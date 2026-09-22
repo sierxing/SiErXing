@@ -2335,6 +2335,7 @@ function renderGoal() {
 
   bindReportCard();
   bindTutorialCard();
+  pluginGoButtonsBind();     // 组件入口按钮（每日刷题 / 图片资料…）
   bindConstraints(g);
   const chatBtn = document.getElementById('chatBtn');
   if (chatBtn) chatBtn.addEventListener('click', () => aiToggle(true));

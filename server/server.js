@@ -1035,7 +1035,7 @@ function buildSkeletonPrompt(goal) {
   lines.push(goalHeader(goal));
   lines.push(goalQaBlock(goal));
   lines.push(constraintsBlock(goal));
-  lines.push(sourcesBlock(goal, 50, 240));
+  lines.push(sourcesBlock(goal, 36, 170));
   lines.push(askBlock(round, '路径骨架'));
   lines.push('');
   lines.push('【要求】');
@@ -1429,8 +1429,9 @@ function streamPlan(req, res, goal, answers) {
       const pend = goalPending(goal.id);
       if (answers && pend) appendGoalQa(goal.id, pend.stage, pend.data.questions, answers);
       send({ status: answers ? '正在结合你的补充回答生成路径骨架…' : '正在结合你的回答生成路径骨架…' });
-      const skeletonText = await aiText(buildSkeletonPrompt(goal), model, 300000);
-      const skeleton = extractJSON(skeletonText);
+      const planPrompt = buildSkeletonPrompt(goal);
+      let skeletonText = await aiText(planPrompt, model, 600000);
+      let skeleton = extractJSON(skeletonText);
       if (skeleton && Array.isArray(skeleton.questions) && skeleton.questions.length) {
         saveGoalQuestions(goal.id, 'plan', skeleton);
         send({ questions: { analysis: skeleton.analysis || '', questions: skeleton.questions }, stage: 'plan', goal: getGoal(goal.id) });
@@ -1438,7 +1439,20 @@ function streamPlan(req, res, goal, answers) {
         return;
       }
       if (!skeleton || !Array.isArray(skeleton.stages) || !skeleton.stages.length) {
-        throw new Error('骨架生成失败，请重试');
+        console.log('[plan] 骨架解析失败（将重试），原始输出前 400 字:', String(skeletonText || '').slice(0, 400).replace(/\n/g, ' '));
+        send({ status: '正在重新整理规划结果…' });
+        skeletonText = await aiText(planPrompt + '\n\n【重要】你上一次的输出不是合法 JSON（可能被截断或夹带了说明文字）。请严格只输出一个 JSON 对象，不要任何解释、不要代码块标记；阶段控制在 4-5 个、每阶段 3-4 个小目标，detail 精简到 60 字以内。', model, 600000);
+        skeleton = extractJSON(skeletonText);
+        if (skeleton && Array.isArray(skeleton.questions) && skeleton.questions.length) {
+          saveGoalQuestions(goal.id, 'plan', skeleton);
+          send({ questions: { analysis: skeleton.analysis || '', questions: skeleton.questions }, stage: 'plan', goal: getGoal(goal.id) });
+          res.end();
+          return;
+        }
+        if (!skeleton || !Array.isArray(skeleton.stages) || !skeleton.stages.length) {
+          console.log('[plan] 重试后仍解析失败，原始输出前 400 字:', String(skeletonText || '').slice(0, 400).replace(/\n/g, ' '));
+          throw new Error('骨架生成失败（模型返回内容不完整），请重试；若反复失败可在设置里换一个模型');
+        }
       }
       const vid = beginVersion(goal.id, '生成新骨架');
       saveSkeleton(goal.id, skeleton);
@@ -1497,6 +1511,7 @@ function streamPlanTasks(req, res, goal, answers) {
             db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), goal.id);
             send({ goal: getGoal(goal.id) });
           } else {
+            console.log('[tasks] 解析失败，原始输出前 400 字:', String(txt || '').slice(0, 400).replace(/\n/g, ' '));
             send({ status: `第 ${i + 1} 阶段任务解析失败（可稍后继续）` });
           }
         } catch (e) {
@@ -1550,8 +1565,15 @@ function streamPlanRefine(req, res, goal, feedback, answers) {
       const current = currentSkeleton(goal.id);
       if (!current.length) throw new Error('还没有骨架可调整');
       send({ status: '正在根据你的意见调整骨架…' });
-      const txt = await aiText(buildRefineSkeletonPrompt(goal, current, feedback), model, 300000);
-      const plan = extractJSON(txt);
+      const refinePrompt = buildRefineSkeletonPrompt(goal, current, feedback);
+      let txt = await aiText(refinePrompt, model, 480000);
+      let plan = extractJSON(txt);
+      if (!plan || !Array.isArray(plan.stages) || !plan.stages.length) {
+        console.log('[refine] 解析失败（将重试），原始输出前 300 字:', String(txt || '').slice(0, 300).replace(/\n/g, ' '));
+        send({ status: '正在重新整理调整结果…' });
+        txt = await aiText(refinePrompt + '\n\n【重要】请严格只输出一个 JSON 对象（不要解释、不要代码块），格式：{"summary":"...","stages":[{"title":"","detail":"","sources":[],"goals":[{"title":"","detail":"","sources":[]}]}]}', model, 480000);
+        plan = extractJSON(txt);
+      }
       if (plan && Array.isArray(plan.questions) && plan.questions.length) {
         saveGoalQuestions(goal.id, 'refine', plan, { feedback });
         send({ questions: { analysis: plan.analysis || '', questions: plan.questions }, stage: 'refine', feedback, goal: getGoal(goal.id) });
