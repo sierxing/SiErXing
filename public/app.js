@@ -76,6 +76,7 @@ function parseRoute() {
   if (gd) return { view: 'guide', step: Math.max(1, Math.min(9, Number(gd[1]))) };
   if (h.startsWith('#/settings')) return { view: 'settings' };
   if (h.startsWith('#/components')) return { view: 'components' };
+  if (h.startsWith('#/library')) return { view: 'library' };
   // 插件页面路由（由前端插件声明）
   const pr = window.SiErXing ? SiErXing.matchRoute(h) : null;
   if (pr) return { view: 'plugin', pluginId: pr.plugin.id, route: pr.route, match: pr.match };
@@ -169,6 +170,7 @@ async function route() {
     else if (r.view === 'settings') { setHeader(r); await renderSettings(); }
     else if (r.view === 'guide') { setHeader(r); await renderHome(); showGuide(r.step - 1); }
     else if (r.view === 'components') { setHeader(r); await renderComponentsPage(); }
+    else if (r.view === 'library') { setHeader(r); await renderLibraryPage(); }
     else if (r.view === 'map') { await loadGoal(r.id); setHeader(r); renderMapPage(); }
     else if (r.view === 'diff') { await loadGoal(r.id); setHeader(r); await renderDiffPage(r.vid); }
     else if (r.view === 'tutorial') { setHeader(r); await renderTutorialPage(r.id); }
@@ -606,11 +608,38 @@ function renderMapPage() {
   bindMapTools();
   requestAnimationFrame(() => mapFit());
 }
+/* 把节点里 AI 写的依据名匹配到资料库真实条目（与服务端同策略：去前缀、去类型、逐级放宽） */
+function findLibSource(ref) {
+  const list = state.sources || [];
+  const sid = Number((ref && (ref.source_id || ref.id)) || 0);
+  if (sid) { const hit = list.find(x => Number(x.id) === sid); if (hit) return hit; }
+  const raw = String((ref && (ref.name || ref.title)) || '').trim();
+  if (!raw) return null;
+  const strip = t => String(t || '')
+    .replace(/^\[[^\]]*\]\s*/, '')
+    .replace(/^(用户自己提供的资料|用户提供的资料|用户资料|导入的资料)[｜|:：]?\s*/, '')
+    .trim();
+  const cands = [];
+  const push = t => { const v = String(t || '').trim(); if (v.length >= 4 && !cands.includes(v)) cands.push(v); };
+  push(raw); push(strip(raw));
+  for (const c of cands.slice()) {
+    const m = c.match(/^(JD|大纲|教材|笔记|表格|文章|资料)[：:]\s*(.+)$/);
+    if (m) push(m[2]);
+  }
+  for (const c of cands) for (const len of [24, 16, 12, 8]) {
+    const key = c.slice(0, len);
+    if (key.length < 4) continue;
+    const hit = list.find(x => String(x.title || '').includes(key));
+    if (hit) return hit;
+  }
+  return null;
+}
 function showNodePanel(id, rerender) {
   const rerenderFn = rerender || renderGoal;
   const n = state.goal.nodes.find(x => x.id === id);
   if (!n) return;
   const srcs = safeParse(n.sources, []);
+  const tuts = tutorialsOfNode(id);   // 修复：原来漏了这行，节点面板一打开就报 tuts is not defined
   const old = document.getElementById('nodePanel');
   if (old) old.remove();
   const div = document.createElement('div');
@@ -633,7 +662,22 @@ function showNodePanel(id, rerender) {
     </div>` : ''}
     ${n.detail ? `<div class="npDetail">${esc(n.detail)}</div>` : ''}
     <div class="npSrcTitle">依据信息源（${srcs.length}）</div>
-    <div class="npSrcList">${srcs.length ? srcs.map(s => `<div class="npSrc"><div class="npSrcName">📎 ${esc(s.name || '')}</div>${s.note ? `<div class="npSrcNote">${esc(s.note)}</div>` : ''}</div>`).join('') : '<div class="muted" style="font-size:12.5px;">未标注信息源</div>'}</div>
+    <div class="npSrcList">${srcs.length ? srcs.map((s, i) => {
+      const lib = findLibSource(s);
+      const body = lib ? String(lib.content || lib.snippet || '') : '';
+      return `<div class="npSrc"><div class="npSrcName">${s.source_id ? '🔗' : '📎'} ${esc(s.name || s.title || '')}</div>${s.note ? `<div class="npSrcNote">${esc(s.note)}</div>` : ''}${body ? `<details class="npSrcBody"><summary>查看资料库正文（${body.length} 字）</summary><div class="mdBody">${mdToHTML(body.slice(0, 4000))}</div></details>` : ''}<button class="btn tiny danger npsrcDel" data-npsrc-del="${i}">移除</button></div>`;
+    }).join('') : '<div class="muted" style="font-size:12.5px;">未标注资料（本节点只依据提炼汇总与资料索引）</div>'}</div>
+    <div class="npSrcAdd">
+      <select id="npSrcPick">${(state.sources || []).map(x => `<option value="${x.id}">${esc('[' + x.kind + '] ' + String(x.title).slice(0, 40))}</option>`).join('')}</select>
+      <button class="btn tiny" id="npSrcAdd">＋ 关联资料库</button>
+      <button class="btn tiny" id="npSrcNew">＋ 手动写一条</button>
+    </div>
+    ${(() => {
+      const txt = (n.title || '') + ' ' + (n.detail || '');
+      const rel = (state.digests || []).map(d => ({ d, score: kwScore(txt, (d.title || '') + ' ' + String(d.content || '').slice(0, 1500)) }))
+        .filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 2);
+      return rel.length ? `<div class="npSrcTitle">📄 相关提炼汇总</div>` + rel.map(({ d }) => `<details class="npSrcBody"><summary>${esc(d.title || d.topic)}</summary><div class="mdBody">${mdToHTML(d.content || '')}</div></details>`).join('') : '';
+    })()}
     <div class="npTut">
       <div class="npSrcTitle">📘 学习教程（${tuts.length}）</div>
       ${tuts.length ? tuts.map(t => `<a class="npTutItem" href="#/t/${t.id}"><span class="npTutName">${esc(t.title)}</span><span class="chip gray">${t.format === 'html' ? 'HTML' : 'MD'}</span></a>`).join('') : '<div class="muted" style="font-size:12.5px;">还没有教程：生成一份「掌握该任务知识点」的完整教程</div>'}
@@ -1594,7 +1638,7 @@ function showCtxMenu(x, y, id) {
     <button data-act="discuss">💬 提意见调整划分（和 AI 讨论）</button>
     <button data-act="tut">📘 生成学习教程（掌握这个任务）</button>
     ${tuts.length ? `<button data-act="tutview">📖 查看教程（${tuts.length}）</button>` : ''}
-    <button data-act="sources">📎 查看信息源（${srcs.length}）</button>
+    <button data-act="sources">📚 资料与提炼汇总（${srcs.length}）</button>
     <div class="ctxSep"></div>
     <button data-act="doing">▶ 标记进行中</button>
     <button data-act="done">✓ 标记已完成</button>
@@ -3033,6 +3077,118 @@ async function loadComponents() {
     applyComponentStyles(r.styles || []);
   } catch (e) { console.warn('组件加载失败：' + e.message); }
 }
+/* ============ 资源库（汇总 MD + 全部资料，按规划归类，可一键导出） ============ */
+/* 关键词打分：用于把资料/汇总归到相关阶段 */
+function kwScore(text, hay) {
+  const words = String(text || '').match(/[\u4e00-\u9fa5]{2,6}|[A-Za-z][A-Za-z0-9+.#_-]{2,}/g) || [];
+  const set = new Set(words.map(x => x.toLowerCase()));
+  const h = String(hay || '').toLowerCase();
+  let n = 0;
+  for (const w of set) if (w.length >= 2 && h.includes(w)) n++;
+  return n;
+}
+function libSourcesOfNode(n) {
+  const list = safeParse(n.sources, []);
+  return Array.isArray(list) ? list : [];
+}
+async function renderLibraryPage() {
+  app.innerHTML = '<p class="muted">加载资源库…</p>';
+  if (!state.goals || !state.goals.length) { try { state.goals = (await api('/api/goals')).goals || []; } catch (e) {} }
+  let g = state.goal && state.goal.nodes ? state.goal : null;
+  if (!g && (state.goals || []).length) g = state.goals[0];
+  if (!g) {
+    app.innerHTML = `<div class="page"><div class="pageHead"><h2 class="title">📚 资源库</h2></div><div class="emptyBox" style="margin-top:30px;"><div class="ebIcon">📚</div><div class="ebTitle">还没有目标</div><div class="ebText">先建一个目标，收集信息源或上传图片资料后，这里会汇总整理好的资料。</div></div></div>`;
+    return;
+  }
+  if (!state.goal || state.goal.id !== g.id || state.goal.nodes == null) { try { await loadGoal(g.id); } catch (e) {} g = state.goal || g; }
+  const digests = state.digests || [];
+  const sources = state.sources || [];
+  const own = sources.filter(x => x.site === '用户提供的图片' || x.site === '导入的资料');
+  const net = sources.filter(x => !(x.site === '用户提供的图片' || x.site === '导入的资料'));
+  const stages = ((g.nodes || [])).filter(n => n.level === 0).sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+  const byKind = {};
+  for (const x of sources) (byKind[x.kind || '其它'] = byKind[x.kind || '其它'] || []).push(x);
+  const goalOptions = (state.goals || []).map(x => `<option value="${x.id}" ${Number(x.id) === Number(g.id) ? 'selected' : ''}>${esc(x.title)}</option>`).join('');
+  const srcCard = (x, withBody) => `<details class="libSrc"><summary><span class="chip gray">${esc(x.kind || '资料')}</span> ${esc(x.title)}</summary>
+      <div class="libSrcBody">${x.url ? `<div class="libSrcMeta">来源：<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.site || x.url)}</a></div>` : `<div class="libSrcMeta">来源：${esc(x.site || '—')}</div>`}
+      ${withBody ? `<div class="mdBody" style="margin-top:6px;">${mdToHTML(String(x.content || x.snippet || '（无正文）').slice(0, 4000))}</div>` : `<div class="libSrcMeta">${esc(String(x.snippet || x.content || '').slice(0, 120))}…</div>`}</div></details>`;
+  let h = `<div class="page">
+    <div class="pageHead">
+      <a class="back js-back" href="#/g/${g.id}">← 返回目标</a>
+      <h2 class="title">📚 资源库</h2>
+      <span class="muted" style="font-size:12.5px;">资料 ${sources.length} 条（自己提供 ${own.length} / 网络 ${net.length}）· 汇总 ${digests.length} 篇</span>
+      <div class="spacer"></div>
+      <select id="libGoal" class="libGoalSel">${goalOptions}</select>
+      <button class="btn small" id="libDigest">🧠 ${digests.length ? '重新提炼' : '信息提炼'}</button>
+      <label class="btn small">⬆ 导入资料<input type="file" id="libImport" accept=".json,application/json" hidden></label>
+      <a class="btn small primary" href="/api/goals/${g.id}/library/export" download>⬇ 一键导出（Markdown）</a>
+    </div>`;
+
+  // 一、按规划归类
+  h += `<div class="sec"><div class="secTitle">🗂 按规划归类</div>`;
+  if (!stages.length) h += `<p class="hint">还没有规划骨架：生成规划后，这里的资料会自动按阶段归类。</p>`;
+  for (const st of stages) {
+    const nodeSrc = [];
+    const walk = n => { nodeSrc.push(...libSourcesOfNode(n)); (n.children || []).forEach(walk); };
+    walk(st);
+    const text = (st.title || '') + ' ' + (st.detail || '');
+    const relDigests = digests.map(d => ({ d, score: kwScore(text, (d.title || '') + ' ' + (d.topic || '') + ' ' + String(d.content || '').slice(0, 2000)) }))
+      .filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 3);
+    const relSrc = sources.map(x => ({ x, score: kwScore(text, (x.title || '') + ' ' + String(x.content || '').slice(0, 1500)) }))
+      .filter(y => y.score > 0).sort((a, b) => b.score - a.score).slice(0, 5);
+    h += `<details class="libStage"><summary>${esc(st.title)} <span class="muted" style="font-size:11.5px;">· 关联资料 ${nodeSrc.length} 条${relDigests.length ? ' · 相关汇总 ' + relDigests.length + ' 篇' : ''}${relSrc.length ? ' · 相关资料 ' + relSrc.length + ' 条' : ''}</span></summary>
+      <div class="libStageBody">
+        ${nodeSrc.length ? `<div class="libSecT">本阶段节点自己标注的依据</div>${nodeSrc.map(x => `<div class="libRef">📎 ${esc(x.name || x.title || '')}${x.note ? `<div class="libSrcMeta">${esc(x.note)}</div>` : ''}</div>`).join('')}` : ''}
+        ${relDigests.length ? `<div class="libSecT">相关提炼汇总</div>${relDigests.map(({ d }) => `<details class="libSrc"><summary>📄 ${esc(d.title || d.topic)}</summary><div class="libSrcBody mdBody">${mdToHTML(d.content || '')}</div></details>`).join('')}` : ''}
+        ${relSrc.length ? `<div class="libSecT">相关资料</div>${relSrc.map(({ x }) => srcCard(x, true)).join('')}` : ''}
+        ${(!nodeSrc.length && !relDigests.length && !relSrc.length) ? '<div class="muted" style="font-size:12.5px;">这个阶段暂时没有匹配到资料</div>' : ''}
+      </div></details>`;
+  }
+  h += `</div>`;
+
+  // 二、主题汇总（MD）
+  h += `<div class="sec"><div class="secTitle">📄 主题汇总（提炼出的 MD 文件，规划优先依据）</div>`;
+  h += digests.length
+    ? `<div class="libDigestHead"><a class="btn tiny" href="/api/goals/${g.id}/digests/export" download>⬇ 下载全部 MD</a></div>` + digests.map(d => `<details class="libSrc"><summary>📄 ${esc(d.title || d.topic)} <span class="muted" style="font-size:11.5px;">· 依据 ${d.sources_count || 0} 条</span></summary><div class="libSrcBody mdBody">${mdToHTML(d.content || '')}</div><div class="spDigestOps"><span class="muted" style="font-size:11.5px;">${esc(fmtDate(d.created_at))}</span><div class="spacer"></div><button class="btn tiny danger" data-digest-del="${d.id}">删除</button></div></details>`).join('')
+    : `<p class="hint">还没有提炼汇总：点右上「🧠 信息提炼」，AI 会通读全部资料并按主题整理成多篇 MD。</p>`;
+  h += `</div>`;
+
+  // 三、全部资料（按类型）
+  h += `<div class="sec"><div class="secTitle">📚 全部资料（${sources.length} 条）</div>`;
+  h += own.length ? `<div class="libSecT">你自己提供的（最高优先级）</div>${own.map(x => srcCard(x, true)).join('')}` : '';
+  for (const k of Object.keys(byKind)) {
+    const list = byKind[k].filter(x => !own.includes(x));
+    if (!list.length) continue;
+    h += `<div class="libSecT">${esc(k)}（${list.length}）</div>${list.slice(0, 60).map(x => srcCard(x, false)).join('')}`;
+    if (list.length > 60) h += `<div class="muted" style="font-size:12px;">…还有 ${list.length - 60} 条（导出 Markdown 可看全部）</div>`;
+  }
+  h += `</div></div>`;
+  app.innerHTML = h;
+
+  const gsel = document.getElementById('libGoal');
+  if (gsel) gsel.addEventListener('change', async () => { try { await loadGoal(Number(gsel.value)); } catch (e) {} renderLibraryPage(); });
+  const ld = document.getElementById('libDigest');
+  if (ld) ld.addEventListener('click', async () => { await startDigest(g.id); renderLibraryPage(); });
+  const li = document.getElementById('libImport');
+  if (li) li.addEventListener('change', async () => {
+    const file = (li.files || [])[0]; li.value = '';
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      const r = await api('/api/goals/' + g.id + '/sources/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+      toast('已导入 ' + r.added + ' 条资料' + (r.skipped ? '（' + r.skipped + ' 条已存在）' : ''));
+      await loadGoal(g.id); renderLibraryPage();
+    } catch (e) { toast(e.message); }
+  });
+  app.querySelectorAll('[data-digest-del]').forEach(b => b.addEventListener('click', async () => {
+    if (!confirm('删除这篇提炼汇总？')) return;
+    try { await api('/api/digests/' + b.getAttribute('data-digest-del'), { method: 'DELETE' });
+      state.digests = (state.digests || []).filter(x => String(x.id) !== String(b.getAttribute('data-digest-del')));
+      toast('已删除'); renderLibraryPage();
+    } catch (e) { toast(e.message); }
+  }));
+}
+
 async function renderComponentsPage() {
   const scrollY = window.scrollY || 0;          // 记住滚动位置，重渲染后恢复
   app.innerHTML = '<p class="muted">加载组件…</p>';
@@ -4046,6 +4202,7 @@ function railItemsHTML() {
   }
   const hasUpd = !!(state.update && state.update.supported && state.update.behind > 0 && state.update.latestShort !== updSkipHash());
   items.push({ icon: '⚙', label: '设置', hash: '#/settings', active: r.view === 'settings', dot: hasUpd });
+  items.push({ icon: '📚', label: '资源库', hash: '#/library', active: r.view === 'library' });
   items.push({ icon: '🧩', label: '组件管理', hash: '#/components', active: r.view === 'components' });
   const compsHTML = railCompsHTML();
   return `<a class="railLogo" href="#/" title="思而行 · 返回目标列表">${RAIL_LOGO_SVG}</a>

@@ -873,6 +873,51 @@ function digestSynthesisPrompt(parts, meta) {
   for (const p of parts) lines.push('### 第 ' + p.idx + ' 批\n' + JSON.stringify(p.data));
   return lines.join('\n');
 }
+/* 资源库整库导出：提炼汇总 + 全部资料（Markdown，便于分享） */
+function buildLibraryMarkdown(goal) {
+  const digests = digestsOf(goal.id);
+  const all = sourcesOf(goal.id);
+  const own = all.filter(x => x.site === '用户提供的图片' || x.site === '导入的资料');
+  const net = all.filter(x => !(x.site === '用户提供的图片' || x.site === '导入的资料'));
+  const L = [];
+  L.push('# 资源库：' + goal.title);
+  L.push('');
+  L.push('> 导出时间：' + nowISO() + '　·　资料 ' + all.length + ' 条（自己提供 ' + own.length + ' / 网络检索 ' + net.length + '）　·　提炼汇总 ' + digests.length + ' 篇');
+  L.push('');
+  if (digests.length) {
+    L.push('## 一、提炼汇总（规划的主要依据）');
+    L.push('');
+    for (const d of digests) {
+      L.push('### ' + (d.title || d.topic));
+      L.push('');
+      L.push(String(d.content || ''));
+      L.push('');
+      L.push('---');
+      L.push('');
+    }
+  }
+  const section = (title, list) => {
+    if (!list.length) return;
+    L.push('## ' + title);
+    L.push('');
+    for (const x of list) {
+      L.push('### [' + x.kind + '] ' + x.title);
+      L.push('');
+      const meta = [];
+      if (x.site) meta.push('来源：' + x.site);
+      if (x.url) meta.push('链接：' + x.url);
+      if (x.published_at) meta.push('时间：' + x.published_at);
+      if (meta.length) { L.push('*' + meta.join('　·　') + '*'); L.push(''); }
+      L.push(String(x.content || x.snippet || '（无正文）').slice(0, 4000));
+      L.push('');
+      L.push('---');
+      L.push('');
+    }
+  };
+  section('二、你自己提供的资料（最高优先级）', own);
+  section('三、网络检索资料', net);
+  return L.join('\n');
+}
 function digestsBlock(goal) {
   const list = digestsOf(goal.id);
   if (!list.length) return '';
@@ -2382,6 +2427,15 @@ async function handleAPI(req, res, u) {
   const digestsGetMatch = p.match(/^\/api\/goals\/(\d+)\/digests$/);
   if (digestsGetMatch && method === 'GET') {
     return sendJSON(res, 200, { digests: digestsOf(Number(digestsGetMatch[1])) });
+  }
+  const libExportMatch = p.match(/^\/api\/goals\/(\d+)\/library\/export$/);
+  if (libExportMatch && method === 'GET') {
+    const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(Number(libExportMatch[1]));
+    if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+    const md = buildLibraryMarkdown(g);
+    const fname = encodeURIComponent('资源库-' + String(g.title).replace(/[\\/:*?"<>|]/g, '').slice(0, 20) + '.md');
+    res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8', 'Content-Disposition': "attachment; filename=\"library.md\"; filename*=UTF-8''" + fname });
+    return res.end(md);
   }
   const digestsExportMatch = p.match(/^\/api\/goals\/(\d+)\/digests\/export$/);
   if (digestsExportMatch && method === 'GET') {
