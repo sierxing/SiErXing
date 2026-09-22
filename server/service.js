@@ -86,11 +86,14 @@ module.exports = function createService({ appDir, port, log = () => {} }) {
     png: path.join(appDir, 'public', 'icon.png'),
     ico: path.join(appDir, 'public', 'icon.ico')
   };
-  function installLinuxIcon() {
+  async function installLinuxIcon() {
     try {
       const dir = path.join(home, '.local', 'share', 'icons', 'hicolor', '256x256', 'apps');
       fs.mkdirSync(dir, { recursive: true });
       fs.copyFileSync(iconSrc.png, path.join(dir, 'sierxing.png'));
+      // 刷新图标缓存，避免其它机器上显示旧图标/不显示
+      const themeDir = path.join(home, '.local', 'share', 'icons', 'hicolor');
+      await sh('gtk-update-icon-cache', ['-f', '-t', themeDir], 8000).catch(() => {});
       return 'sierxing';
     } catch (e) { return ''; }
   }
@@ -206,7 +209,7 @@ module.exports = function createService({ appDir, port, log = () => {} }) {
           result.desktop = true;
           result.icon = iconSrc.png;   // macOS 可在「显示简介」里把该 PNG 拖到图标上自定义
         } else {
-          const iconName = installLinuxIcon() || iconSrc.png;   // 优先装到 hicolor 主题，失败则用绝对路径
+          const iconName = (await installLinuxIcon()) || iconSrc.png;   // 优先装到 hicolor 主题，失败则用绝对路径
           fs.mkdirSync(path.dirname(paths.applications), { recursive: true });
           fs.writeFileSync(paths.applications, desktopEntryContent(execLine, iconName), 'utf8');
           result.applications = true;
@@ -316,6 +319,7 @@ module.exports = function createService({ appDir, port, log = () => {} }) {
     const hasSystemd = (await sh('systemctl', ['--user', 'show-environment'], 6000)).ok;
     if (hasSystemd) {
       if (enabled) {
+        await installLinuxIcon();   // 老安装升级后也能拿到最新图标
         fs.mkdirSync(path.dirname(paths.unit), { recursive: true });
         fs.writeFileSync(paths.unit, unitContent(), 'utf8');
         await sh('systemctl', ['--user', 'daemon-reload'], 10000);
@@ -344,7 +348,7 @@ module.exports = function createService({ appDir, port, log = () => {} }) {
     // 退回 XDG autostart
     if (enabled) {
       fs.mkdirSync(path.dirname(paths.autostart), { recursive: true });
-      fs.writeFileSync(paths.autostart, desktopEntryContent(paths.launcher, installLinuxIcon() || iconSrc.png), 'utf8');
+      fs.writeFileSync(paths.autostart, desktopEntryContent(paths.launcher, (await installLinuxIcon()) || iconSrc.png), 'utf8');
       return { ok: true, enabled: true, hint: '当前环境无 systemd --user，已使用 XDG 自启动（登录桌面后启动）' };
     }
     try { fs.unlinkSync(paths.autostart); } catch (e) {}
