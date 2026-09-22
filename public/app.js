@@ -110,8 +110,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     const panel = document.getElementById('nodePanel');
     if (panel) panel.remove();
-    const menu = document.getElementById('ctxMenu');
-    if (menu) menu.remove();
+    document.querySelectorAll('.ctxMenu').forEach(m => m.remove());
   }
 });
 document.addEventListener('contextmenu', e => {
@@ -123,11 +122,9 @@ document.addEventListener('contextmenu', e => {
   showCtxMenu(e.clientX, e.clientY, Number(el.getAttribute('data-node-id')));
 });
 document.addEventListener('click', e => {
-  if (!e.target.closest('.ctxMenu')) {
-    const m = document.getElementById('ctxMenu');
-    if (m) m.remove();
-  }
+  if (!e.target.closest('.ctxMenu')) document.querySelectorAll('.ctxMenu').forEach(m => m.remove());
 });
+window.addEventListener('scroll', () => document.querySelectorAll('.ctxMenu').forEach(m => m.remove()), true);
 window.addEventListener('mousemove', e => {
   const d = state._drag;
   if (!d) return;
@@ -156,6 +153,7 @@ function setHeader(r) {
 }
 
 async function route() {
+  document.querySelectorAll('.ctxMenu').forEach(m => m.remove());
   const r = parseRoute();
   document.body.classList.toggle('mapMode', r.view === 'map');
   try {
@@ -2874,6 +2872,7 @@ async function loadComponents() {
     const r = await api('/api/components');
     state.components = r.enabled || {};
     state.componentList = r.components || [];
+    state.componentPins = r.pins || state.componentPins || [];
     SiErXing.setServerPlugins(r.components || []);
     applyComponentStyles(r.styles || []);
   } catch (e) { console.warn('组件加载失败：' + e.message); }
@@ -2887,6 +2886,7 @@ async function renderComponentsPage() {
   ]);
   state.components = r.enabled || {};
   state.componentList = r.components || [];
+  state.componentPins = r.pins || state.componentPins || [];
   state.componentCats = catsRes;                 // 分类实时刷新（新建后立即出现）
   applyComponentStyles(r.styles || []);
   const comps = r.components || [];
@@ -2917,7 +2917,9 @@ async function renderComponentsPage() {
         </div>
         ${c.builtin ? '' : `<div class="cmpFiles">服务端 server/plugins/${esc(c.id)}.js${c.client ? ` · 前端 public/plugins/${esc(c.id)}.js` : ''}${c.hasStyle ? ` · 样式 public/plugins/${esc(c.id)}.css` : ''}</div>`}
       </div>
-      <div class="cmpOps">${extraRight || ''}${sw(c)}</div>
+      <div class="cmpOps">${extraRight || ''}
+        <button class="btn tiny cmpPin" data-cmp-pin="${esc(c.id)}" title="${(state.componentPins || []).includes(c.id) ? '移出常用' : '加入常用（侧边栏置顶）'}">${(state.componentPins || []).includes(c.id) ? '★' : '☆'}</button>
+        ${sw(c)}</div>
     </div>`;
   let html = `<div class="page">
     <div class="pageHead">
@@ -3016,6 +3018,18 @@ await renderComponentsPage();
     } catch (e) { toast(e.message); }
   }));
 
+  app.querySelectorAll('[data-cmp-pin]').forEach(b => b.addEventListener('click', async () => {
+    const id = b.getAttribute('data-cmp-pin');
+    const pins = (state.componentPins || []).slice();
+    const has = pins.includes(id);
+    try {
+      const r = await api('/api/component-pins', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action: has ? 'remove' : 'add' }) });
+      state.componentPins = r.pins || pins;
+      toast(has ? '已移出常用' : '已加入常用（侧边栏置顶）');
+      renderRail();
+      renderComponentsPage();
+    } catch (e) { toast(e.message); }
+  }));
   app.querySelectorAll('[data-cmp]').forEach(inp => inp.addEventListener('change', async () => {
     const id = inp.getAttribute('data-cmp');
     const enabled = inp.checked;
@@ -3523,8 +3537,9 @@ async function ensureAIConfigured() {
 let BOOTED = false;
 function pluginButtonsHTML(goal) {
   if (!window.SiErXing) return '';
-  return SiErXing.goalEntries(goal).map(e =>
-    `<button class="btn" data-plugin-go="${esc(e.hash(goal.id))}">${e.icon} ${esc(e.label)}</button>`).join('');
+  return SiErXing.goalEntries(goal)
+    .filter(e => e.header !== false)
+    .map(e => `<button class="btn" data-plugin-go="${esc(e.hash(goal.id))}">${e.icon} ${esc(e.label)}</button>`).join('');
 }
 function pluginPickerHTML() {
   const list = (window.SiErXing ? SiErXing.serverPlugins() : []).filter(p => p.goalToggle);
@@ -3623,7 +3638,7 @@ function bindPluginPicker() {
   paint();
   applyFilter();
 }
-/* 左栏顶部的品牌图标（独立提取的「思」） */
+/* ============ 左栏：可展开的组件模块（分组 + 常用置顶 + 拖拽/右键） ============ */
 const RAIL_LOGO_SVG = `<svg viewBox="0 0 64 64" width="46" height="46" aria-hidden="true">
   <defs>
     <linearGradient id="railLogoBg" x1="0" y1="0" x2="1" y2="1">
@@ -3639,22 +3654,85 @@ const RAIL_LOGO_SVG = `<svg viewBox="0 0 64 64" width="46" height="46" aria-hidd
         font-family="Songti SC,Noto Serif SC,Source Han Serif SC,STSong,SimSun,Georgia,serif" fill="#ffffff">思</text>
   <path d="M21 51h22" stroke="#ffffff" stroke-opacity="0.55" stroke-width="2.2" stroke-linecap="round"/>
 </svg>`;
+function railExpanded() {
+  if (state.railExpanded == null) {
+    try { state.railExpanded = localStorage.getItem('sierxing-rail-comps') === '1'; } catch (e) { state.railExpanded = false; }
+  }
+  return !!state.railExpanded;
+}
+function setRailExpanded(v) {
+  state.railExpanded = !!v;
+  try { localStorage.setItem('sierxing-rail-comps', v ? '1' : '0'); } catch (e) {}
+  renderRail();
+}
+function railCompItemHTML(e, pinned, active) {
+  return `<a class="railCompItem ${active ? 'active' : ''} ${pinned ? 'pinned' : ''}" href="${e.hash}" draggable="true"
+      data-rail-comp="${esc(e.id)}" data-cat="${esc(e.category || '其它')}" title="${esc(e.label)}${pinned ? '（常用）' : ''}">
+      <span class="rciIcon">${e.icon}</span>
+      <span class="rciName">${esc(e.label)}</span>
+      ${pinned ? '<span class="rciPin">⭐</span>' : ''}
+    </a>`;
+}
+function railCompsHTML() {
+  const r = parseRoute();
+  const g = state.goal;
+  // 左栏只放「扩展组件」：内置基础功能组件（问卷/约束/图片资料…）的入口在目标页里，不在这里重复
+  const metaOf = id => (SiErXing.serverPlugins() || []).find(x => x.id === id) || {};
+  const entries = ((window.SiErXing && g) ? SiErXing.goalEntries(g) : [])
+    .filter(e => { const m = metaOf(e.id); return !(m.builtin && m.scope === 'base'); });
+  if (!entries.length) {
+    return `<button class="railItem railCompToggle" id="railCompToggle" title="本目标还没有扩展组件">
+        <span class="railIcon">📦</span><span class="railLabel">组件</span>
+      </button>`;
+  }
+  const pins = (state.componentPins || []).filter(id => entries.some(e => e.id === id));
+  const groups = {};
+  for (const e of entries) {
+    if (pins.includes(e.id)) continue;
+    const k = e.category || '其它';
+    (groups[k] = groups[k] || []).push(e);
+  }
+  const isActive = e => r.view === 'plugin' && r.pluginId === e.id;
+  let h = `<button class="railItem railCompToggle ${railExpanded() ? 'open' : ''}" id="railCompToggle" title="展开/收起组件列表">
+      <span class="railIcon">📦</span><span class="railLabel">组件</span>
+      <span class="railCaret">${railExpanded() ? '▾' : '▸'}</span>
+    </button>`;
+  if (railExpanded()) {
+    h += `<div class="railComps" id="railComps">`;
+    h += `<div class="railGroup" data-drop-group="pins">
+        <div class="railGroupHead">⭐ 常用 <span class="rgHint">（拖到这里置顶）</span></div>
+        <div class="railGroupBody" data-group="pins">
+          ${pins.length ? pins.map(id => entries.find(e => e.id === id)).filter(Boolean).map(e => railCompItemHTML(e, true, isActive(e))).join('') : '<div class="railEmpty">把常用组件拖进来，或右键「加入常用」</div>'}
+        </div>
+      </div>`;
+    if (!pins.length && !Object.keys(groups).length) h += '<div class="railEmpty">本目标还没有扩展组件</div>';
+    for (const k of Object.keys(groups)) {
+      h += `<div class="railGroup">
+          <div class="railGroupHead">${esc(k)}</div>
+          <div class="railGroupBody" data-group="${esc(k)}">${groups[k].map(e => railCompItemHTML(e, false, isActive(e))).join('')}</div>
+        </div>`;
+    }
+    h += `</div>`;
+  }
+  return h;
+}
 function railItemsHTML() {
   const r = parseRoute();
   const g = state.goal;
   const themeIcon = currentThemeEff() === 'dark' ? '☀️' : '🌙';
   let items = [{ icon: '🏠', label: '目标', hash: '#/', active: r.view === 'home' }];
   if (g && (r.view === 'goal' || r.view === 'map' || r.view === 'plugin')) {
-    if (r.view !== 'home') items.push({ icon: '🗺', label: '路线图', hash: '#/g/' + g.id, active: r.view === 'goal' });
-    for (const e of (window.SiErXing ? SiErXing.goalEntries(g) : [])) {
-      items.push({ icon: e.icon, label: e.label, hash: e.hash(g.id), active: r.view === 'plugin' && r.pluginId === e.id });
-    }
+    items.push({ icon: '🗺', label: '路线图', hash: '#/g/' + g.id, active: r.view === 'goal' });
   }
   items.push({ icon: '⚙', label: '设置', hash: '#/settings', active: r.view === 'settings' });
-  items.push({ icon: '🧩', label: '组件', hash: '#/components', active: r.view === 'components' });
+  items.push({ icon: '🧩', label: '组件管理', hash: '#/components', active: r.view === 'components' });
+  const compsHTML = railCompsHTML();
   return `<a class="railLogo" href="#/" title="思而行 · 返回目标列表">${RAIL_LOGO_SVG}</a>
     <div class="railNav">
-      ${items.map(i => `<a class="railItem ${i.active ? 'active' : ''}" href="${i.hash}" title="${esc(i.label)}">
+      ${items.slice(0, g && (r.view === 'goal' || r.view === 'map' || r.view === 'plugin') ? 2 : 1).map(i => `<a class="railItem ${i.active ? 'active' : ''}" href="${i.hash}" title="${esc(i.label)}">
+        <span class="railIcon">${i.icon}</span><span class="railLabel">${esc(i.label)}</span></a>`).join('')}
+      ${compsHTML}
+      ${items.slice(g && (r.view === 'goal' || r.view === 'map' || r.view === 'plugin') ? 2 : 1).map(i => `<a class="railItem ${i.active ? 'active' : ''}" href="${i.hash}" title="${esc(i.label)}">
         <span class="railIcon">${i.icon}</span><span class="railLabel">${esc(i.label)}</span></a>`).join('')}
     </div>
     <div class="railBottom">
@@ -3663,6 +3741,96 @@ function railItemsHTML() {
       </button>
     </div>`;
 }
+/* ---- 常用组件：拖拽 / 右键 ---- */
+async function savePins(list) {
+  state.componentPins = list;
+  renderRail();
+  try {
+    const r = await api('/api/component-pins', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pins: list }) });
+    state.componentPins = r.pins || list;
+    renderRail();
+  } catch (e) { toast(e.message); }
+}
+function bindRailComps() {
+  const tg = document.getElementById('railCompToggle');
+  if (tg) tg.addEventListener('click', () => setRailExpanded(!railExpanded()));
+  const box = document.getElementById('railComps');
+  if (!box) return;
+  // 右键菜单
+  box.querySelectorAll('[data-rail-comp]').forEach(el => el.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    const id = el.getAttribute('data-rail-comp');
+    const pinned = (state.componentPins || []).includes(id);
+    const label = (SiErXing.goalEntries(state.goal).find(x => x.id === id) || {}).label || id;
+    document.querySelectorAll('.ctxMenu').forEach(x => x.remove());
+    const m = document.createElement('div');
+    m.id = 'ctxMenu';
+    m.className = 'ctxMenu railCtx';
+    m.style.left = Math.min(e.clientX, window.innerWidth - 200) + 'px';
+    m.style.top = Math.min(e.clientY, window.innerHeight - 140) + 'px';
+    m.innerHTML = `
+      <div class="ctxTitle">${esc(label)}</div>
+      <button data-act="open">打开</button>
+      <button data-act="pin">${pinned ? '⭐ 移出常用' : '⭐ 加入常用（置顶）'}</button>
+      ${pinned ? '<button data-act="pinTop">⬆ 移到常用最前</button>' : ''}`;
+    document.body.appendChild(m);
+    const close = () => m.remove();
+    m.querySelector('[data-act="open"]').addEventListener('click', () => { close(); go(el.getAttribute('href')); });
+    m.querySelector('[data-act="pin"]').addEventListener('click', () => {
+      close();
+      const pins = (state.componentPins || []).slice();
+      savePins(pinned ? pins.filter(x => x !== id) : pins.concat([id]));
+    });
+    const pt = m.querySelector('[data-act="pinTop"]');
+    if (pt) pt.addEventListener('click', () => { close(); savePins([id].concat((state.componentPins || []).filter(x => x !== id))); });
+  }));
+  // 拖拽
+  let dragId = '';
+  box.querySelectorAll('[data-rail-comp]').forEach(el => {
+    el.addEventListener('dragstart', e => {
+      dragId = el.getAttribute('data-rail-comp');
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', dragId); } catch (err) {}
+      el.classList.add('dragging');
+    });
+    el.addEventListener('dragend', () => { dragId = ''; el.classList.remove('dragging'); box.querySelectorAll('.dropOn').forEach(x => x.classList.remove('dropOn')); });
+    // 拖到某个已置顶项上 → 插到它前面（排序）
+    el.addEventListener('dragover', e => {
+      const targetPinned = el.classList.contains('pinned');
+      if (!targetPinned || !dragId || dragId === el.getAttribute('data-rail-comp')) return;
+      e.preventDefault();
+      el.classList.add('dropOn');
+    });
+    el.addEventListener('dragleave', () => el.classList.remove('dropOn'));
+    el.addEventListener('drop', e => {
+      e.preventDefault();
+      el.classList.remove('dropOn');
+      const id = dragId || e.dataTransfer.getData('text/plain');
+      const target = el.getAttribute('data-rail-comp');
+      if (!id || !el.classList.contains('pinned') || id === target) return;
+      const pins = (state.componentPins || []).filter(x => x !== id);
+      pins.splice(Math.max(0, pins.indexOf(target)), 0, id);
+      savePins(pins);
+    });
+  });
+  // 拖到「常用」分组空白处 → 追加
+  const pinsBody = box.querySelector('[data-group="pins"]');
+  if (pinsBody) {
+    pinsBody.addEventListener('dragover', e => { if (dragId) { e.preventDefault(); pinsBody.classList.add('dropOn'); } });
+    pinsBody.addEventListener('dragleave', () => pinsBody.classList.remove('dropOn'));
+    pinsBody.addEventListener('drop', e => {
+      e.preventDefault();
+      pinsBody.classList.remove('dropOn');
+      const id = dragId || e.dataTransfer.getData('text/plain');
+      if (!id) return;
+      const pins = (state.componentPins || []).slice();
+      if (!pins.includes(id)) pins.push(id);
+      savePins(pins);
+      toast('已加入常用（置顶）');
+    });
+  }
+}
+
 function renderRail() {
   let el = document.getElementById('rail');
   const r = parseRoute();
@@ -3677,6 +3845,10 @@ function renderRail() {
   el.innerHTML = railItemsHTML();
   const th = document.getElementById('railTheme');
   if (th) th.addEventListener('click', toggleTheme);
+  bindRailComps();
+  const wide = railExpanded() && !!(state.goal && SiErXing.goalEntries(state.goal).length);
+  el.classList.toggle('wide', wide);
+  document.body.classList.toggle('railWide', wide);
   document.body.classList.add('hasRail');
 }
 async function loadFrontendPlugins() {

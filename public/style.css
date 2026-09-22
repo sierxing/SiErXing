@@ -941,7 +941,7 @@ body.aiOpen .nodePanel{right:calc(var(--ai-w, 440px) + 26px);}
   width:62px; padding:9px 2px 8px; border-radius:12px; text-decoration:none;
   display:flex; flex-direction:column; align-items:center; gap:4px;
   color:var(--muted); transition:.15s; background:none; border:1px solid transparent;
-  font-family:inherit; cursor:pointer;
+  font-family:inherit; font-size:inherit; line-height:inherit; cursor:pointer;
 }
 .railItem:hover{background:var(--soft); color:var(--text);}
 .railItem.active{background:var(--accent-soft); color:var(--accent); border-color:var(--accent-border);}
@@ -1302,3 +1302,46 @@ body{padding-left:78px;}
 .gdCompRow{display:flex; align-items:center; gap:9px; background:var(--card); border:1px solid var(--border); border-radius:9px; padding:7px 11px; font-size:12.8px;}
 .gdCompIcon{font-size:14px;}
 .gdCompName{flex:1;}
+
+/* ============ 左栏：可展开的组件模块（分组 / 常用置顶 / 拖拽） ============ */
+.rail.wide{width:236px;}
+body.railWide{padding-left:236px;}
+body.railWide .mapPage{left:236px;}
+.rail.wide .railLabel{display:inline;}
+.rail.wide .railItem{width:100%; flex-direction:row; justify-content:flex-start; gap:10px; padding:9px 12px; border-radius:10px;}
+.rail.wide .railItem .railIcon{width:20px; text-align:center;}
+.rail.wide .railItem .railLabel{font-size:13px; font-weight:600;}
+.rail.wide .railLogo{justify-content:flex-start; padding-left:14px;}
+.railCaret{margin-left:auto; font-size:11px; color:var(--muted); line-height:1;}
+/* 折叠（窄栏）时隐藏箭头，避免被挤到第二行形成空行 */
+.rail:not(.wide) .railCaret{display:none;}
+.rail:not(.wide) .railCompToggle{position:relative;}
+.rail:not(.wide) .railCompToggle::after{
+  content:''; position:absolute; right:9px; bottom:9px; width:6px; height:6px;
+  border-right:1.6px solid var(--muted); border-bottom:1.6px solid var(--muted);
+  transform:rotate(-45deg); opacity:.75; transition:.15s;
+}
+.rail:not(.wide) .railCompToggle.open::after{transform:rotate(45deg); bottom:6px;}
+.railCompToggle.open{background:var(--soft); color:var(--text);}
+.railComps{width:100%; padding:2px 6px 6px; overflow-y:auto; flex:1; min-height:0;}
+.railGroup{margin-top:8px;}
+.railGroupHead{font-size:10.5px; font-weight:700; color:var(--muted); padding:3px 8px; letter-spacing:.03em;}
+.rgHint{font-weight:400; opacity:.75;}
+.railGroupBody{display:flex; flex-direction:column; gap:1px; border-radius:10px;}
+.railGroupBody.dropOn{background:var(--accent-soft); outline:1.5px dashed var(--accent-border);}
+.railCompItem{
+  display:flex; align-items:center; gap:8px; padding:6px 9px; border-radius:9px;
+  text-decoration:none; color:var(--text); font-size:12.8px; cursor:grab; transition:.12s;
+}
+.railCompItem:hover{background:var(--soft);}
+.railCompItem.active{background:var(--accent-soft); color:var(--accent); font-weight:600;}
+.railCompItem.pinned{background:rgba(241,196,15,.08);}
+.railCompItem.pinned:hover{background:rgba(241,196,15,.16);}
+.railCompItem.dragging{opacity:.45;}
+.railCompItem.dropOn{box-shadow:inset 0 2px 0 0 var(--accent);}
+.rciIcon{font-size:13px; flex:none;}
+.rciName{flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.rciPin{font-size:10px;}
+.railEmpty{font-size:11.5px; color:var(--muted); padding:6px 9px; line-height:1.6;}
+.railCtx{width:210px;}
+.cmpPin{font-size:13px; padding:2px 7px;}

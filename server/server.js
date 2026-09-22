@@ -200,6 +200,17 @@ function saveComponentCategories(list) {
   setSetting('component_categories', JSON.stringify(uniq));
   return uniq;
 }
+/* 常用组件（侧边栏置顶，顺序即数组顺序） */
+function componentPins() {
+  const raw = safeParse(getSetting('component_pins', '[]')) || [];
+  return (Array.isArray(raw) ? raw : []).map(String);
+}
+function saveComponentPins(list) {
+  const uniq = [];
+  for (const x of list) { const s = String(x); if (s && !uniq.includes(s)) uniq.push(s); }
+  setSetting('component_pins', JSON.stringify(uniq));
+  return uniq;
+}
 function componentCategoryMap() {
   const raw = safeParse(getSetting('component_category_map', '{}')) || {};
   return (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
@@ -238,7 +249,7 @@ function allComponents() {
       version: p.version || '1.0.0', author: p.author || '',
       kind, hasStyle,
       style: hasStyle ? '/plugins/' + p.id + '.css' : '',
-      builtin: false, removable: true, client: p.client || '',
+      builtin: !!p.builtin, removable: !p.builtin && p.removable !== false, client: p.client || '',
       file: p.__file || ''
     });
   }
@@ -2381,6 +2392,22 @@ async function handleAPI(req, res, u) {
     }
   }
 
+  if (p === '/api/component-pins' && method === 'GET') {
+    return sendJSON(res, 200, { pins: componentPins() });
+  }
+  if (p === '/api/component-pins' && method === 'POST') {
+    const body = await readBody(req);
+    if (Array.isArray(body.pins)) return sendJSON(res, 200, { ok: true, pins: saveComponentPins(body.pins) });
+    const id = String(body.id || '');
+    const valid = allComponents().some(c => c.id === id);
+    if (!valid) return sendJSON(res, 404, { error: '组件不存在' });
+    const list = componentPins();
+    if (body.action === 'remove') {
+      return sendJSON(res, 200, { ok: true, pins: saveComponentPins(list.filter(x => x !== id)) });
+    }
+    if (!list.includes(id)) list.push(id);
+    return sendJSON(res, 200, { ok: true, pins: saveComponentPins(list) });
+  }
   if (p === '/api/component-categories' && method === 'GET') {
     const { categories, used } = allCategoriesWithUsage();
     return sendJSON(res, 200, { categories, used, map: componentCategoryMap() });
@@ -2488,6 +2515,7 @@ async function handleAPI(req, res, u) {
     for (const c of comps) enabled[c.id] = (c.scope === 'core') ? true : (settings[c.id] != null ? !!settings[c.id] : !!c.defaultEnabled);
     return sendJSON(res, 200, {
       components: comps,
+      pins: componentPins(),
       plugins: PLUGINS.map(pluginMeta),
       enabled,
       builtins: enabledBuiltins(),

@@ -33,7 +33,9 @@ CREATE TABLE IF NOT EXISTS jd_images (
 module.exports = {
   id: 'jdfile',
   name: '图片资料',
-  category: '其它',
+  category: '基础功能组件',
+  scope: 'base',        // 与问卷/约束等一样，属于内置基础功能组件（不是扩展组件）
+  builtin: true,        // 随应用分发：不显示"第三方组件"标签，也不提供卸载
   icon: '📷',
   desc: '粘贴 JD / 大纲 / 教材截图，视觉模型提炼成结构化资料源，辅助规划决策',
   order: 30,

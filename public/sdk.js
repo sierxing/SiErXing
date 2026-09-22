@@ -65,7 +65,12 @@ window.SiErXing = (function () {
     goalEntries(goal) {
       return plugins
         .filter(p => p.goalEntry && (!p.goalEntry.show || p.goalEntry.show(goal)))
-        .map(p => Object.assign({ id: p.id }, p.goalEntry));
+        .map(p => {
+          // 自动补齐服务端元数据（分类、图标、名称）：插件里没写也能正确分组
+          const meta = (serverPlugins || []).find(x => x.id === p.id) || {};
+          const base = { id: p.id, icon: meta.icon || '🧩', label: meta.name || p.id, category: meta.category || '其它' };
+          return Object.assign(base, p.goalEntry);
+        });
     },
     /* 匹配插件页面路由 */
     matchRoute(hash) {
