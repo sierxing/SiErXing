@@ -60,7 +60,7 @@ $Dir = $Dir.TrimEnd('\')
 if ($inProject -and ($here.TrimEnd('\') -ne $Dir)) {
   Say "正在复制项目到 $Dir …"
   New-Item -ItemType Directory -Force -Path $Dir | Out-Null
-  robocopy $here $Dir /E /XD data .git /NFL /NDL /NJH /NJS /NP | Out-Null
+  robocopy $here $Dir /E /XD .git /NFL /NDL /NJH /NJS /NP | Out-Null   # 连 data（目标与进度）一起搬，只排除 .git
   if (-not (Test-Path (Join-Path $Dir 'server\server.js'))) { Die "复制失败，请检查目标目录权限：$Dir" }
 }
 
