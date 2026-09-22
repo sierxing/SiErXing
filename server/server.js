@@ -783,7 +783,8 @@ async function collectSources(goal, queries, onProgress) {
   return { saved, blocked };
 }
 function sourcesOf(goalId) {
-  return db.prepare("SELECT * FROM sources WHERE goal_id = ? ORDER BY CASE WHEN kind = 'JD' THEN 0 ELSE 1 END, id").all(goalId);
+  // 用户自己提供的图片资料（JD / 大纲 / 笔记…）排在最前，其次才是检索到的网络信息源
+  return db.prepare("SELECT * FROM sources WHERE goal_id = ? ORDER BY CASE WHEN site = '用户提供的图片' OR kind = 'JD' THEN 0 ELSE 1 END, id").all(goalId);
 }
 
 /* ===== AI 规划 ===== */
@@ -1419,7 +1420,7 @@ function streamClarify(req, res, goal) {
   (async () => {
     try {
       send({ status: 'AI 正在分析你的情况，准备澄清问题…' });
-      const txt = await aiText(buildClarifyPrompt(goal), model, 300000);
+      const txt = await aiTextProgress(buildClarifyPrompt(goal), model, 300000, send, '问题');
       const data = extractJSON(txt);
       if (!data || !Array.isArray(data.questions) || !data.questions.length) throw new Error('澄清问题生成失败，请重试');
       db.prepare('UPDATE goals SET clarify = ?, clarify_stage = ?, status = ?, error = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(data), 'clarify', 'clarify', '', nowISO(), goal.id);
@@ -1432,6 +1433,47 @@ function streamClarify(req, res, goal) {
     res.end();
   })();
 }
+/* ---------- 规划过程的进度反馈 ----------
+   流式增量 + 定时心跳：即使模型一段时间不吐字，也每 2.5s 汇报一次；
+   并从已生成的 JSON 片段里数出"已经规划了几项"（阶段/小目标/任务），让用户知道没卡住。 */
+function progressTitles(text) {
+  const out = [];
+  const re = /"(?:title|name)"\s*:\s*"((?:[^"\\]|\\.){1,80})"/g;
+  let m;
+  while ((m = re.exec(text))) out.push(m[1].replace(/\\"/g, '"'));
+  return out;
+}
+async function aiTextProgress(prompt, model, timeoutMs, send, label) {
+  const t0 = Date.now();
+  let full = '', thinking = '', lastSent = 0;
+  const snapshot = extra => {
+    const titles = progressTitles(full);
+    return Object.assign({
+      elapsed: Math.round((Date.now() - t0) / 1000),
+      count: titles.length,
+      titles: titles.slice(-4),
+      thinking: thinking ? thinking.slice(-40) : '',
+      label: label || ''
+    }, extra || {});
+  };
+  const hb = setInterval(() => { send({ progress: snapshot({ heartbeat: true }) }); }, 2500);
+  try {
+    return await ai.stream({
+      prompt, model, timeoutMs,
+      onEvent: ev => {
+        if (ev && ev.text) {
+          full += ev.text;
+          const now = Date.now();
+          if (now - lastSent > 1500) { lastSent = now; send({ progress: snapshot() }); }
+        } else if (ev && ev.thinking) {
+          thinking = ev.thinking;
+        }
+      }
+    });
+  } finally {
+    clearInterval(hb);
+  }
+}
 function streamPlan(req, res, goal, answers) {
   // 第一步：只生成骨架（阶段 + 小目标），等待用户确认（会带上澄清问答）
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
@@ -1443,7 +1485,7 @@ function streamPlan(req, res, goal, answers) {
       if (answers && pend) appendGoalQa(goal.id, pend.stage, pend.data.questions, answers);
       send({ status: answers ? '正在结合你的补充回答生成路径骨架…' : '正在结合你的回答生成路径骨架…' });
       const planPrompt = buildSkeletonPrompt(goal);
-      let skeletonText = await aiText(planPrompt, model, 600000);
+      let skeletonText = await aiTextProgress(planPrompt, model, 600000, send, '阶段/小目标');
       let skeleton = extractJSON(skeletonText);
       if (skeleton && Array.isArray(skeleton.questions) && skeleton.questions.length) {
         saveGoalQuestions(goal.id, 'plan', skeleton);
@@ -1454,7 +1496,7 @@ function streamPlan(req, res, goal, answers) {
       if (!skeleton || !Array.isArray(skeleton.stages) || !skeleton.stages.length) {
         console.log('[plan] 骨架解析失败（将重试），原始输出前 400 字:', String(skeletonText || '').slice(0, 400).replace(/\n/g, ' '));
         send({ status: '正在重新整理规划结果…' });
-        skeletonText = await aiText(planPrompt + '\n\n【重要】你上一次的输出不是合法 JSON（可能被截断或夹带了说明文字）。请严格只输出一个 JSON 对象，不要任何解释、不要代码块标记；阶段控制在 4-5 个、每阶段 3-4 个小目标，detail 精简到 60 字以内。', model, 600000);
+        skeletonText = await aiTextProgress(planPrompt + '\n\n【重要】你上一次的输出不是合法 JSON（可能被截断或夹带了说明文字）。请严格只输出一个 JSON 对象，不要任何解释、不要代码块标记；阶段控制在 4-5 个、每阶段 3-4 个小目标，detail 精简到 60 字以内。', model, 600000, send, '阶段/小目标');
         skeleton = extractJSON(skeletonText);
         if (skeleton && Array.isArray(skeleton.questions) && skeleton.questions.length) {
           saveGoalQuestions(goal.id, 'plan', skeleton);
@@ -1510,7 +1552,7 @@ function streamPlanTasks(req, res, goal, answers) {
         if (hasTasks) { send({ status: `第 ${i + 1}/${skeleton.length} 阶段已有任务，跳过` }); continue; }
         send({ status: `生成第 ${i + 1}/${skeleton.length} 阶段的任务：${String(st.title || '').slice(0, 22)}…` });
         try {
-          const txt = await aiText(buildTasksPrompt(goal, st, i), model, 300000);
+          const txt = await aiTextProgress(buildTasksPrompt(goal, st, i), model, 300000, send, '任务');
           const data = extractJSON(txt);
           if (data && Array.isArray(data.questions) && data.questions.length) {
             saveGoalQuestions(goal.id, 'tasks', data);
@@ -1579,12 +1621,12 @@ function streamPlanRefine(req, res, goal, feedback, answers) {
       if (!current.length) throw new Error('还没有骨架可调整');
       send({ status: '正在根据你的意见调整骨架…' });
       const refinePrompt = buildRefineSkeletonPrompt(goal, current, feedback);
-      let txt = await aiText(refinePrompt, model, 480000);
+      let txt = await aiTextProgress(refinePrompt, model, 480000, send, '阶段/小目标');
       let plan = extractJSON(txt);
       if (!plan || !Array.isArray(plan.stages) || !plan.stages.length) {
         console.log('[refine] 解析失败（将重试），原始输出前 300 字:', String(txt || '').slice(0, 300).replace(/\n/g, ' '));
         send({ status: '正在重新整理调整结果…' });
-        txt = await aiText(refinePrompt + '\n\n【重要】请严格只输出一个 JSON 对象（不要解释、不要代码块），格式：{"summary":"...","stages":[{"title":"","detail":"","sources":[],"goals":[{"title":"","detail":"","sources":[]}]}]}', model, 480000);
+        txt = await aiTextProgress(refinePrompt + '\n\n【重要】请严格只输出一个 JSON 对象（不要解释、不要代码块），格式：{"summary":"...","stages":[{"title":"","detail":"","sources":[],"goals":[{"title":"","detail":"","sources":[]}]}]}', model, 480000, send, '阶段/小目标');
         plan = extractJSON(txt);
       }
       if (plan && Array.isArray(plan.questions) && plan.questions.length) {

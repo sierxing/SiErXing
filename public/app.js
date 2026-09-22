@@ -1874,6 +1874,7 @@ function planPanelHTML() {
     return `<div class="planPanel" id="planPanel">
       <div class="ppHead"><span class="spinner"></span><span id="ppStatus">${esc(state.planStatus || 'AI 正在规划…')}</span><span class="ppTime" id="ppTime">0s</span></div>
       <div class="ppTrack"><div class="ppTrackIn"></div></div>
+      <div class="ppLive" id="ppLive" hidden></div>
       <details class="ppRaw"><summary>查看 AI 原始输出</summary><pre class="ppText" id="ppText"></pre></details>
       <div class="hint">${esc(state.planHint || '规划约需 1-3 分钟，请保持页面打开。')}</div>
     </div>`;
@@ -1920,6 +1921,17 @@ function bindPlanPanel() {
   if (resumeBtn) resumeBtn.addEventListener('click', () => startPlanTasks(state.goal.id));
 }
 let planTimer = null;
+/* 规划过程的实时反馈：已用时间 / 已生成几项 / 最近生成的标题（每 1.5-2.5 秒刷新一次） */
+function renderPlanLive() {
+  const el = document.getElementById('ppLive');
+  if (!el) return;
+  const p = state.planProgress;
+  if (!p) { el.hidden = true; el.innerHTML = ''; return; }
+  el.hidden = false;
+  const unit = p.label ? ' 个' + esc(p.label) : ' 项';
+  el.innerHTML = `<span class="ppLiveMeta">⏱ 已用 ${p.elapsed || 0}s${p.count ? ' · 已生成 ' + p.count + unit : ''}${p.thinking ? ' · 模型思考中…' : ''}</span>`
+    + ((p.titles && p.titles.length) ? `<div class="ppLiveList">${p.titles.map(t => `<span class="ppLiveChip">${esc(t)}</span>`).join('')}</div>` : '');
+}
 function bindPlanningPanel() {
   const t0 = Date.now();
   clearInterval(planTimer);
@@ -1927,6 +1939,7 @@ function bindPlanningPanel() {
     const el = document.getElementById('ppTime');
     if (el) el.textContent = Math.round((Date.now() - t0) / 1000) + 's';
   }, 1000);
+  renderPlanLive();
 }
 async function streamSSE(url, body, onEvent) {
   const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
@@ -1966,6 +1979,7 @@ async function startClarify(id) {
   bindPlanningPanel();
   const r = await streamSSE('/api/goals/' + id + '/plan/clarify', {}, d => {
     if (d.status) { state.planStatus = d.status; const el = document.getElementById('ppStatus'); if (el) el.textContent = d.status; }
+    if (d.progress) { state.planProgress = d.progress; renderPlanLive(); }
   }).catch(e => ({ done: true, error: e.message }));
   clearInterval(planTimer);
   state.planning = false;
@@ -1983,6 +1997,7 @@ async function startClarify(id) {
 async function startPlanning(id, answers) {
   if (state.planning || state.collecting || state.expanding) return;
   state.planning = true;
+  state.planProgress = null;
   state.planStage = 'skeleton';
   state.planStatus = answers ? '正在结合你的回答生成路径骨架…' : '正在生成路径骨架（阶段与小目标）…';
   state.planHint = '骨架生成约需 30-90 秒，生成后可确认或提意见。';
@@ -1994,6 +2009,7 @@ async function startPlanning(id, answers) {
   let asked = null;
   const r = await streamSSE('/api/goals/' + id + '/plan', answers ? { answers } : {}, d => {
     if (d.status) { state.planStatus = d.status; const el = document.getElementById('ppStatus'); if (el) el.textContent = d.status; }
+    if (d.progress) { state.planProgress = d.progress; renderPlanLive(); }
     if (d.questions) asked = { stage: d.stage || 'plan', feedback: d.feedback || '', data: d.questions };
   }).catch(e => ({ done: true, error: e.message }));
   clearInterval(planTimer);
@@ -2017,6 +2033,7 @@ async function startPlanning(id, answers) {
 async function startPlanTasks(id, answers) {
   if (state.planning || state.collecting || state.expanding) return;
   state.planning = true;
+  state.planProgress = null;
   state.planStage = 'tasks';
   state.planStatus = '开始逐阶段细化任务…';
   state.planHint = '按阶段逐个生成，中途可关闭页面，回来点「继续细化任务」接着跑。';
@@ -2025,6 +2042,7 @@ async function startPlanTasks(id, answers) {
   let asked = null;
   const r = await streamSSE('/api/goals/' + id + '/plan/tasks', answers ? { answers } : {}, d => {
     if (d.status) { state.planStatus = d.status; const el = document.getElementById('ppStatus'); if (el) el.textContent = d.status; }
+    if (d.progress) { state.planProgress = d.progress; renderPlanLive(); }
     if (d.questions) asked = { stage: 'tasks', feedback: '', data: d.questions };
     if (d.goal) {
       state.goal = d.goal;
@@ -2048,6 +2066,7 @@ async function startPlanTasks(id, answers) {
 async function startPlanRefine(id, feedback, answers) {
   if (state.planning || state.collecting || state.expanding) return;
   state.planning = true;
+  state.planProgress = null;
   state.planStatus = '正在根据你的意见调整骨架…';
   state.planHint = '调整后仍需你确认才会细化任务。';
   renderGoal();
@@ -2055,6 +2074,7 @@ async function startPlanRefine(id, feedback, answers) {
   let asked = null;
   const r = await streamSSE('/api/goals/' + id + '/plan/refine', answers ? { feedback, answers } : { feedback }, d => {
     if (d.status) { state.planStatus = d.status; const el = document.getElementById('ppStatus'); if (el) el.textContent = d.status; }
+    if (d.progress) { state.planProgress = d.progress; renderPlanLive(); }
     if (d.questions) asked = { stage: 'refine', feedback: d.feedback || feedback, data: d.questions };
   }).catch(e => ({ done: true, error: e.message }));
   clearInterval(planTimer);
@@ -2652,7 +2672,7 @@ const GUIDE_STEPS = [
     </div>
     <div class="gmCaption">每一步都能停下来改：提意见、深挖追问、随时调整</div>`,
     html: `<ol class="gdSteps">
-      <li><b>新建目标</b>：写清目标与现状，可粘贴参考资料（JD/大纲），勾选需要的组件。</li>
+      <li><b>新建目标</b>：写清目标与现状，可粘贴参考资料（JD / 大纲 / 笔记），也可直接上传图片资料，勾选需要的组件。</li>
       <li><b>回答问卷</b>：不确定的点 <b>🔍 进一步探讨</b> 让 AI 追问，也可自己补充信息。</li>
       <li><b>加约束</b>：硬性要求写进 <b>⛓ 规划约束</b>（如"只能周末学，每周 ≤6 小时"）。</li>
       <li><b>确认骨架 → 细化任务</b>：先给阶段+小目标（可提意见重排），确认后再拆任务（每阶段 ≤10 个）。</li>
@@ -3357,7 +3377,7 @@ async function syncSectionHTML() {
       </div>
       <div class="svcRow"><span class="svcLabel">自动上传</span>${syncSwitch('syncAutoPush', st.autoPush, '数据变化后 20 秒自动提交并推送')}</div>
       <div class="svcRow"><span class="svcLabel">启动时拉取</span>${syncSwitch('syncAutoPull', st.autoPull, '每次打开程序时从仓库拉取最新数据')}</div>
-      <div class="svcRow"><span class="svcLabel">同步图片</span>${syncSwitch('syncImages', st.images, '把上传的图片（JD 等）也一起同步')}</div>
+      <div class="svcRow"><span class="svcLabel">同步图片</span>${syncSwitch('syncImages', st.images, '把上传的图片也一起同步')}</div>
       <div class="toolbarRow" style="margin-top:12px;">
         <button class="btn primary" id="syncSave">保存并测试连接</button>
         <button class="btn" id="syncPush">⬆ 立即上传</button>
@@ -3477,7 +3497,7 @@ async function renderSettings() {
         </div>
         <div class="field"><label>API 地址（Base URL）</label><input id="aiBase" value="${esc(s.ai_base_url || '')}" placeholder="如 https://api.deepseek.com/v1"></div>
         <div class="field"><label>API 密钥</label><input id="aiKey" type="password" value="${esc(s.ai_api_key || '')}" placeholder="${s.env_keys && s.env_keys.key ? '已通过环境变量提供（留空则用环境变量）' : 'sk-...'}"></div>
-        <div class="field"><label>视觉模型（可选：用于识别 JD 等图片）</label>
+        <div class="field"><label>视觉模型（可选：用于识别图片资料）</label>
           <input id="aiVisionModel" list="modelList" value="${esc(s.ai_vision_model || '')}" placeholder="留空则与文本模型相同，如 qwen-vl-max">
         </div>
         <div class="field"><label>单次请求超时（毫秒）</label><input id="aiTimeout" value="${esc(s.ai_timeout_ms || '300000')}"></div>

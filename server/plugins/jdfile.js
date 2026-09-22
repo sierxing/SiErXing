@@ -117,31 +117,67 @@ module.exports = {
 
 /* ===================== 以下为插件实现 ===================== */
 /* ===== JD 图片 → 资料源 ===== */
-function buildJDPrompt(note) {
+function extractJSON(text) {
+  const t = String(text || '').trim();
+  if (!t) return null;
+  try { return JSON.parse(t); } catch (e) {}
+  const m = t.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (m) { try { return JSON.parse(m[1]); } catch (e) {} }
+  const start = t.indexOf('{');
+  if (start < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let j = start; j < t.length; j++) {
+    const c = t[j];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '{') depth++;
+    else if (c === '}') {
+      depth--;
+      if (depth === 0) { try { return JSON.parse(t.slice(start, j + 1)); } catch (e) { return null; } }
+    }
+  }
+  return null;
+}
+function buildImagePrompt(note) {
   const lines = [];
-  lines.push('这是一张（或几张）招聘 JD 的截图。请准确提取其中的岗位信息，作为职业规划的参考资料。');
+  lines.push('这是一张（或几张）与用户目标相关的图片资料，可能是：招聘 JD、课程大纲、教材/笔记、文章或表格截图、思维导图、代码截图等。');
+  lines.push('请先判断图片类型，再把其中有价值的信息准确提炼出来，作为目标规划的参考资料。');
   lines.push('');
   lines.push('【提取要求】');
   lines.push('1. 逐字准确提取可见信息，不要脑补；看不清的地方标注「[不清晰]」。');
-  lines.push('2. 归纳：岗位名称、公司、地点、薪资、岗位职责、任职要求、技能关键词、硬性条件（学历/到岗天数/实习时长等）、加分项。');
-  lines.push('3. 判断这份 JD 反映的「招聘方最看重什么」（按重要性排序），供规划参考。');
+  lines.push('2. 按图片类型归纳内容：');
+  lines.push('   · 招聘 JD：岗位、公司、地点、薪资、职责、任职要求、技能关键词、硬性条件（学历/到岗天数/实习时长等）、加分项；');
+  lines.push('   · 大纲 / 教材 / 笔记：章节与知识模块、核心概念、学习目标、重点难点、前置知识、练习作业；');
+  lines.push('   · 表格 / 清单：字段与条目，尽量保持原结构；');
+  lines.push('   · 其他：关键事实、数据、结论。');
+  lines.push('3. 判断这份资料对「用户目标」最关键的内容（按重要性排序），供规划参考。');
   lines.push('4. 只输出一个 JSON 对象：');
-  lines.push('{"title":"岗位名","company":"","location":"","salary":"","duties":[""],"requirements":[""],"skills":[""],"hard_conditions":[""],"priority":["招聘方最看重的前 3-5 项"],"summary":"3 句以内总结","raw_text":"尽可能完整的原文文本"}');
+  lines.push('{"type":"JD / 大纲 / 教材 / 笔记 / 表格 / 文章 / 其他","title":"一句话标题（如：字节跳动 Agent 实习 JD、机器学习课程大纲）","source":"来源机构/公司/学校/作者，没有就留空","location":"","salary":"","summary":"3 句以内总结","points":["关键要点"],"sections":["结构化条目（章节/职责/要求等，按原结构）"],"keywords":["关键词"],"hard_conditions":["硬性条件 / 门槛 / 前置知识"],"priority":["对目标最关键的前 3-5 项"],"actions":["据此应该做什么"],"raw_text":"尽可能完整的原文文本"}');
   if (note) { lines.push(''); lines.push('【用户备注】' + note); }
   return lines.join('\n');
 }
-function jdToText(data) {
+function imageToText(data) {
   const L = [];
-  if (data.title) L.push('岗位：' + data.title);
-  if (data.company) L.push('公司：' + data.company);
-  if (data.location) L.push('地点：' + data.location);
-  if (data.salary) L.push('薪资：' + data.salary);
-  if (Array.isArray(data.duties) && data.duties.length) L.push('岗位职责：\n' + data.duties.map(x => '· ' + x).join('\n'));
-  if (Array.isArray(data.requirements) && data.requirements.length) L.push('任职要求：\n' + data.requirements.map(x => '· ' + x).join('\n'));
-  if (Array.isArray(data.skills) && data.skills.length) L.push('技能关键词：' + data.skills.join('、'));
+  const line = (label, v) => { if (v) L.push(label + '：' + v); };
+  const list = (label, arr) => { if (Array.isArray(arr) && arr.length) L.push(label + '：\n' + arr.map(x => '· ' + x).join('\n')); };
+  line('资料类型', data.type);
+  line('标题', data.title);
+  line('来源', data.source || data.company);
+  line('地点', data.location);
+  line('薪资', data.salary);
+  list('关键要点', data.points);
+  list('结构化内容', data.sections || data.duties || data.requirements);
+  const kw = data.keywords || data.skills;
+  if (Array.isArray(kw) && kw.length) L.push('关键词：' + kw.join('、'));
   if (Array.isArray(data.hard_conditions) && data.hard_conditions.length) L.push('硬性条件：' + data.hard_conditions.join('；'));
-  if (Array.isArray(data.priority) && data.priority.length) L.push('招聘方最看重：' + data.priority.join('；'));
-  if (data.summary) L.push('总结：' + data.summary);
+  list('最关键内容', data.priority);
+  list('建议行动', data.actions);
+  line('总结', data.summary);
   if (data.raw_text) L.push('\n原文摘录：\n' + String(data.raw_text).slice(0, 3000));
   return L.join('\n');
 }
@@ -163,15 +199,17 @@ function streamJDImage(req, res, goal, dataUrl, note) {
       fs.writeFileSync(fpath, buf);
       send({ status: '图片已收到，AI 正在识别并提炼 JD 信息…', file: fname });
       const model = currentVisionModel();
-      const txt = await aiTextFiles(buildJDPrompt(note), model, [fpath], 300000);
+      const txt = await aiTextFiles(buildImagePrompt(note), model, [fpath], 300000);
       const data = extractJSON(txt);
-      if (!data || !data.title) throw new Error('JD 信息提炼失败，请重试（建议换一张更清晰的截图）');
+      if (!data || (!data.title && !data.summary && !data.raw_text)) throw new Error('图片信息提炼失败，请重试（建议换一张更清晰的截图）');
       const t = nowISO();
-      const title = '岗位JD：' + String(data.title).slice(0, 60) + (data.company ? '（' + String(data.company).slice(0, 30) + '）' : '');
-      const content = jdToText(data);
+      const type = String(data.type || '').trim() || '资料';
+        const from = data.source || data.company || '';
+        const title = (type !== '资料' ? type + '：' : '') + String(data.title || '图片资料').slice(0, 60) + (from ? '（' + String(from).slice(0, 30) + '）' : '');
+      const content = imageToText(data);
       const snippet = String(data.summary || '').slice(0, 300);
       const sr = db.prepare('INSERT INTO sources (goal_id,title,url,site,kind,snippet,content,published_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
-        .run(goal.id, title, '', '用户提供的JD图片', 'JD', snippet, content, '', t);
+        .run(goal.id, title, '', '用户提供的图片', /JD/i.test(type) ? 'JD' : type.slice(0, 10), snippet, content, '', t);
       const sourceId = Number(sr.lastInsertRowid);
       const jr = db.prepare('INSERT INTO jd_images (goal_id,file,mime,size,title,extracted,status,error,source_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
         .run(goal.id, fname, mime, buf.length, title, JSON.stringify(data), 'done', '', sourceId, t);
