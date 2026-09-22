@@ -1023,6 +1023,7 @@ function sourcesBlock(goal, maxItems, maxLen) {
     return `- [${s.site}｜${s.kind}] ${s.title}${body ? '：' + body + (full.length > len ? '…' : '') : ''}`;
   };
   const lines = [''];
+    lines.push(`（说明：本目标共收集 ${all.length} 条资料——用户自己提供 ${own.length} 条、网络检索 ${net.length} 条；下面是与你目标最相关的部分，其余资料的结论已由「提炼汇总」概括。）`);
   if (own.length) {
     lines.push('【用户自己提供的资料（★最高优先级：用户真实场景的一手信息，必须严格依据）】');
     lines.push('要求：① 其中的硬性条件（学历 / 到岗天数 / 技能要求 / 时间节点 / 知识范围等）必须原样满足，不得忽略或改写；');
@@ -1031,7 +1032,7 @@ function sourcesBlock(goal, maxItems, maxLen) {
     lines.push('④ 在 sources 中标注这些资料时写明「用户提供的资料」；');
     lines.push('⑤ 用户有多份同类资料（如多份 JD）时，请横向归纳「共同要求」（出现频次高的技能/条件优先安排），再兼顾各自特殊点。');
     // 用户资料给足篇幅：每条最多 450 字（关键字段已在正文最前面），最多 24 条
-    for (const s of own.slice(0, 24)) lines.push(fmt(s, Math.max(maxLen, 450)));
+    for (const s of own.slice(0, 30)) lines.push(fmt(s, Math.max(maxLen, 600)));
   }
   if (net.length) {
     lines.push('');
@@ -1295,7 +1296,7 @@ function buildSkeletonPrompt(goal) {
   lines.push(goalQaBlock(goal));
   lines.push(constraintsBlock(goal));
   lines.push(digestsBlock(goal));
-  lines.push(sourcesBlock(goal, 36, 170));
+  lines.push(sourcesBlock(goal, 60, 200));
   lines.push(askBlock(round, '路径骨架'));
   lines.push('');
   lines.push('【要求】');
@@ -1313,7 +1314,8 @@ function buildSkeletonPrompt(goal) {
   lines.push('   · 小目标要「能独立验收」、能力或成果导向（如「掌握 X 并完成 Y 练习」「能用 Z 做出 W」）；');
   lines.push('   · 【自检】输出前逐个核对资料里的技术栈与知识点：有没有哪个在本阶段找不到落点？有就补一个小目标。');
   lines.push('4. 每个节点 detail 写 60-120 字：说明要达成什么、为什么这样安排。');
-  lines.push('5. 每个节点 sources 给 1-3 条依据：name 必须写明实际来源（站点名+标题要点，用户资料写「用户提供的资料」），note 写依据了什么要求/结论。');
+  lines.push('5. 每个节点都要给 sources 依据：**阶段给 3-5 条、小目标给 1-3 条**（不要空着）；name 写明实际来源（站点名+标题要点，用户资料写「用户提供的资料」），note 写依据了什么要求/结论。');
+  lines.push('   优先引用：① 用户提供的资料 ② 提炼汇总里的结论 ③ 下面列出的资料；不同阶段尽量引用与它最相关的不同资料，让依据分布开来。');
   lines.push('6. 路径必须匹配用户现状（零基础从基础开始，有基础则跳过）；顺序体现「真实工作中最看重什么」。');
   lines.push('7. 只输出一个 JSON 对象（不要其他文字或代码块标记），量控制在 28000 字符内（内容多时 detail 可精简到 40-80 字，但小目标不要省）：');
   lines.push('8. 若按上面的「关键机制」需要先提问，则只输出 {"analysis":"你的分析","questions":[...]}，不要输出 stages。');
