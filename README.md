@@ -166,13 +166,19 @@
 
 ### 一键安装（推荐）
 
-**Linux / macOS**（一条命令，自动下载 + 安装 + 启动）：
+**Linux / macOS**（一条命令：下载 + 安装 + 启动）：
 
 ```bash
-curl -fsSL https://atomgit.com/sierxing/SiErXing/raw/main/install.sh | bash
+git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git ~/SiErXing && bash ~/SiErXing/install.sh
 ```
 
-**Windows**：从仓库下载 ZIP → 解压 → **双击 `install.bat`**（或在解压目录执行 `install.bat`）。
+**Windows**（PowerShell 一条命令；或从仓库页下载 ZIP → 解压 → 双击 `install.bat`）：
+
+```powershell
+git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git "$env:USERPROFILE\SiErXing"; & "$env:USERPROFILE\SiErXing\install.bat"
+```
+
+> 没有 git？直接打开 <https://atomgit.com/sierxing/SiErXing> 点「克隆/下载」拿到 ZIP，解压后运行 `install.sh`（macOS/Linux）或 `install.bat`（Windows）即可。
 
 安装程序会自动完成这些事：
 

@@ -3,7 +3,8 @@
 #  思而行 SiErXing · 一键安装脚本（Linux / macOS）
 #  用法：
 #    1) 已下载本项目：  ./install.sh
-#    2) 全新安装：      curl -fsSL https://atomgit.com/sierxing/SiErXing/raw/main/install.sh | bash
+#    2) 全新安装（一条命令）：
+#       git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git ~/SiErXing && bash ~/SiErXing/install.sh
 #  可选环境变量：
 #    SIERXING_DIR=<安装目录>      默认 ~/SiErXing
 #    SIERXING_PORT=<端口>         默认 3213
