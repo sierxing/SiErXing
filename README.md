@@ -29,9 +29,13 @@
 | --- | --- |
 | ![问卷](docs/screenshots/09-questionnaire.png) | ![新建目标](docs/screenshots/05-new-goal.png) |
 
-| 组件中心（开关功能 / 换肤 / 导入导出） | 设置（接入模型 / 服务与启动） |
+| 组件中心（开关 / 分类管理 / 换肤） | 设置（接入模型 / 服务与启动） |
 | --- | --- |
 | ![组件](docs/screenshots/12-components.png) | ![设置](docs/screenshots/13-settings.png) |
+
+| 批量导入组件（可多选 + 统一分类） | 每日刷题（内置组件） |
+| --- | --- |
+| ![导入](docs/screenshots/17-import.png) | ![刷题](docs/screenshots/14-daily.png) |
 
 | 版本对比（左旧右新，彩色标注） | 学习教程（真正学会，含练习与自测） |
 | --- | --- |
