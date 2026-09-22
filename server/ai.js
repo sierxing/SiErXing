@@ -21,7 +21,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const { spawn, execFileSync } = require('node:child_process');
 
 let ctx = { getSetting: () => '', appDir: process.cwd() };
 
@@ -229,14 +229,69 @@ async function openaiModels(c) {
 
 /* ---------------- opencode CLI（可选） ---------------- */
 
-function runOpencode(c, args, timeoutMs) {
+/**
+ * 解析 opencode 可执行文件路径：
+ * - Linux/macOS：直接用 PATH 里的 opencode
+ * - Windows：opencode 常见是 .cmd/.exe 包装脚本，Node 直接 spawn 会 ENOENT，
+ *   这里用 where 找到真实路径；.cmd/.bat 需要通过 cmd.exe 执行。
+ */
+let opencodeCmdCache = null;
+function opencodeCommand() {
+  if (opencodeCmdCache) return opencodeCmdCache;
+  if (process.platform !== 'win32') { opencodeCmdCache = { file: 'opencode', prefix: [] }; return opencodeCmdCache; }
+  const cands = [];
+  try {
+    const out = execFileSync('where', ['opencode'], { encoding: 'utf8', windowsHide: true });
+    out.split(/\r?\n/).map(x => x.trim()).filter(Boolean).forEach(x => cands.push(x));
+  } catch (e) {}
+  const home = os.homedir();
+  for (const p of [
+    path.join(home, '.opencode', 'bin', 'opencode.exe'),
+    path.join(home, '.opencode', 'bin', 'opencode.cmd'),
+    path.join(process.env.LOCALAPPDATA || '', 'opencode', 'bin', 'opencode.exe'),
+    path.join(process.env.APPDATA || '', 'npm', 'opencode.cmd'),
+    path.join(process.env.APPDATA || '', 'npm', 'opencode'),
+    path.join(process.env.ProgramFiles || '', 'opencode', 'opencode.exe'),
+    path.join(process.env.ProgramData || '', 'chocolatey', 'bin', 'opencode.exe')
+  ]) { try { if (p && fs.existsSync(p)) cands.push(p); } catch (e) {} }
+  const exe = cands.find(x => /\.exe$/i.test(x));
+  const shim = cands.find(x => /\.(cmd|bat)$/i.test(x));
+  const target = exe || shim || cands[0];
+  if (!target) { opencodeCmdCache = { file: 'opencode', prefix: [], missing: true }; return opencodeCmdCache; }
+  if (/\.(cmd|bat)$/i.test(target)) opencodeCmdCache = { file: process.env.ComSpec || 'cmd.exe', prefix: ['/d', '/s', '/c', target], resolved: target };
+  else opencodeCmdCache = { file: target, prefix: [], resolved: target };
+  return opencodeCmdCache;
+}
+/** 统一 spawn：提示词通过 stdin 传入（避免 Windows 命令行转义/长度限制问题） */
+function spawnOpencode(args, prompt) {
+  const cmd = opencodeCommand();
+  const child = spawn(cmd.file, cmd.prefix.concat(args), {
+    cwd: ctx.appDir,
+    env: { ...process.env, PWD: ctx.appDir },
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true
+  });
+  try {
+    if (prompt != null) { child.stdin.write(prompt); }
+    child.stdin.end();
+  } catch (e) {}
+  return child;
+}
+function opencodeMissingError() {
+  const cmd = opencodeCommand();
+  return '未找到 opencode 命令' + (process.platform === 'win32'
+    ? '（Windows：请确认已安装 opencode 且 `where opencode` 能找到；若用 npm 安装，通常在 %APPDATA%\\npm\\opencode.cmd）。也可以改用「OpenAI 兼容接口」方式接入模型。'
+    : '（请确认已安装 opencode，或改用「OpenAI 兼容接口」）') + (cmd.resolved ? '（已尝试：' + cmd.resolved + '）' : '');
+}
+function runOpencode(c, args, timeoutMs, prompt) {
   return new Promise((resolve, reject) => {
-    const child = spawn('opencode', args, { cwd: ctx.appDir, env: { ...process.env, PWD: ctx.appDir }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let child;
+    try { child = spawnOpencode(args, prompt == null ? null : prompt); } catch (e) { return reject(new Error(opencodeMissingError())); }
     let out = '', err = '';
     const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) {} reject(new Error('opencode 调用超时')); }, timeoutMs || 300000);
     child.stdout.on('data', d => { out += d; });
     child.stderr.on('data', d => { err += d; });
-    child.on('error', e => { clearTimeout(timer); reject(new Error('未找到 opencode 命令（如需使用请先安装，或改用 OpenAI 兼容接口）')); });
+    child.on('error', e => { clearTimeout(timer); reject(new Error(opencodeMissingError())); });
     child.on('close', () => { clearTimeout(timer); resolve({ out, err }); });
   });
 }
@@ -251,11 +306,11 @@ async function opencodeText(c, opts) {
   if (c.agent) args.push('--agent', c.agent);
   if (model || c.model) args.push('-m', model || c.model);
   for (const f of (images || [])) { if (!/^data:/.test(f)) args.push('-f', f); }
-  args.push(prompt);
-  // 流式（有 onEvent 时逐行推送）
+  // 提示词通过 stdin 传入（Windows 下 cmd 包装脚本 + 长文本更稳）
   if (onEvent) {
     return await new Promise((resolve, reject) => {
-      const child = spawn('opencode', args, { cwd: ctx.appDir, env: { ...process.env, PWD: ctx.appDir }, stdio: ['ignore', 'pipe', 'pipe'] });
+      let child;
+      try { child = spawnOpencode(args, prompt); } catch (e) { return reject(new Error(opencodeMissingError())); }
       let buf = '', text = '';
       const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) {} reject(new Error('opencode 调用超时')); }, timeoutMs || 300000);
       child.stdout.on('data', chunk => {
@@ -274,11 +329,11 @@ async function opencodeText(c, opts) {
         }
       });
       child.stderr.on('data', () => {});
-      child.on('error', () => { clearTimeout(timer); reject(new Error('未找到 opencode 命令（如需使用请先安装，或改用 OpenAI 兼容接口）')); });
-      child.on('close', () => { clearTimeout(timer); text ? resolve(text) : reject(new Error('opencode 未返回内容')); });
+      child.on('error', () => { clearTimeout(timer); reject(new Error(opencodeMissingError())); });
+      child.on('close', () => { clearTimeout(timer); text ? resolve(text) : reject(new Error('opencode 未返回内容（可在终端执行 opencode run "你好" 检查是否可用）')); });
     });
   }
-  const r = await runOpencode(c, args, timeoutMs);
+  const r = await runOpencode(c, args, timeoutMs, prompt);
   let text = '';
   for (const line of String(r.out).split('\n')) {
     if (!line.trim()) continue;

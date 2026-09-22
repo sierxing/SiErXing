@@ -461,6 +461,10 @@ Base URL 通常需要以 `/v1` 结尾（例如 `https://api.deepseek.com/v1`）�
 **Q：端口被占用？**
 `PORT=3214 ./start.sh` 换端口即可。
 
+**Q：Windows 上选了 opencode CLI，测试连接报「未找到 opencode 命令」，但 PowerShell 里能运行？**
+已修复：Windows 上 `opencode` 通常是 `.cmd` 包装脚本，普通进程启动找不到它。程序现在会自动用 `where opencode` 解析真实路径（也检查 `%APPDATA%\npm`、`~/.opencode/bin` 等常见位置），并把提示词通过 **stdin** 传入（避免 Windows 命令行转义/长度问题）。
+如果仍失败：① 确认 `where opencode` 有输出；② 也可以直接用「OpenAI 兼容接口」方式接入，效果相同。
+
 **Q：怎么设置/取消开机自启？**
 打开页面 **设置 → 服务与启动**，切换「开机自启」开关即可（Linux 用 systemd 用户服务；Windows/macOS 用启动项）。安装脚本也会询问一次。
 命令行等价操作（Linux）：`systemctl --user disable --now sierxing.service`。
