@@ -249,7 +249,7 @@ $d="D:\SiErXing"; git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git 
 - **冲突策略**：以最后保存的设备为准（个人多设备场景足够；每次导入前会自动本地备份）
 - 本机工作副本在 `data/sync/`（已在 .gitignore 中）
 
-### 9. 服务与启动
+### 10. 服务与启动
 
 - **桌面图标**：一键创建（Windows 快捷方式 / Linux·macOS 桌面启动器），**图标与浏览器标签页同款**（渐变底白色「思」），双击启动并在浏览器打开
 - **终端命令**：`sierxing`（Linux/macOS 位于 `~/.local/bin`）
@@ -258,7 +258,7 @@ $d="D:\SiErXing"; git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git 
   - Windows：启动文件夹快捷方式；macOS：LaunchAgent
 - 设置页可查看访问地址、复制启动方式、查看当前机制与提示
 
-### 10. 每日刷题（内置插件，编程类目标适用）
+### 11. 每日刷题（内置插件，编程类目标适用）
 
 - 从 leetcode.cn 拉取「热题 100」，按 **17 个知识点** 分组（哈希 / 双指针 / 滑动窗口 / 子串 / 普通数组 / 矩阵 / 链表 / 二叉树 / 图论 / 回溯 / 二分查找 / 栈 / 堆 / 贪心 / 动态规划 / 多维动态规划 / 技巧）
 - 每日任务（题量 1-10 可调，自动跳过已通过）、换一批、手动勾选
@@ -270,7 +270,7 @@ $d="D:\SiErXing"; git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git 
 
 ---
 
-### 11. 更新与升级（自动检查，一键更新）
+### 12. 更新与升级（自动检查，一键更新）
 
 - **启动时自动检查**远端是否有新提交（后台进行，不拖慢启动；网络不通时静默跳过）
 - 有新版本时右下角弹出提示：**落后几个提交 · 最新提交说明**，可选
