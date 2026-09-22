@@ -2471,6 +2471,7 @@ async function handleAPI(req, res, u) {
     if (bundle.client != null && typeof bundle.client !== 'string') return sendJSON(res, 400, { error: 'client 字段必须是字符串' });
     backup();
     fs.mkdirSync(PLUGIN_DIR, { recursive: true });
+    const fileExisted = fs.existsSync(path.join(PLUGIN_DIR, cid + '.js'));
     fs.writeFileSync(path.join(PLUGIN_DIR, cid + '.js'), bundle.server);
     if (bundle.client) {
       fs.mkdirSync(path.join(PUBLIC_DIR, 'plugins'), { recursive: true });
@@ -2483,7 +2484,68 @@ async function handleAPI(req, res, u) {
     const n = reloadPlugins();
     const ok = FILE_PLUGINS.some(x => x.id === cid);
     if (!ok) return sendJSON(res, 500, { error: '组件已写入但加载失败，请检查服务端代码（查看服务日志）' });
-    return sendJSON(res, 201, { ok: true, id: cid, loaded: n, name: bundle.name || cid });
+    // 导入时可指定分类（批量导入时统一归类）
+    let category = '';
+    const wantCat = String(body.category || '').trim();
+    if (wantCat && wantCat !== '__auto__') {
+      const cat = wantCat.slice(0, 24);
+      const map = componentCategoryMap();
+      map[cid] = cat;
+      saveComponentCategoryMap(map);
+      const list = componentCategoryList();
+      if (!list.includes(cat)) { list.push(cat); saveComponentCategories(list); }
+      category = cat;
+    } else {
+      category = effectiveCategory(cid, (FILE_PLUGINS.find(x => x.id === cid) || {}).category);
+    }
+    return sendJSON(res, 201, { ok: true, id: cid, loaded: n, name: bundle.name || cid, category, replaced: fileExisted });
+  }
+  if (p === '/api/components/install-batch' && method === 'POST') {
+    const body = await readBody(req);
+    const items = Array.isArray(body.bundles) ? body.bundles : [];
+    if (!items.length) return sendJSON(res, 400, { error: '没有可导入的组件' });
+    const wantCat = String(body.category || '').trim();
+    const results = [];
+    for (const raw of items) {
+      let bundle = raw;
+      if (typeof bundle === 'string') { try { bundle = JSON.parse(bundle); } catch (e) { results.push({ ok: false, error: '不是合法 JSON' }); continue; } }
+      const cid = String((bundle && bundle.id) || '').trim();
+      const name = String((bundle && bundle.name) || cid || '');
+      if (!bundle || bundle.format !== 'sierxing-component') { results.push({ ok: false, id: cid, name, error: '不是有效的组件文件' }); continue; }
+      if (!/^[a-z][a-z0-9_-]{1,30}$/i.test(cid)) { results.push({ ok: false, id: cid, name, error: '组件 id 不合法' }); continue; }
+      if (BUILTIN_COMPONENTS.some(b => b.id === cid)) { results.push({ ok: false, id: cid, name, error: '不能覆盖内置组件' }); continue; }
+      if (typeof bundle.server !== 'string' || !bundle.server.includes('module.exports')) { results.push({ ok: false, id: cid, name, error: '缺少服务端代码' }); continue; }
+      try {
+        backup();
+        fs.mkdirSync(PLUGIN_DIR, { recursive: true });
+        fs.writeFileSync(path.join(PLUGIN_DIR, cid + '.js'), bundle.server);
+        if (bundle.client) {
+          fs.mkdirSync(path.join(PUBLIC_DIR, 'plugins'), { recursive: true });
+          fs.writeFileSync(path.join(PUBLIC_DIR, 'plugins', cid + '.js'), bundle.client);
+        }
+        if (typeof bundle.style === 'string' && bundle.style.trim()) {
+          fs.mkdirSync(path.join(PUBLIC_DIR, 'plugins'), { recursive: true });
+          fs.writeFileSync(path.join(PUBLIC_DIR, 'plugins', cid + '.css'), bundle.style);
+        }
+        results.push({ ok: true, id: cid, name });
+      } catch (e) {
+        results.push({ ok: false, id: cid, name, error: e.message });
+      }
+    }
+    const n = reloadPlugins();
+    // 统一归类
+    let category = '';
+    if (wantCat && wantCat !== '__auto__') {
+      const cat = wantCat.slice(0, 24);
+      const map = componentCategoryMap();
+      for (const r of results) if (r.ok) map[r.id] = cat;
+      saveComponentCategoryMap(map);
+      const list = componentCategoryList();
+      if (!list.includes(cat)) { list.push(cat); saveComponentCategories(list); }
+      category = cat;
+    }
+    const okCount = results.filter(r => r.ok).length;
+    return sendJSON(res, 200, { ok: okCount > 0, loaded: n, category, results, okCount, failCount: results.length - okCount });
   }
   const compDelMatch = p.match(/^\/api\/components\/([a-z0-9_-]+)$/i);
   if (compDelMatch && method === 'DELETE') {

@@ -2773,7 +2773,7 @@ async function renderComponentsPage() {
       <span class="hint" style="margin-left:10px;">功能与界面样式都由组件提供，可自由开关、导入分享</span>
       <div class="spacer"></div>
       <button class="btn small" id="cmpReload">↻ 重新加载</button>
-      <label class="btn small primary">⬆ 导入组件<input type="file" id="cmpImport" accept=".json,application/json" hidden></label>
+      <label class="btn small primary">⬆ 导入组件（可多选）<input type="file" id="cmpImport" accept=".json,application/json" multiple hidden></label>
     </div>
     <div class="sec">
       <div class="secTitle">分类管理</div>
@@ -2891,15 +2891,19 @@ async function renderComponentsPage() {
     } catch (e) { toast(e.message); }
   });
   document.getElementById('cmpImport').addEventListener('change', async e => {
-    const f = e.target.files && e.target.files[0];
-    if (!f) return;
-    try {
-      const text = await f.text();
-      const r = await api('/api/components/install', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bundle: text }) });
-      toast('组件「' + (r.name || r.id) + '」已安装');
-      setTimeout(() => location.reload(), 600);
-    } catch (err) { toast('安装失败：' + err.message); }
+    const files = Array.from(e.target.files || []);
     e.target.value = '';
+    if (!files.length) return;
+    const parsed = [];
+    for (const f of files) {
+      try {
+        const obj = JSON.parse(await f.text());
+        parsed.push({ file: f.name, bundle: obj });
+      } catch (err) {
+        parsed.push({ file: f.name, bundle: null, error: '不是合法 JSON' });
+      }
+    }
+    showImportDialog(parsed);
   });
 }
 
@@ -3163,6 +3167,79 @@ function disabledComponentsHTML() {
     <div class="spacer"></div>
     <a class="btn tiny" href="#/components">去开启</a>
   </div>`;
+}
+function showImportDialog(parsed) {
+  const cats = ((state.componentCats || {}).categories) || [];
+  const installed = new Set(((state.componentList || []).filter(c => !c.builtin)).map(c => c.id));
+  const items = parsed.map(p => {
+    const b = p.bundle;
+    const okFmt = b && b.format === 'sierxing-component' && b.id && typeof b.server === 'string' && b.server.includes('module.exports');
+    const id = b ? String(b.id || '') : '';
+    const exists = id && installed.has(id);
+    return { file: p.file, bundle: b, id, name: (b && b.name) || id || p.file, version: (b && b.version) || '', author: (b && b.author) || '', autoCat: (b && b.category) || '其它', error: p.error || (okFmt ? '' : '不是有效的组件文件'), replaced: !!exists };
+  });
+  const valid = items.filter(x => !x.error);
+  const old = document.getElementById('importDialog');
+  if (old) old.remove();
+  const div = document.createElement('div');
+  div.id = 'importDialog';
+  div.className = 'tutDialog';
+  div.innerHTML = `<div class="tdHead"><span>📦</span><span>导入组件（选中 ${items.length} 个）</span><button class="btn tiny" id="impX">×</button></div>
+    <div class="tdBody">
+      <div class="impList">
+        ${items.map(x => `<div class="impItem ${x.error ? 'bad' : ''}">
+          <span class="chip ${x.error ? 'danger' : (x.replaced ? 'warn' : 'ok')}">${x.error ? '无法导入' : (x.replaced ? '覆盖' : '新装')}</span>
+          <b>${esc(x.name)}</b>
+          <span class="muted">${esc(x.id || x.file)}${x.version ? ' · v' + esc(x.version) : ''}${x.author ? ' · ' + esc(x.author) : ''}</span>
+          ${x.error ? `<span class="impErr">${esc(x.error)}</span>` : ''}
+        </div>`).join('')}
+      </div>
+      ${valid.length ? `<div class="field" style="margin-top:12px;"><label>导入到分类（可统一归类，也可用组件自带分类）</label>
+        <select id="impCat">
+          <option value="__auto__">使用组件自带分类（${esc(Array.from(new Set(valid.map(v => v.autoCat))).join(' / '))}）</option>
+          ${cats.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}
+          <option value="__new__">＋ 新建分类…</option>
+        </select>
+        <input type="text" id="impNewCat" placeholder="新分类名称，例如：效率工具" style="margin-top:8px; display:none;">
+      </div>
+      <div class="toolbarRow" style="margin-top:12px;">
+        <button class="btn primary" id="impOk">导入 ${valid.length} 个组件</button>
+        <button class="btn" id="impCancel">取消</button>
+      </div>` : `<div class="toolbarRow" style="margin-top:12px;"><button class="btn" id="impCancel">关闭</button></div>`}
+      <p class="hint" style="margin-top:10px;">组件包含可执行代码（服务端会加载、前端会注入页面），请只导入你信任来源的组件。</p>
+    </div>`;
+  document.body.appendChild(div);
+  const close = () => div.remove();
+  div.querySelector('#impX').addEventListener('click', close);
+  const cancel = div.querySelector('#impCancel');
+  if (cancel) cancel.addEventListener('click', close);
+  const sel = div.querySelector('#impCat');
+  if (sel) sel.addEventListener('change', () => {
+    const inp = div.querySelector('#impNewCat');
+    if (inp) { inp.style.display = sel.value === '__new__' ? '' : 'none'; if (sel.value === '__new__') inp.focus(); }
+  });
+  const okBtn = div.querySelector('#impOk');
+  if (okBtn) okBtn.addEventListener('click', async () => {
+    let category = sel ? sel.value : '__auto__';
+    if (category === '__new__') {
+      const inp = div.querySelector('#impNewCat');
+      const name = (inp.value || '').trim();
+      if (!name) return toast('请填写新分类名称');
+      category = name;
+    }
+    okBtn.disabled = true; okBtn.textContent = '导入中…';
+    try {
+      const r = await api('/api/components/install-batch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bundles: valid.map(v => v.bundle), category }) });
+      const fails = (r.results || []).filter(x => !x.ok);
+      toast('已导入 ' + r.okCount + ' 个组件' + (r.category ? '（分类：' + r.category + '）' : '') + (fails.length ? '；失败 ' + fails.length + ' 个' : ''));
+      close();
+      await loadComponents();
+      setTimeout(() => location.reload(), 700);
+    } catch (err) {
+      toast('导入失败：' + err.message);
+      okBtn.disabled = false; okBtn.textContent = '重试导入';
+    }
+  });
 }
 function setupCardHTML() {
   const st = state.aiStatus || {};
