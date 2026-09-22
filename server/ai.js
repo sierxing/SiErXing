@@ -25,6 +25,7 @@ const path = require('node:path');
 const { spawn, execFileSync } = require('node:child_process');
 
 let ctx = { getSetting: () => '', appDir: process.cwd() };
+function log(...a) { try { console.log(...a); } catch (e) {} }
 
 function env(name, alt) {
   const v = process.env[name];
@@ -236,6 +237,37 @@ async function openaiModels(c) {
  * - Windows：opencode 常见是 .cmd/.exe 包装脚本，Node 直接 spawn 会 ENOENT，
  *   这里用 where 找到真实路径；.cmd/.bat 需要通过 cmd.exe 执行。
  */
+/**
+ * 仅在「使用 opencode CLI」时自动创建 .opencode/opencode.json（NoTools 代理：禁用工具、只输出文本）
+ * · 已存在则不覆盖（尊重用户自己的配置）
+ * · 不使用 opencode 时不会生成该目录
+ */
+function ensureOpencodeAgent() {
+  try {
+    const dir = path.join(ctx.appDir, '.opencode');
+    const file = path.join(dir, 'opencode.json');
+    if (fs.existsSync(file)) return file;
+    const cfg = {
+      '$schema': 'https://opencode.ai/config.json',
+      agent: {
+        NoTools: {
+          description: '纯文本输出：禁用所有工具，只根据提示词中的信息作答（思而行 SiErXing 自动生成）',
+          mode: 'primary',
+          tools: {
+            write: false, edit: false, bash: false, read: false, glob: false, grep: false,
+            list: false, task: false, skill: false, webfetch: false, websearch: false, codesearch: false
+          },
+          permission: { '*': 'deny' }
+        }
+      }
+    };
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+    log('[ai] 已自动创建 .opencode/opencode.json（NoTools 代理，禁用工具）');
+    return file;
+  } catch (e) { return ''; }
+}
+
 let opencodeCmdCache = null;
 function opencodeCommand() {
   if (opencodeCmdCache) return opencodeCmdCache;
@@ -265,6 +297,7 @@ function opencodeCommand() {
 }
 /** 统一 spawn：提示词通过 stdin 传入（避免 Windows 命令行转义/长度限制问题） */
 function spawnOpencode(args, prompt) {
+  ensureOpencodeAgent();
   const cmd = opencodeCommand();
   const child = spawn(cmd.file, cmd.prefix.concat(args), {
     cwd: ctx.appDir,
@@ -301,12 +334,21 @@ function parseOpencodeJsonl(line) {
   try { return JSON.parse(line); } catch (e) { return null; }
 }
 
-async function opencodeText(c, opts) {
-  const { prompt, model, images, timeoutMs, onEvent } = opts;
+function opencodeArgs(c, opts, withAgent) {
+  const { model, images } = opts;
   const args = ['run', '--format', 'json', '--auto'];
-  if (c.agent) args.push('--agent', c.agent);
+  if (withAgent && c.agent) args.push('--agent', c.agent);
   if (model || c.model) args.push('-m', model || c.model);
   for (const f of (images || [])) { if (!/^data:/.test(f)) args.push('-f', f); }
+  return args;
+}
+/** 代理不存在时的提示（.opencode 目录被删除等情况，会自动回退到默认代理） */
+function isAgentError(msg) {
+  return /agent/i.test(String(msg || '')) && /(not found|不存在|unknown|无效|invalid)/i.test(String(msg || ''));
+}
+async function opencodeText(c, opts) {
+  const { prompt, model, images, timeoutMs, onEvent } = opts;
+  const args = opencodeArgs(c, opts, true);
   // 提示词通过 stdin 传入（Windows 下 cmd 包装脚本 + 长文本更稳）
   if (onEvent) {
     return await new Promise((resolve, reject) => {
@@ -329,17 +371,35 @@ async function opencodeText(c, opts) {
           else if (d.type === 'tool_use' && d.part) onEvent({ thinking: '正在使用工具：' + (d.part.tool || '') });
         }
       });
-      child.stderr.on('data', () => {});
+      let errBuf = '';
+      child.stderr.on('data', d => { errBuf += d; });
       child.on('error', () => { clearTimeout(timer); reject(new Error(opencodeMissingError())); });
-      child.on('close', () => { clearTimeout(timer); text ? resolve(text) : reject(new Error('opencode 未返回内容（可在终端执行 opencode run "你好" 检查是否可用）')); });
+      child.on('close', () => {
+        clearTimeout(timer);
+        if (text) return resolve(text);
+        if (isAgentError(errBuf)) {
+          log('[ai] 代理不可用，改用 opencode 默认代理重试');
+          return opencodeText(c, { ...opts, onEvent: null }).then(resolve).catch(reject);
+        }
+        reject(new Error('opencode 未返回内容（可在终端执行 opencode run "你好" 检查是否可用）' + (errBuf ? '：' + errBuf.slice(0, 160) : '')));
+      });
     });
   }
-  const r = await runOpencode(c, args, timeoutMs, prompt);
+  let r = await runOpencode(c, args, timeoutMs, prompt);
   let text = '';
   for (const line of String(r.out).split('\n')) {
     if (!line.trim()) continue;
     const d = parseOpencodeJsonl(line);
     if (d && d.type === 'text' && d.part && d.part.text) text += d.part.text;
+  }
+  if (!text && isAgentError(r.err || r.out)) {
+    log('[ai] 代理不可用，改用 opencode 默认代理重试（如需禁用工具，请保留项目里的 .opencode/opencode.json）');
+    r = await runOpencode(c, opencodeArgs(c, opts, false), timeoutMs, prompt);
+    for (const line of String(r.out).split('\n')) {
+      if (!line.trim()) continue;
+      const d = parseOpencodeJsonl(line);
+      if (d && d.type === 'text' && d.part && d.part.text) text += d.part.text;
+    }
   }
   if (!text) {
     const errText = String(r.err || '').split('\n').filter(Boolean).slice(-2).join(' ');
@@ -383,6 +443,8 @@ const ai = {
       return { provider: 'openai', models: c.model ? [c.model] : [], default: c.model || '', error: e.message };
     }
   },
+  /** 使用 opencode 时确保代理配置存在（供设置页调用） */
+  ensureOpencodeAgent,
   /** 连接测试：发一句最短的请求 */
   async test() {
     const c = cfg();

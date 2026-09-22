@@ -2737,7 +2737,11 @@ async function handleAPI(req, res, u) {
     const set = (k, v) => { if (v != null) setSetting(k, String(v).trim()); };
     if (body.model != null) set('model', body.model);
     if (body.vision_model != null) set('vision_model', body.vision_model);
-    if (body.ai_provider != null) set('ai_provider', body.ai_provider === 'opencode' ? 'opencode' : 'openai');
+    if (body.ai_provider != null) {
+      const pv = body.ai_provider === 'opencode' ? 'opencode' : 'openai';
+      set('ai_provider', pv);
+      if (pv === 'opencode') ai.ensureOpencodeAgent();   // 用到 opencode 才生成 .opencode/opencode.json
+    }
     if (body.ai_base_url != null) set('ai_base_url', body.ai_base_url);
     if (body.ai_vision_model != null) set('ai_vision_model', body.ai_vision_model);
     if (body.ai_opencode_agent != null) set('ai_opencode_agent', body.ai_opencode_agent);
@@ -2797,6 +2801,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
+  if (getSetting('ai_provider', 'openai') === 'opencode') ai.ensureOpencodeAgent();
   if (sync && getSetting('sync_enabled', '') === '1' && getSetting('sync_auto_pull', '1') !== '0') {
     sync.pull().then(r => console.log('[sync] 启动拉取:', r.imported ? ('已导入来自 ' + r.device + ' 的数据') : r.message))
       .catch(e => console.log('[sync] 启动拉取失败:', e.message));

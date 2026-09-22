@@ -361,7 +361,7 @@ node --no-warnings server/server.js
 
 1. 设置 → AI 接入方式选 `opencode CLI`
 2. 模型名填 `provider/model`（如 `opencode-go/deepseek-v4-flash`）
-3. 代理留默认 `NoTools`（本项目自带 `.opencode/opencode.json`，禁用工具、只输出文本，速度更快也更安全）
+3. 代理留默认 `NoTools`：**选择 opencode 接入时程序会自动创建 `.opencode/opencode.json`**（禁用工具、只输出文本，更快更安全；已存在则不覆盖你的配置）。不用 opencode 时不会生成该目录
 
 两种方式可以随时切换，互不影响。
 
@@ -436,8 +436,8 @@ SiErXing/                     # 项目根目录（目录名用英文，产品名
 │   │   ├── theme-carbon.css #  主题样式（覆盖设计变量）
 │   │   └── theme-paper.css  #  主题样式
 │   └── style.css      # 设计系统（含深色模式）
-├── .opencode/
-│   └── opencode.json  # 可选：使用 opencode CLI 时的 NoTools 代理定义
+├── .opencode/         # 运行时生成（仅当你使用 opencode CLI 接入时才出现，已 gitignore）
+│   └── opencode.json  #   自动写入的 NoTools 代理定义（禁用工具、只输出文本）
 ├── data/              # 运行后生成：数据库、备份、上传图片（不建议提交到 git）
 ├── examples/          # 示例组件包（可在「组件」页导入体验）
 ├── .env.example       # 环境变量示例
@@ -476,6 +476,10 @@ Base URL 通常需要以 `/v1` 结尾（例如 `https://api.deepseek.com/v1`）�
 
 **Q：端口被占用？**
 `PORT=3214 ./start.sh` 换端口即可。
+
+**Q：项目里的 `.opencode/` 目录是什么？可以删吗？**
+它是**你选择 opencode CLI 作为 AI 接入方式时自动生成**的配置（定义了一个禁用所有工具的 `NoTools` 代理，让模型只输出文本、更快也更安全）。用 OpenAI 兼容接口时不会生成它，删掉也没关系——下次用到 opencode 时会自动重建；如果你自己写了同路径的配置，程序不会覆盖。
+（本项目已把 `.opencode/` 加入 .gitignore，不会进版本库。）
 
 **Q：怎么在多台电脑之间同步数据？**
 ① 建一个私有 Git 仓库（AtomGit/GitHub/Gitee 都行）；② 在 A 电脑「设置 → 多端同步」填仓库地址与令牌 → 保存并测试 → 立即上传；③ 在 B 电脑填同样的地址与令牌 → 保存并测试 → 立即拉取（或直接重启程序自动拉取）。之后两边改动都会自动上传、打开时自动拉取。

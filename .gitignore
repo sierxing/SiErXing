@@ -9,3 +9,6 @@ nohup.out
 # 系统文件
 .DS_Store
 Thumbs.db
+
+# 运行时生成（仅在使用 opencode CLI 接入方式时自动创建）
+.opencode/
