@@ -1089,12 +1089,17 @@ function buildSkeletonPrompt(goal) {
   lines.push('');
   lines.push('【要求】');
   lines.push('0. 【最重要】起点必须严格匹配问卷反映的真实水平：自测答对/自述已掌握的内容不要重复安排基础内容；自测答错或自述薄弱的环节必须补足基础。节奏要贴合用户每周可投入时间与期限。');
-  lines.push('1. 阶段 4-6 个：从当前起点出发，按能力/成果递进，最后包含「求职落地/投递面试」阶段。');
-  lines.push('2. 每个阶段 3-4 个小目标（不超过 4 个）；小目标要是能力或成果导向（如「掌握 X」「完成 Y 作品」）。');
+  lines.push('1. 阶段数量按目标规模与期限自行判断，不要凑数也不要硬挤：');
+  lines.push('   · 小而聚焦的目标（单一技能、1 个月内）：3-4 个阶段；');
+  lines.push('   · 中等目标（求职转型、3-6 个月）：5-6 个阶段；');
+  lines.push('   · 跨度大 / 多线并行（补基础 + 做项目 + 求职 + 长期习惯）：6-8 个阶段，最多不超过 9 个；');
+  lines.push('   · 从当前起点按能力/成果递进，最后一个阶段必须是「求职落地 / 投递面试 / 成果验收」这类收口阶段；');
+  lines.push('   · 判断标准：每个阶段应是「一个能独立验收的能力台阶」，太大就拆、太小就合并。');
+  lines.push('2. 每个阶段 3-5 个小目标（不超过 6 个）：小目标同样要「能独立验收」，能力或成果导向（如「掌握 X」「完成 Y 作品」）。');
   lines.push('3. 每个节点 detail 写 60-120 字：说明要达成什么、为什么这样安排。');
   lines.push('4. 每个节点 sources 给 1-3 条依据：name 必须写明实际来源（站点名+标题要点），note 写依据了什么要求/结论。');
   lines.push('5. 路径必须匹配用户现状（零基础从基础开始，有基础则跳过）；顺序体现「真实工作中最看重什么」。');
-  lines.push('6. 只输出一个 JSON 对象（不要其他文字或代码块标记），量控制在 8000 字符内：');
+  lines.push('6. 只输出一个 JSON 对象（不要其他文字或代码块标记），量控制在 12000 字符内（阶段多时 detail 可适当精简到 40-80 字）：');
   lines.push('{"summary":"总体思路（120字内）","stages":[{"title":"阶段名","detail":"说明","sources":[{"name":"","note":""}],"goals":[{"title":"小目标","detail":"说明","sources":[{"name":"","note":""}]}]}]}');
   lines.push('7. 若按上面的「关键机制」需要先提问，则只输出 {"analysis":"你的分析","questions":[...]}，不要输出 stages。');
   return lines.join('\n');
@@ -1533,7 +1538,7 @@ function streamPlan(req, res, goal, answers) {
       if (!skeleton || !Array.isArray(skeleton.stages) || !skeleton.stages.length) {
         console.log('[plan] 骨架解析失败（将重试），原始输出前 400 字:', String(skeletonText || '').slice(0, 400).replace(/\n/g, ' '));
         send({ status: '正在重新整理规划结果…' });
-        skeletonText = await aiTextProgress(planPrompt + '\n\n【重要】你上一次的输出不是合法 JSON（可能被截断或夹带了说明文字）。请严格只输出一个 JSON 对象，不要任何解释、不要代码块标记；阶段控制在 4-5 个、每阶段 3-4 个小目标，detail 精简到 60 字以内。', model, 600000, send, '阶段/小目标', sig);
+        skeletonText = await aiTextProgress(planPrompt + '\n\n【重要】你上一次的输出不是合法 JSON（可能被截断或夹带了说明文字）。请严格只输出一个 JSON 对象，不要任何解释、不要代码块标记；阶段数量按目标规模决定（3-9 个，不要凑数）、每阶段 3-5 个小目标，detail 精简到 60 字以内。', model, 600000, send, '阶段/小目标', sig);
         skeleton = extractJSON(skeletonText);
         if (skeleton && Array.isArray(skeleton.questions) && skeleton.questions.length) {
           saveGoalQuestions(goal.id, 'plan', skeleton);
@@ -1654,7 +1659,7 @@ function buildRefineSkeletonPrompt(goal, current, feedback) {
   lines.push('【用户反馈（必须采纳）】' + feedback);
   lines.push('');
   lines.push('【要求】');
-  lines.push('1. 只调整用户指出的问题，其余尽量保持原样（阶段数量、顺序、命名保持稳定）。');
+  lines.push('1. 只调整用户指出的问题，其余尽量保持原样（**除非用户明确要求增加 / 删除 / 合并阶段，否则阶段数量、顺序、命名保持稳定**）。用户说"阶段太少/太多/想加一个 XX 阶段"时，就按要求调整数量。');
   lines.push('2. 输出完整的调整后骨架，格式与输入一致。');
   lines.push('3. 只输出一个 JSON 对象：{"summary":"总体思路","stages":[{"title":"","detail":"","sources":[{"name":"","note":""}],"goals":[{"title":"","detail":"","sources":[{"name":"","note":""}]}]}]}');
   lines.push('4. 若按「关键机制」需要先提问，则只输出 {"questions":[...]}，不要输出 stages。');
