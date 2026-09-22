@@ -1332,8 +1332,15 @@ function mdInline(s) {
   s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
   return s;
 }
+/* 把与文字挤在一行的 ``` 围栏拆到独立行（题面/粘贴内容里常见） */
+function normalizeFences(raw) {
+  let t = String(raw == null ? '' : raw).replace(/\r\n/g, '\n');
+  t = t.replace(/(```+[ \t]*[\w+-]*)[ \t]*([^\n`])/g, '$1\n$2');   // 开围栏后面直接跟内容
+  t = t.replace(/([^\n`])(```+)/g, '$1\n$2');                        // 围栏紧跟在文字后面
+  return t;
+}
 function mdToHTML(text) {
-  const lines = String(text == null ? '' : text).replace(/\r\n/g, '\n').split('\n');
+  const lines = normalizeFences(text).split('\n');
   let html = '', i = 0;
   const mdRow = c => {
     let p = c.split('|');

@@ -17,7 +17,7 @@ function looksLikeMarkdown(s) {
   const raw = String(s || '');
   if (!raw.trim()) return false;
   if (/<(p|div|ul|ol|li|pre|code|table|thead|tbody|h[1-6]|blockquote|strong|em|img|br|sup|sub|span|a|font|hr)\b/i.test(raw)) return false;
-  return /(^|\n)\s*```/.test(raw)
+  return /```/.test(raw)
     || /(^|\n)\s*#{1,6}\s+\S/.test(raw)
     || /\*\*[^*\n]+\*\*/.test(raw)
     || /(^|\n)\s*[-*+]\s+\S/.test(raw)
@@ -25,8 +25,8 @@ function looksLikeMarkdown(s) {
     || /`[^`\n]+`/.test(raw);
 }
 function fencesToPre(html) {
-  return String(html || '').replace(/```([\w-]*)\s*\n([\s\S]*?)```/g, (m, lang, code) =>
-    '<pre' + (lang ? ' data-lang="' + escCode(lang) + '"' : '') + '><code>' + escCode(code.replace(/\n$/, '')) + '</code></pre>');
+  return String(html || '').replace(/```([\w+-]*)[ \t]*\n?([\s\S]*?)```/g, (m, lang, code) =>
+    '<pre' + (lang ? ' data-lang="' + escCode(lang) + '"' : '') + '><code>' + escCode(code.replace(/^\n/, '').replace(/\n$/, '')) + '</code></pre>');
 }
 function statementHTML(raw) {
   const s = String(raw == null ? '' : raw).trim();

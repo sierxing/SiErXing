@@ -24,6 +24,9 @@ const SYNC_TABLES = [
   'goals', 'nodes', 'sources', 'tutorials', 'goal_versions',
   'chat_sessions', 'chats', 'problems', 'practice_records', 'daily_plans', 'jd_images'
 ];
+// 不参与同步的列：题面正文与代码模板体积大，且每台设备用本机 LeetCode 登录态自己抓即可；
+// 多设备之间互相覆盖反而会看到别人的缓存（导入时保留本机已有值）
+const SYNC_OMIT_COLUMNS = { problems: ['statement', 'statement_at', 'snapshots'] };
 // 参与同步的设置项白名单（绝不包含密钥）
 const SYNC_SETTINGS = [
   'model', 'vision_model', 'ai_provider', 'ai_base_url', 'ai_vision_model', 'ai_opencode_agent',
@@ -112,7 +115,11 @@ module.exports = function createSync(ctx) {
   function exportSnapshot(reason) {
     const data = {};
     for (const t of SYNC_TABLES) {
-      try { data[t] = db.prepare(`SELECT * FROM ${t}`).all(); } catch (e) { data[t] = []; }
+      let rows = [];
+      try { rows = db.prepare(`SELECT * FROM ${t}`).all(); } catch (e) { rows = []; }
+      const omit = SYNC_OMIT_COLUMNS[t];
+      if (omit && rows.length) rows = rows.map(r => { const c = Object.assign({}, r); for (const k of omit) delete c[k]; return c; });
+      data[t] = rows;
     }
     const settings = {};
     for (const k of SYNC_SETTINGS) {
@@ -142,13 +149,25 @@ module.exports = function createSync(ctx) {
     try {
       for (const t of SYNC_TABLES) {
         const rows = Array.isArray(snap.data[t]) ? snap.data[t] : [];
+        const valid = new Set(tableColumns(t));
+        const keep = (SYNC_OMIT_COLUMNS[t] || []).filter(c => valid.has(c));
+        // 必须在清表之前读出本机这些列的值（题面等不同步字段要保留本机缓存）
+        const localKeep = new Map();
+        if (keep.length) {
+          try { for (const r of db.prepare(`SELECT id, ${keep.join(',')} FROM ${t}`).all()) localKeep.set(r.id, r); } catch (e) {}
+        }
         db.prepare(`DELETE FROM ${t}`).run();
         if (!rows.length) continue;
-        const valid = new Set(tableColumns(t));
         const cols = Object.keys(rows[0]).filter(c => valid.has(c));
         if (!cols.length) continue;
+        for (const k of keep) if (!cols.includes(k)) cols.push(k);
         const stmt = db.prepare(`INSERT INTO ${t} (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`);
-        for (const r of rows) stmt.run(...cols.map(c => (r[c] === undefined ? null : r[c])));
+        for (const r of rows) {
+          const row = Object.assign({}, r);
+          const lk = localKeep.get(r.id);
+          for (const k of keep) row[k] = lk ? lk[k] : (KEEP_DEFAULTS[k] !== undefined ? KEEP_DEFAULTS[k] : null);
+          stmt.run(...cols.map(c => (row[c] === undefined ? null : row[c])));
+        }
       }
       // 设置项：只导入白名单，绝不覆盖密钥
       if (snap.settings && typeof snap.settings === 'object') {

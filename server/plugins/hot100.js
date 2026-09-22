@@ -88,8 +88,10 @@ module.exports = {
 
   /** 导出：题库 + 作答记录 + 每日计划（随主数据一起备份） */
   exportData(ctx) {
+    // 题面正文（statement/snapshots）不参与同步：体积大、且每台设备用本机 LeetCode 登录态自己抓即可，
+    // 多设备之间互相覆盖反而容易看到别人的缓存。题目列表、作答记录、每日计划照常同步。
     return {
-      problems: ctx.db.prepare('SELECT * FROM problems').all(),
+      problems: ctx.db.prepare('SELECT id,fid,slug,title,difficulty,link,groups,tags,sort_index,synced_at FROM problems').all(),
       records: ctx.db.prepare('SELECT * FROM practice_records').all(),
       plans: ctx.db.prepare('SELECT * FROM daily_plans').all()
     };
@@ -97,8 +99,14 @@ module.exports = {
   importData(data, ctx) {
     if (!data) return;
     const { db } = ctx;
-    for (const x of (data.problems || [])) db.prepare('INSERT OR REPLACE INTO problems (id,fid,slug,title,difficulty,link,groups,tags,sort_index,statement,statement_at,snapshots,synced_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
-      .run(x.id, x.fid, x.slug, x.title, x.difficulty, x.link, x.groups, x.tags, x.sort_index, x.statement, x.statement_at, x.snapshots, x.synced_at);
+    for (const x of (data.problems || [])) {
+      const cur = db.prepare('SELECT statement, statement_at, snapshots FROM problems WHERE id = ?').get(x.id) || {};
+      const statement = x.statement === undefined ? (cur.statement || '') : x.statement;
+      const statement_at = x.statement === undefined ? (cur.statement_at || '') : (x.statement_at || '');
+      const snapshots = x.snapshots === undefined ? (cur.snapshots || '[]') : x.snapshots;
+      db.prepare('INSERT OR REPLACE INTO problems (id,fid,slug,title,difficulty,link,groups,tags,sort_index,statement,statement_at,snapshots,synced_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(x.id, x.fid, x.slug, x.title, x.difficulty, x.link, x.groups, x.tags, x.sort_index, statement, statement_at, snapshots, x.synced_at);
+    }
     for (const x of (data.records || [])) db.prepare('INSERT OR REPLACE INTO practice_records (id,problem_id,goal_id,date,passed,language,code,notes,minutes,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
       .run(x.id, x.problem_id, x.goal_id, x.date, x.passed, x.language, x.code, x.notes, x.minutes, x.created_at);
     for (const x of (data.plans || [])) db.prepare('INSERT OR REPLACE INTO daily_plans (id,goal_id,date,items,created_at) VALUES (?,?,?,?,?)')
