@@ -1287,3 +1287,18 @@ body{padding-left:78px;}
 .gdSyncRow2{display:grid; grid-template-columns:1fr 1fr; gap:8px;}
 @media (max-width:640px){ .gdSyncRow2{grid-template-columns:1fr;} }
 .gdSyncForm .toolbarRow{align-items:center; gap:10px;}
+
+/* 引导内可直接配置的表单 */
+.gdForm{border:1.5px solid var(--accent-border); background:var(--accent-soft); border-radius:12px; padding:12px; margin:10px 0;}
+.gdForm input{width:100%; border:1.5px solid var(--border); border-radius:9px; padding:8px 11px; font-family:inherit; font-size:13px; background:var(--card); color:var(--text); margin-bottom:8px;}
+.gdForm input:focus{outline:none; border-color:var(--accent);}
+.gdSeg2{display:flex; gap:6px; margin-bottom:10px;}
+.gdSegBtn{flex:1; border:1.5px solid var(--border); background:var(--card); color:var(--muted); border-radius:9px; padding:7px 8px; font-size:12.5px; font-family:inherit; cursor:pointer; transition:.15s;}
+.gdSegBtn.active{background:var(--accent); border-color:var(--accent); color:#fff; font-weight:700;}
+.gdPresets{display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px;}
+.gdPreset{border:1px dashed var(--accent-border); background:var(--card); color:var(--accent); border-radius:20px; padding:3px 11px; font-size:11.5px; font-family:inherit; cursor:pointer;}
+.gdPreset:hover{background:var(--accent); color:#fff; border-style:solid;}
+.gdCompList{display:flex; flex-direction:column; gap:6px;}
+.gdCompRow{display:flex; align-items:center; gap:9px; background:var(--card); border:1px solid var(--border); border-radius:9px; padding:7px 11px; font-size:12.8px;}
+.gdCompIcon{font-size:14px;}
+.gdCompName{flex:1;}

@@ -1,6 +1,16 @@
 /* 思而行 · 前端逻辑（原生 JS，零依赖） */
 
 const app = document.getElementById('app');
+const AI_PRESETS = [
+  { name: 'DeepSeek', base: 'https://api.deepseek.com/v1', model: 'deepseek-chat', vision: '' },
+  { name: '通义千问', base: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', vision: 'qwen-vl-max' },
+  { name: 'Kimi', base: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k', vision: '' },
+  { name: '智谱 GLM', base: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-plus', vision: 'glm-4v-plus' },
+  { name: '硅基流动', base: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V3', vision: '' },
+  { name: 'OpenAI', base: 'https://api.openai.com/v1', model: 'gpt-4o-mini', vision: 'gpt-4o' },
+  { name: '本地 Ollama', base: 'http://localhost:11434/v1', model: 'qwen2.5:14b', vision: '', key: 'ollama' }
+];
+
 const state = { goals: [], goal: null, sources: [], planning: false, collecting: false, collectStatus: '', expanded: {}, filter: '', models: [], model: '', showNew: false, showEdit: false, mapScale: 1, mapTx: 40, mapTy: 40, _drag: null, _suppressClick: false };
 
 /* ============ 主题（白天/黑夜） ============ */
@@ -57,8 +67,6 @@ function parseRoute() {
   if (tm) return { view: 'tutorial', id: Number(tm[1]) };
   const cm = h.match(/^#\/g\/(\d+)\/chat$/);
   if (cm) return { view: 'goal', id: Number(cm[1]), openAI: true };
-  const jm = h.match(/^#\/g\/(\d+)\/jd$/);
-  if (jm) return { view: 'jd', id: Number(jm[1]) };
 
   const dm = h.match(/^#\/g\/(\d+)\/diff\/(\d+)$/);
   if (dm) return { view: 'diff', id: Number(dm[1]), vid: Number(dm[2]) };
@@ -2513,8 +2521,7 @@ function editGoalHTML(g) {
     </div>
   </form>`;
 }
-/* ============ 首次使用引导 ============ */
-/* ============ 首次使用引导（含界面演示动画） ============ */
+/* ============ 首次使用引导（含界面演示动画 + 可直接配置） ============ */
 const GUIDE_STEPS = [
   {
     icon: '👋', title: '欢迎使用「思而行」',
@@ -2561,13 +2568,31 @@ const GUIDE_STEPS = [
       </div>
     </div>
     <div class="gmCaption">左侧栏 → ⚙ 设置：选服务商 → 填密钥 → 测试连接</div>`,
-    html: `<p class="gdP">问卷、规划、教程、对话都由 AI 完成，<b>先接一个模型</b>。设置页支持两种方式，任选其一：</p>
-      <div class="gdGrid">
-        <div class="gdCard"><b>① OpenAI 兼容接口（推荐）</b><span>无需安装其它软件。设置页有常见预设（DeepSeek / 通义千问 / Kimi / 智谱 / OpenAI / 本地 Ollama），一键填好地址与模型，再填密钥。</span></div>
-        <div class="gdCard"><b>② opencode CLI 等 Agent</b><span>本机已装并登录 <b>opencode</b> 时可直接复用：模型填 <code>provider/model</code>（如 <code>opencode-go/deepseek-v4-flash</code>），地址密钥留空；自带 <code>NoTools</code> 代理（禁用工具、只输出文本）。</span></div>
+    html: `<p class="gdP">问卷、规划、教程、对话都由 AI 完成，<b>先接一个模型</b>。可以直接在下面配置（也能稍后在「设置」里改）：</p>
+      <div class="gdForm" id="gdAiForm">
+        <div class="gdSeg2" id="gdProvSeg">
+          <button type="button" class="gdSegBtn active" data-prov="openai">OpenAI 兼容接口（推荐）</button>
+          <button type="button" class="gdSegBtn" data-prov="opencode">opencode CLI（Agent）</button>
+        </div>
+        <div id="gdOpenaiBox">
+          <div class="gdPresets">点一下自动填好：${AI_PRESETS.map((p, i) => `<button type="button" class="gdPreset" data-gdpre="${i}">${esc(p.name)}</button>`).join('')}</div>
+          <input id="gdAiBase" placeholder="API 地址，如 https://api.deepseek.com/v1">
+          <div class="gdSyncRow2">
+            <input id="gdAiKey" type="password" placeholder="API 密钥（本地 Ollama 可随便填）">
+            <input id="gdAiModel" placeholder="模型，如 deepseek-chat">
+          </div>
+        </div>
+        <div id="gdOpencodeBox" hidden>
+          <input id="gdAiModel2" placeholder="模型，如 opencode-go/deepseek-v4-flash">
+          <input id="gdAiAgent" value="NoTools" placeholder="代理（默认 NoTools，用到时自动创建）">
+          <p class="hint" style="margin:6px 0 0;">opencode 方式无需填地址与密钥（复用本机已登录的 CLI）</p>
+        </div>
+        <div class="toolbarRow" style="margin-top:10px;">
+          <button class="btn primary" id="gdAiSave">保存并测试连接</button>
+          <span class="hint" id="gdAiMsg"></span>
+        </div>
       </div>
-      <div class="gdNote">💡 填完点 <b>「测试连接」</b>，显示「连接正常」即可开始；两种方式随时切换、互不影响。<br>
-      💡 没有密钥？装 <b>Ollama</b> 选「本地 Ollama」预设，离线免费。<br>
+      <div class="gdNote">💡 没有密钥？装 <b>Ollama</b> 选「本地 Ollama」预设，离线免费。<br>
       💡 密钥只存本机（数据库或 <code>.env</code>），不会写进代码、不会显示在页面上。</div>`
   },
   {
@@ -2586,9 +2611,13 @@ const GUIDE_STEPS = [
     html: `<p class="gdP">每个功能、甚至<b>界面样式</b>都是组件，可开关、可换肤、可分享：</p>
       <div class="gdGrid">
         <div class="gdCard"><b>🧭 核心</b><span>路线图与规划（不可关闭）</span></div>
-        <div class="gdCard"><b>📝 基础功能</b><span>问卷 / 约束 / 检索 / 版本对比 / 对话 / 教程，默认开启，可关掉</span></div>
         <div class="gdCard"><b>🎨 主题</b><span>碳黑、宣纸等皮肤，本质是覆盖设计变量的 CSS 组件</span></div>
         <div class="gdCard"><b>🧩 扩展</b><span>每日刷题、图片资料…可按目标启用，可导出给别人</span></div>
+        <div class="gdCard"><b>📦 导入分享</b><span>组件页可导出 <code>*.component.json</code> 发给别人，也能一次导入多个</span></div>
+      </div>
+      <div class="gdForm" id="gdCompForm">
+        <div class="hint" style="margin-bottom:8px;">基础功能组件（默认全开，不需要的可以直接关掉）：</div>
+        <div class="gdCompList" id="gdCompList"><span class="muted" style="font-size:12.5px;">加载中…</span></div>
       </div>`
   },
   {
@@ -2723,6 +2752,74 @@ function drawGuide() {
   const setup = mask.querySelector('#gdSetup');
   if (setup) setup.addEventListener('click', () => { closeGuide(true); go('#/settings'); });
   mask.querySelectorAll('[data-gd]').forEach(d => d.addEventListener('click', () => { state.guideStep = Number(d.getAttribute('data-gd')); drawGuide(); }));
+  /* ---- 引导第 2 步：直接配置 AI ---- */
+  const aiForm = mask.querySelector('#gdAiForm');
+  if (aiForm) {
+    let prov = 'openai';
+    const seg = mask.querySelector('#gdProvSeg');
+    const boxOpenai = mask.querySelector('#gdOpenaiBox');
+    const boxOc = mask.querySelector('#gdOpencodeBox');
+    const msg = mask.querySelector('#gdAiMsg');
+    seg.querySelectorAll('.gdSegBtn').forEach(b => b.addEventListener('click', () => {
+      seg.querySelectorAll('.gdSegBtn').forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+      prov = b.getAttribute('data-prov');
+      boxOpenai.hidden = prov !== 'openai';
+      boxOc.hidden = prov === 'openai';
+    }));
+    aiForm.querySelectorAll('[data-gdpre]').forEach(b => b.addEventListener('click', () => {
+      const p = AI_PRESETS[Number(b.getAttribute('data-gdpre'))];
+      mask.querySelector('#gdAiBase').value = p.base;
+      mask.querySelector('#gdAiModel').value = p.model;
+      if (p.key) mask.querySelector('#gdAiKey').value = p.key;
+      toast('已填入「' + p.name + '」配置，接着填 API 密钥即可');
+      mask.querySelector('#gdAiKey').focus();
+    }));
+    const saveBtn = mask.querySelector('#gdAiSave');
+    saveBtn.addEventListener('click', async () => {
+      const base = (mask.querySelector('#gdAiBase').value || '').trim();
+      const key = (mask.querySelector('#gdAiKey').value || '').trim();
+      const model1 = (mask.querySelector('#gdAiModel').value || '').trim();
+      const model2 = (mask.querySelector('#gdAiModel2').value || '').trim();
+      const agent = (mask.querySelector('#gdAiAgent').value || '').trim() || 'NoTools';
+      if (prov === 'openai' && !base) { msg.textContent = '请先填 API 地址（或点上面的预设）'; msg.style.color = 'var(--warn)'; return; }
+      if (prov === 'openai' && !model1) { msg.textContent = '请填写模型名'; msg.style.color = 'var(--warn)'; return; }
+      if (prov === 'opencode' && !model2) { msg.textContent = '请填写模型名（如 opencode-go/deepseek-v4-flash）'; msg.style.color = 'var(--warn)'; return; }
+      saveBtn.disabled = true; saveBtn.textContent = '测试中…'; msg.textContent = '';
+      try {
+        await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+          ai_provider: prov, ai_base_url: base, ai_api_key: key,
+          model: prov === 'openai' ? model1 : model2, ai_opencode_agent: agent
+        }) });
+        const t = await api('/api/ai/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        if (t.ok) { msg.textContent = '✅ 连接正常，可以开始用了'; msg.style.color = 'var(--ok)'; toast('AI 已配置好'); }
+        else { msg.textContent = '❌ ' + (t.message || '连接失败'); msg.style.color = 'var(--danger)'; }
+      } catch (e) { msg.textContent = '❌ ' + e.message; msg.style.color = 'var(--danger)'; }
+      finally { saveBtn.disabled = false; saveBtn.textContent = '保存并测试连接'; }
+    });
+  }
+  /* ---- 引导第 3 步：组件真实开关 ---- */
+  const compList = mask.querySelector('#gdCompList');
+  if (compList) {
+    (async () => {
+      try {
+        const r = await api('/api/components');
+        const base = (r.components || []).filter(c => c.scope === 'base');
+        compList.innerHTML = base.map(c => `<label class="gdCompRow">
+            <span class="gdCompIcon">${c.icon}</span><span class="gdCompName">${esc(c.name)}</span>
+            <label class="cmpSwitch"><input type="checkbox" data-gdcomp="${esc(c.id)}" ${r.enabled[c.id] !== false ? 'checked' : ''}><span class="cmpSlider"></span></label>
+          </label>`).join('');
+        compList.querySelectorAll('[data-gdcomp]').forEach(inp => inp.addEventListener('change', async () => {
+          const id = inp.getAttribute('data-gdcomp');
+          try {
+            await api('/api/components/' + encodeURIComponent(id) + '/toggle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: inp.checked }) });
+            await loadComponents();
+            toast(inp.checked ? '已开启' : '已关闭');
+          } catch (e) { toast(e.message); inp.checked = !inp.checked; }
+        }));
+      } catch (e) { compList.innerHTML = '<span class="muted" style="font-size:12.5px;">加载失败：' + esc(e.message) + '</span>'; }
+    })();
+  }
   const gdBtn = mask.querySelector('#gdSyncBtn');
   if (gdBtn) gdBtn.addEventListener('click', async () => {
     const repo = (mask.querySelector('#gdSyncRepo').value || '').trim();
@@ -2966,15 +3063,6 @@ await renderComponentsPage();
 }
 
 /* ============ 设置页（含 AI 配置引导） ============ */
-const AI_PRESETS = [
-  { name: 'DeepSeek', base: 'https://api.deepseek.com/v1', model: 'deepseek-chat', vision: '' },
-  { name: '通义千问', base: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', vision: 'qwen-vl-max' },
-  { name: 'Kimi', base: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k', vision: '' },
-  { name: '智谱 GLM', base: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-plus', vision: 'glm-4v-plus' },
-  { name: '硅基流动', base: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V3', vision: '' },
-  { name: 'OpenAI', base: 'https://api.openai.com/v1', model: 'gpt-4o-mini', vision: 'gpt-4o' },
-  { name: '本地 Ollama', base: 'http://localhost:11434/v1', model: 'qwen2.5:14b', vision: '', key: 'ollama' }
-];
 /* ============ 设置页：服务与启动 ============ */
 async function serviceSectionHTML() {
   let st = {};
@@ -3641,4 +3729,12 @@ function pluginGoButtonsBind() {
   if (!guideDone()) {
     setTimeout(() => { if (!document.getElementById('guideMask')) showGuide(0); }, 500);
   }
-})();
+})().catch(err => {
+  console.error('启动失败：', err);
+  try {
+    const box = document.getElementById('app');
+    if (box) box.innerHTML = '<div class="page"><div class="emptyBox" style="margin-top:40px;">'
+      + '<div class="ebIcon">⚠️</div><div class="ebTitle">界面启动失败</div>'
+      + '<div class="ebText">' + String((err && err.message) || err) + '<br>请按 Ctrl+Shift+R 强制刷新；若仍失败，请把此信息反馈给作者。</div></div></div>';
+  } catch (e) {}
+});
