@@ -1601,11 +1601,25 @@ function askMeta(stage) {
   };
   return m[stage] || m.plan;
 }
+/* 问卷/自测题里的文字可能是 Markdown（AI 出代码题很常见），识别后按 Markdown 渲染；
+   mdToHTML 内部逐段转义，渲染 AI 内容安全 */
+function looksLikeMd(s) {
+  const raw = String(s == null ? '' : s);
+  if (!raw.trim()) return false;
+  return /```/.test(raw)
+    || /\*\*[^*\n]+\*\*/.test(raw)
+    || /`[^`\n]+`/.test(raw)
+    || /(^|\n)\s*#{1,6}\s+\S/.test(raw)
+    || /(^|\n)\s*[-*+]\s+\S/.test(raw)
+    || /(^|\n)\s*\d+[.)]\s+\S/.test(raw)
+    || /\n/.test(raw);
+}
+function mdMaybe(s) { return looksLikeMd(s) ? mdToHTML(s) : esc(String(s == null ? '' : s)); }
 function questionHTML(q, numLabel) {
   const isQuiz = q.type === 'quiz';
   const depth = Number(q.depth || 0);
   let h = `<div class="clarifyQ${isQuiz ? ' quizQ' : ''}${depth ? ' subQ' : ''}" data-qid="${esc(String(q.id))}" style="margin-left:${Math.min(depth, 3) * 16}px"${isQuiz ? ` data-answer="${esc(String(q.answer || ''))}" data-explain="${esc(q.explain || '')}"` : ''}>
-    <div class="cqTitle"><span class="qnum">${esc(numLabel)}</span><span>${esc(q.title)}</span>${isQuiz ? '<span class="cqQuizTag">自测</span>' : ''}${q.desc ? `<span class="cqWhy">${esc(q.desc)}</span>` : ''}</div>`;
+    <div class="cqTitle"><span class="qnum">${esc(numLabel)}</span><div class="cqTitleText mdBody">${mdMaybe(q.title)}</div>${isQuiz ? '<span class="cqQuizTag">自测</span>' : ''}${q.desc ? `<span class="cqWhy">${esc(q.desc)}</span>` : ''}</div>`;
   if (q.type === 'text') {
     h += `<textarea class="cqText" placeholder="${esc(q.placeholder || '写下你的情况…')}"></textarea>`;
   } else {
@@ -1613,7 +1627,7 @@ function questionHTML(q, numLabel) {
     for (const o of (q.options || [])) {
       const v = typeof o === 'string' ? o : (o.v != null ? o.v : o.label);
       const label = typeof o === 'string' ? o : (o.label || o.v || '');
-      h += `<label class="cqOpt"><input type="${q.type === 'multi' ? 'checkbox' : 'radio'}" name="cq_${esc(String(q.id))}" value="${esc(String(v))}"><span>${esc(label)}</span></label>`;
+      h += `<label class="cqOpt"><input type="${q.type === 'multi' ? 'checkbox' : 'radio'}" name="cq_${esc(String(q.id))}" value="${esc(String(v))}"><span class="cqOptText mdBody">${mdMaybe(label)}</span></label>`;
     }
     h += '</div>';
   }
@@ -1645,7 +1659,7 @@ function askPanelHTML(pend) {
   }
   let h = `<div class="planPanel clarify">
     <div class="ppHead"><span>🧭</span><span>${esc(meta.title)}（共 ${qs.length} 题${quizCount ? '，含 ' + quizCount + ' 道水平自测' : ''}，约 3-5 分钟）</span></div>
-    ${data.analysis ? `<div class="ghSummary" style="margin-top:10px;"><span style="font-size:11px;font-weight:700;color:var(--accent);">AI 的分析　</span>${esc(data.analysis)}</div>` : ''}
+    ${data.analysis ? `<div class="ghSummary" style="margin-top:10px;"><span style="font-size:11px;font-weight:700;color:var(--accent);">AI 的分析　</span><span class="mdBody" style="display:inline-block;vertical-align:top;">${mdMaybe(data.analysis)}</span></div>` : ''}
     <p class="hint" style="margin:10px 0 4px;">${esc(meta.hint)}问卷越如实，规划越贴合你的真实水平；对哪个问题想说得更清楚，点它下方的 <b>🔍 进一步探讨</b>，AI 会追加针对性的子问题把情况问透。有硬性要求请先在下方<b>「⛓ 规划约束」</b>里添加。</p>
     <div class="clarifyQs">`;
   let lastSection = '';
@@ -1677,7 +1691,7 @@ function bindQuizFeedback(root) {
       const ok = String(inp.value) === String(answer);
       fb.hidden = false;
       fb.className = 'cqFeedback ' + (ok ? 'ok' : 'bad');
-      fb.innerHTML = (ok ? '✓ 答对了：该知识点已掌握，规划会跳过基础内容。' : '✗ 答错了：规划会补上这块基础，别担心。') + (explain ? `<div class="cqExplain">解析：${esc(explain)}</div>` : '');
+      fb.innerHTML = (ok ? '✓ 答对了：该知识点已掌握，规划会跳过基础内容。' : '✗ 答错了：规划会补上这块基础，别担心。') + (explain ? `<div class="cqExplain mdBody">解析：${mdMaybe(explain)}</div>` : '');
     }));
   });
 }

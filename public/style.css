@@ -1384,3 +1384,16 @@ body.railWide .mapPage{left:236px;}
 .updSub{font-size:12.5px; color:var(--muted); margin-top:6px; line-height:1.7; word-break:break-word;}
 .railIcon{position:relative;}
 .railDot{position:absolute; top:-1px; right:-3px; width:7px; height:7px; border-radius:50%; background:#ef4444; box-shadow:0 0 0 2px var(--card);}
+
+/* 问卷/自测题里的 Markdown 内容（AI 可能出代码题） */
+.cqTitle{align-items:flex-start;}
+.cqTitleText{flex:1; min-width:0; font-weight:600; font-size:13.5px;}
+.cqTitleText p{margin:3px 0;}
+.cqTitleText pre,.cqExplain pre,.cqFeedback pre{background:var(--soft); border:1px solid var(--border); border-radius:9px; padding:9px 11px; overflow-x:auto; margin:8px 0; font-size:12.3px; line-height:1.6; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; white-space:pre; position:relative;}
+.cqTitleText pre[data-lang]:before,.cqExplain pre[data-lang]:before{content:attr(data-lang); position:absolute; top:4px; right:9px; font-size:10px; color:var(--muted);}
+.cqTitleText code,.cqExplain code,.cqFeedback code{background:var(--soft); border:1px solid var(--border); border-radius:5px; padding:1px 5px; font-size:12.2px; font-family:ui-monospace,Menlo,Consolas,monospace;}
+.cqTitleText pre code,.cqExplain pre code,.cqFeedback pre code{background:none; border:none; padding:0;}
+.cqOptText{font-size:12.5px; line-height:1.5;}
+.cqOptText p{margin:0; display:inline;}
+.cqOptText pre{margin:4px 0; font-size:12px;}
+.cqOptText code{background:var(--soft); border:1px solid var(--border); border-radius:4px; padding:0 4px; font-size:12px;}
