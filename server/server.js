@@ -821,8 +821,10 @@ function sourcesBlock(goal, maxItems, maxLen) {
     lines.push('要求：① 其中的硬性条件（学历 / 到岗天数 / 技能要求 / 时间节点 / 知识范围等）必须原样满足，不得忽略或改写；');
     lines.push('② 规划要与这些资料高度对齐：按真实 JD 的要求与优先级安排重点，按大纲/笔记的章节顺序组织学习路径；');
     lines.push('③ 若下面的网络信息源与用户资料冲突，一律以用户资料为准，并可在说明中指出差异；');
-    lines.push('④ 在 sources 中标注这些资料时写明「用户提供的资料」。');
-    for (const s of own.slice(0, maxItems)) lines.push(fmt(s, maxLen));
+    lines.push('④ 在 sources 中标注这些资料时写明「用户提供的资料」；');
+    lines.push('⑤ 用户有多份同类资料（如多份 JD）时，请横向归纳「共同要求」（出现频次高的技能/条件优先安排），再兼顾各自特殊点。');
+    // 用户资料给足篇幅：每条最多 450 字（关键字段已在正文最前面），最多 24 条
+    for (const s of own.slice(0, 24)) lines.push(fmt(s, Math.max(maxLen, 450)));
   }
   if (net.length) {
     lines.push('');

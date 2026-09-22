@@ -302,21 +302,23 @@ function buildImagePrompt(note) {
   return lines.join('\n');
 }
 function imageToText(data) {
+  // 注意顺序：规划最关心的字段（硬性条件 / 最关键内容 / 建议行动）放最前面，
+  // 这样即使提示词只截取前若干字符，也不会把关键要求切掉。
   const L = [];
   const line = (label, v) => { if (v) L.push(label + '：' + v); };
   const list = (label, arr) => { if (Array.isArray(arr) && arr.length) L.push(label + '：\n' + arr.map(x => '· ' + x).join('\n')); };
   line('资料类型', data.type);
   line('标题', data.title);
   line('来源', data.source || data.company);
+  if (Array.isArray(data.hard_conditions) && data.hard_conditions.length) L.push('硬性条件（必须满足）：' + data.hard_conditions.join('；'));
+  list('最关键内容', data.priority);
+  list('建议行动', data.actions);
   line('地点', data.location);
   line('薪资', data.salary);
   list('关键要点', data.points);
   list('结构化内容', data.sections || data.duties || data.requirements);
   const kw = data.keywords || data.skills;
   if (Array.isArray(kw) && kw.length) L.push('关键词：' + kw.join('、'));
-  if (Array.isArray(data.hard_conditions) && data.hard_conditions.length) L.push('硬性条件：' + data.hard_conditions.join('；'));
-  list('最关键内容', data.priority);
-  list('建议行动', data.actions);
   line('总结', data.summary);
   if (data.raw_text) L.push('\n原文摘录：\n' + String(data.raw_text).slice(0, 3000));
   return L.join('\n');
