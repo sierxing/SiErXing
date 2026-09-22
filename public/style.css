@@ -803,7 +803,12 @@ body.aiOpen .nodePanel{right:calc(var(--ai-w, 440px) + 26px);}
 .lcStatement p{margin:8px 0;}
 .lcStatement pre{background:var(--soft); border:1px solid var(--border); border-radius:9px; padding:10px 12px; overflow-x:auto; margin:10px 0; font-size:12.6px; line-height:1.6; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
 .lcStatement code{background:var(--soft); border:1px solid var(--border); border-radius:5px; padding:1px 5px; font-size:12.4px; font-family:ui-monospace,Menlo,Consolas,monospace;}
-.lcStatement pre code{background:none; border:none; padding:0;}
+.lcStatement pre code{background:none; border:none; padding:0; white-space:pre;}
+.lcStatement pre[data-lang]{position:relative;}
+.lcStatement pre[data-lang]:before{content:attr(data-lang); position:absolute; top:5px; right:10px; font-size:10.5px; color:var(--muted); letter-spacing:.4px;}
+.lcStatement blockquote{border-left:3px solid var(--accent-border); background:var(--soft); margin:10px 0; padding:6px 12px; border-radius:0 9px 9px 0;}
+.lcStatement h1,.lcStatement h2,.lcStatement h3,.lcStatement h4{margin:14px 0 6px; line-height:1.4;}
+.lcStatement hr{border:0; border-top:1px solid var(--border); margin:12px 0;}
 .lcStatement ul,.lcStatement ol{margin:8px 0 8px 22px;}
 .lcStatement li{margin:3px 0;}
 .lcStatement img{max-width:100%; border-radius:8px; border:1px solid var(--border);}
@@ -1345,3 +1350,37 @@ body.railWide .mapPage{left:236px;}
 .railEmpty{font-size:11.5px; color:var(--muted); padding:6px 9px; line-height:1.6;}
 .railCtx{width:210px;}
 .cmpPin{font-size:13px; padding:2px 7px;}
+
+/* ============ 更新提示条 / 更新进度 / 设置页版本区 ============ */
+.updBanner{
+  position:fixed; left:50%; bottom:22px; transform:translateX(-50%);
+  z-index:120; display:flex; flex-wrap:wrap; align-items:center; gap:10px;
+  background:var(--card); border:1px solid var(--accent-border);
+  box-shadow:0 14px 38px rgba(20,18,40,.18); border-radius:14px;
+  padding:10px 14px; max-width:min(880px, calc(100vw - 110px));
+  animation:updIn .26s ease;
+}
+@keyframes updIn{from{opacity:0; transform:translate(-50%, 12px);} to{opacity:1; transform:translate(-50%, 0);}}
+.updIcon{font-size:20px; line-height:1;}
+.updText{display:flex; flex-direction:column; line-height:1.35; min-width:0; flex:1;}
+.updText b{font-size:13.5px;}
+.updText span{font-size:12px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:460px;}
+.updClose{background:none; border:0; color:var(--muted); font-size:18px; line-height:1; cursor:pointer; padding:2px 4px; border-radius:6px;}
+.updClose:hover{background:var(--soft); color:var(--text);}
+.updList{flex:0 0 100%; order:9; margin-top:6px; border-top:1px solid var(--border); padding-top:8px; max-height:230px; overflow:auto;}
+.updItem{display:flex; gap:8px; align-items:baseline; font-size:12px; padding:3px 0;}
+.updItem code{font-size:11.5px; color:var(--accent); background:var(--accent-soft); padding:1px 5px; border-radius:5px;}
+.updItem span{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.updItem i{color:var(--muted); font-style:normal; font-size:11px; flex:none;}
+.updNote{font-size:11.5px; color:var(--muted); margin-top:8px; line-height:1.7;}
+.updMask{
+  position:fixed; inset:0; z-index:200; background:rgba(18,16,34,.45);
+  display:flex; align-items:center; justify-content:center; padding:20px;
+}
+.updBox{background:var(--card); border-radius:16px; padding:26px 30px; text-align:center; box-shadow:0 22px 60px rgba(0,0,0,.3); max-width:440px;}
+.updSpin{width:28px; height:28px; margin:0 auto 12px; border:3px solid var(--accent-soft); border-top-color:var(--accent); border-radius:50%; animation:updSpin .9s linear infinite;}
+@keyframes updSpin{to{transform:rotate(360deg);}}
+.updMsg{font-size:14px; font-weight:600;}
+.updSub{font-size:12.5px; color:var(--muted); margin-top:6px; line-height:1.7; word-break:break-word;}
+.railIcon{position:relative;}
+.railDot{position:absolute; top:-1px; right:-3px; width:7px; height:7px; border-radius:50%; background:#ef4444; box-shadow:0 0 0 2px var(--card);}

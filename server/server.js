@@ -16,6 +16,7 @@ const ai = require('./ai');
 const { loadPlugins, pluginMeta, matchRoute } = require('./plugins');
 const createService = require('./service');
 const createSync = require('./sync');
+const createUpdate = require('./update');
 
 const APP_DIR = path.resolve(__dirname, '..');
 const DATA_DIR = path.join(APP_DIR, 'data');
@@ -135,6 +136,7 @@ function currentModel() { return getSetting('model', '') || ai.config().model ||
 function currentVisionModel() { return getSetting('vision_model', '') || ai.config().visionModel || currentModel(); }
 
 const service = createService({ appDir: APP_DIR, port: PORT, log: (...a) => console.log(...a) });
+const update = createUpdate({ appDir: APP_DIR, port: PORT, log: (...a) => console.log(...a) });
 let sync = null;   // 多端同步（在 backup 定义后初始化）
 
 sync = createSync({
@@ -2464,6 +2466,21 @@ async function handleAPI(req, res, u) {
     return sendJSON(res, 200, { ok: true, category: effectiveCategory(cid, comp.category) });
   }
 
+  /* ---- 更新检查与一键更新 ---- */
+  if (p === '/api/update/status' && method === 'GET') {
+    return sendJSON(res, 200, update.state);
+  }
+  if (p === '/api/update/check' && method === 'POST') {
+    return sendJSON(res, 200, await update.check(true));
+  }
+  if (p === '/api/update/apply' && method === 'POST') {
+    try { return sendJSON(res, 200, await update.apply()); }
+    catch (e) { return sendJSON(res, 400, { error: e.message }); }
+  }
+  if (p === '/api/update/restart' && method === 'POST') {
+    return sendJSON(res, 200, update.restart());
+  }
+
   if (p === '/api/sync/status' && method === 'GET') {
     return sendJSON(res, 200, await sync.status());
   }
@@ -2856,6 +2873,7 @@ server.listen(PORT, () => {
     sync.pull().then(r => console.log('[sync] 启动拉取:', r.imported ? ('已导入来自 ' + r.device + ' 的数据') : r.message))
       .catch(e => console.log('[sync] 启动拉取失败:', e.message));
   }
+  update.startAutoCheck();   // 启动后台检查远端是否有新版本（不阻塞、失败静默）
   console.log(`思而行(SiErXing) started: http://localhost:${PORT}`);
   console.log('数据文件: data/sierxing.db');
   if (process.env.NO_OPEN) return;

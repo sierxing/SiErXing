@@ -10,6 +10,30 @@
 (function () {
   const { api, esc, toast, go, state, mdToHTML, fmtDate, safeParse } = SiErXing;
 
+/* 题面渲染：LeetCode 多数题目给 HTML，部分新题给 Markdown（含 ``` 代码围栏）——
+   这里自动识别：Markdown 走 mdToHTML，HTML 直接渲染，混排时把围栏也转成 <pre>。 */
+function escCode(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function looksLikeMarkdown(s) {
+  const raw = String(s || '');
+  if (!raw.trim()) return false;
+  if (/<(p|div|ul|ol|li|pre|code|table|thead|tbody|h[1-6]|blockquote|strong|em|img|br|sup|sub|span|a|font|hr)\b/i.test(raw)) return false;
+  return /(^|\n)\s*```/.test(raw)
+    || /(^|\n)\s*#{1,6}\s+\S/.test(raw)
+    || /\*\*[^*\n]+\*\*/.test(raw)
+    || /(^|\n)\s*[-*+]\s+\S/.test(raw)
+    || /(^|\n)\s*\d+[.)]\s+\S/.test(raw)
+    || /`[^`\n]+`/.test(raw);
+}
+function fencesToPre(html) {
+  return String(html || '').replace(/```([\w-]*)\s*\n([\s\S]*?)```/g, (m, lang, code) =>
+    '<pre' + (lang ? ' data-lang="' + escCode(lang) + '"' : '') + '><code>' + escCode(code.replace(/\n$/, '')) + '</code></pre>');
+}
+function statementHTML(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s) return '<p class="muted">题面尚未缓存，点右上「刷新题面」从 leetcode.cn 获取。</p>';
+  if (looksLikeMarkdown(s)) return mdToHTML(s);
+  return fencesToPre(s);   // 已是 HTML：顺带把混在里面的 ``` 围栏也转成代码块
+}
 const DIFF_CHIP = { EASY: ['简单', 'ok'], MEDIUM: ['中等', 'warn'], HARD: ['困难', 'danger'] };
 function diffChipHTML(d) {
   const c = DIFF_CHIP[d] || ['未知', 'gray'];
@@ -229,7 +253,7 @@ function drawProblemPage(pid) {
     <div class="probCols">
       <div class="secCard probStmtCard">
         <div class="secHead"><span>📄 题目描述</span><div class="spacer"></div>${p.statement_at ? `<span class="muted" style="font-size:11.5px;">缓存于 ${esc(fmtDate(p.statement_at))}</span>` : ''}</div>
-        <div class="lcStatement">${p.statement || '<p class="muted">题面尚未缓存，点右上「刷新题面」从 leetcode.cn 获取。</p>'}</div>
+        <div class="lcStatement">${statementHTML(p.statement)}</div>
       </div>
       <div class="secCard probRecCard">
         <div class="secHead"><span>📝 我的作答记录（${recs.length}）</span><div class="spacer"></div><button class="btn tiny primary" id="addRecBtn">＋ 记录一次作答</button></div>

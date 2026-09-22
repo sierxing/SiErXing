@@ -3077,6 +3077,163 @@ await renderComponentsPage();
 }
 
 /* ============ 设置页（含 AI 配置引导） ============ */
+/* ============ 更新检查（启动自动检测 + 一键更新） ============ */
+function updSkipHash() { try { return localStorage.getItem('sierxing-update-skip') || ''; } catch (e) { return ''; } }
+function updLaterUntil() { try { return Number(localStorage.getItem('sierxing-update-later') || 0); } catch (e) { return 0; } }
+function fmtUpdTime(t) { return t ? String(t).replace(' +0800', '').slice(0, 16) : ''; }
+function updHasUpdate() {
+  const u = state.update || {};
+  return !!(u.supported && u.behind > 0 && u.latestShort && u.latestShort !== updSkipHash());
+}
+/* 启动时检查（服务端启动后已后台检测过一次，这里取缓存，没有就补一次） */
+async function checkUpdateOnBoot() {
+  try {
+    let u = await api('/api/update/status');
+    if (!u || u.supported == null) u = await api('/api/update/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    state.update = u;
+    renderRail();
+    if (!updHasUpdate()) return;
+    if (Date.now() < updLaterUntil()) return;         // 选过「稍后」
+    renderUpdateBanner();
+  } catch (e) { /* 静默：检查更新失败不打扰用户 */ }
+}
+function renderUpdateBanner() {
+  const u = state.update || {};
+  if (!updHasUpdate()) { const b = document.getElementById('updBanner'); if (b) b.remove(); return; }
+  let el = document.getElementById('updBanner');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'updBanner';
+    el.className = 'updBanner';
+    document.body.appendChild(el);
+  }
+  el.innerHTML = `
+    <span class="updIcon">🚀</span>
+    <div class="updText">
+      <b>发现新版本</b>
+      <span>落后 ${u.behind} 个提交 · 最新：${esc(u.latestSubject || '')}</span>
+    </div>
+    <button class="btn tiny" id="updDetails">更新内容</button>
+    <button class="btn tiny primary" id="updNow">立即更新</button>
+    <button class="btn tiny" id="updLater">稍后</button>
+    <button class="updClose" id="updSkip" title="跳过此版本（不再提示）">×</button>
+    <div class="updList" id="updList" hidden>
+      ${(u.commits || []).map(c => `<div class="updItem"><code>${esc(c.hash)}</code><span>${esc(c.subject)}</span><i>${esc(fmtUpdTime(c.date))}</i></div>`).join('') || '<div class="muted">（没有更多详情）</div>'}
+      <div class="updNote">更新只会替换程序文件，你的数据（目标 / 组件设置 / 密钥）都在本地，不会丢。</div>
+    </div>`;
+  const list = el.querySelector('#updList');
+  el.querySelector('#updDetails').addEventListener('click', () => { list.hidden = !list.hidden; });
+  el.querySelector('#updNow').addEventListener('click', applyUpdate);
+  el.querySelector('#updLater').addEventListener('click', () => {
+    try { localStorage.setItem('sierxing-update-later', String(Date.now() + 6 * 3600 * 1000)); } catch (e) {}
+    el.remove();
+    toast('已改为稍后提醒（6 小时内不再弹）');
+  });
+  el.querySelector('#updSkip').addEventListener('click', () => {
+    try { localStorage.setItem('sierxing-update-skip', u.latestShort || ''); } catch (e) {}
+    el.remove();
+    toast('已跳过 ' + (u.latestShort || '') + '，有新版本时还会提醒');
+  });
+}
+function updMaskShow(text) {
+  let m = document.getElementById('updMask');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'updMask';
+    m.className = 'updMask';
+    document.body.appendChild(m);
+  }
+  m.innerHTML = `<div class="updBox"><div class="updSpin"></div><div class="updMsg">${esc(text)}</div><div class="updSub" id="updSub"></div></div>`;
+  return m;
+}
+function updMaskSub(text) { const s = document.getElementById('updSub'); if (s) s.textContent = text; }
+/* 等服务端重启完成（旧进程退出、新进程起来） */
+async function waitServerBack(maxMs = 40000) {
+  const t0 = Date.now();
+  let down = false;
+  while (Date.now() - t0 < maxMs) {
+    await new Promise(r => setTimeout(r, 900));
+    try {
+      const r = await fetch('/api/health', { cache: 'no-store' });
+      if (r.ok) { if (down) return true; down = false; }
+    } catch (e) { down = true; }
+  }
+  return false;
+}
+async function applyUpdate() {
+  const u = state.update || {};
+  if (!confirm('更新到最新版本（' + (u.latestShort || '') + '）？\n更新完会自动重启应用，页面会自动刷新。\n你的数据都在本地，不会丢失。')) return;
+  const b = document.getElementById('updBanner');
+  if (b) b.remove();
+  updMaskShow('正在更新…');
+  updMaskSub('从远端拉取最新代码');
+  try {
+    const r = await api('/api/update/apply', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    if (!r.updated) { updMaskShow('已经是最新版本'); setTimeout(() => { const m = document.getElementById('updMask'); if (m) m.remove(); }, 1200); return; }
+    updMaskSub('已更新 ' + r.before + ' → ' + r.after + '（' + r.commits + ' 个提交）' + (r.warning ? ' · ' + r.warning : ''));
+    updMaskShow('更新完成，正在重启应用…');
+    updMaskSub('重启后会自动刷新页面，请稍候');
+    try { await api('/api/update/restart', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch (e) {}
+    const ok = await waitServerBack();
+    if (ok) {
+      location.href = location.pathname + '?_=' + Date.now() + (location.hash || '');
+    } else {
+      updMaskShow('已更新，但自动重启没成功');
+      updMaskSub('请手动关闭后重新启动（桌面图标 / 终端命令 sierxing），再刷新本页');
+    }
+  } catch (e) {
+    updMaskShow('更新失败');
+    updMaskSub(e.message + ' · 可在项目目录手动执行 git pull');
+    setTimeout(() => { const m = document.getElementById('updMask'); if (m) m.remove(); }, 8000);
+  }
+}
+/* ---- 设置页：版本与更新 ---- */
+async function updateSectionHTML() {
+  let u = state.update;
+  if (!u) { try { u = await api('/api/update/status'); state.update = u; } catch (e) { u = {}; } }
+  const cur = u.currentShort ? `<code>${esc(u.currentShort)}</code> ${esc(fmtUpdTime(u.currentDate))}` : '（未检测）';
+  const supported = u.supported !== false;
+  const has = updHasUpdate();
+  const status = !supported
+    ? '<span style="color:var(--warn)">当前不是 git 安装，无法自动更新（可重新用 git clone 安装，数据不会丢）</span>'
+    : (u.reason === 'fetch-failed'
+      ? '<span style="color:var(--warn)">检查失败：' + esc(u.error || '网络或权限问题') + '</span>'
+      : (has
+        ? '<b style="color:var(--accent)">有 ' + u.behind + ' 个新提交</b> · 最新：' + esc(u.latestSubject || '')
+        : '已是最新版本' + (u.dirty ? ' · 本地有 ' + u.dirty + ' 个改动文件（更新时会自动暂存）' : '')));
+  return `<div class="sec">
+      <div class="secTitle">版本与更新</div>
+      <div class="svcRow">
+        <span class="svcLabel">当前版本</span>
+        <span class="svcVal">${cur}</span>
+        <div class="spacer"></div>
+        <button class="btn tiny" id="updCheck">检查更新</button>
+        ${has ? '<button class="btn tiny primary" id="updApply">立即更新</button>' : ''}
+      </div>
+      <p class="hint" id="updStatus" style="margin-top:8px; line-height:1.8;">${status}${u.checkedAt ? ' · 上次检查：' + esc(fmtUpdTime(new Date(u.checkedAt).toISOString())) : ''}</p>
+      ${(u.commits && u.commits.length) ? `<div class="updList" style="margin-top:6px;">${u.commits.map(c => `<div class="updItem"><code>${esc(c.hash)}</code><span>${esc(c.subject)}</span><i>${esc(fmtUpdTime(c.date))}</i></div>`).join('')}</div>` : ''}
+      <p class="hint" style="margin-top:8px;">· 启动时会自动检查一次；也可以随时点「检查更新」<br>· 更新只替换程序文件，本地数据（目标 / 组件设置 / 密钥）不受影响；更新后会自动重启应用</p>
+    </div>`;
+}
+function bindUpdateSection() {
+  const ck = document.getElementById('updCheck');
+  if (ck) ck.addEventListener('click', async () => {
+    ck.disabled = true; ck.textContent = '检查中…';
+    try {
+      const u = await api('/api/update/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      state.update = u;
+      toast(u.supported === false ? '当前不是 git 安装，无法自动更新'
+        : (u.reason === 'fetch-failed' ? '检查失败：' + (u.error || '网络或权限问题')
+          : (u.behind > 0 ? '发现 ' + u.behind + ' 个新提交' : '已是最新版本')));
+      renderRail();
+      rerenderCurrent();
+    } catch (e) { toast(e.message); }
+    ck.disabled = false; ck.textContent = '检查更新';
+  });
+  const ap = document.getElementById('updApply');
+  if (ap) ap.addEventListener('click', applyUpdate);
+}
+
 /* ============ 设置页：服务与启动 ============ */
 async function serviceSectionHTML() {
   let st = {};
@@ -3326,6 +3483,7 @@ async function renderSettings() {
       ${modelsRes.error ? `<p class="hint" style="color:var(--warn); margin-top:6px;">模型列表：${esc(modelsRes.error)}（可手动填写模型名）</p>` : ''}
     </div>
     ${await serviceSectionHTML()}
+    ${await updateSectionHTML()}
     ${await syncSectionHTML()}
     <div class="sec">
       <div class="secTitle">数据安全</div>
@@ -3409,6 +3567,7 @@ async function renderSettings() {
     renderSettings();
   });
   bindServiceSection();
+  bindUpdateSection();
   bindSyncSection();
   const sgb = document.getElementById('showGuideBtn');
   if (sgb) sgb.addEventListener('click', () => showGuide(0));
@@ -3724,13 +3883,14 @@ function railItemsHTML() {
   if (g && (r.view === 'goal' || r.view === 'map' || r.view === 'plugin')) {
     items.push({ icon: '🗺', label: '路线图', hash: '#/g/' + g.id, active: r.view === 'goal' });
   }
-  items.push({ icon: '⚙', label: '设置', hash: '#/settings', active: r.view === 'settings' });
+  const hasUpd = !!(state.update && state.update.supported && state.update.behind > 0 && state.update.latestShort !== updSkipHash());
+  items.push({ icon: '⚙', label: '设置', hash: '#/settings', active: r.view === 'settings', dot: hasUpd });
   items.push({ icon: '🧩', label: '组件管理', hash: '#/components', active: r.view === 'components' });
   const compsHTML = railCompsHTML();
   return `<a class="railLogo" href="#/" title="思而行 · 返回目标列表">${RAIL_LOGO_SVG}</a>
     <div class="railNav">
-      ${items.slice(0, g && (r.view === 'goal' || r.view === 'map' || r.view === 'plugin') ? 2 : 1).map(i => `<a class="railItem ${i.active ? 'active' : ''}" href="${i.hash}" title="${esc(i.label)}">
-        <span class="railIcon">${i.icon}</span><span class="railLabel">${esc(i.label)}</span></a>`).join('')}
+      ${items.slice(0, g && (r.view === 'goal' || r.view === 'map' || r.view === 'plugin') ? 2 : 1).map(i => `<a class="railItem ${i.active ? 'active' : ''}" href="${i.hash}" title="${esc(i.label)}${i.dot ? ' · 有新版本' : ''}">
+        <span class="railIcon">${i.icon}${i.dot ? '<i class="railDot"></i>' : ''}</span><span class="railLabel">${esc(i.label)}</span></a>`).join('')}
       ${compsHTML}
       ${items.slice(g && (r.view === 'goal' || r.view === 'map' || r.view === 'plugin') ? 2 : 1).map(i => `<a class="railItem ${i.active ? 'active' : ''}" href="${i.hash}" title="${esc(i.label)}">
         <span class="railIcon">${i.icon}</span><span class="railLabel">${esc(i.label)}</span></a>`).join('')}
@@ -3898,6 +4058,7 @@ function pluginGoButtonsBind() {
   });
   BOOTED = true;
   route();
+  checkUpdateOnBoot();
   if (!guideDone()) {
     setTimeout(() => { if (!document.getElementById('guideMask')) showGuide(0); }, 500);
   }
