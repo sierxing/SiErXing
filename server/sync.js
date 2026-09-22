@@ -47,7 +47,16 @@ module.exports = function createSync(ctx) {
   const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 
   const enabled = () => getSetting('sync_enabled', '') === '1';
-  const repoUrl = () => (getSetting('sync_repo', '') || '').trim();
+  /* 规范化仓库地址：补 .git、去尾斜杠。git 重定向会丢掉地址里内嵌的用户名密码，
+     进而转去调用凭据助手（Windows 上就报 cache daemon 错误），所以先规整成最终地址。 */
+  function normalizeRepo(url) {
+    let t = String(url || '').trim();
+    if (!t) return t;
+    t = t.replace(/\/+$/, '');
+    if (/^https?:\/\//i.test(t) && !/\.git$/i.test(t)) t += '.git';
+    return t;
+  }
+  const repoUrl = () => normalizeRepo(getSetting('sync_repo', '') || '');
   const branch = () => (getSetting('sync_branch', '') || 'main').trim();
   const autoPush = () => getSetting('sync_auto_push', '1') !== '0';
   const autoPull = () => getSetting('sync_auto_pull', '1') !== '0';
@@ -59,7 +68,19 @@ module.exports = function createSync(ctx) {
     return new Promise(resolve => {
       let child;
       try {
-        child = spawn('git', args, { cwd: WORK_DIR, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+        // -c credential.helper= ：禁用系统凭据助手（Windows 上 Git Credential Manager 的
+        //   "unable to connect to cache daemon" 就来自这里；凭据已内嵌在仓库地址中，不需要助手）
+        const hardened = ['-c', 'credential.helper=', '-c', 'credential.interactive=never', '-c', 'core.askPass='].concat(args);
+        child = spawn('git', hardened, {
+          cwd: WORK_DIR,
+          env: Object.assign({}, process.env, {
+            GIT_TERMINAL_PROMPT: '0',
+            GCM_INTERACTIVE: 'never',
+            GIT_ASKPASS: process.platform === 'win32' ? 'echo' : '/bin/echo'
+          }),
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true
+        });
       } catch (e) { return resolve({ ok: false, out: '', err: String(e.message) }); }
       let out = '', err = '';
       const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) {} resolve({ ok: false, out, err: 'timeout' }); }, timeoutMs);
@@ -115,6 +136,8 @@ module.exports = function createSync(ctx) {
     await git(['remote', 'set-url', 'origin', authUrl(repoUrl())], 30000);
     await git(['config', 'user.name', 'sierxing-sync'], 20000);
     await git(['config', 'user.email', 'sync@localhost'], 20000);
+      // 设置上游（远端分支还不存在时会失败，忽略即可：pull/push 都显式带分支）
+      await git(['branch', '--set-upstream-to=origin/' + branch(), branch()], 20000);
     return true;
   }
 
@@ -218,7 +241,7 @@ module.exports = function createSync(ctx) {
     pushing = true;
     try {
       await ensureRepo();
-      await git(['pull', '--rebase', '--autostash'], 120000);   // 先同步远程，减少冲突
+      await git(['pull', '--rebase', '--autostash', 'origin', branch()], 120000);   // 先同步远程，减少冲突
       const snap = exportSnapshot(reason);
       fs.writeFileSync(path.join(WORK_DIR, SNAP_NAME), JSON.stringify(snap, null, 1), 'utf8');
       if (syncImages() && fs.existsSync(UPLOAD_DIR)) {
@@ -234,7 +257,7 @@ module.exports = function createSync(ctx) {
         throw new Error('提交失败：' + (commit.err || commit.out));
       }
       const p = await git(['push', '-u', 'origin', branch()], 180000);
-      if (!p.ok) throw new Error('推送失败：' + (p.err || p.out));
+      if (!p.ok) throw new Error('推送失败：' + friendlyGitError(p.err || p.out));
       setSetting('sync_last_at', new Date().toISOString());
       setSetting('sync_last_status', '上传成功 · ' + (snap.counts.goals || 0) + ' 个目标');
       log('[sync] push ok:', snap.counts.goals, 'goals');
@@ -251,10 +274,10 @@ module.exports = function createSync(ctx) {
     if (!enabled()) throw new Error('未启用多端同步');
     await ensureRepo();
     const before = await git(['rev-parse', 'HEAD'], 30000);
-    const p = await git(['pull', '--rebase', '--autostash'], 180000);
+    const p = await git(['pull', '--rebase', '--autostash', 'origin', branch()], 180000);
     if (!p.ok && !/Already up to date|Already up-to-date/i.test(p.out + p.err)) {
-      setSetting('sync_last_status', '拉取失败：' + (p.err || p.out));
-      throw new Error('拉取失败：' + (p.err || p.out));
+      setSetting('sync_last_status', '拉取失败：' + friendlyGitError(p.err || p.out));
+      throw new Error('拉取失败：' + friendlyGitError(p.err || p.out));
     }
     const remote = readLocalSnapshot();
     if (!remote) return { ok: true, imported: false, message: '仓库里还没有同步数据（先从一台设备点「立即上传」）' };
@@ -280,6 +303,14 @@ module.exports = function createSync(ctx) {
     return { ok: true, imported: true, savedAt: remote.savedAt, device: remote.device, counts: remote.counts };
   }
 
+  /* 把 git 的凭据类报错翻译成可操作提示 */
+  function friendlyGitError(msg) {
+    const t = String(msg || '');
+    if (/cache daemon|credential|Authentication failed|could not read Username|terminal prompts disabled|Permission denied|403/i.test(t)) {
+      return t + '\n提示：请在「设置 → 多端同步」填写仓库地址（https://atomgit.com/用户名/仓库名.git）、用户名与访问令牌，再点「保存并测试连接」。AtomGit 用「用户名 + 访问令牌」（网页端 设置 → 访问令牌 生成），不要填登录密码。';
+    }
+    return t;
+  }
   /** 数据变化后自动上传（去抖，避免频繁提交） */
   function schedulePush(reason) {
     if (!enabled() || !autoPush()) return;
@@ -294,7 +325,14 @@ module.exports = function createSync(ctx) {
     if (!hasGit) return { ok: false, message: '本机未找到 git 命令，请先安装 git' };
     const r = await new Promise(resolve => {
       let child;
-      try { child = spawn('git', ['ls-remote', '--heads', authUrl(repoUrl())], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }); }
+      try {
+        const hardened = ['-c', 'credential.helper=', '-c', 'credential.interactive=never', '-c', 'core.askPass=', 'ls-remote', '--heads', authUrl(repoUrl())];
+        child = spawn('git', hardened, {
+          env: Object.assign({}, process.env, { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_ASKPASS: process.platform === 'win32' ? 'echo' : '/bin/echo' }),
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true
+        });
+      }
       catch (e) { return resolve({ ok: false, err: String(e.message) }); }
       let out = '', err = '';
       const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) {} resolve({ ok: false, err: 'timeout' }); }, 60000);
