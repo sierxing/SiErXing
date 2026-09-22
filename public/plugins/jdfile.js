@@ -115,7 +115,7 @@ async function uploadJDFile(file) {
         let d;
         try { d = JSON.parse(line.slice(6)); } catch (e) { continue; }
         if (d.status) { state.jdStatus = d.status; const el = document.querySelector('.jpBusy'); if (el) el.innerHTML = '<span class="spinner"></span> ' + esc(d.status); }
-        if (d.done) { finished = true; state.goal = d.goal; toast('已提炼并加入资料库'); }
+        if (d.done) { finished = true; state.goal = d.goal; toast(d.notice || '已提炼并加入资料库'); }
         if (d.error) { finished = true; toast(d.error); }
       }
     }

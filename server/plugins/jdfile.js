@@ -120,28 +120,80 @@ module.exports = {
 function extractJSON(text) {
   const t = String(text || '').trim();
   if (!t) return null;
-  try { return JSON.parse(t); } catch (e) {}
-  const m = t.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (m) { try { return JSON.parse(m[1]); } catch (e) {} }
-  const start = t.indexOf('{');
-  if (start < 0) return null;
-  let depth = 0, inStr = false, esc = false;
-  for (let j = start; j < t.length; j++) {
-    const c = t[j];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === '\\') esc = true;
-      else if (c === '"') inStr = false;
-      continue;
+  const tryParse = raw => {
+    if (!raw) return null;
+    const cleaned = String(raw)
+      .replace(/^\uFEFF/, '')
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+      .replace(/,\s*([}\]])/g, '$1');
+    try { return JSON.parse(cleaned); } catch (e) { return null; }
+  };
+  let r = tryParse(t);
+  if (r) return r;
+  const fence = t.match(/```(?:json|JSON)?\s*([\s\S]*?)```/);
+  if (fence) { r = tryParse(fence[1]); if (r) return r; }
+  const objs = [];
+  let i = 0;
+  while (i < t.length) {
+    const start = t.indexOf('{', i);
+    if (start < 0) break;
+    let depth = 0, inStr = false, esc = false, end = -1;
+    for (let j = start; j < t.length; j++) {
+      const c = t[j];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c === '\\') esc = true;
+        else if (c === '"') inStr = false;
+        continue;
+      }
+      if (c === '"') { inStr = true; continue; }
+      if (c === '{') depth++;
+      else if (c === '}') { depth--; if (depth === 0) { end = j; break; } }
     }
-    if (c === '"') { inStr = true; continue; }
-    if (c === '{') depth++;
-    else if (c === '}') {
-      depth--;
-      if (depth === 0) { try { return JSON.parse(t.slice(start, j + 1)); } catch (e) { return null; } }
-    }
+    if (end < 0) break;
+    const o = tryParse(t.slice(start, end + 1));
+    if (o && typeof o === 'object' && !Array.isArray(o)) objs.push(o);
+    i = end + 1;
   }
-  return null;
+  if (!objs.length) {
+    // 可能是输出被截断：从第一个 { 到末尾，尽力补齐后解析
+    const start = t.indexOf('{');
+    if (start >= 0) {
+      let cut = t.slice(start).replace(/\n\s*$/, '').replace(/,\s*$/, '');
+      let inStr = false, esc = false;
+      const stack = [];
+      for (let j = 0; j < cut.length; j++) {
+        const c = cut[j];
+        if (inStr) {
+          if (esc) esc = false;
+          else if (c === '\\') esc = true;
+          else if (c === '"') inStr = false;
+          continue;
+        }
+        if (c === '"') { inStr = true; continue; }
+        if (c === '{' || c === '[') stack.push(c === '{' ? '}' : ']');
+        else if (c === '}' || c === ']') stack.pop();
+      }
+      if (inStr) cut += '"';
+      while (stack.length) cut += stack.pop();
+      const fixed = tryParse(cut);
+      if (fixed && typeof fixed === 'object' && !Array.isArray(fixed)) return fixed;
+    }
+    return null;
+  }
+  objs.sort((a, b) => Object.keys(b).length - Object.keys(a).length);
+  return objs[0];
+}
+/* 提炼结果是否可用：任意关键字段有内容即可 */
+function hasExtract(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  for (const k of ['title', 'summary', 'raw_text', 'type', 'source', 'company']) {
+    if (typeof data[k] === 'string' && data[k].trim()) return true;
+  }
+  for (const k of ['points', 'sections', 'keywords', 'skills', 'hard_conditions', 'priority', 'actions', 'duties', 'requirements', 'modules']) {
+    if (Array.isArray(data[k]) && data[k].length) return true;
+  }
+  return false;
 }
 function buildImagePrompt(note) {
   const lines = [];
@@ -197,11 +249,28 @@ function streamJDImage(req, res, goal, dataUrl, note) {
       const fname = `jd-${goal.id}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
       const fpath = path.join(UPLOAD_DIR, fname);
       fs.writeFileSync(fpath, buf);
-      send({ status: '图片已收到，AI 正在识别并提炼 JD 信息…', file: fname });
+      send({ status: '图片已收到，AI 正在识别并提炼信息…', file: fname });
       const model = currentVisionModel();
-      const txt = await aiTextFiles(buildImagePrompt(note), model, [fpath], 300000);
-      const data = extractJSON(txt);
-      if (!data || (!data.title && !data.summary && !data.raw_text)) throw new Error('图片信息提炼失败，请重试（建议换一张更清晰的截图）');
+      let txt = await aiTextFiles(buildImagePrompt(note), model, [fpath], 300000);
+      let data = extractJSON(txt);
+      let notice = '';
+      if (!hasExtract(data)) {
+        console.log('[jdfile] 结构化提炼失败，原始输出前 500 字:', String(txt || '').slice(0, 500).replace(/\n/g, ' '));
+        send({ status: '第一次没解析成功，正在重新整理…' });
+        try {
+          txt = await aiTextFiles(buildImagePrompt(note) + '\n\n【重要】上一次的输出不是合法 JSON。请严格只输出一个 JSON 对象：不要解释文字、不要前后缀、不要多个对象，字符串内不要出现未转义的换行。', model, [fpath], 300000);
+          data = extractJSON(txt);
+        } catch (e) {
+          console.log('[jdfile] 重试失败:', e.message);
+        }
+      }
+      if (!hasExtract(data)) {
+        const raw = String(txt || '').trim();
+        console.log('[jdfile] 重试后仍未解析，按原文导入。原始输出前 500 字:', raw.slice(0, 500).replace(/\n/g, ' '));
+        const firstLine = raw.split('\n').map(x => x.trim()).find(Boolean) || '图片资料';
+        data = { type: '资料', title: firstLine.slice(0, 40), summary: '', raw_text: raw.slice(0, 4000) };
+        notice = '结构化提炼没成功，已按图片原文导入资料库（可重试或换一张更清晰的截图）';
+      }
       const t = nowISO();
       const type = String(data.type || '').trim() || '资料';
         const from = data.source || data.company || '';
@@ -215,7 +284,7 @@ function streamJDImage(req, res, goal, dataUrl, note) {
         .run(goal.id, fname, mime, buf.length, title, JSON.stringify(data), 'done', '', sourceId, t);
       db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(t, goal.id);
       backup();
-      send({ done: true, jd: { id: Number(jr.lastInsertRowid), file: fname, title, source_id: sourceId }, extracted: data, goal: getGoal(goal.id), sources: sourcesOf(goal.id) });
+      send({ done: true, notice, jd: { id: Number(jr.lastInsertRowid), file: fname, title, source_id: sourceId }, extracted: data, goal: getGoal(goal.id), sources: sourcesOf(goal.id) });
     } catch (e) {
       send({ error: e.message });
     }
