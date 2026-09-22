@@ -24,6 +24,13 @@ const SYNC_TABLES = [
   'goals', 'nodes', 'sources', 'tutorials', 'goal_versions',
   'chat_sessions', 'chats', 'problems', 'practice_records', 'daily_plans', 'jd_images'
 ];
+/* 是否为「只对本机有效」的地址（localhost / 回环 / 内网段） */
+function isLocalUrl(v) {
+  const t = String(v || '').trim();
+  if (!t) return false;
+  return /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])([:/]|$)/i.test(t)
+    || /^https?:\/\/(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(t);
+}
 // 不参与同步的列：题面正文与代码模板体积大，且每台设备用本机 LeetCode 登录态自己抓即可；
 // 多设备之间互相覆盖反而会看到别人的缓存（导入时保留本机已有值）
 const SYNC_OMIT_COLUMNS = { problems: ['statement', 'statement_at', 'snapshots'] };
@@ -124,7 +131,10 @@ module.exports = function createSync(ctx) {
     const settings = {};
     for (const k of SYNC_SETTINGS) {
       const v = getSetting(k, '');
-      if (v !== '' && v != null) settings[k] = v;
+      if (v === '' || v == null) continue;
+      // 本机地址只对本机有效（如 http://localhost:3210）：不同步给其他设备，避免把别人的 AI 地址改成连不上的本地地址
+      if (k === 'ai_base_url' && isLocalUrl(v)) continue;
+      settings[k] = v;
     }
     return {
       format: 'sierxing-sync',
@@ -172,7 +182,9 @@ module.exports = function createSync(ctx) {
       // 设置项：只导入白名单，绝不覆盖密钥
       if (snap.settings && typeof snap.settings === 'object') {
         for (const k of SYNC_SETTINGS) {
-          if (snap.settings[k] !== undefined) setSetting(k, String(snap.settings[k]));
+          if (snap.settings[k] === undefined) continue;
+          if (k === 'ai_base_url' && isLocalUrl(snap.settings[k])) continue;   // 忽略别人设备上的本机地址
+          setSetting(k, String(snap.settings[k]));
         }
       }
       db.exec('COMMIT');
