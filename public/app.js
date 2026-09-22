@@ -3463,6 +3463,10 @@ async function renderSettings() {
   state.aiStatus = st;
   const provider = s.ai_provider || 'openai';
   const configured = !!st.configured;
+  // 识图会用哪个模型：配置了就用配置的，否则显示自动选用的（opencode 有可读图的默认值）
+  const visionHint = st.visionModel
+    ? '识别图片会使用：' + st.visionModel + (st.visionModelSaved ? '' : '（未单独配置，自动选用）')
+    : '识别图片需要支持视觉的模型（如 qwen-vl-max / gpt-4o / glm-4v-plus）；留空则用上面的文本模型，若它不支持读图，识图会提示失败。';
 
   let html = `<div class="page">
     <div class="pageHead"><a class="back js-back" href="#/">← 返回</a><h2 class="title" style="margin-left:10px;">设置</h2>
@@ -3498,8 +3502,9 @@ async function renderSettings() {
         <div class="field"><label>API 地址（Base URL）</label><input id="aiBase" value="${esc(s.ai_base_url || '')}" placeholder="如 https://api.deepseek.com/v1"></div>
         <div class="field"><label>API 密钥</label><input id="aiKey" type="password" value="${esc(s.ai_api_key || '')}" placeholder="${s.env_keys && s.env_keys.key ? '已通过环境变量提供（留空则用环境变量）' : 'sk-...'}"></div>
         <div class="field"><label>视觉模型（可选：用于识别图片资料）</label>
-          <input id="aiVisionModel" list="modelList" value="${esc(s.ai_vision_model || '')}" placeholder="留空则与文本模型相同，如 qwen-vl-max">
+          <input id="aiVisionModel" list="modelList" value="${esc(s.ai_vision_model || '')}" placeholder="如 qwen-vl-max / gpt-4o / glm-4v-plus">
         </div>
+        <p class="hint" id="aiVisionHint" style="margin:-4px 0 10px;">${esc(visionHint)}</p>
         <div class="field"><label>单次请求超时（毫秒）</label><input id="aiTimeout" value="${esc(s.ai_timeout_ms || '300000')}"></div>
       </div>
       <div id="opencodeCfg" ${provider === 'openai' ? 'hidden' : ''}>

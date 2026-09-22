@@ -1408,3 +1408,7 @@ body.railWide .mapPage{left:236px;}
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; animation:ppChipIn .25s ease;
 }
 @keyframes ppChipIn{from{opacity:0; transform:translateY(3px);} to{opacity:1; transform:none;}}
+
+/* 图片资料：识别失败的提示与重试 */
+.jdFail{margin-top:8px; font-size:12.5px; line-height:1.7; color:var(--text); background:rgba(217,119,6,.09); border:1px solid rgba(217,119,6,.32); border-radius:9px; padding:8px 11px; word-break:break-word;}
+.jdOps{display:flex; align-items:center; gap:9px; margin-top:8px; flex-wrap:wrap;}

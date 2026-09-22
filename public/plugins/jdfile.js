@@ -30,7 +30,9 @@ function jdCardHTML(jd) {
         ${sec('关键要点', ex.points)}${sec('结构化内容', ex.sections || ex.duties || ex.requirements)}${sec('关键词', ex.keywords || ex.skills)}${sec('硬性条件 / 前置知识', ex.hard_conditions)}${sec('最关键内容', ex.priority)}${sec('建议行动', ex.actions)}${other}
         ${ex.raw_text ? `<div class="jdSec"><div class="jdSecT">原文摘录</div><pre class="jdRaw">${esc(String(ex.raw_text).slice(0, 1500))}</pre></div>` : ''}
       </details>` : ''}
-      <div class="jdSrc">已导入资料库（${jd.source_id ? '#' + jd.source_id : '—'}），AI 规划与对话时会优先参考</div>
+      ${jd.status === 'failed' ? `<div class="jdFail">⚠️ 识别失败：${esc(jd.error || '未知原因')}</div>
+        <div class="jdOps"><button class="btn tiny primary jdRetry" data-jdid="${jd.id}">🔄 重试识别</button><span class="muted" style="font-size:11.5px;">配置好视觉模型后点这里重试，不用重新上传</span></div>` : ''}
+      <div class="jdSrc">${jd.status === 'failed' ? '尚未导入资料库' : '已导入资料库（' + (jd.source_id ? '#' + jd.source_id : '—') + '），AI 规划与对话时会优先参考'}</div>
     </div>
   </div>`;
 }
@@ -78,7 +80,8 @@ function drawJDPage() {
   fi.addEventListener('change', () => { for (const f of Array.from(fi.files || [])) uploadJDFile(f); fi.value = ''; });
   const jc = document.getElementById('jdChatBtn');
   if (jc) jc.addEventListener('click', () => aiToggle(true));
-  app.querySelectorAll('.jdDel').forEach(b => b.addEventListener('click', async () => {
+  app.querySelectorAll('.jdRetry').forEach(b => b.addEventListener('click', () => retryJDImage(b.getAttribute('data-jdid'))));
+    app.querySelectorAll('.jdDel').forEach(b => b.addEventListener('click', async () => {
     if (!confirm('删除这张图片及其资料源？')) return;
     try {
       await api('/api/jd-images/' + b.getAttribute('data-jdid'), { method: 'DELETE' });
@@ -89,17 +92,8 @@ function drawJDPage() {
     } catch (e) { toast(e.message); }
   }));
 }
-async function uploadJDFile(file) {
-  if (state.jdBusy) return toast('正在识别上一张，请稍候');
-  if (!file.type || !file.type.startsWith('image/')) return toast('请粘贴图片文件');
-  if (file.size > 8 * 1024 * 1024) return toast('图片过大（8MB 以内）');
-  state.jdBusy = true;
-  state.jdStatus = '正在读取图片…';
-  drawJDPage();
-  const dataUrl = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(file); });
-  try {
-    const resp = await fetch('/api/goals/' + state.goal.id + '/jd-image', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dataUrl }) });
-    if (!resp.ok || !resp.body) throw new Error('无法连接识别服务');
+  /* 读取识别过程的 SSE 事件（上传与重试共用） */
+  async function readJDStream(resp) {
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
     let buf = '', finished = false;
@@ -119,6 +113,39 @@ async function uploadJDFile(file) {
         if (d.error) { finished = true; toast(d.error); }
       }
     }
+    return finished;
+  }
+  async function retryJDImage(id) {
+    if (state.jdBusy) return toast('正在识别，请稍候');
+    state.jdBusy = true;
+    state.jdStatus = '正在用当前视觉模型重新识别…';
+    drawJDPage();
+    try {
+      const resp = await fetch('/api/jd-images/' + id + '/retry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (!resp.ok || !resp.body) throw new Error('无法连接识别服务');
+      const finished = await readJDStream(resp);
+      if (!finished) toast('识别中断，可重试');
+    } catch (e) {
+      toast(e.message);
+    } finally {
+      state.jdBusy = false;
+      state.jdStatus = '';
+      try { const r = await api('/api/goals/' + state.goal.id + '/jd-images'); state.jdImages = r.images || []; } catch (e) {}
+      drawJDPage();
+    }
+  }
+  async function uploadJDFile(file) {
+  if (state.jdBusy) return toast('正在识别上一张，请稍候');
+  if (!file.type || !file.type.startsWith('image/')) return toast('请粘贴图片文件');
+  if (file.size > 8 * 1024 * 1024) return toast('图片过大（8MB 以内）');
+  state.jdBusy = true;
+  state.jdStatus = '正在读取图片…';
+  drawJDPage();
+  const dataUrl = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(file); });
+  try {
+    const resp = await fetch('/api/goals/' + state.goal.id + '/jd-image', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dataUrl }) });
+    if (!resp.ok || !resp.body) throw new Error('无法连接识别服务');
+    const finished = await readJDStream(resp);
     if (!finished) toast('识别中断，可重试');
   } catch (e) {
     toast(e.message);

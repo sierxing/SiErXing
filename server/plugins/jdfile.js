@@ -68,6 +68,25 @@ module.exports = {
 
   api: [
   {
+    // 重试识别：失败/不满意的图片可以用当前（新配置的）视觉模型重新识别一次
+    method: 'POST',
+    pattern: /^\/api\/jd-images\/(\d+)\/retry$/,
+    handler: async (req, res, u, ctx) => {
+      const m = u.pathname.match(/^\/api\/jd-images\/(\d+)\/retry$/);
+      if (!m || req.method !== 'POST') return false;
+      const row = db.prepare('SELECT * FROM jd_images WHERE id = ?').get(Number(m[1]));
+      if (!row) return sendJSON(res, 404, { error: '图片不存在' });
+      const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(row.goal_id);
+      if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+      const fpath = path.join(UPLOAD_DIR, row.file);
+      if (!row.file || !fs.existsSync(fpath)) return sendJSON(res, 404, { error: '原图已不在，请重新粘贴上传' });
+      try { db.prepare('DELETE FROM jd_images WHERE id = ?').run(row.id); } catch (e) {}
+      const buf = fs.readFileSync(fpath);
+      const dataUrl = 'data:' + (row.mime || 'image/png') + ';base64,' + buf.toString('base64');
+      return streamJDImage(req, res, g, dataUrl, '');
+    }
+  },
+  {
     method: 'POST',
     pattern: /^\/api\/goals\/(\d+)\/jd-image$/,
     handler: async (req, res, u, ctx) => {
@@ -184,6 +203,15 @@ function extractJSON(text) {
   objs.sort((a, b) => Object.keys(b).length - Object.keys(a).length);
   return objs[0];
 }
+/* 模型压根读不到图时的典型回复（此时不该把没用的原文当资料导入） */
+function looksNoVision(text) {
+  const t = String(text || '');
+  if (/无法(查看|看到|读取|识别|访问|解析)图片|看不到图片|不支持(图片|图像|读图|视觉)|未(收到|提供|附带)图片|没有(收到|看到)图片|cannot (view|see|read|process|access) (the )?(image|picture)|unable to (view|see|read|process)|no image (was )?(provided|attached)/i.test(t)) return true;
+  return false;
+}
+function noVisionError() {
+  return new Error('当前模型不支持读图。请在「设置 → 视觉模型」里配置一个支持图片的模型（opencode 用户可填 opencode-go/deepseek-v4-flash-vision-exp，其他服务商如 qwen-vl-max / gpt-4o / glm-4v-plus），然后点这张图的「重试识别」。');
+}
 /* 提炼结果是否可用：任意关键字段有内容即可 */
 function hasExtract(data) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
@@ -237,16 +265,17 @@ function streamJDImage(req, res, goal, dataUrl, note) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} };
   (async () => {
+    let fname = '', buf = null, mime = '';
     try {
       const m = String(dataUrl || '').match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
       if (!m) throw new Error('图片格式不支持（请粘贴 PNG/JPG/WebP 图片）');
-      const mime = m[1].toLowerCase();
-      const buf = Buffer.from(m[2], 'base64');
+      mime = m[1].toLowerCase();
+      buf = Buffer.from(m[2], 'base64');
       if (!buf.length) throw new Error('图片内容为空');
       if (buf.length > 8 * 1024 * 1024) throw new Error('图片过大（请压缩到 8MB 以内）');
       const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : mime.includes('gif') ? 'gif' : 'jpg';
       fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-      const fname = `jd-${goal.id}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
+      fname = `jd-${goal.id}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
       const fpath = path.join(UPLOAD_DIR, fname);
       fs.writeFileSync(fpath, buf);
       send({ status: '图片已收到，AI 正在识别并提炼信息…', file: fname });
@@ -254,19 +283,23 @@ function streamJDImage(req, res, goal, dataUrl, note) {
       let txt = await aiTextFiles(buildImagePrompt(note), model, [fpath], 300000);
       let data = extractJSON(txt);
       let notice = '';
+      if (looksNoVision(txt)) throw noVisionError();
       if (!hasExtract(data)) {
         console.log('[jdfile] 结构化提炼失败，原始输出前 500 字:', String(txt || '').slice(0, 500).replace(/\n/g, ' '));
         send({ status: '第一次没解析成功，正在重新整理…' });
         try {
           txt = await aiTextFiles(buildImagePrompt(note) + '\n\n【重要】上一次的输出不是合法 JSON。请严格只输出一个 JSON 对象：不要解释文字、不要前后缀、不要多个对象，字符串内不要出现未转义的换行。', model, [fpath], 300000);
+          if (looksNoVision(txt)) throw noVisionError();
           data = extractJSON(txt);
         } catch (e) {
           console.log('[jdfile] 重试失败:', e.message);
+          if (/不支持读图/.test(e.message)) throw e;
         }
       }
       if (!hasExtract(data)) {
         const raw = String(txt || '').trim();
-        console.log('[jdfile] 重试后仍未解析，按原文导入。原始输出前 500 字:', raw.slice(0, 500).replace(/\n/g, ' '));
+        console.log('[jdfile] 重试后仍未解析。原始输出前 500 字:', raw.slice(0, 500).replace(/\n/g, ' '));
+        if (looksNoVision(raw) || raw.length < 40) throw new Error('没能从这张图里提炼出内容：请确认「设置 → 视觉模型」配置的是支持图片的模型，或换一张更清晰的截图后重试。');
         const firstLine = raw.split('\n').map(x => x.trim()).find(Boolean) || '图片资料';
         data = { type: '资料', title: firstLine.slice(0, 40), summary: '', raw_text: raw.slice(0, 4000) };
         notice = '结构化提炼没成功，已按图片原文导入资料库（可重试或换一张更清晰的截图）';
@@ -286,6 +319,10 @@ function streamJDImage(req, res, goal, dataUrl, note) {
       backup();
       send({ done: true, notice, jd: { id: Number(jr.lastInsertRowid), file: fname, title, source_id: sourceId }, extracted: data, goal: getGoal(goal.id), sources: sourcesOf(goal.id) });
     } catch (e) {
+      try {
+        db.prepare('INSERT INTO jd_images (goal_id,file,mime,size,title,extracted,status,error,source_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+          .run(goal.id, fname || '', mime || '', buf ? buf.length : 0, '未识别：' + String(fname || '').slice(0, 40), '', 'failed', e.message, 0, nowISO());
+      } catch (e2) {}
       send({ error: e.message });
     }
     res.end();

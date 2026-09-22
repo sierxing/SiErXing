@@ -133,7 +133,14 @@ CREATE TABLE IF NOT EXISTS sources (
 `);
 ai.init({ getSetting: (k, d) => getSetting(k, d), appDir: APP_DIR });
 function currentModel() { return getSetting('model', '') || ai.config().model || ''; }
-function currentVisionModel() { return getSetting('vision_model', '') || ai.config().visionModel || currentModel(); }
+const DEFAULT_VISION_MODEL = 'opencode-go/deepseek-v4-flash-vision-exp';   // opencode 用户的默认视觉模型（与实习速成一致）
+function currentVisionModel() {
+  const saved = getSetting('vision_model', '') || ai.config().visionModel;
+  if (saved) return saved;
+  // 没配视觉模型时：opencode 走可读图的默认模型，避免用纯文本模型硬读图导致"提炼失败"
+  if (getSetting('ai_provider', 'openai') === 'opencode') return DEFAULT_VISION_MODEL;
+  return currentModel();
+}
 
 const service = createService({ appDir: APP_DIR, port: PORT, log: (...a) => console.log(...a) });
 const update = createUpdate({ appDir: APP_DIR, port: PORT, log: (...a) => console.log(...a) });
@@ -2753,7 +2760,8 @@ async function handleAPI(req, res, u) {
     return sendJSON(res, 200, { provider: r.provider, models: r.models || [], default: r.default || '', error: r.error || '' });
   }
   if (p === '/api/ai/status' && method === 'GET') {
-    return sendJSON(res, 200, { ...ai.status(), env: { base: !!process.env.SIERXING_API_BASE || !!process.env.OPENAI_BASE_URL, key: !!process.env.SIERXING_API_KEY || !!process.env.OPENAI_API_KEY } });
+    // visionModel 返回「实际会用的」视觉模型（含 opencode 默认值），前端据此提示
+    return sendJSON(res, 200, { ...ai.status(), visionModel: currentVisionModel(), visionModelSaved: getSetting('vision_model', '') || '', env: { base: !!process.env.SIERXING_API_BASE || !!process.env.OPENAI_BASE_URL, key: !!process.env.SIERXING_API_KEY || !!process.env.OPENAI_API_KEY } });
   }
   if (p === '/api/ai/test' && method === 'POST') {
     const r = await ai.test();
