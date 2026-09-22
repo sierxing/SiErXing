@@ -15,6 +15,7 @@ try {
 const ai = require('./ai');
 const { loadPlugins, pluginMeta, matchRoute } = require('./plugins');
 const createService = require('./service');
+const createSync = require('./sync');
 
 const APP_DIR = path.resolve(__dirname, '..');
 const DATA_DIR = path.join(APP_DIR, 'data');
@@ -134,6 +135,13 @@ function currentModel() { return getSetting('model', '') || ai.config().model ||
 function currentVisionModel() { return getSetting('vision_model', '') || ai.config().visionModel || currentModel(); }
 
 const service = createService({ appDir: APP_DIR, port: PORT, log: (...a) => console.log(...a) });
+let sync = null;   // 多端同步（在 backup 定义后初始化）
+
+sync = createSync({
+  db, APP_DIR, DATA_DIR, getSetting, setSetting,
+  backup: (...a) => backup(...a),
+  log: (...a) => console.log(...a)
+});
 
 let PLUGINS = [];
 let FILE_PLUGINS = [];   // 来自 server/plugins/*.js 的文件组件
@@ -336,6 +344,7 @@ function setSetting(k, v) {
   db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(k, String(v));
 }
 function backup() {
+  try { if (sync) sync.schedulePush('数据变更'); } catch (e) {}
   try {
     db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
     fs.copyFileSync(DB_PATH, path.join(BACKUP_DIR, `sierxing-${stamp()}.db`));
@@ -2406,6 +2415,33 @@ async function handleAPI(req, res, u) {
     return sendJSON(res, 200, { ok: true, category: effectiveCategory(cid, comp.category) });
   }
 
+  if (p === '/api/sync/status' && method === 'GET') {
+    return sendJSON(res, 200, await sync.status());
+  }
+  if (p === '/api/sync/settings' && method === 'POST') {
+    const body = await readBody(req);
+    const set = (k, v) => { if (v != null) setSetting(k, String(v).trim()); };
+    if (body.repo != null) set('sync_repo', body.repo);
+    if (body.branch != null) set('sync_branch', body.branch || 'main');
+    if (body.user != null) set('sync_user', body.user);
+    if (body.token != null && !/^•+$/.test(String(body.token).trim())) set('sync_token', body.token);
+    if (body.enabled != null) set('sync_enabled', body.enabled ? '1' : '0');
+    if (body.auto_push != null) set('sync_auto_push', body.auto_push ? '1' : '0');
+    if (body.auto_pull != null) set('sync_auto_pull', body.auto_pull ? '1' : '0');
+    if (body.images != null) set('sync_images', body.images ? '1' : '0');
+    return sendJSON(res, 200, { ok: true, status: await sync.status() });
+  }
+  if (p === '/api/sync/test' && method === 'POST') {
+    return sendJSON(res, 200, await sync.test());
+  }
+  if (p === '/api/sync/push' && method === 'POST') {
+    try { return sendJSON(res, 200, await sync.push('手动上传')); }
+    catch (e) { return sendJSON(res, 500, { error: e.message }); }
+  }
+  if (p === '/api/sync/pull' && method === 'POST') {
+    try { return sendJSON(res, 200, await sync.pull()); }
+    catch (e) { return sendJSON(res, 500, { error: e.message }); }
+  }
   if (p === '/api/service/status' && method === 'GET') {
     return sendJSON(res, 200, await service.status());
   }
@@ -2675,6 +2711,16 @@ async function handleAPI(req, res, u) {
 
   if (p === '/api/settings' && method === 'GET') {
     return sendJSON(res, 200, {
+      sync: {
+        enabled: getSetting('sync_enabled', '') === '1',
+        repo: getSetting('sync_repo', ''),
+        branch: getSetting('sync_branch', 'main'),
+        user: getSetting('sync_user', ''),
+        token_set: !!getSetting('sync_token', ''),
+        auto_push: getSetting('sync_auto_push', '1') !== '0',
+        auto_pull: getSetting('sync_auto_pull', '1') !== '0',
+        images: getSetting('sync_images', '1') === '1'
+      },
       model: currentModel(),
       vision_model: getSetting('vision_model', ''),
       ai_provider: getSetting('ai_provider', 'openai'),
@@ -2751,6 +2797,10 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
+  if (sync && getSetting('sync_enabled', '') === '1' && getSetting('sync_auto_pull', '1') !== '0') {
+    sync.pull().then(r => console.log('[sync] 启动拉取:', r.imported ? ('已导入来自 ' + r.device + ' 的数据') : r.message))
+      .catch(e => console.log('[sync] 启动拉取失败:', e.message));
+  }
   console.log(`思而行(SiErXing) started: http://localhost:${PORT}`);
   console.log('数据文件: data/sierxing.db');
   if (process.env.NO_OPEN) return;

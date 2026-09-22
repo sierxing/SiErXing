@@ -64,6 +64,8 @@ function parseRoute() {
   if (dm) return { view: 'diff', id: Number(dm[1]), vid: Number(dm[2]) };
   const m = h.match(/^#\/g\/(\d+)(\/map)?$/);
   if (m) return { view: m[2] ? 'map' : 'goal', id: Number(m[1]) };
+  const gd = h.match(/^#\/guide\/(\d+)$/);
+  if (gd) return { view: 'guide', step: Math.max(1, Math.min(9, Number(gd[1]))) };
   if (h.startsWith('#/settings')) return { view: 'settings' };
   if (h.startsWith('#/components')) return { view: 'components' };
   // 插件页面路由（由前端插件声明）
@@ -159,6 +161,7 @@ async function route() {
     }
     if (r.view === 'home') { setHeader(r); await renderHome(); }
     else if (r.view === 'settings') { setHeader(r); await renderSettings(); }
+    else if (r.view === 'guide') { setHeader(r); await renderHome(); showGuide(r.step - 1); }
     else if (r.view === 'components') { setHeader(r); await renderComponentsPage(); }
     else if (r.view === 'map') { await loadGoal(r.id); setHeader(r); renderMapPage(); }
     else if (r.view === 'diff') { await loadGoal(r.id); setHeader(r); await renderDiffPage(r.vid); }
@@ -2608,6 +2611,29 @@ const GUIDE_STEPS = [
     </ol>`
   },
   {
+    icon: '🔄', title: '多端同步（可选，但很实用）',
+    visual: `<div class="gmSync">
+      <div class="gmSyncRow" style="--d:.05s"><span class="gmSyncIcon">💻</span><span class="gmSyncName">电脑 A</span><span class="gmSyncArrow">⬆</span><span class="gmSyncRepo">你的 Git 仓库</span><span class="gmSyncArrow">⬇</span><span class="gmSyncName">电脑 B</span></div>
+      <div class="gmSyncFile" style="--d:.5s">📄 sierxing-sync.json（数据快照，不含密钥）</div>
+      <div class="gmSyncFlow" style="--d:.9s"><span>改动后自动上传</span><span>·</span><span>打开时自动拉取</span><span>·</span><span>冲突以最后保存为准</span></div>
+    </div>
+    <div class="gmCaption">填一个你自己的 Git 仓库地址即可，多台设备自动同步</div>`,
+    html: `<p class="gdP">想让家里/公司两台电脑的数据自动同步？把<b>你自己的 Git 仓库</b>填进来就行（建议用私有仓库）：</p>
+      <div class="gdSyncForm" id="gdSyncForm">
+        <input id="gdSyncRepo" placeholder="仓库地址，如 https://atomgit.com/你的用户名/sierxing-data.git">
+        <div class="gdSyncRow2">
+          <input id="gdSyncUser" placeholder="用户名（可选，默认 oauth2）">
+          <input id="gdSyncToken" type="password" placeholder="密码 / 访问令牌（私有仓库需要）">
+        </div>
+        <div class="toolbarRow">
+          <button class="btn primary" id="gdSyncBtn">启用同步并上传当前数据</button>
+          <span class="hint" id="gdSyncMsg"></span>
+        </div>
+      </div>
+      <div class="gdNote">· 只同步数据快照（目标/任务/来源/教程/作答记录…），<b>AI 密钥、同步令牌等敏感信息不会同步</b><br>
+      · 同步令牌只保存在本机；也可稍后在「设置 → 多端同步」里修改或关闭</div>`
+  },
+  {
     icon: '⌨️', title: '界面导航与数据',
     visual: `<div class="gmNav">
       <div class="gmNavRail">
@@ -2696,6 +2722,30 @@ function drawGuide() {
   const setup = mask.querySelector('#gdSetup');
   if (setup) setup.addEventListener('click', () => { closeGuide(true); go('#/settings'); });
   mask.querySelectorAll('[data-gd]').forEach(d => d.addEventListener('click', () => { state.guideStep = Number(d.getAttribute('data-gd')); drawGuide(); }));
+  const gdBtn = mask.querySelector('#gdSyncBtn');
+  if (gdBtn) gdBtn.addEventListener('click', async () => {
+    const repo = (mask.querySelector('#gdSyncRepo').value || '').trim();
+    const user = (mask.querySelector('#gdSyncUser').value || '').trim();
+    const token = (mask.querySelector('#gdSyncToken').value || '').trim();
+    const msg = mask.querySelector('#gdSyncMsg');
+    if (!repo) { msg.textContent = '请先填写仓库地址'; msg.style.color = 'var(--warn)'; return; }
+    gdBtn.disabled = true; gdBtn.textContent = '配置中…'; msg.textContent = '';
+    try {
+      await api('/api/sync/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: true, repo, user, token, auto_push: true, auto_pull: true, images: true }) });
+      const t = await api('/api/sync/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (!t.ok) throw new Error(t.message || '仓库无法访问');
+      const r = await api('/api/sync/push', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const c = r.counts || {};
+      msg.textContent = '✅ 同步已开启并上传成功（' + (c.goals || 0) + ' 个目标）';
+      msg.style.color = 'var(--ok)';
+      toast('多端同步已开启');
+    } catch (e) {
+      msg.textContent = '❌ ' + e.message;
+      msg.style.color = 'var(--danger)';
+    } finally {
+      gdBtn.disabled = false; gdBtn.textContent = '启用同步并上传当前数据';
+    }
+  });
   mask.addEventListener('click', e => { if (e.target === mask) closeGuide(mask.querySelector('#gdNoShow').checked); });
 }
 
@@ -2992,6 +3042,114 @@ function bindServiceSection() {
   });
 }
 
+/* ============ 设置页：多端同步 ============ */
+function syncSwitch(id, on, title) {
+  return `<label class="cmpSwitch" title="${esc(title || '')}"><input type="checkbox" id="${id}" ${on ? 'checked' : ''}><span class="cmpSlider"></span></label>`;
+}
+async function syncSectionHTML() {
+  let st = {};
+  try { st = await api('/api/sync/status'); } catch (e) { st = {}; }
+  state.syncStatus = st;
+  const snap = st.snapshot;
+  return `<div class="sec">
+      <div class="secTitle">多端同步（Git 仓库）</div>
+      <p class="hint" style="line-height:1.85;">
+        把数据快照提交到<b>你自己的 Git 仓库</b>（建议私有仓库），实现多台设备同步：<b>改动后自动上传</b>、<b>启动时自动拉取</b>。<br>
+        · 密钥类信息（AI API Key、同步令牌、LeetCode 登录态）<b>不会</b>被同步<br>
+        · 冲突策略：以最后保存的设备为准（个人多设备场景足够用）<br>
+        · 本机工作副本：<code>data/sync/</code>（已在 .gitignore 中）
+      </p>
+      <div class="svcRow"><span class="svcLabel">启用同步</span>${syncSwitch('syncEnabled', st.enabled, '开启后才会自动上传/拉取')}
+        <span class="svcVal">${st.enabled ? '已启用' : '未启用'}</span>
+        <div class="spacer"></div>
+        <span class="svcVal">${st.hasGit ? '✓ 检测到 git' : '⚠ 未检测到 git 命令'}</span>
+      </div>
+      <div class="field"><label>仓库地址</label>
+        <input id="syncRepo" value="${esc(st.repo || '')}" placeholder="https://atomgit.com/你的用户名/sierxing-data.git">
+      </div>
+      <div class="grid2">
+        <div class="field"><label>分支</label><input id="syncBranch" value="${esc(st.branch || 'main')}" placeholder="main"></div>
+        <div class="field"><label>用户名（可选）</label><input id="syncUser" value="${esc((state.settingsSyncUser) || '')}" placeholder="oauth2 或你的账号"></div>
+      </div>
+      <div class="field"><label>密码 / 访问令牌（私有仓库需要）</label>
+        <input type="password" id="syncToken" value="${st.hasToken ? '••••••••' : ''}" placeholder="${st.hasToken ? '已保存（留空则不修改）' : '粘贴访问令牌'}">
+      </div>
+      <div class="svcRow"><span class="svcLabel">自动上传</span>${syncSwitch('syncAutoPush', st.autoPush, '数据变化后 20 秒自动提交并推送')}</div>
+      <div class="svcRow"><span class="svcLabel">启动时拉取</span>${syncSwitch('syncAutoPull', st.autoPull, '每次打开程序时从仓库拉取最新数据')}</div>
+      <div class="svcRow"><span class="svcLabel">同步图片</span>${syncSwitch('syncImages', st.images, '把上传的图片（JD 等）也一起同步')}</div>
+      <div class="toolbarRow" style="margin-top:12px;">
+        <button class="btn primary" id="syncSave">保存并测试连接</button>
+        <button class="btn" id="syncPush">⬆ 立即上传</button>
+        <button class="btn" id="syncPull">⬇ 立即拉取</button>
+      </div>
+      <div id="syncBox" class="hint" style="margin-top:10px; line-height:1.85;">
+        ${snap ? `仓库里最新快照：${esc(fmtDate(snap.savedAt))} · 来自 ${esc(snap.device || '')} · ${snap.counts && snap.counts.goals || 0} 个目标<br>` : ''}
+        ${st.lastAt ? `上次同步：${esc(fmtDate(st.lastAt))} · ${esc(st.lastStatus || '')}` : '还没有同步记录'}
+        ${st.cloned ? `<br>本地副本：${esc(st.commit || '')} · ${esc(st.workState || '')}` : ''}
+      </div>
+    </div>`;
+}
+function bindSyncSection() {
+  const box = document.getElementById('syncBox');
+  const collect = () => ({
+    enabled: (document.getElementById('syncEnabled') || {}).checked,
+    repo: (document.getElementById('syncRepo') || {}).value || '',
+    branch: (document.getElementById('syncBranch') || {}).value || 'main',
+    user: (document.getElementById('syncUser') || {}).value || '',
+    token: (document.getElementById('syncToken') || {}).value || '',
+    auto_push: (document.getElementById('syncAutoPush') || {}).checked,
+    auto_pull: (document.getElementById('syncAutoPull') || {}).checked,
+    images: (document.getElementById('syncImages') || {}).checked
+  });
+  const save = async () => {
+    const r = await api('/api/sync/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(collect()) });
+    state.syncStatus = r.status;
+    return r.status;
+  };
+  const sv = document.getElementById('syncSave');
+  if (sv) sv.addEventListener('click', async () => {
+    sv.disabled = true; sv.textContent = '保存中…';
+    try {
+      await save();
+      const t = await api('/api/sync/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (box) box.innerHTML = t.ok
+        ? '✅ 已保存，仓库可访问' + (t.branches && t.branches.length ? '（分支：' + esc(t.branches.join('、')) + '）' : '（仓库还是空的，点「立即上传」创建首个快照）')
+        : '❌ 已保存，但连接失败：' + esc(t.message || '');
+      toast(t.ok ? '同步已保存' : '已保存，但连接失败');
+      renderSettings();
+    } catch (e) { toast(e.message); if (box) box.innerHTML = '❌ ' + esc(e.message); }
+    finally { sv.disabled = false; sv.textContent = '保存并测试连接'; }
+  });
+  const sp = document.getElementById('syncPush');
+  if (sp) sp.addEventListener('click', async () => {
+    sp.disabled = true; sp.textContent = '上传中…';
+    if (box) box.innerHTML = '正在导出并推送到仓库…';
+    try {
+      await save();
+      const r = await api('/api/sync/push', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const c = r.counts || {};
+      if (box) box.innerHTML = '✅ 上传成功 · ' + (c.goals || 0) + ' 个目标 / ' + (c.nodes || 0) + ' 个节点';
+      toast('已上传到同步仓库');
+    } catch (e) { toast('上传失败：' + e.message); if (box) box.innerHTML = '❌ 上传失败：' + esc(e.message); }
+    finally { sp.disabled = false; sp.textContent = '⬆ 立即上传'; }
+  });
+  const pl = document.getElementById('syncPull');
+  if (pl) pl.addEventListener('click', async () => {
+    pl.disabled = true; pl.textContent = '拉取中…';
+    if (box) box.innerHTML = '正在从仓库拉取…';
+    try {
+      await save();
+      const r = await api('/api/sync/pull', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (box) box.innerHTML = r.imported
+        ? '✅ 已导入来自 ' + esc(r.device || '其它设备') + ' 的数据（' + ((r.counts || {}).goals || 0) + ' 个目标），页面即将刷新…'
+        : 'ℹ ' + esc(r.message || '已是最新');
+      toast(r.imported ? '已导入最新数据' : (r.message || '已是最新'));
+      if (r.imported) setTimeout(() => location.reload(), 1200);
+    } catch (e) { toast('拉取失败：' + e.message); if (box) box.innerHTML = '❌ 拉取失败：' + esc(e.message); }
+    finally { pl.disabled = false; pl.textContent = '⬇ 立即拉取'; }
+  });
+}
+
 async function renderSettings() {
   app.innerHTML = '<p class="muted">加载中…</p>';
   const [modelsRes, s, st] = await Promise.all([
@@ -3065,6 +3223,7 @@ async function renderSettings() {
       ${modelsRes.error ? `<p class="hint" style="color:var(--warn); margin-top:6px;">模型列表：${esc(modelsRes.error)}（可手动填写模型名）</p>` : ''}
     </div>
     ${await serviceSectionHTML()}
+    ${await syncSectionHTML()}
     <div class="sec">
       <div class="secTitle">数据安全</div>
       <div class="toolbarRow">
@@ -3147,6 +3306,7 @@ async function renderSettings() {
     renderSettings();
   });
   bindServiceSection();
+  bindSyncSection();
   const sgb = document.getElementById('showGuideBtn');
   if (sgb) sgb.addEventListener('click', () => showGuide(0));
   document.getElementById('backupNow').addEventListener('click', async () => {
