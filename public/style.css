@@ -1412,3 +1412,20 @@ body.railWide .mapPage{left:236px;}
 /* 图片资料：识别失败的提示与重试 */
 .jdFail{margin-top:8px; font-size:12.5px; line-height:1.7; color:var(--text); background:rgba(217,119,6,.09); border:1px solid rgba(217,119,6,.32); border-radius:9px; padding:8px 11px; word-break:break-word;}
 .jdOps{display:flex; align-items:center; gap:9px; margin-top:8px; flex-wrap:wrap;}
+
+/* ============ 资料提炼汇总（多篇 MD） ============ */
+.spDigests{margin-top:10px; border-top:1px solid var(--border); padding-top:10px;}
+.spDigestsHead{display:flex; align-items:center; font-size:12.5px; font-weight:700; margin-bottom:6px; gap:8px;}
+.spDigest{border:1px solid var(--border); border-radius:10px; margin-top:6px; background:var(--bg); overflow:hidden;}
+.spDigest summary{cursor:pointer; padding:8px 11px; font-size:12.8px; font-weight:600; list-style:none;}
+.spDigest summary::-webkit-details-marker{display:none;}
+.spDigest summary:before{content:'▸ '; color:var(--muted);}
+.spDigest[open] summary:before{content:'▾ ';}
+.spDigestBody{padding:2px 12px 10px; font-size:13px; max-height:420px; overflow:auto; border-top:1px solid var(--border);}
+.spDigestOps{display:flex; align-items:center; gap:8px; padding:6px 11px 9px; border-top:1px dashed var(--border);}
+
+/* 节点面板：资料单独管理 */
+.npSrcAdd{display:flex; gap:6px; align-items:center; margin-top:8px; flex-wrap:wrap;}
+.npSrcAdd select{flex:1; min-width:150px; border:1px solid var(--border); background:var(--card); color:var(--text); border-radius:8px; padding:5px 8px; font-size:12px; font-family:inherit;}
+.npSrc{position:relative;}
+.npSrc .npsrcDel{position:absolute; right:0; top:0;}

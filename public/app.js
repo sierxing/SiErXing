@@ -308,12 +308,14 @@ function go(hash) { if (location.hash === hash) route(); else location.hash = ha
 
 /* ============ 目标详情 ============ */
 async function loadGoal(id) {
-  const [{ goal }, { sources }] = await Promise.all([
+  const [{ goal }, { sources }, digestsRes] = await Promise.all([
     api('/api/goals/' + id),
-    api('/api/goals/' + id + '/sources')
+    api('/api/goals/' + id + '/sources'),
+    api('/api/goals/' + id + '/digests').catch(() => ({ digests: [] }))
   ]);
   state.goal = goal;
   state.sources = sources || [];
+  state.digests = (digestsRes && digestsRes.digests) || [];
 }
 function buildTree(nodes) {
   const byId = {};
@@ -647,6 +649,39 @@ function showNodePanel(id, rerender) {
       <button class="btn small danger" id="npDel">删除</button>
     </div>`;
   document.body.appendChild(div);
+  const saveNodeSources = async list => {
+    try {
+      const r = await api('/api/nodes/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sources: list }) });
+      state.goal = r.goal;
+      toast('已更新本节点资料');
+      showNodePanel(id, rerenderFn);
+    } catch (e) { toast(e.message); }
+  };
+  div.querySelectorAll('[data-npsrc-del]').forEach(b => b.addEventListener('click', () => {
+    const i = Number(b.getAttribute('data-npsrc-del'));
+    saveNodeSources(safeParse(n.sources, []).filter((x, k) => k !== i));
+  }));
+  const npAdd = div.querySelector('#npSrcAdd');
+  if (npAdd) npAdd.addEventListener('click', () => {
+    const sel = div.querySelector('#npSrcPick');
+    const sid = sel && sel.value ? Number(sel.value) : 0;
+    if (!sid) return toast('资料库还是空的：先收集信息源或上传图片资料');
+    const src = (state.sources || []).find(x => Number(x.id) === sid);
+    if (!src) return toast('没找到这条资料');
+    const list = safeParse(n.sources, []).slice();
+    if (list.some(x => Number(x.source_id) === sid)) return toast('这条资料已经在本节点了');
+    list.push({ source_id: sid, name: String(src.title).slice(0, 120) });
+    saveNodeSources(list);
+  });
+  const npNew = div.querySelector('#npSrcNew');
+  if (npNew) npNew.addEventListener('click', () => {
+    const name = prompt('资料名称（例如：某厂 JD / 某课程大纲）');
+    if (!name || !name.trim()) return;
+    const note = prompt('补充说明（可选）：这条资料里有什么要求或结论？') || '';
+    const list = safeParse(n.sources, []).slice();
+    list.push({ name: name.trim().slice(0, 120), note: note.trim().slice(0, 300) });
+    saveNodeSources(list);
+  });
   document.getElementById('npClose').addEventListener('click', () => div.remove());
   const tutBtn = document.getElementById('npTutBtn');
   if (tutBtn) tutBtn.addEventListener('click', () => { div.remove(); showTutorialDialog(id); });
@@ -2175,16 +2210,27 @@ function sourceItemHTML(s) {
 }
 function srcPanelHTML() {
   const list = state.sources || [];
+  const digests = state.digests || [];
   let h = `<div class="srcPanel">
     <div class="spHead">
       <span class="spTitle">信息源</span><span class="spCount">${list.length}</span>
       <span class="spHint">大厂 JD · 牛客 · BOSS直聘 · 知乎等真实资料，规划时优先依据</span>
       <div class="spacer"></div>
-      <button class="btn small" id="collectBtn">${list.length ? '重新收集' : '收集信息源'}</button>
-    </div>`;
+        <button class="btn small" id="collectBtn">${list.length ? '重新收集' : '收集信息源'}</button>
+        <button class="btn small primary" id="digestBtn" title="让 AI 通读全部资料（含你上传的图片资料），提炼成多篇主题汇总，规划时优先依据">🧠 ${digests.length ? '重新提炼' : '信息提炼'}</button>
+      </div>`;
   if (state.collecting) {
       h += `<div class="spProgress"><span class="spinner"></span><span id="spStatus">${esc(state.collectStatus || '正在检索…')}</span><div class="spacer"></div><button class="btn tiny" id="collectStop" title="停止本次收集（已收集到的会保留）">⏹ 停止</button></div>`;
   }
+    if (state.digesting) {
+      const dp = state.digestProgress || {};
+      h += `<div class="spProgress"><span class="spinner"></span><span id="spStatus">${esc(state.digestStatus || '正在通读资料…')}</span>${dp.total ? `<span class="muted" style="font-size:11.5px;">（${dp.done || 0}/${dp.total} 批）</span>` : ''}<div class="spacer"></div><button class="btn tiny" id="digestStop" title="停止提炼">⏹ 停止</button></div>`;
+    }
+    if (digests.length) {
+      h += `<div class="spDigests"><div class="spDigestsHead">📄 提炼汇总（${digests.length} 篇 · 规划优先依据）<div class="spacer"></div><a class="btn tiny" href="/api/goals/${(state.goal || {}).id}/digests/export" download>⬇ 下载全部 MD</a></div>`
+        + digests.map(d => `<details class="spDigest"><summary>${esc(d.title || d.topic)}</summary><div class="spDigestBody mdBody">${mdToHTML(d.content || '')}</div><div class="spDigestOps"><span class="muted" style="font-size:11.5px;">依据 ${d.sources_count || 0} 条资料 · ${esc(fmtDate(d.created_at))}</span><div class="spacer"></div><button class="btn tiny danger" data-digest-del="${d.id}">删除</button></div></details>`).join('')
+        + `</div>`;
+    }
   if (list.length) {
     h += `<details class="spDetails"><summary>查看来源列表（${list.length} 条）</summary><div class="spList">${list.map(sourceItemHTML).join('')}</div></details>`;
   } else if (!state.collecting) {
@@ -2192,6 +2238,53 @@ function srcPanelHTML() {
   }
   h += '</div>';
   return h;
+}
+/* 信息提炼：让 AI 通读全部资料（含图片资料）→ 提炼成多篇主题 MD 汇总 → 规划优先依据 */
+async function startDigest(id) {
+  if (state.digesting) return;
+  if (!(await ensureAIConfigured())) return;
+  if (!(state.sources || []).length) { toast('还没有资料：先「收集信息源」或上传图片资料'); return; }
+  if (!confirm('让 AI 通读全部 ' + (state.sources || []).length + ' 条资料并提炼成多篇主题汇总？\n\n资料多时可能需要几分钟（可随时点停止），提炼结果会用于后续规划。')) return;
+  state.digesting = true;
+  state.digestStatus = '正在通读资料…';
+  state.digestProgress = null;
+  state.digestAbort = new AbortController();
+  renderGoal();
+  try {
+    const resp = await fetch('/api/goals/' + id + '/sources/digest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: state.digestAbort.signal });
+    if (!resp.ok || !resp.body) throw new Error('无法连接提炼服务');
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '', done = false;
+    while (true) {
+      const { done: d0, value } = await reader.read();
+      if (d0) break;
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split('\n\n');
+      buf = parts.pop();
+      for (const part of parts) {
+        const line = part.split('\n').find(l => l.startsWith('data: '));
+        if (!line) continue;
+        let d;
+        try { d = JSON.parse(line.slice(6)); } catch (e) { continue; }
+        if (d.status) { state.digestStatus = d.status; const el = document.getElementById('spStatus'); if (el) el.textContent = d.status; }
+        if (d.progress) { state.digestProgress = d.progress; }
+        if (d.done) { done = true; state.digests = d.digests || []; toast('提炼完成：' + d.count + ' 篇主题汇总（规划会优先依据）'); }
+        if (d.cancelled) { done = true; toast(d.status || '已停止提炼'); }
+        if (d.error) { done = true; toast(d.error); }
+      }
+    }
+    if (!done) toast('提炼中断，可重试');
+  } catch (e) {
+    if (e && e.name !== 'AbortError') toast(e.message);
+  } finally {
+    state.digesting = false;
+    state.digestStatus = '';
+    state.digestProgress = null;
+    state.digestAbort = null;
+    try { await loadGoal(id); } catch (e) {}
+    renderGoal();
+  }
 }
 async function startCollect(id) {
   if (typeof compOn === 'function' && !compOn('sources')) { toast('「信息源检索」组件已关闭：左侧栏 → 🧩 组件 可开启'); return; }
@@ -2405,6 +2498,17 @@ function renderGoal() {
   if (cb) cb.addEventListener('click', () => startCollect(g.id));
   const cs = document.getElementById('collectStop');
   if (cs) cs.addEventListener('click', () => { if (state.collectAbort) state.collectAbort.abort(); });
+  const db2 = document.getElementById('digestBtn');
+  if (db2) db2.addEventListener('click', () => startDigest(g.id));
+  const ds = document.getElementById('digestStop');
+  if (ds) ds.addEventListener('click', () => { if (state.digestAbort) state.digestAbort.abort(); });
+  app.querySelectorAll('[data-digest-del]').forEach(b => b.addEventListener('click', async () => {
+    if (!confirm('删除这篇提炼汇总？')) return;
+    try { await api('/api/digests/' + b.getAttribute('data-digest-del'), { method: 'DELETE' });
+      state.digests = (state.digests || []).filter(x => String(x.id) !== String(b.getAttribute('data-digest-del')));
+      toast('已删除'); renderGoal();
+    } catch (e) { toast(e.message); }
+  }));
   if (state.planning || state.collecting) {
     planBtnEl.disabled = true;
     if (cb) cb.disabled = true;

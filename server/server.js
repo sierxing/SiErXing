@@ -799,12 +799,156 @@ function clientSignal(req) {
   try { req.on('close', () => { try { ac.abort(); } catch (e) {} }); } catch (e) {}
   return ac.signal;
 }
+/* 资料提炼汇总（把全部资料交给 AI 提炼成多篇主题 MD，规划时优先依据） */
+db.exec(`CREATE TABLE IF NOT EXISTS source_digests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  goal_id INTEGER NOT NULL,
+  topic TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL DEFAULT '',
+  content TEXT NOT NULL DEFAULT '',
+  sources_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);`);
+function digestsOf(goalId) {
+  return db.prepare('SELECT * FROM source_digests WHERE goal_id = ? ORDER BY id').all(goalId);
+}
 function sourcesOf(goalId) {
   // 用户自己提供的图片资料（JD / 大纲 / 笔记…）排在最前，其次才是检索到的网络信息源
   return db.prepare("SELECT * FROM sources WHERE goal_id = ? ORDER BY CASE WHEN site = '用户提供的图片' OR kind = 'JD' THEN 0 ELSE 1 END, id").all(goalId);
 }
 
 /* ===== AI 规划 ===== */
+/* ---------- 资料提炼：把全部资料分批喂给 AI，再汇总成多篇主题 MD ---------- */
+function digestBatches(goal) {
+  const all = sourcesOf(goal.id);
+  const own = all.filter(x => x.site === '用户提供的图片' || x.site === '导入的资料');
+  const net = all.filter(x => !(x.site === '用户提供的图片' || x.site === '导入的资料'));
+  // 用户自己提供的资料全文（最多 4000 字/条）；网络资料 900 字/条
+  const items = own.map(x => ({ label: `[用户资料｜${x.kind}] ${x.title}`, body: String(x.content || x.snippet || '').slice(0, 4000) }))
+    .concat(net.map(x => ({ label: `[${x.site}｜${x.kind}] ${x.title}`, body: String(x.content || x.snippet || '').slice(0, 900) })));
+  const batches = [];
+  let cur = [], curLen = 0;
+  const LIMIT = 12000;
+  for (const it of items) {
+    const len = it.label.length + it.body.length + 8;
+    if (cur.length && curLen + len > LIMIT) { batches.push(cur); cur = []; curLen = 0; }
+    cur.push(it); curLen += len;
+  }
+  if (cur.length) batches.push(cur);
+  return { batches, ownCount: own.length, netCount: net.length, total: items.length };
+}
+function digestBatchPrompt(batch, idx, total) {
+  const lines = [];
+  lines.push(`你是资料提炼助手。下面是用户目标的资料（第 ${idx}/${total} 批）。`);
+  lines.push('请把其中**对目标规划有价值的信息完整提取出来，宁多勿漏**：');
+  lines.push('- tech：技术栈、技能、框架、语言、工具（逐条列出，保留原文的具体名词与限定词）');
+  lines.push('- hard：硬性条件（学历 / 年限 / 到岗天数 / 证书 / 前置知识 / 地点等）');
+  lines.push('- duties：职责与工作内容、项目类型、业务方向');
+  lines.push('- roadmap：学习路线、知识体系、章节模块与顺序');
+  lines.push('- interview：面试重点、高频考点、面经结论');
+  lines.push('- resources：书 / 课程 / 网站 / 工具 / 证书等具体资源名');
+  lines.push('- timeline：时间节点、流程（投递 / 面试轮次 / 截止时间）');
+  lines.push('- other：其它对规划有用的结论');
+  lines.push('只输出一个 JSON 对象，键为上面这些英文名，值为字符串数组；不要遗漏具体名词。');
+  lines.push('');
+  lines.push('【资料开始】');
+  for (const it of batch) { lines.push('## ' + it.label); lines.push(it.body); }
+  lines.push('【资料结束】');
+  return lines.join('\n');
+}
+function digestSynthesisPrompt(parts, meta) {
+  const lines = [];
+  lines.push('下面是同一目标的资料提炼结果（多批汇总，来自用户提供的图片资料与网络检索资料）。');
+  lines.push(`共处理 ${meta.total} 条资料（用户自己提供 ${meta.ownCount} 条、网络检索 ${meta.netCount} 条）。`);
+  lines.push('请整理成若干篇「主题汇总」Markdown 文档，用于指导后续的目标规划。');
+  lines.push('');
+  lines.push('【要求】');
+  lines.push('1. 按主题拆分（例如：岗位要求与技术栈 / 学习路线与知识体系 / 面试重点与高频考点 / 项目与作品 / 硬性条件与时间安排 / 资源与工具 …），篇数按内容多少决定（3-8 篇），不要硬凑。');
+  lines.push('2. 内容要具体、可执行：保留具体技术名 / 工具名 / 公司 / 证书 / 书名 / 课程名；合并去重；对出现频次高的（更重要的）要求标注「高频」或按重要性排序。');
+  lines.push('3. 技术栈那一篇要**逐项列全**，并标注每项在资料里体现的要求程度（必须掌握 / 加分项 / 了解即可）。');
+  lines.push('4. 只输出一个 JSON 对象：{"digests":[{"topic":"主题","title":"标题","content_md":"# 标题\n\n正文…"}]}');
+  lines.push('5. content_md 用 Markdown（列表 / 表格都行），每篇 400-1500 字，不要写空话。');
+  lines.push('');
+  lines.push('【各批提炼结果】');
+  for (const p of parts) lines.push('### 第 ' + p.idx + ' 批\n' + JSON.stringify(p.data));
+  return lines.join('\n');
+}
+function digestsBlock(goal) {
+  const list = digestsOf(goal.id);
+  if (!list.length) return '';
+  const lines = ['', '【资料提炼汇总（已通读用户全部资料后整理，规划必须以此为主要依据，优先级高于下面的原始资料）】'];
+  for (const d of list) {
+    lines.push('');
+    lines.push('### ' + (d.title || d.topic));
+    lines.push(String(d.content || '').slice(0, 4000));
+  }
+  return lines.join('\n');
+}
+/* ---------- 节点级资料：每个节点有自己的资料，做节点级规划时只看这一份 ---------- */
+/* 把 AI 写的依据名（可能带前缀/类型）匹配到资料库里的真实条目 */
+function findSourceByRef(goalId, rawName) {
+  const strip = t => String(t || '')
+    .replace(/^\[[^\]]*\]\s*/, '')
+    .replace(/^(用户自己提供的资料|用户提供的资料|用户资料|导入的资料)[｜|:：]?\s*/, '')
+    .trim();
+  const cands = [];
+  const push = t => { const v = String(t || '').trim(); if (v.length >= 4 && !cands.includes(v)) cands.push(v); };
+  push(rawName); push(strip(rawName));
+  for (const c of cands.slice()) {
+    const m = c.match(/^(JD|大纲|教材|笔记|表格|文章|资料)[：:]\s*(.+)$/);
+    if (m) push(m[2]);
+  }
+  for (const c of cands) {
+    for (const len of [24, 16, 12, 8]) {
+      const key = c.slice(0, len);
+      try {
+        const hit = db.prepare('SELECT * FROM sources WHERE goal_id = ? AND title LIKE ? ORDER BY id LIMIT 1').get(goalId, '%' + key + '%');
+        if (hit) return hit;
+      } catch (e) {}
+    }
+  }
+  return null;
+}
+function nodeSourceItems(goal, node) {
+  let list = node && node.sources;
+  if (typeof list === 'string') { try { list = JSON.parse(list) || []; } catch (e) { list = []; } }
+  if (!Array.isArray(list)) list = [];
+  const out = [];
+  for (const it of list) {
+    if (!it) continue;
+    // 1) 明确关联到资料库某条（节点面板里选的）
+    const sid = Number((it.source_id || it.id) || 0);
+    if (sid) {
+      const src = db.prepare('SELECT * FROM sources WHERE id = ?').get(sid);
+      if (src) { out.push({ label: `[${src.site}｜${src.kind}] ${src.title}`, body: String(src.content || src.snippet || '') }); continue; }
+    }
+    const name = String(it.name || it.title || '').trim();
+    if (!name) continue;
+    // 2) AI 写的依据：按标题在资料库里找对应正文（名字常带「用户提供的资料｜」这类前缀，逐级放宽匹配）
+    const src = findSourceByRef(goal.id, name);
+    if (src) out.push({ label: `[${src.site}｜${src.kind}] ${src.title}`, body: String(src.content || src.snippet || '') });
+    else out.push({ label: name, body: String(it.note || '') });
+  }
+  return out;
+}
+function nodeSourcesBlock(goal, node, maxLen) {
+  const items = nodeSourceItems(goal, node);
+  if (!items.length) return '';
+  const lines = ['', '【本节点对应的资料（只依据这些做本节点的规划/拆分/教程，不要去读其它节点的资料）】'];
+  for (const it of items.slice(0, 12)) {
+    const body = String(it.body || '').replace(/\s+/g, ' ').slice(0, maxLen || 900);
+    lines.push('- ' + it.label + (body ? '：' + body : ''));
+  }
+  return lines.join('\n');
+}
+/* 其它资料的索引（只给标题，避免把全部正文塞进节点级提示词） */
+function sourcesIndexBlock(goal, maxTitles) {
+  const all = sourcesOf(goal.id);
+  if (!all.length) return '';
+  const lines = ['', '【资料库其它条目（仅索引，未展开正文；如本节点确实需要，可在资料标题里点明）】'];
+  for (const x of all.slice(0, maxTitles || 20)) lines.push('- [' + x.site + '｜' + x.kind + '] ' + x.title);
+  return lines.join('\n');
+}
 function sourcesBlock(goal, maxItems, maxLen) {
   const all = sourcesOf(goal.id);
   if (!all.length) return '\n【注意】本次没有检索到网络信息源，请仅依据公开公认的岗位要求与学习路径规划，并在 sources 中注明依据，不确定处标注「待核实」。';
@@ -849,6 +993,7 @@ function buildClarifyPrompt(goal) {
   lines.push('问卷质量直接决定规划是否贴合用户——宁可多问，也不要凭假设规划。');
   lines.push('');
   lines.push(goalHeader(goal));
+  lines.push(digestsBlock(goal));
   lines.push(sourcesBlock(goal, 30, 180));
   lines.push('');
   lines.push('【问卷要求】生成 10-14 道题，按下面 6 个板块组织（每题带 section 字段）：');
@@ -1086,24 +1231,29 @@ function buildSkeletonPrompt(goal) {
   lines.push(goalHeader(goal));
   lines.push(goalQaBlock(goal));
   lines.push(constraintsBlock(goal));
+  lines.push(digestsBlock(goal));
   lines.push(sourcesBlock(goal, 36, 170));
   lines.push(askBlock(round, '路径骨架'));
   lines.push('');
   lines.push('【要求】');
   lines.push('0. 【最重要】起点必须严格匹配问卷反映的真实水平：自测答对/自述已掌握的内容不要重复安排基础内容；自测答错或自述薄弱的环节必须补足基础。节奏要贴合用户每周可投入时间与期限。');
-  lines.push('1. 阶段数量按目标规模与期限自行判断，不要凑数也不要硬挤：');
+  lines.push('1. 【覆盖度优先】先在心里列出资料里出现的**全部技术栈 / 能力项**（含硬性条件），再确保每一项都能落到某个阶段或小目标上；');
+  lines.push('   **宁可多一个阶段，也不要为了「阶段少」而省去内容**（阶段上限放宽到 12 个）。');
+  lines.push('2. 阶段数量按目标规模与期限自行判断，不要凑数也不要硬挤：');
   lines.push('   · 小而聚焦的目标（单一技能、1 个月内）：3-4 个阶段；');
   lines.push('   · 中等目标（求职转型、3-6 个月）：5-6 个阶段；');
-  lines.push('   · 跨度大 / 多线并行（补基础 + 做项目 + 求职 + 长期习惯）：6-8 个阶段，最多不超过 9 个；');
+  lines.push('   · 跨度大 / 多线并行（补基础 + 做项目 + 求职 + 长期习惯）：6-9 个阶段，资料要求多时最多 12 个；');
   lines.push('   · 从当前起点按能力/成果递进，最后一个阶段必须是「求职落地 / 投递面试 / 成果验收」这类收口阶段；');
   lines.push('   · 判断标准：每个阶段应是「一个能独立验收的能力台阶」，太大就拆、太小就合并。');
-  lines.push('2. 每个阶段 3-5 个小目标（不超过 6 个）：小目标同样要「能独立验收」，能力或成果导向（如「掌握 X」「完成 Y 作品」）。');
-  lines.push('3. 每个节点 detail 写 60-120 字：说明要达成什么、为什么这样安排。');
-  lines.push('4. 每个节点 sources 给 1-3 条依据：name 必须写明实际来源（站点名+标题要点），note 写依据了什么要求/结论。');
-  lines.push('5. 路径必须匹配用户现状（零基础从基础开始，有基础则跳过）；顺序体现「真实工作中最看重什么」。');
-  lines.push('6. 只输出一个 JSON 对象（不要其他文字或代码块标记），量控制在 12000 字符内（阶段多时 detail 可适当精简到 40-80 字）：');
-  lines.push('{"summary":"总体思路（120字内）","stages":[{"title":"阶段名","detail":"说明","sources":[{"name":"","note":""}],"goals":[{"title":"小目标","detail":"说明","sources":[{"name":"","note":""}]}]}]}');
-  lines.push('7. 若按上面的「关键机制」需要先提问，则只输出 {"analysis":"你的分析","questions":[...]}，不要输出 stages。');
+  lines.push('3. 每个阶段的小目标数量**按该阶段要覆盖的知识点决定**，不要为了少而合并掉内容：');
+  lines.push('   · 每个知识点 / 技术点 / 硬性条件都应能落到某个小目标上；一般 5-8 个，内容多的阶段可到 12 个（不超过 12 个）；');
+  lines.push('   · 小目标要「能独立验收」、能力或成果导向（如「掌握 X 并完成 Y 练习」「能用 Z 做出 W」）；');
+  lines.push('   · 【自检】输出前逐个核对资料里的技术栈与知识点：有没有哪个在本阶段找不到落点？有就补一个小目标。');
+  lines.push('4. 每个节点 detail 写 60-120 字：说明要达成什么、为什么这样安排。');
+  lines.push('5. 每个节点 sources 给 1-3 条依据：name 必须写明实际来源（站点名+标题要点，用户资料写「用户提供的资料」），note 写依据了什么要求/结论。');
+  lines.push('6. 路径必须匹配用户现状（零基础从基础开始，有基础则跳过）；顺序体现「真实工作中最看重什么」。');
+  lines.push('7. 只输出一个 JSON 对象（不要其他文字或代码块标记），量控制在 28000 字符内（内容多时 detail 可精简到 40-80 字，但小目标不要省）：');
+  lines.push('8. 若按上面的「关键机制」需要先提问，则只输出 {"analysis":"你的分析","questions":[...]}，不要输出 stages。');
   return lines.join('\n');
 }
 function buildTasksPrompt(goal, stage, stageIndex) {
@@ -1114,7 +1264,9 @@ function buildTasksPrompt(goal, stage, stageIndex) {
   lines.push(goalHeader(goal));
   lines.push(goalQaBlock(goal));
   lines.push(constraintsBlock(goal));
-  lines.push(sourcesBlock(goal, 35, 220));
+  lines.push(digestsBlock(goal));
+  lines.push(nodeSourcesBlock(goal, stage, 1000));
+  lines.push(sourcesIndexBlock(goal, 16));
   lines.push(askBlock(round, '本阶段任务细化'));
   lines.push('');
   lines.push(`【当前阶段】第 ${stageIndex + 1} 阶段：${stage.title}`);
@@ -1124,7 +1276,7 @@ function buildTasksPrompt(goal, stage, stageIndex) {
   lines.push('');
   lines.push('【要求】');
   lines.push('1. 为每个小目标产出 2-3 个任务，按执行顺序排列，每个任务能在一周内完成。');
-  lines.push('   【硬约束】本阶段所有小目标的任务加起来不超过 10 个——任务太多会让用户压力过大、难以坚持；宁可粗一点，也要让用户觉得「做得完」。');
+  lines.push('   【数量】每个小目标 2-3 个任务；本阶段合计不超过 14 个（内容特别多的阶段最多 18 个）。既要覆盖到该阶段的每个知识点，也别拆得过碎——让用户觉得「做得完」。');
   lines.push('2. 每个任务必须给出：');
   lines.push('   - title：动词开头、具体可执行（如「用原生 JS 实现待办清单并部署到 GitHub Pages」）');
   lines.push('   - detail：怎么做，80-150 字，写清步骤/方法/用到的资源与练习方式');
@@ -1208,7 +1360,9 @@ function buildExpandPrompt(goal, node, sources) {
   lines.push(`【当前节点（${levelName}）】${node.title}`);
   if (node.detail) lines.push('节点说明：' + node.detail);
   if (node.artifact) lines.push('节点产出物：' + node.artifact);
-  lines.push(sourcesBlock(goal, 40, 220));
+  lines.push(digestsBlock(goal));
+  lines.push(nodeSourcesBlock(goal, node, 1100));
+  lines.push(sourcesIndexBlock(goal, 16));
   lines.push(askBlock(node.ask_round || 0, '该节点的拆分'));
   lines.push('');
   lines.push('【要求】');
@@ -1240,7 +1394,9 @@ function buildTutorialPrompt(goal, node, format, note) {
   if (node.artifact) lines.push('应产出的成果：' + node.artifact);
   if (node.acceptance) lines.push('验收标准：' + node.acceptance);
   if (node.hours) lines.push('预计投入：' + node.hours);
-  lines.push(sourcesBlock(goal, 25, 200));
+  lines.push(digestsBlock(goal));
+  lines.push(nodeSourcesBlock(goal, node, 1100));
+  lines.push(sourcesIndexBlock(goal, 12));
   if (note) { lines.push(''); lines.push('【用户的额外要求（必须满足）】' + note); }
   lines.push('');
   lines.push('【教程必须包含的结构】');
@@ -1283,7 +1439,9 @@ function buildRefineNodePrompt(goal, node, kids, feedback) {
   else lines.push('（暂无子任务）');
   lines.push('');
   lines.push('【用户反馈（最高优先级，必须采纳）】' + feedback);
-  lines.push(sourcesBlock(goal, 30, 180));
+  lines.push(digestsBlock(goal));
+  lines.push(nodeSourcesBlock(goal, node, 1000));
+  lines.push(sourcesIndexBlock(goal, 12));
   lines.push('');
   lines.push('【要求】');
   lines.push('1. 严格按用户反馈调整：该删的删、该加的加、该改顺序的改顺序、该拆细的拆细、该跳过的跳过。');
@@ -1652,6 +1810,7 @@ function buildRefineSkeletonPrompt(goal, current, feedback) {
   lines.push(goalHeader(goal));
   lines.push(goalQaBlock(goal));
   lines.push(constraintsBlock(goal));
+  lines.push(digestsBlock(goal));
   lines.push(sourcesBlock(goal, 40, 200));
   lines.push(askBlock(round, '骨架调整'));
   lines.push('');
@@ -2162,6 +2321,85 @@ async function handleAPI(req, res, u) {
     return;
   }
 
+  /* ---------- 资料提炼：读全部资料 → 提炼 → 多主题 MD 汇总 ---------- */
+  const digestMatch = p.match(/^\/api\/goals\/(\d+)\/sources\/digest$/);
+  if (digestMatch && method === 'POST') {
+    const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(Number(digestMatch[1]));
+    if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+    res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache' });
+    const sig = clientSignal(req);
+    const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} };
+    (async () => {
+      try {
+        const info = digestBatches(g);
+        if (!info.batches.length) throw new Error('还没有资料可以提炼：先「收集信息源」或上传图片资料');
+        const model = currentModel();
+        send({ status: `共 ${info.total} 条资料（你提供的 ${info.ownCount} 条 / 网络 ${info.netCount} 条），分 ${info.batches.length} 批通读…`, progress: { done: 0, total: info.batches.length } });
+        const parts = [];
+        let done = 0, next = 0;
+        const worker = async () => {
+          while (true) {
+            const my = next++;
+            if (my >= info.batches.length) return;
+            if (sig.aborted) { const e = new Error('已停止'); e.cancelled = true; throw e; }
+            send({ status: `正在通读第 ${my + 1}/${info.batches.length} 批资料…`, progress: { done, total: info.batches.length } });
+            const txt = await aiText(digestBatchPrompt(info.batches[my], my + 1, info.batches.length), model, 300000, null, sig);
+            let data = null;
+            try { data = extractJSONRaw(txt) || {}; } catch (e) { data = {}; }
+            parts.push({ idx: my + 1, data });
+            done++;
+            send({ status: `已通读 ${done}/${info.batches.length} 批`, progress: { done, total: info.batches.length } });
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(2, info.batches.length) }, worker));
+        parts.sort((a, b) => a.idx - b.idx);
+        send({ status: '正在汇总成主题文档（按主题拆分成多篇）…', progress: { done, total: info.batches.length } });
+        const syn = await aiText(digestSynthesisPrompt(parts, info), model, 600000, null, sig);
+        const parsed = extractJSONRaw(syn) || {};
+        const list = Array.isArray(parsed.digests) ? parsed.digests : (Array.isArray(parsed) ? parsed : []);
+        if (!list.length) throw new Error('汇总结果解析失败，可重试');
+        const t = nowISO();
+        db.prepare('DELETE FROM source_digests WHERE goal_id = ?').run(g.id);
+        for (const d of list.slice(0, 12)) {
+          const topic = String(d.topic || '').slice(0, 60);
+          const title = String(d.title || topic || '汇总').slice(0, 120);
+          const content = String(d.content_md || d.content || '').slice(0, 20000);
+          if (!content.trim()) continue;
+          db.prepare('INSERT INTO source_digests (goal_id, topic, title, content, sources_count, created_at) VALUES (?,?,?,?,?,?)')
+            .run(g.id, topic, title, content, info.total, t);
+        }
+        db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(t, g.id);
+        backup();
+        send({ done: true, count: digestsOf(g.id).length, digests: digestsOf(g.id) });
+      } catch (e) {
+        if (e && e.cancelled) send({ cancelled: true, status: '已停止提炼' });
+        else send({ error: '资料提炼失败：' + e.message });
+      }
+      res.end();
+    })();
+    return;
+  }
+  const digestsGetMatch = p.match(/^\/api\/goals\/(\d+)\/digests$/);
+  if (digestsGetMatch && method === 'GET') {
+    return sendJSON(res, 200, { digests: digestsOf(Number(digestsGetMatch[1])) });
+  }
+  const digestsExportMatch = p.match(/^\/api\/goals\/(\d+)\/digests\/export$/);
+  if (digestsExportMatch && method === 'GET') {
+    const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(Number(digestsExportMatch[1]));
+    if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+    const list = digestsOf(g.id);
+    if (!list.length) return sendJSON(res, 404, { error: '还没有提炼汇总' });
+    const md = list.map(d => '# ' + (d.title || d.topic) + '\n\n' + d.content).join('\n\n---\n\n');
+    const fname = encodeURIComponent('资料提炼汇总-' + String(g.title).replace(/[\\/:*?"<>|]/g, '').slice(0, 20) + '.md');
+    res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8', 'Content-Disposition': "attachment; filename=\"digests.md\"; filename*=UTF-8''" + fname });
+    return res.end(md);
+  }
+  const digestDelMatch = p.match(/^\/api\/digests\/(\d+)$/);
+  if (digestDelMatch && method === 'DELETE') {
+    db.prepare('DELETE FROM source_digests WHERE id = ?').run(Number(digestDelMatch[1]));
+    return sendJSON(res, 200, { ok: true });
+  }
+
   const sourcesMatch = p.match(/^\/api\/goals\/(\d+)\/sources$/);
   if (sourcesMatch && method === 'GET') {
     return sendJSON(res, 200, { sources: sourcesOf(Number(sourcesMatch[1])) });
@@ -2232,7 +2470,7 @@ async function handleAPI(req, res, u) {
           }
           send({ status: '开始制定拆分计划…' });
           var vid = beginVersion(goal.id, reason);
-          const txt = await aiText(buildExpandPrompt(goal, n, sourcesOf(goal.id)), model, 300000);
+          const txt = await aiText(buildExpandPrompt(goal, n, null), model, 300000);
           const data = extractJSON(txt);
           if (data && Array.isArray(data.questions) && data.questions.length) {
             saveNodeQuestions(n.id, data, feedback);
