@@ -1,0 +1,40 @@
+/* ============================================================
+   思而行 · 主题组件：宣纸（Paper）
+   覆盖设计变量即可换肤；同时把字体、圆角一并调整，展示「界面样式可重构」。
+   ============================================================ */
+:root,
+:root[data-theme="dark"],
+:root[data-theme="light"]{
+  --bg:#f7f3ea;
+  --card:#fffdf7;
+  --soft:#f2ece0;
+  --border:#e6ddc9;
+  --text:#2b2620;
+  --muted:#8a7f6d;
+
+  --accent:#b4442e;          /* 朱红 */
+  --accent-2:#c98a2e;        /* 赭黄 */
+  --accent-soft:#f7e9e4;
+  --accent-border:#e6c8bd;
+
+  --ok:#3f7d54;
+  --warn:#b8860b;
+  --danger:#b3261e;
+
+  --shadow-sm:0 1px 2px rgba(80,60,30,.06);
+  --shadow:0 6px 18px rgba(80,60,30,.08);
+  --shadow-lg:0 18px 44px rgba(80,60,30,.14);
+
+  --r-sm:10px; --r:14px; --r-lg:20px;
+}
+
+/* 主题个性：衬线标题 + 纸质纹理底 + 卡片细描边 */
+body{
+  font-family:"Songti SC","Noto Serif SC","Source Han Serif SC",Georgia,serif;
+  background-image:radial-gradient(rgba(180,68,46,.028) 1px, transparent 1px);
+  background-size:18px 18px;
+}
+.title, .ghTitle, .probTitle, .mapTitle, .secTitle{ letter-spacing:.02em; }
+.secCard, .statCard, .consCard, .reportCard{ border-color:var(--border); }
+.railItem.active{ background:var(--accent-soft); border-color:var(--accent-border); }
+.logoText{ text-shadow:0 1px 2px rgba(180,68,46,.25); }

@@ -1,0 +1,37 @@
+/* ============================================================
+   思而行 · 主题组件：碳黑（Carbon）
+   换肤原理：覆盖 style.css 中定义的设计变量（:root 下的 CSS 变量）。
+   为覆盖系统深浅色分支，这里把选择器写成同优先级并靠加载顺序取胜。
+   ============================================================ */
+:root,
+:root[data-theme="dark"],
+:root[data-theme="light"]{
+  --bg:#0b0d12;
+  --card:#12151d;
+  --soft:#171b25;
+  --border:#242a37;
+  --text:#e6eaf2;
+  --muted:#8d97ab;
+
+  --accent:#2dd4bf;          /* 青绿 */
+  --accent-2:#38bdf8;        /* 天蓝 */
+  --accent-soft:#0f2a2a;
+  --accent-border:#1f4d4a;
+
+  --ok:#34d399;
+  --warn:#fbbf24;
+  --danger:#fb7185;
+
+  --shadow-sm:0 1px 2px rgba(0,0,0,.5);
+  --shadow:0 6px 20px rgba(0,0,0,.45);
+  --shadow-lg:0 18px 50px rgba(0,0,0,.6);
+
+  --r-sm:6px; --r:10px; --r-lg:14px;
+}
+
+/* 一点主题个性：顶栏加一条细的青绿渐变线，卡片投影更深 */
+header.top{ border-bottom:1px solid var(--border); box-shadow:inset 0 -2px 0 0 rgba(45,212,191,.25); }
+.secCard, .statCard, .consCard, .reportCard{ backdrop-filter:saturate(120%); }
+.logoMark{ box-shadow:0 3px 14px rgba(45,212,191,.35), inset 0 1px 0 rgba(255,255,255,.18); }
+.logoText{ text-shadow:0 0 14px rgba(45,212,191,.35); }
+.railItem.active{ box-shadow:inset 0 0 0 1px rgba(45,212,191,.35); }

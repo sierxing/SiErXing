@@ -1,0 +1,11 @@
+# 数据与日志（不提交个人数据）
+data/
+*.log
+nohup.out
+
+# 环境变量（含密钥）
+.env
+
+# 系统文件
+.DS_Store
+Thumbs.db

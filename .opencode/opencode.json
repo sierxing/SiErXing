@@ -1,0 +1,26 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "agent": {
+    "NoTools": {
+      "description": "纯文本输出：禁用所有工具，只根据提示词中的信息作答（供本应用的服务端调用 AI 使用）",
+      "mode": "primary",
+      "tools": {
+        "write": false,
+        "edit": false,
+        "bash": false,
+        "read": false,
+        "glob": false,
+        "grep": false,
+        "list": false,
+        "task": false,
+        "skill": false,
+        "webfetch": false,
+        "websearch": false,
+        "codesearch": false
+      },
+      "permission": {
+        "*": "deny"
+      }
+    }
+  }
+}
