@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS jd_images (
 module.exports = {
   id: 'jdfile',
   name: '图片资料',
-  category: '资料与素材',
+  category: '其它',
   icon: '📷',
   desc: '粘贴 JD / 大纲 / 教材截图，视觉模型提炼成结构化资料源，辅助规划决策',
   order: 30,

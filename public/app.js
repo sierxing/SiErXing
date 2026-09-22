@@ -2731,10 +2731,15 @@ async function loadComponents() {
   } catch (e) { console.warn('组件加载失败：' + e.message); }
 }
 async function renderComponentsPage() {
+  const scrollY = window.scrollY || 0;          // 记住滚动位置，重渲染后恢复
   app.innerHTML = '<p class="muted">加载组件…</p>';
-  const r = await api('/api/components');
+  const [r, catsRes] = await Promise.all([
+    api('/api/components'),
+    api('/api/component-categories').catch(() => ({ categories: [], used: {}, map: {} }))
+  ]);
   state.components = r.enabled || {};
   state.componentList = r.components || [];
+  state.componentCats = catsRes;                 // 分类实时刷新（新建后立即出现）
   applyComponentStyles(r.styles || []);
   const comps = r.components || [];
   const core = comps.filter(c => c.scope === 'core');
@@ -2849,7 +2854,8 @@ async function renderComponentsPage() {
     try {
       await api('/api/component-categories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
       toast('已新建分类「' + name + '」');
-      await renderComponentsPage();
+await renderComponentsPage();
+        await loadComponents();
     } catch (e) { toast(e.message); }
   });
   /* 组件移动分类 */
@@ -2890,6 +2896,7 @@ async function renderComponentsPage() {
       location.reload();
     } catch (e) { toast(e.message); }
   });
+  window.scrollTo(0, scrollY);                   // 恢复滚动位置
   document.getElementById('cmpImport').addEventListener('change', async e => {
     const files = Array.from(e.target.files || []);
     e.target.value = '';

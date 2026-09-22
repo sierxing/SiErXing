@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS daily_plans (
 module.exports = {
   id: 'hot100',
   name: '每日刷题',
-  category: '刷题与算法',
+  category: '其它',
   icon: '🧩',
   desc: 'LeetCode 热题 100：按知识点分组、每日任务、完整题面、VSCode 作答与作答记录',
   order: 20,

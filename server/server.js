@@ -141,19 +141,19 @@ let FILE_PLUGINS = [];   // 来自 server/plugins/*.js 的文件组件
 /* 内置组件注册表：scope=core 不可关闭；base=默认开启（可关）；extra=默认关闭（可开）
    文件组件（server/plugins/*.js）默认 scope=extra，可被导入/分享 */
 const BUILTIN_COMPONENTS = [
-  { id: 'plan',        name: '路线图与规划', icon: '🧭', scope: 'core', order: 1,
+  { id: 'plan',        name: '路线图与规划', icon: '🧭', scope: 'core', order: 1, category: '核心组件',
     desc: '目标管理、骨架生成、任务细化、节点拆分、导图与清单（应用核心，不可关闭）' },
-  { id: 'clarify',     name: '规划前问卷',   icon: '📝', scope: 'base', defaultEnabled: true, order: 10,
+  { id: 'clarify',     name: '规划前问卷',   icon: '📝', scope: 'base', defaultEnabled: true, category: '基础功能组件', order: 10,
     desc: '规划前先问清楚：10-14 题问卷（含水平自测）、逐题深挖追问、补充信息' },
-  { id: 'constraints', name: '规划约束',     icon: '⛓', scope: 'base', defaultEnabled: true, order: 11,
+  { id: 'constraints', name: '规划约束',     icon: '⛓', scope: 'base', defaultEnabled: true, category: '基础功能组件', order: 11,
     desc: '把硬性要求（时间/预算/工具/期限）写成约束，所有 AI 环节严格遵守' },
-  { id: 'sources',     name: '信息源检索',   icon: '🔎', scope: 'base', defaultEnabled: true, order: 12,
+  { id: 'sources',     name: '信息源检索',   icon: '🔎', scope: 'base', defaultEnabled: true, category: '基础功能组件', order: 12,
     desc: '自动检索真实资料（时间筛选 + 广告过滤）作为规划依据，也可手动导入' },
-  { id: 'versions',    name: '版本对比与汇报', icon: '📜', scope: 'base', defaultEnabled: true, order: 13,
+  { id: 'versions',    name: '版本对比与汇报', icon: '📜', scope: 'base', defaultEnabled: true, category: '基础功能组件', order: 13,
     desc: '每次改动保存版本快照，可左右对比差异，并生成 AI 变更汇报' },
-  { id: 'chat',        name: '对话改规划',   icon: '💬', scope: 'base', defaultEnabled: true, order: 14,
+  { id: 'chat',        name: '对话改规划',   icon: '💬', scope: 'base', defaultEnabled: true, category: '基础功能组件', order: 14,
     desc: '右侧对话侧边栏：随时用自然语言让 AI 修改路线图（支持多会话与模型切换）' },
-  { id: 'tutorial',    name: '学习教程',     icon: '📘', scope: 'base', defaultEnabled: true, order: 15,
+  { id: 'tutorial',    name: '学习教程',     icon: '📘', scope: 'base', defaultEnabled: true, category: '基础功能组件', order: 15,
     desc: '为任意任务点生成“真正学会”的完整教程（HTML / Markdown，含练习与自测）' }
 ];
 
@@ -207,7 +207,7 @@ function allCategoriesWithUsage() {
   const comps = allComponents();
   const used = {};
   for (const c of comps) {
-    if (!c.goalToggle) continue;            // 只统计可在新建目标勾选的组件
+    // 统计全部组件（新建目标选择器的计数由前端按 goalToggle 单独计算）
     const k = c.category || '其它';
     used[k] = (used[k] || 0) + 1;
   }
@@ -216,7 +216,8 @@ function allCategoriesWithUsage() {
   return { categories: declared.concat(auto), used };
 }
 function allComponents() {
-  const list = BUILTIN_COMPONENTS.map(b => ({ ...b, builtin: true, removable: b.scope !== 'core', client: b.client || '', kind: 'feature' }));
+  const list = BUILTIN_COMPONENTS.map(b => ({ ...b, builtin: true, removable: b.scope !== 'core', client: b.client || '', kind: 'feature',
+    category: b.category || (b.scope === 'core' ? '核心组件' : (b.scope === 'base' ? '基础功能组件' : '其它')) }));
   for (const p of FILE_PLUGINS) {
     const kind = p.kind === 'theme' ? 'theme' : 'feature';
     let hasStyle = false;
@@ -286,6 +287,23 @@ function pluginCtx() {
     db.prepare('UPDATE goals SET status = ?, error = ? WHERE id = ?').run(n > 0 ? 'planned' : 'draft', n > 0 ? '' : '上次规划中断，请重新规划', g.id);
   }
 })();
+/* 一次性迁移：清理早期版本用过的分类名，让组件回到新的默认分类 */
+(function migrateCategories() {
+  const LEGACY = ['学习成长', '资料与素材', '刷题与算法', '效率工具', '外观主题'];
+  try {
+    const list = componentCategoryList();
+    const kept = list.filter(x => !LEGACY.includes(x));
+    if (kept.length !== list.length) saveComponentCategories(kept);
+    const map = componentCategoryMap();
+    let changed = false;
+    for (const k of Object.keys(map)) {
+      if (LEGACY.includes(String(map[k]))) { delete map[k]; changed = true; }
+    }
+    if (changed) saveComponentCategoryMap(map);
+    if (kept.length !== list.length || changed) console.log('[migrate] 已清理早期分类名，组件回到默认分类');
+  } catch (e) {}
+})();
+
 /* 加载组件（server/plugins/*.js）：init 建表 / 注册路由 */
 const PLUGIN_DIR = path.join(__dirname, 'plugins');
 function reloadPlugins() {
@@ -2365,7 +2383,10 @@ async function handleAPI(req, res, u) {
     const name = decodeURIComponent(catDelMatch[1]).trim();
     saveComponentCategories(componentCategoryList().filter(x => x !== name));
     const map = componentCategoryMap();
-    for (const k of Object.keys(map)) if (String(map[k]) === name) delete map[k];   // 组件回落到插件自带分类
+    // 该分类下的组件（含回落到插件默认分类者）显式归入「其它」，否则会被自动检测重新加回
+    for (const c of allComponents()) {
+      if (effectiveCategory(c.id, c.category) === name) map[c.id] = '其它';
+    }
     saveComponentCategoryMap(map);
     return sendJSON(res, 200, { ok: true, categories: allCategoriesWithUsage().categories });
   }

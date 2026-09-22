@@ -8,7 +8,7 @@
 module.exports = {
   id: 'theme-carbon',
   name: '碳黑主题',
-  category: '外观主题',
+  category: '主题与样式',
   icon: '🌑',
   kind: 'theme',
   scope: 'theme',
