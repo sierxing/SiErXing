@@ -80,10 +80,11 @@ module.exports = {
       if (!g) return sendJSON(res, 404, { error: '目标不存在' });
       const fpath = path.join(UPLOAD_DIR, row.file);
       if (!row.file || !fs.existsSync(fpath)) return sendJSON(res, 404, { error: '原图已不在，请重新粘贴上传' });
+      const reuseSourceId = row.source_id || 0;   // 重试后原地更新同一条资料源，避免重复入库
       try { db.prepare('DELETE FROM jd_images WHERE id = ?').run(row.id); } catch (e) {}
       const buf = fs.readFileSync(fpath);
       const dataUrl = 'data:' + (row.mime || 'image/png') + ';base64,' + buf.toString('base64');
-      return streamJDImage(req, res, g, dataUrl, '');
+      return streamJDImage(req, res, g, dataUrl, '', reuseSourceId);
     }
   },
   {
@@ -110,8 +111,67 @@ module.exports = {
         const jdListMatch = p.match(/^\/api\/goals\/(\d+)\/jd-images$/);
         if (jdListMatch && method === 'GET') {
           const rows = db.prepare('SELECT id, goal_id, file, mime, size, title, extracted, status, error, source_id, created_at FROM jd_images WHERE goal_id = ? ORDER BY id DESC').all(Number(jdListMatch[1]));
+          // 标注资料源是否还在（在信息源面板里被删掉时，前端提示重新导入）
+          for (const r of rows) r.source_exists = r.source_id ? !!db.prepare('SELECT 1 FROM sources WHERE id = ?').get(r.source_id) : false;
           return sendJSON(res, 200, { images: rows });
         }
+    }
+  },
+  {
+    // 一键导出图片资料（纯文字）：识别结果打包成 JSON，可发给别人
+    method: 'GET',
+    pattern: /^\/api\/goals\/(\d+)\/jd-images\/export$/,
+    handler: async (req, res, u, ctx) => {
+      const m = u.pathname.match(/^\/api\/goals\/(\d+)\/jd-images\/export$/);
+      if (!m || req.method !== 'GET') return false;
+      const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(Number(m[1]));
+      if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+      const imgs = db.prepare('SELECT * FROM jd_images WHERE goal_id = ? ORDER BY id').all(g.id);
+      const out = { format: 'sierxing-sources', version: 1, exportedAt: nowISO(), from: { goal: g.title }, count: 0, sources: [] };
+      for (const img of imgs) {
+        const src = img.source_id ? db.prepare('SELECT * FROM sources WHERE id = ?').get(img.source_id) : null;
+        if (!src) continue;
+        out.sources.push({
+          title: src.title, kind: src.kind, site: src.site, snippet: src.snippet,
+          content: src.content, published_at: src.published_at, extracted: img.extracted || '', image: img.file
+        });
+      }
+      out.count = out.sources.length;
+      const fname = encodeURIComponent('图片资料-' + String(g.title).replace(/[\\/:*?"<>|]/g, '').slice(0, 20) + '.sources.json');
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Disposition': "attachment; filename=\"sources.json\"; filename*=UTF-8''" + fname
+      });
+      return res.end(JSON.stringify(out, null, 2));
+    }
+  },
+  {
+    // 一键导入资料（别人发来的 *.sources.json）→ 直接进当前目标的信息源库
+    method: 'POST',
+    pattern: /^\/api\/goals\/(\d+)\/sources\/import$/,
+    handler: async (req, res, u, ctx) => {
+      const m = u.pathname.match(/^\/api\/goals\/(\d+)\/sources\/import$/);
+      if (!m || req.method !== 'POST') return false;
+      const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(Number(m[1]));
+      if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+      const body = await readBody(req);
+      const list = Array.isArray(body.sources) ? body.sources : (Array.isArray(body) ? body : []);
+      if (!list.length) return sendJSON(res, 400, { error: '文件里没有资料（需要 *.sources.json）' });
+      let added = 0, skipped = 0;
+      for (const s of list.slice(0, 500)) {
+        const title = String((s && s.title) || '').trim().slice(0, 200);
+        const content = String((s && (s.content || s.text)) || '').trim().slice(0, 20000);
+        if (!title && !content) { skipped++; continue; }
+        const dup = db.prepare("SELECT id FROM sources WHERE goal_id = ? AND ((title != '' AND title = ?) OR (content != '' AND content = ?)) LIMIT 1").get(g.id, title, content);
+        if (dup) { skipped++; continue; }
+        db.prepare('INSERT INTO sources (goal_id,title,url,site,kind,snippet,content,published_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+          .run(g.id, title || '导入的资料', String(s.url || ''), '导入的资料',
+            String(s.kind || '资料').slice(0, 10), String(s.snippet || content.slice(0, 300)).slice(0, 300),
+            content, String(s.published_at || ''), nowISO());
+        added++;
+      }
+      if (added) { db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), g.id); backup(); }
+      return sendJSON(res, 200, { ok: true, added, skipped, total: list.length, goal: getGoal(g.id), sources: sourcesOf(g.id) });
     }
   },
   {
@@ -261,7 +321,7 @@ function imageToText(data) {
   if (data.raw_text) L.push('\n原文摘录：\n' + String(data.raw_text).slice(0, 3000));
   return L.join('\n');
 }
-function streamJDImage(req, res, goal, dataUrl, note) {
+function streamJDImage(req, res, goal, dataUrl, note, reuseSourceId) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} };
   (async () => {
@@ -310,9 +370,22 @@ function streamJDImage(req, res, goal, dataUrl, note) {
         const title = (type !== '资料' ? type + '：' : '') + String(data.title || '图片资料').slice(0, 60) + (from ? '（' + String(from).slice(0, 30) + '）' : '');
       const content = imageToText(data);
       const snippet = String(data.summary || '').slice(0, 300);
-      const sr = db.prepare('INSERT INTO sources (goal_id,title,url,site,kind,snippet,content,published_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
-        .run(goal.id, title, '', '用户提供的图片', /JD/i.test(type) ? 'JD' : type.slice(0, 10), snippet, content, '', t);
-      const sourceId = Number(sr.lastInsertRowid);
+      const kind = /JD/i.test(type) ? 'JD' : type.slice(0, 10);
+      let sourceId = 0;
+      if (reuseSourceId) {
+        // 重新识别：把原来的资料源就地更新（信息源库里的内容跟着变新）
+        const old = db.prepare('SELECT id FROM sources WHERE id = ? AND goal_id = ?').get(reuseSourceId, goal.id);
+        if (old) {
+          db.prepare('UPDATE sources SET title=?, site=?, kind=?, snippet=?, content=?, created_at=? WHERE id=?')
+            .run(title, '用户提供的图片', kind, snippet, content, t, old.id);
+          sourceId = old.id;
+        }
+      }
+      if (!sourceId) {
+        const sr = db.prepare('INSERT INTO sources (goal_id,title,url,site,kind,snippet,content,published_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+          .run(goal.id, title, '', '用户提供的图片', kind, snippet, content, '', t);
+        sourceId = Number(sr.lastInsertRowid);
+      }
       const jr = db.prepare('INSERT INTO jd_images (goal_id,file,mime,size,title,extracted,status,error,source_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
         .run(goal.id, fname, mime, buf.length, title, JSON.stringify(data), 'done', '', sourceId, t);
       db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(t, goal.id);

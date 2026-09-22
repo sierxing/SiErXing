@@ -30,8 +30,8 @@ function jdCardHTML(jd) {
         ${sec('关键要点', ex.points)}${sec('结构化内容', ex.sections || ex.duties || ex.requirements)}${sec('关键词', ex.keywords || ex.skills)}${sec('硬性条件 / 前置知识', ex.hard_conditions)}${sec('最关键内容', ex.priority)}${sec('建议行动', ex.actions)}${other}
         ${ex.raw_text ? `<div class="jdSec"><div class="jdSecT">原文摘录</div><pre class="jdRaw">${esc(String(ex.raw_text).slice(0, 1500))}</pre></div>` : ''}
       </details>` : ''}
-      ${jd.status === 'failed' ? `<div class="jdFail">⚠️ 识别失败：${esc(jd.error || '未知原因')}</div>
-        <div class="jdOps"><button class="btn tiny primary jdRetry" data-jdid="${jd.id}">🔄 重试识别</button><span class="muted" style="font-size:11.5px;">配置好视觉模型后点这里重试，不用重新上传</span></div>` : ''}
+      ${(jd.status === 'failed' || (jd.source_id && jd.source_exists === false)) ? `<div class="jdFail">${jd.status === 'failed' ? '⚠️ 识别失败：' + esc(jd.error || '未知原因') : '⚠️ 这条资料源已在「信息源」里被删除，点「重试识别」可重新导入'}</div>
+        <div class="jdOps"><button class="btn tiny primary jdRetry" data-jdid="${jd.id}">🔄 重试识别</button><span class="muted" style="font-size:11.5px;">重新识别并更新信息源，不用重新上传</span></div>` : ''}
       <div class="jdSrc">${jd.status === 'failed' ? '尚未导入资料库' : '已导入资料库（' + (jd.source_id ? '#' + jd.source_id : '—') + '），AI 规划与对话时会优先参考'}</div>
     </div>
   </div>`;
@@ -45,6 +45,11 @@ function drawJDPage() {
       <span class="mapTitle">📷 图片资料</span>
       <span class="chip gray">${esc(g.title)}</span>
       <div class="spacer"></div>
+
+      <a class="btn small" id="jdExportBtn" href="/api/goals/${g.id}/jd-images/export" download>⬇ 导出全部（文字）</a>
+
+      <label class="btn small">⬆ 导入资料<input type="file" id="jdImportFile" accept=".json,application/json" hidden></label>
+
       <button class="btn small" id="jdChatBtn">💬 对话改规划</button>
     </div>
     <div class="jdPaste" id="jdPaste">
@@ -78,6 +83,44 @@ function drawJDPage() {
   });
   const fi = document.getElementById('jdFile');
   fi.addEventListener('change', () => { for (const f of Array.from(fi.files || [])) uploadJDFile(f); fi.value = ''; });
+  const imp = document.getElementById('jdImportFile');
+
+  if (imp) imp.addEventListener('change', async () => {
+
+    const file = (imp.files || [])[0];
+
+    imp.value = '';
+
+    if (!file) return;
+
+    try {
+
+      const text = await file.text();
+
+      let data;
+
+      try { data = JSON.parse(text); } catch (e) { throw new Error('文件不是有效的 JSON（需要 *.sources.json）'); }
+
+      const r = await api('/api/goals/' + g.id + '/sources/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+
+      state.goal = r.goal;
+
+      if (r.sources) state.goal.sources = r.sources;
+
+      toast('已导入 ' + r.added + ' 条资料' + (r.skipped ? '（' + r.skipped + ' 条已存在，已跳过）' : ''));
+
+    } catch (e) { toast(e.message); }
+
+  });
+
+  const exp = document.getElementById('jdExportBtn');
+
+  if (exp) exp.addEventListener('click', e => {
+
+    if (!(state.jdImages || []).length) { e.preventDefault(); toast('还没有图片资料可以导出'); }
+
+  });
+
   const jc = document.getElementById('jdChatBtn');
   if (jc) jc.addEventListener('click', () => aiToggle(true));
   app.querySelectorAll('.jdRetry').forEach(b => b.addEventListener('click', () => retryJDImage(b.getAttribute('data-jdid'))));
