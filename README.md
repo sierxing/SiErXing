@@ -17,17 +17,24 @@
 
 ## 🚀 30 秒上手
 
+> ⚠️ **只复制代码块里的内容**。下面的中文说明、表格都是文档文字，粘到终端会报 `is not recognized as an internal or external command`。
+
 ### ① 一条命令安装（Linux / macOS）
 
 ```bash
 git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git ~/SiErXing && bash ~/SiErXing/install.sh
 ```
 
-**Windows**（PowerShell；**`$dir` 可以改成任意盘/目录**，不写则装到 `%USERPROFILE%\SiErXing`）：
+**Windows**（PowerShell，**整行复制**）：
 
 ```powershell
-$dir = "D:\SiErXing"        # ← 想装到哪就改这里（如 E:\Apps\SiErXing）
-git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git $dir; & "$dir\install.bat"
+git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git "$env:USERPROFILE\SiErXing"; & "$env:USERPROFILE\SiErXing\install.bat"
+```
+
+想装到**其它盘/目录**（把 `D:\SiErXing` 换成你要的路径，整行复制）：
+
+```powershell
+$d="D:\SiErXing"; git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git $d; & "$d\install.bat"
 ```
 
 > 已经下载/解压了 ZIP？直接在该目录运行 `install.bat` 即可；也可以 `install.bat D:\SiErXing` 指定安装目录（会复制过去）。
