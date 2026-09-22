@@ -23,11 +23,15 @@
 git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git ~/SiErXing && bash ~/SiErXing/install.sh
 ```
 
-**Windows**（PowerShell）：
+**Windows**（PowerShell；**`$dir` 可以改成任意盘/目录**，不写则装到 `%USERPROFILE%\SiErXing`）：
 
 ```powershell
-git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git "$env:USERPROFILE\SiErXing"; & "$env:USERPROFILE\SiErXing\install.bat"
+$dir = "D:\SiErXing"        # ← 想装到哪就改这里（如 E:\Apps\SiErXing）
+git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git $dir; & "$dir\install.bat"
 ```
+
+> 已经下载/解压了 ZIP？直接在该目录运行 `install.bat` 即可；也可以 `install.bat D:\SiErXing` 指定安装目录（会复制过去）。
+> 安装脚本会**自动定位真实的桌面目录**（兼容 OneDrive 重定向），桌面图标一定能出现；终端命令 `sierxing` 装在 `%LOCALAPPDATA%\SiErXing`。
 
 > 没有 git？打开 <https://atomgit.com/sierxing/SiErXing> 下载 ZIP → 解压 → 运行 `install.sh`（macOS/Linux）或 `install.bat`（Windows）。
 > 只需要 **Node.js ≥ 22.5**（推荐 24 LTS），**不需要 npm install**（零第三方依赖）。
@@ -235,7 +239,7 @@ git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git "$env:USERPROFILE\
 
 | 使用方式 | 操作 |
 | --- | --- |
-| 一键安装 | 见文首：`git clone … && bash install.sh`（Windows 用 `install.bat`） |
+| 一键安装 | 见文首：`git clone … && bash install.sh`（Windows：`install.bat [安装目录]`，可指定任意盘） |
 | 桌面图标 | 安装后双击「思而行」→ 自动启动服务并打开浏览器 |
 | 终端命令 | 安装后输入 `sierxing`（已在运行时直接打开浏览器） |
 | 开机自启 | 安装时选择，或随时在 **设置 → 服务与启动** 里开关 |
@@ -418,7 +422,8 @@ SiErXing/                     # 项目根目录（目录名用英文，产品名
 ├── start.sh           # Linux / macOS 启动脚本（一键安装后桌面图标/终端命令调用它）
 ├── start.bat          # Windows 启动脚本
 ├── install.sh         # ★ 一键安装（Linux/macOS）：桌面图标 + 终端命令 + 开机自启
-├── install.bat        # ★ 一键安装（Windows）
+├── install.bat        # ★ 一键安装（Windows，可传安装目录：install.bat D:\SiErXing）
+├── install.ps1        #   Windows 安装逻辑（桌面图标 / 终端命令 / 开机自启）
 ├── docs/screenshots/  # 界面截图（README 用）
 ├── LICENSE            # MIT 许可证（请保留版权与署名）
 └── README.md

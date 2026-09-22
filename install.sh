@@ -41,7 +41,17 @@ if [ -f "${SRC_DIR}/server/server.js" ]; then
   APP_DIR="$SRC_DIR"
   ok "使用当前目录：${APP_DIR}"
 else
-  APP_DIR="${SIERXING_DIR:-$HOME/SiErXing}"
+  APP_DIR="${SIERXING_DIR:-}"
+  if [ -z "$APP_DIR" ]; then
+    if [ -t 0 ]; then
+      printf "安装目录（回车使用 %s）：" "$HOME/SiErXing"
+      read -r ans || ans=""
+      APP_DIR="${ans:-$HOME/SiErXing}"
+    else
+      APP_DIR="$HOME/SiErXing"
+    fi
+  fi
+  APP_DIR="${APP_DIR/#\~/$HOME}"
   if [ -f "${APP_DIR}/server/server.js" ]; then
     ok "使用已有安装：${APP_DIR}"
   else

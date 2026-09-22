@@ -80,6 +80,35 @@ module.exports = function createService({ appDir, port, log = () => {} }) {
     };
   })();
 
+  /* ---------------- Windows 真实目录（兼容 OneDrive 桌面重定向） ---------------- */
+  let winDirs = null;
+  async function resolveWinDirs() {
+    if (winDirs) return winDirs;
+    const ps = "[Environment]::GetFolderPath('Desktop'); [Environment]::GetFolderPath('StartMenu'); [Environment]::GetFolderPath('Startup'); $env:APPDATA; $env:LOCALAPPDATA";
+    const r = await sh('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], 20000);
+    const lines = String(r.out || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+    const appData = lines[3] || process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+    winDirs = {
+      desktop: lines[0] || path.join(home, 'Desktop'),
+      startMenu: lines[1] || path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
+      startup: lines[2] || path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup'),
+      appData,
+      localAppData: lines[4] || process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local')
+    };
+    return winDirs;
+  }
+  /** Windows 下取真实路径；其它平台直接用静态 paths */
+  async function pth(key) {
+    if (platform !== 'win32') return paths[key];
+    const d = await resolveWinDirs();
+    if (key === 'desktop') return path.join(d.desktop, APP_LABEL + '.lnk');
+    if (key === 'startMenu') return path.join(d.startMenu, APP_LABEL + '.lnk');
+    if (key === 'autostart') return path.join(d.startup, APP_LABEL + '.lnk');
+    if (key === 'binDir') return path.join(d.localAppData, 'SiErXing');
+    if (key === 'launcher') return path.join(d.localAppData, 'SiErXing', 'sierxing.cmd');
+    return paths[key];
+  }
+
   /* ---------------- 应用图标（与浏览器标签页图标同款） ---------------- */
   const iconSrc = {
     svg: path.join(appDir, 'public', 'icon.svg'),
@@ -172,29 +201,36 @@ module.exports = function createService({ appDir, port, log = () => {} }) {
     const result = { launcher: false, desktop: false, applications: false, autostartKind: platform, notes: [] };
     try {
       if (platform === 'win32') {
-        fs.mkdirSync(paths.binDir, { recursive: true });
-        fs.writeFileSync(paths.launcher, launcherContent(), 'utf8');
+        const binDir = await pth('binDir');
+        const launcher = await pth('launcher');
+        const desktopLnk = await pth('desktop');
+        const startMenuLnk = await pth('startMenu');
+        fs.mkdirSync(binDir, { recursive: true });
+        fs.writeFileSync(launcher, launcherContent(), 'utf8');
         result.launcher = true;
+        const q = x => String(x).replace(/"/g, '""');
         const ps = [
           '$ws = New-Object -ComObject WScript.Shell',
-          `$sc = $ws.CreateShortcut("${paths.desktop.replace(/"/g, '""')}")`,
-          `$sc.TargetPath = "${paths.launcher}"`,
-          `$sc.WorkingDirectory = "${appDataOr(paths.binDir)}"`,
+          `$sc = $ws.CreateShortcut("${q(desktopLnk)}")`,
+          `$sc.TargetPath = "${q(launcher)}"`,
+          `$sc.WorkingDirectory = "${q(binDir)}"`,
           `$sc.Description = "${APP_LABEL} · 目标规划助手"`,
-          `$sc.IconLocation = "${iconSrc.ico.replace(/"/g, '""')}"`,
+          `$sc.IconLocation = "${q(iconSrc.ico)}"`,
           '$sc.WindowStyle = 7',
           '$sc.Save()',
-          `$sc2 = $ws.CreateShortcut("${paths.startMenu.replace(/"/g, '""')}")`,
-          `$sc2.TargetPath = "${paths.launcher}"`,
-          `$sc2.WorkingDirectory = "${appDataOr(paths.binDir)}"`,
-          `$sc2.IconLocation = "${iconSrc.ico.replace(/"/g, '""')}"`,
+          `$sc2 = $ws.CreateShortcut("${q(startMenuLnk)}")`,
+          `$sc2.TargetPath = "${q(launcher)}"`,
+          `$sc2.WorkingDirectory = "${q(binDir)}"`,
+          `$sc2.IconLocation = "${q(iconSrc.ico)}"`,
           '$sc2.WindowStyle = 7',
           '$sc2.Save()'
         ].join('; ');
-        const r = await sh('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], 25000);
-        result.desktop = fs.existsSync(paths.desktop);
-        result.applications = fs.existsSync(paths.startMenu);
-        if (!r.ok && !result.desktop) result.notes.push('创建 Windows 快捷方式失败：' + (r.err || '未知错误'));
+        const r = await sh('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], 30000);
+        result.desktop = fs.existsSync(desktopLnk);
+        result.applications = fs.existsSync(startMenuLnk);
+        result.desktopPath = desktopLnk;
+        if (!result.desktop) result.notes.push('桌面快捷方式创建失败（桌面目录：' + desktopLnk + '）：' + (r.err || '未知错误'));
+        else result.notes.push('桌面快捷方式：' + desktopLnk);
       } else {
         // 启动命令
         fs.mkdirSync(paths.binDir, { recursive: true });
@@ -241,8 +277,9 @@ module.exports = function createService({ appDir, port, log = () => {} }) {
 
   async function autostartInfo() {
     if (isWindows) {
-      const enabled = fs.existsSync(paths.autostart);
-      return { supported: true, enabled, mechanism: 'Windows 启动文件夹快捷方式', detail: paths.autostart };
+      const autoLnk = await pth('autostart');
+      const enabled = fs.existsSync(autoLnk);
+      return { supported: true, enabled, mechanism: 'Windows 启动文件夹快捷方式', detail: autoLnk };
     }
     if (isMac) {
       const enabled = fs.existsSync(paths.autostart);
@@ -270,23 +307,27 @@ module.exports = function createService({ appDir, port, log = () => {} }) {
 
   async function setAutostart(enabled) {
     if (isWindows) {
+      const autoLnk = await pth('autostart');
       if (enabled) {
         const r = await installShortcuts();
         if (!r.launcher) return { ok: false, error: '启动脚本创建失败' };
+        const launcher = await pth('launcher');
+        const binDir = await pth('binDir');
+        const q = x => String(x).replace(/"/g, '""');
         const ps = [
           '$ws = New-Object -ComObject WScript.Shell',
-          `$sc = $ws.CreateShortcut("${paths.autostart.replace(/"/g, '""')}")`,
-          `$sc.TargetPath = "${paths.launcher}"`,
-          `$sc.WorkingDirectory = "${paths.binDir}"`,
+          `$sc = $ws.CreateShortcut("${q(autoLnk)}")`,
+          `$sc.TargetPath = "${q(launcher)}"`,
+          `$sc.WorkingDirectory = "${q(binDir)}"`,
           `$sc.Description = "${APP_LABEL} 开机自启"`,
           '$sc.WindowStyle = 7',
           '$sc.Save()'
         ].join('; ');
-        const res = await sh('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], 25000);
-        if (!fs.existsSync(paths.autostart)) return { ok: false, error: '创建开机自启项失败：' + (res.err || '未知错误') };
+        const res = await sh('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], 30000);
+        if (!fs.existsSync(autoLnk)) return { ok: false, error: '创建开机自启项失败：' + (res.err || '未知错误') };
         return { ok: true, enabled: true };
       }
-      try { fs.unlinkSync(paths.autostart); } catch (e) {}
+      try { fs.unlinkSync(autoLnk); } catch (e) {}
       return { ok: true, enabled: false };
     }
 
@@ -358,10 +399,12 @@ module.exports = function createService({ appDir, port, log = () => {} }) {
   /* ---------------- 状态 ---------------- */
   async function status() {
     const auto = await autostartInfo();
+    const desktopFile = await pth('desktop');
+    const launcherFile = await pth('launcher');
     let desktopExists = false;
-    try { desktopExists = fs.existsSync(paths.desktop); } catch (e) {}
+    try { desktopExists = fs.existsSync(desktopFile); } catch (e) {}
     let launcherExists = false;
-    try { launcherExists = fs.existsSync(paths.launcher); } catch (e) {}
+    try { launcherExists = fs.existsSync(launcherFile); } catch (e) {}
     return {
       platform,
       platformName: isWindows ? 'Windows' : (isMac ? 'macOS' : 'Linux'),
@@ -371,8 +414,8 @@ module.exports = function createService({ appDir, port, log = () => {} }) {
       node: process.execPath,
       nodeVersion: process.versions.node,
       startCommand: 'node ' + nodeFlags.join(' ') + ' ' + serverScript,
-      launcher: { path: paths.launcher, exists: launcherExists, command: isWindows ? 'sierxing' : 'sierxing', binDir: paths.binDir },
-      desktop: { path: paths.desktop, exists: desktopExists },
+      launcher: { path: launcherFile, exists: launcherExists, command: 'sierxing', binDir: await pth('binDir') },
+      desktop: { path: desktopFile, exists: desktopExists },
       autostart: auto
     };
   }
