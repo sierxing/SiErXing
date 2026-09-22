@@ -3892,8 +3892,8 @@ function railItemsHTML() {
       ${items.slice(0, g && (r.view === 'goal' || r.view === 'map' || r.view === 'plugin') ? 2 : 1).map(i => `<a class="railItem ${i.active ? 'active' : ''}" href="${i.hash}" title="${esc(i.label)}${i.dot ? ' · 有新版本' : ''}">
         <span class="railIcon">${i.icon}${i.dot ? '<i class="railDot"></i>' : ''}</span><span class="railLabel">${esc(i.label)}</span></a>`).join('')}
       ${compsHTML}
-      ${items.slice(g && (r.view === 'goal' || r.view === 'map' || r.view === 'plugin') ? 2 : 1).map(i => `<a class="railItem ${i.active ? 'active' : ''}" href="${i.hash}" title="${esc(i.label)}">
-        <span class="railIcon">${i.icon}</span><span class="railLabel">${esc(i.label)}</span></a>`).join('')}
+      ${items.slice(g && (r.view === 'goal' || r.view === 'map' || r.view === 'plugin') ? 2 : 1).map(i => `<a class="railItem ${i.active ? 'active' : ''}" href="${i.hash}" title="${esc(i.label)}${i.dot ? ' · 有新版本' : ''}">
+        <span class="railIcon">${i.icon}${i.dot ? '<i class="railDot"></i>' : ''}</span><span class="railLabel">${esc(i.label)}</span></a>`).join('')}
     </div>
     <div class="railBottom">
       <button class="railItem" id="railTheme" title="切换白天 / 黑夜模式">
