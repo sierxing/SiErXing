@@ -63,10 +63,18 @@ function cfg() {
 
 /* ---------------- 通用工具 ---------------- */
 
-function withTimeout(ms) {
+function withTimeout(ms, outer) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), Math.max(5000, ms || 300000));
-  return { signal: ctrl.signal, done: () => clearTimeout(timer) };
+  const onAbort = () => { try { ctrl.abort(); } catch (e) {} };
+  if (outer) {
+    if (outer.aborted) onAbort();
+    else outer.addEventListener('abort', onAbort, { once: true });
+  }
+  return {
+    signal: ctrl.signal,
+    done: () => { clearTimeout(timer); if (outer) outer.removeEventListener('abort', onAbort); }
+  };
 }
 
 function httpErrorText(status, body) {
@@ -126,11 +134,11 @@ function messageContent(prompt, images) {
   return parts;
 }
 
-async function openaiRequest(c, body, timeoutMs) {
+async function openaiRequest(c, body, timeoutMs, signal) {
   const urls = candidateUrls(c.baseUrl, 'chat/completions');
   let lastErr = null;
   for (const url of urls) {
-    const t = withTimeout(timeoutMs || c.timeoutMs);
+    const t = withTimeout(timeoutMs || c.timeoutMs, signal);
     try {
       const res = await fetch(url, { method: 'POST', headers: openaiHeaders(c), body: JSON.stringify(body), signal: t.signal });
       if (!res.ok) {
@@ -141,7 +149,10 @@ async function openaiRequest(c, body, timeoutMs) {
       return res;
     } catch (e) {
       lastErr = e;
-      if (e && e.name === 'AbortError') throw new Error('AI 请求超时（可在设置里调大超时时间）');
+      if (e && e.name === 'AbortError') {
+          if (signal && signal.aborted) { const err = new Error('已停止'); err.cancelled = true; throw err; }
+          throw new Error('AI 请求超时（可在设置里调大超时时间）');
+        }
       if (String(e.message || '').includes('fetch failed') || e.cause) {
         if (url === urls[urls.length - 1]) throw new Error('无法连接 AI 接口：' + (c.baseUrl || '(未配置地址)') + '（检查地址、网络或代理）');
         continue;
@@ -155,7 +166,7 @@ async function openaiRequest(c, body, timeoutMs) {
 }
 
 async function openaiText(c, opts) {
-  const { prompt, model, images, timeoutMs, onEvent } = opts;
+  const { prompt, model, images, timeoutMs, onEvent, signal } = opts;
   const useStream = !!(onEvent && opts.stream !== false);
   const mdl = model || c.model;
   if (!mdl) throw new Error('未配置模型名（在「设置」里填写，或设置环境变量 SIERXING_MODEL）');
@@ -164,7 +175,7 @@ async function openaiText(c, opts) {
     messages: [{ role: 'user', content: messageContent(prompt, images) }],
     stream: useStream
   };
-  const res = await openaiRequest(c, body, timeoutMs);
+  const res = await openaiRequest(c, body, timeoutMs, signal);
   if (!useStream) {
     const j = await res.json().catch(() => null);
     const text = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
@@ -347,7 +358,8 @@ function isAgentError(msg) {
   return /agent/i.test(String(msg || '')) && /(not found|不存在|unknown|无效|invalid)/i.test(String(msg || ''));
 }
 async function opencodeText(c, opts) {
-  const { prompt, model, images, timeoutMs, onEvent } = opts;
+  const { prompt, model, images, timeoutMs, onEvent, signal } = opts;
+    if (signal && signal.aborted) { const err = new Error('已停止'); err.cancelled = true; throw err; }
   const args = opencodeArgs(c, opts, true);
   // 提示词通过 stdin 传入（Windows 下 cmd 包装脚本 + 长文本更稳）
   if (onEvent) {

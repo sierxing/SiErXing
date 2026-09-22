@@ -697,8 +697,8 @@ async function mapLimit(items, limit, fn) {
   await Promise.all(workers);
   return ret;
 }
-async function collectForGoal(goal, onProgress) {
-  return collectSources(goal, collectQueries(goal.title), onProgress);
+async function collectForGoal(goal, onProgress, signal) {
+  return collectSources(goal, collectQueries(goal.title), onProgress, signal);
 }
 // 按节点主题搜集（拆分节点时使用，颗粒更聚焦）
 const nodeQueries = title => {
@@ -712,12 +712,15 @@ const nodeQueries = title => {
     { kind: 'JD', q: `${k} 岗位要求`, days: 60 }
   ];
 };
-async function collectSources(goal, queries, onProgress) {
+async function collectSources(goal, queries, onProgress, signal) {
   const seen = new Set();
   const all = [];
   let doneQ = 0, blocked = false;
+  const checkStop = () => { if (signal && signal.aborted) { const e = new Error('已停止'); e.cancelled = true; throw e; } };
   for (const item of queries) {
+    checkStop();
     await new Promise(r => setTimeout(r, 1100 + Math.random() * 1200));
+    checkStop();
     let rs = await baiduSearch(item.q, 30, item.days);
     if (rs === null) {
       if (!blocked) { blocked = true; onProgress({ status: '百度触发限流，切换备用搜索（必应）…' }); }
@@ -758,6 +761,7 @@ async function collectSources(goal, queries, onProgress) {
   const now = Date.now();
   let fetched = 0, saved = 0, ads = 0, skipped = 0;
   await mapLimit(picked, 4, async s => {
+    checkStop();
     fetched++;
     if (fetched % 8 === 0) onProgress({ status: `抓取正文 ${fetched}/${picked.length}（新增 ${saved} 条，排除广告 ${ads} 条，跳过已有 ${skipped} 条）` });
     if (existingUrls.has(s.url)) { skipped++; return; }
@@ -789,6 +793,12 @@ async function collectSources(goal, queries, onProgress) {
   backup();
   return { saved, blocked };
 }
+/* 客户端断开（用户点了「停止」）时，用它把上游 AI 请求也一起终止 */
+function clientSignal(req) {
+  const ac = new AbortController();
+  try { req.on('close', () => { try { ac.abort(); } catch (e) {} }); } catch (e) {}
+  return ac.signal;
+}
 function sourcesOf(goalId) {
   // 用户自己提供的图片资料（JD / 大纲 / 笔记…）排在最前，其次才是检索到的网络信息源
   return db.prepare("SELECT * FROM sources WHERE goal_id = ? ORDER BY CASE WHEN site = '用户提供的图片' OR kind = 'JD' THEN 0 ELSE 1 END, id").all(goalId);
@@ -796,12 +806,30 @@ function sourcesOf(goalId) {
 
 /* ===== AI 规划 ===== */
 function sourcesBlock(goal, maxItems, maxLen) {
-  const sources = sourcesOf(goal.id);
-  if (!sources.length) return '\n【注意】本次没有检索到网络信息源，请仅依据公开公认的岗位要求与学习路径规划，并在 sources 中注明依据，不确定处标注「待核实」。';
-  const lines = ['', '【已检索到的优质信息源（必须优先依据这些真实资料，并在 sources 中标注来源）】'];
-  for (const s of sources.slice(0, maxItems)) {
-    const body = String(s.content || s.snippet || '').replace(/\s+/g, ' ').slice(0, maxLen);
-    lines.push(`- [${s.site}｜${s.kind}] ${s.title}${body ? '：' + body : ''}`);
+  const all = sourcesOf(goal.id);
+  if (!all.length) return '\n【注意】本次没有检索到网络信息源，请仅依据公开公认的岗位要求与学习路径规划，并在 sources 中注明依据，不确定处标注「待核实」。';
+  // 用户自己提供的图片资料（JD / 大纲 / 笔记…）是最高优先级的一手信息
+  const own = all.filter(s => s.site === '用户提供的图片' || s.site === '导入的资料');
+  const net = all.filter(s => !(s.site === '用户提供的图片' || s.site === '导入的资料'));
+  const fmt = (s, len) => {
+    const body = String(s.content || s.snippet || '').replace(/\s+/g, ' ').slice(0, len);
+    return `- [${s.site}｜${s.kind}] ${s.title}${body ? '：' + body : ''}`;
+  };
+  const lines = [''];
+  if (own.length) {
+    lines.push('【用户自己提供的资料（★最高优先级：用户真实场景的一手信息，必须严格依据）】');
+    lines.push('要求：① 其中的硬性条件（学历 / 到岗天数 / 技能要求 / 时间节点 / 知识范围等）必须原样满足，不得忽略或改写；');
+    lines.push('② 规划要与这些资料高度对齐：按真实 JD 的要求与优先级安排重点，按大纲/笔记的章节顺序组织学习路径；');
+    lines.push('③ 若下面的网络信息源与用户资料冲突，一律以用户资料为准，并可在说明中指出差异；');
+    lines.push('④ 在 sources 中标注这些资料时写明「用户提供的资料」。');
+    for (const s of own.slice(0, maxItems)) lines.push(fmt(s, maxLen));
+  }
+  if (net.length) {
+    lines.push('');
+    lines.push(own.length
+      ? '【网络检索到的信息源（参考用，优先级低于上面的用户资料）】'
+      : '【已检索到的优质信息源（必须优先依据这些真实资料，并在 sources 中标注来源）】');
+    for (const s of net.slice(0, Math.max(10, maxItems - own.length))) lines.push(fmt(s, maxLen));
   }
   return lines.join('\n');
 }
@@ -1103,11 +1131,11 @@ function buildTasksPrompt(goal, stage, stageIndex) {
   return lines.join('\n');
 }
 /* ===== AI 调用（由 server/ai.js 提供，支持任意 OpenAI 兼容接口或 opencode CLI） ===== */
-async function aiText(prompt, model, timeoutMs, onEvent) {
-  return ai.text({ prompt, model: model || currentModel(), timeoutMs, onEvent });
+async function aiText(prompt, model, timeoutMs, onEvent, signal) {
+  return ai.text({ prompt, model: model || currentModel(), timeoutMs, onEvent, signal });
 }
-async function aiTextFiles(prompt, model, files, timeoutMs) {
-  return ai.text({ prompt, model: model || currentVisionModel(), images: files || [], timeoutMs });
+async function aiTextFiles(prompt, model, files, timeoutMs, signal) {
+  return ai.text({ prompt, model: model || currentVisionModel(), images: files || [], timeoutMs, signal });
 }
 function extractJSONObjects(text) {
   const objs = [];
@@ -1424,10 +1452,11 @@ function streamClarify(req, res, goal) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   const model = currentModel();
   const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} };
+    const sig = clientSignal(req);
   (async () => {
     try {
       send({ status: 'AI 正在分析你的情况，准备澄清问题…' });
-      const txt = await aiTextProgress(buildClarifyPrompt(goal), model, 300000, send, '问题');
+      const txt = await aiTextProgress(buildClarifyPrompt(goal), model, 300000, send, '问题', sig);
       const data = extractJSON(txt);
       if (!data || !Array.isArray(data.questions) || !data.questions.length) throw new Error('澄清问题生成失败，请重试');
       db.prepare('UPDATE goals SET clarify = ?, clarify_stage = ?, status = ?, error = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(data), 'clarify', 'clarify', '', nowISO(), goal.id);
@@ -1450,7 +1479,7 @@ function progressTitles(text) {
   while ((m = re.exec(text))) out.push(m[1].replace(/\\"/g, '"'));
   return out;
 }
-async function aiTextProgress(prompt, model, timeoutMs, send, label) {
+async function aiTextProgress(prompt, model, timeoutMs, send, label, signal) {
   const t0 = Date.now();
   let full = '', thinking = '', lastSent = 0;
   const snapshot = extra => {
@@ -1466,7 +1495,7 @@ async function aiTextProgress(prompt, model, timeoutMs, send, label) {
   const hb = setInterval(() => { send({ progress: snapshot({ heartbeat: true }) }); }, 2500);
   try {
     return await ai.stream({
-      prompt, model, timeoutMs,
+      prompt, model, timeoutMs, signal,
       onEvent: ev => {
         if (ev && ev.text) {
           full += ev.text;
@@ -1486,13 +1515,14 @@ function streamPlan(req, res, goal, answers) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   const model = currentModel();
   const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} };
+    const sig = clientSignal(req);
   (async () => {
     try {
       const pend = goalPending(goal.id);
       if (answers && pend) appendGoalQa(goal.id, pend.stage, pend.data.questions, answers);
       send({ status: answers ? '正在结合你的补充回答生成路径骨架…' : '正在结合你的回答生成路径骨架…' });
       const planPrompt = buildSkeletonPrompt(goal);
-      let skeletonText = await aiTextProgress(planPrompt, model, 600000, send, '阶段/小目标');
+      let skeletonText = await aiTextProgress(planPrompt, model, 600000, send, '阶段/小目标', sig);
       let skeleton = extractJSON(skeletonText);
       if (skeleton && Array.isArray(skeleton.questions) && skeleton.questions.length) {
         saveGoalQuestions(goal.id, 'plan', skeleton);
@@ -1503,7 +1533,7 @@ function streamPlan(req, res, goal, answers) {
       if (!skeleton || !Array.isArray(skeleton.stages) || !skeleton.stages.length) {
         console.log('[plan] 骨架解析失败（将重试），原始输出前 400 字:', String(skeletonText || '').slice(0, 400).replace(/\n/g, ' '));
         send({ status: '正在重新整理规划结果…' });
-        skeletonText = await aiTextProgress(planPrompt + '\n\n【重要】你上一次的输出不是合法 JSON（可能被截断或夹带了说明文字）。请严格只输出一个 JSON 对象，不要任何解释、不要代码块标记；阶段控制在 4-5 个、每阶段 3-4 个小目标，detail 精简到 60 字以内。', model, 600000, send, '阶段/小目标');
+        skeletonText = await aiTextProgress(planPrompt + '\n\n【重要】你上一次的输出不是合法 JSON（可能被截断或夹带了说明文字）。请严格只输出一个 JSON 对象，不要任何解释、不要代码块标记；阶段控制在 4-5 个、每阶段 3-4 个小目标，detail 精简到 60 字以内。', model, 600000, send, '阶段/小目标', sig);
         skeleton = extractJSON(skeletonText);
         if (skeleton && Array.isArray(skeleton.questions) && skeleton.questions.length) {
           saveGoalQuestions(goal.id, 'plan', skeleton);
@@ -1523,8 +1553,15 @@ function streamPlan(req, res, goal, answers) {
       backup();
       send({ done: true, stages: skeleton.stages.length, goal: getGoal(goal.id), report, versionId: vid });
     } catch (e) {
-      db.prepare('UPDATE goals SET status = ?, error = ?, updated_at = ? WHERE id = ?').run('failed', e.message, nowISO(), goal.id);
-      send({ error: e.message });
+      if (e && e.cancelled) {
+        // 用户点了「停止」：不算失败，回到可继续的状态
+        const cnt = db.prepare('SELECT COUNT(*) AS c FROM nodes WHERE goal_id = ?').get(goal.id).c;
+        db.prepare('UPDATE goals SET status = ?, error = ?, updated_at = ? WHERE id = ?').run(cnt ? 'review' : 'todo', '', nowISO(), goal.id);
+        send({ cancelled: true, status: '已停止（可随时继续）', goal: getGoal(goal.id) });
+      } else {
+        db.prepare('UPDATE goals SET status = ?, error = ?, updated_at = ? WHERE id = ?').run('failed', e.message, nowISO(), goal.id);
+        send({ error: e.message });
+      }
     }
     res.end();
   })();
@@ -1542,6 +1579,7 @@ function streamPlanTasks(req, res, goal, answers) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   const model = currentModel();
   const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} };
+    const sig = clientSignal(req);
   (async () => {
     try {
       const pend = goalPending(goal.id);
@@ -1559,7 +1597,7 @@ function streamPlanTasks(req, res, goal, answers) {
         if (hasTasks) { send({ status: `第 ${i + 1}/${skeleton.length} 阶段已有任务，跳过` }); continue; }
         send({ status: `生成第 ${i + 1}/${skeleton.length} 阶段的任务：${String(st.title || '').slice(0, 22)}…` });
         try {
-          const txt = await aiTextProgress(buildTasksPrompt(goal, st, i), model, 300000, send, '任务');
+          const txt = await aiTextProgress(buildTasksPrompt(goal, st, i), model, 300000, send, '任务', sig);
           const data = extractJSON(txt);
           if (data && Array.isArray(data.questions) && data.questions.length) {
             saveGoalQuestions(goal.id, 'tasks', data);
@@ -1586,8 +1624,15 @@ function streamPlanTasks(req, res, goal, answers) {
       const updated = getGoal(goal.id);
       send({ done: true, goal: updated, report, versionId: vid });
     } catch (e) {
-      db.prepare('UPDATE goals SET status = ?, error = ?, updated_at = ? WHERE id = ?').run('failed', e.message, nowISO(), goal.id);
-      send({ error: e.message });
+      if (e && e.cancelled) {
+        // 用户点了「停止」：不算失败，回到可继续的状态
+        const cnt = db.prepare('SELECT COUNT(*) AS c FROM nodes WHERE goal_id = ?').get(goal.id).c;
+        db.prepare('UPDATE goals SET status = ?, error = ?, updated_at = ? WHERE id = ?').run(cnt ? 'review' : 'todo', '', nowISO(), goal.id);
+        send({ cancelled: true, status: '已停止（可随时继续）', goal: getGoal(goal.id) });
+      } else {
+        db.prepare('UPDATE goals SET status = ?, error = ?, updated_at = ? WHERE id = ?').run('failed', e.message, nowISO(), goal.id);
+        send({ error: e.message });
+      }
     }
     res.end();
   })();
@@ -1619,6 +1664,7 @@ function streamPlanRefine(req, res, goal, feedback, answers) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   const model = currentModel();
   const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} };
+    const sig = clientSignal(req);
   (async () => {
     try {
       const pend = goalPending(goal.id);
@@ -1628,12 +1674,12 @@ function streamPlanRefine(req, res, goal, feedback, answers) {
       if (!current.length) throw new Error('还没有骨架可调整');
       send({ status: '正在根据你的意见调整骨架…' });
       const refinePrompt = buildRefineSkeletonPrompt(goal, current, feedback);
-      let txt = await aiTextProgress(refinePrompt, model, 480000, send, '阶段/小目标');
+      let txt = await aiTextProgress(refinePrompt, model, 480000, send, '阶段/小目标', sig);
       let plan = extractJSON(txt);
       if (!plan || !Array.isArray(plan.stages) || !plan.stages.length) {
         console.log('[refine] 解析失败（将重试），原始输出前 300 字:', String(txt || '').slice(0, 300).replace(/\n/g, ' '));
         send({ status: '正在重新整理调整结果…' });
-        txt = await aiTextProgress(refinePrompt + '\n\n【重要】请严格只输出一个 JSON 对象（不要解释、不要代码块），格式：{"summary":"...","stages":[{"title":"","detail":"","sources":[],"goals":[{"title":"","detail":"","sources":[]}]}]}', model, 480000, send, '阶段/小目标');
+        txt = await aiTextProgress(refinePrompt + '\n\n【重要】请严格只输出一个 JSON 对象（不要解释、不要代码块），格式：{"summary":"...","stages":[{"title":"","detail":"","sources":[],"goals":[{"title":"","detail":"","sources":[]}]}]}', model, 480000, send, '阶段/小目标', sig);
         plan = extractJSON(txt);
       }
       if (plan && Array.isArray(plan.questions) && plan.questions.length) {
@@ -1650,8 +1696,15 @@ function streamPlanRefine(req, res, goal, feedback, answers) {
       backup();
       send({ done: true, goal: getGoal(goal.id), report, versionId: vid });
     } catch (e) {
-      db.prepare('UPDATE goals SET status = ?, error = ?, updated_at = ? WHERE id = ?').run('failed', e.message, nowISO(), goal.id);
-      send({ error: e.message });
+      if (e && e.cancelled) {
+        // 用户点了「停止」：不算失败，回到可继续的状态
+        const cnt = db.prepare('SELECT COUNT(*) AS c FROM nodes WHERE goal_id = ?').get(goal.id).c;
+        db.prepare('UPDATE goals SET status = ?, error = ?, updated_at = ? WHERE id = ?').run(cnt ? 'review' : 'todo', '', nowISO(), goal.id);
+        send({ cancelled: true, status: '已停止（可随时继续）', goal: getGoal(goal.id) });
+      } else {
+        db.prepare('UPDATE goals SET status = ?, error = ?, updated_at = ? WHERE id = ?').run('failed', e.message, nowISO(), goal.id);
+        send({ error: e.message });
+      }
     }
     res.end();
   })();
@@ -2084,13 +2137,18 @@ async function handleAPI(req, res, u) {
     const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(id);
     if (!g) return sendJSON(res, 404, { error: '目标不存在' });
     res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache' });
+    const sig = clientSignal(req);
     (async () => {
       try {
-        const r = await collectForGoal(g, s => { try { res.write(`data: ${JSON.stringify(s)}\n\n`); } catch (e) {} });
+        const r = await collectForGoal(g, s => { try { res.write(`data: ${JSON.stringify(s)}\n\n`); } catch (e) {} }, sig);
         const list = sourcesOf(id);
         try { res.write(`data: ${JSON.stringify({ done: true, count: r.saved, blocked: r.blocked, sources: list })}\n\n`); } catch (e) {}
       } catch (e) {
-        try { res.write(`data: ${JSON.stringify({ error: '信息源获取失败：' + e.message })}\n\n`); } catch (e2) {}
+        if (e && e.cancelled) {
+          try { res.write(`data: ${JSON.stringify({ cancelled: true, status: '已停止收集', sources: sourcesOf(id) })}\n\n`); } catch (e2) {}
+        } else {
+          try { res.write(`data: ${JSON.stringify({ error: '信息源获取失败：' + e.message })}\n\n`); } catch (e2) {}
+        }
       }
       res.end();
     })();
@@ -2913,7 +2971,12 @@ const server = http.createServer(async (req, res) => {
     if (u.pathname.startsWith('/uploads/')) serveUpload(req, res, u.pathname.slice('/uploads/'.length));
     else serveStatic(req, res, u.pathname);
   } catch (e) {
-    sendJSON(res, 500, { error: e.message });
+    // 注意：流式（SSE）响应可能已经开始，此时不能再写响应头，否则会直接把进程搞崩
+    console.error('[http] 请求处理失败:', (e && e.message) || e);
+    try {
+      if (!res.headersSent) sendJSON(res, 500, { error: e.message });
+      else if (!res.writableEnded) res.end();
+    } catch (e2) {}
   }
 });
 

@@ -1872,7 +1872,7 @@ function planPanelHTML() {
   if (!g) return '';
   if (state.planning) {
     return `<div class="planPanel" id="planPanel">
-      <div class="ppHead"><span class="spinner"></span><span id="ppStatus">${esc(state.planStatus || 'AI 正在规划…')}</span><span class="ppTime" id="ppTime">0s</span></div>
+      <div class="ppHead"><span class="spinner"></span><span id="ppStatus">${esc(state.planStatus || 'AI 正在规划…')}</span><span class="ppTime" id="ppTime">0s</span><div class="spacer"></div><button class="btn tiny" id="planStop" title="停止这次生成（已生成的内容不会丢，可随时重新开始或继续）">⏹ 停止</button></div>
       <div class="ppTrack"><div class="ppTrackIn"></div></div>
       <div class="ppLive" id="ppLive" hidden></div>
       <details class="ppRaw"><summary>查看 AI 原始输出</summary><pre class="ppText" id="ppText"></pre></details>
@@ -1933,6 +1933,10 @@ function renderPlanLive() {
     + ((p.titles && p.titles.length) ? `<div class="ppLiveList">${p.titles.map(t => `<span class="ppLiveChip">${esc(t)}</span>`).join('')}</div>` : '');
 }
 function bindPlanningPanel() {
+  const stopBtn = document.getElementById('planStop');
+  if (stopBtn) stopBtn.addEventListener('click', () => {
+    if (state.planAbort) { state.planAbort.abort(); stopBtn.disabled = true; stopBtn.textContent = '正在停止…'; }
+  });
   const t0 = Date.now();
   clearInterval(planTimer);
   planTimer = setInterval(() => {
@@ -1941,8 +1945,8 @@ function bindPlanningPanel() {
   }, 1000);
   renderPlanLive();
 }
-async function streamSSE(url, body, onEvent) {
-  const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+async function streamSSE(url, body, onEvent, signal) {
+  const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}), signal: signal || undefined });
   if (!resp.ok || !resp.body) throw new Error('无法连接服务');
   const reader = resp.body.getReader();
   const dec = new TextDecoder();
@@ -1971,6 +1975,7 @@ async function startClarify(id) {
   if (!(await ensureAIConfigured())) return;
   if (typeof compOn === 'function' && !compOn('clarify')) { return startPlanning(id, null); }
   state.planning = true;
+  state.planAbort = new AbortController();
   state.planStatus = 'AI 正在分析你的情况，准备澄清问题…';
   state.planHint = 'AI 会先问几个问题（选择/简答），充分了解你的情况后再制定规划。';
   state.showEdit = false;
@@ -1980,7 +1985,7 @@ async function startClarify(id) {
   const r = await streamSSE('/api/goals/' + id + '/plan/clarify', {}, d => {
     if (d.status) { state.planStatus = d.status; const el = document.getElementById('ppStatus'); if (el) el.textContent = d.status; }
     if (d.progress) { state.planProgress = d.progress; renderPlanLive(); }
-  }).catch(e => ({ done: true, error: e.message }));
+  }, state.planAbort.signal).catch(e => ({ done: true, error: e.message }));
   clearInterval(planTimer);
   state.planning = false;
   if (r.error || !r.done) {
@@ -1997,6 +2002,7 @@ async function startClarify(id) {
 async function startPlanning(id, answers) {
   if (state.planning || state.collecting || state.expanding) return;
   state.planning = true;
+  state.planAbort = new AbortController();
   state.planProgress = null;
   state.planStage = 'skeleton';
   state.planStatus = answers ? '正在结合你的回答生成路径骨架…' : '正在生成路径骨架（阶段与小目标）…';
@@ -2011,7 +2017,7 @@ async function startPlanning(id, answers) {
     if (d.status) { state.planStatus = d.status; const el = document.getElementById('ppStatus'); if (el) el.textContent = d.status; }
     if (d.progress) { state.planProgress = d.progress; renderPlanLive(); }
     if (d.questions) asked = { stage: d.stage || 'plan', feedback: d.feedback || '', data: d.questions };
-  }).catch(e => ({ done: true, error: e.message }));
+  }, state.planAbort.signal).catch(e => ({ done: true, error: e.message }));
   clearInterval(planTimer);
   state.planning = false;
   if (asked) {
@@ -2033,6 +2039,7 @@ async function startPlanning(id, answers) {
 async function startPlanTasks(id, answers) {
   if (state.planning || state.collecting || state.expanding) return;
   state.planning = true;
+  state.planAbort = new AbortController();
   state.planProgress = null;
   state.planStage = 'tasks';
   state.planStatus = '开始逐阶段细化任务…';
@@ -2050,7 +2057,7 @@ async function startPlanTasks(id, answers) {
       const el = document.getElementById('ppStatus');
       if (el && state.planStatus) el.textContent = state.planStatus + '　[已有 ' + cnt + ' 个任务]';
     }
-  }).catch(e => ({ done: true, error: e.message }));
+  }, state.planAbort.signal).catch(e => ({ done: true, error: e.message }));
   clearInterval(planTimer);
   state.planning = false;
   if (asked) {
@@ -2066,6 +2073,7 @@ async function startPlanTasks(id, answers) {
 async function startPlanRefine(id, feedback, answers) {
   if (state.planning || state.collecting || state.expanding) return;
   state.planning = true;
+  state.planAbort = new AbortController();
   state.planProgress = null;
   state.planStatus = '正在根据你的意见调整骨架…';
   state.planHint = '调整后仍需你确认才会细化任务。';
@@ -2076,7 +2084,7 @@ async function startPlanRefine(id, feedback, answers) {
     if (d.status) { state.planStatus = d.status; const el = document.getElementById('ppStatus'); if (el) el.textContent = d.status; }
     if (d.progress) { state.planProgress = d.progress; renderPlanLive(); }
     if (d.questions) asked = { stage: 'refine', feedback: d.feedback || feedback, data: d.questions };
-  }).catch(e => ({ done: true, error: e.message }));
+  }, state.planAbort.signal).catch(e => ({ done: true, error: e.message }));
   clearInterval(planTimer);
   state.planning = false;
   if (asked) {
@@ -2175,7 +2183,7 @@ function srcPanelHTML() {
       <button class="btn small" id="collectBtn">${list.length ? '重新收集' : '收集信息源'}</button>
     </div>`;
   if (state.collecting) {
-    h += `<div class="spProgress"><span class="spinner"></span><span id="spStatus">${esc(state.collectStatus || '正在检索…')}</span></div>`;
+      h += `<div class="spProgress"><span class="spinner"></span><span id="spStatus">${esc(state.collectStatus || '正在检索…')}</span><div class="spacer"></div><button class="btn tiny" id="collectStop" title="停止本次收集（已收集到的会保留）">⏹ 停止</button></div>`;
   }
   if (list.length) {
     h += `<details class="spDetails"><summary>查看来源列表（${list.length} 条）</summary><div class="spList">${list.map(sourceItemHTML).join('')}</div></details>`;
@@ -2192,7 +2200,8 @@ async function startCollect(id) {
   state.collectStatus = '正在检索…';
   renderGoal();
   try {
-    const resp = await fetch('/api/goals/' + id + '/collect', { method: 'POST' });
+    state.collectAbort = new AbortController();
+      const resp = await fetch('/api/goals/' + id + '/collect', { method: 'POST', signal: state.collectAbort.signal });
     if (!resp.ok || !resp.body) throw new Error('无法连接采集服务');
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
@@ -2394,6 +2403,8 @@ function renderGoal() {
   if (emptyPlan) emptyPlan.addEventListener('click', () => startClarify(g.id));
   const cb = document.getElementById('collectBtn');
   if (cb) cb.addEventListener('click', () => startCollect(g.id));
+  const cs = document.getElementById('collectStop');
+  if (cs) cs.addEventListener('click', () => { if (state.collectAbort) state.collectAbort.abort(); });
   if (state.planning || state.collecting) {
     planBtnEl.disabled = true;
     if (cb) cb.disabled = true;
