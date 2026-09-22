@@ -2288,7 +2288,7 @@ async function startDigest(id) {
   if (state.digesting) return;
   if (!(await ensureAIConfigured())) return;
   if (!(state.sources || []).length) { toast('还没有资料：先「收集信息源」或上传图片资料'); return; }
-  if (!confirm('让 AI 通读全部 ' + (state.sources || []).length + ' 条资料并提炼成多篇主题汇总？\n\n资料多时可能需要几分钟（可随时点停止），提炼结果会用于后续规划。')) return;
+  if (!confirm('让 AI 通读全部 ' + (state.sources || []).length + ' 条资料并提炼成多篇主题汇总？\n\n你的资料越多耗时越长（100 条以上大约 10-20 分钟，期间可随时点「⏹ 停止」，已提炼的部分会保留），提炼结果会用于后续规划。')) return;
   state.digesting = true;
   state.digestStatus = '正在通读资料…';
   state.digestProgress = null;
@@ -3109,9 +3109,12 @@ async function renderLibraryPage() {
   const byKind = {};
   for (const x of sources) (byKind[x.kind || '其它'] = byKind[x.kind || '其它'] || []).push(x);
   const goalOptions = (state.goals || []).map(x => `<option value="${x.id}" ${Number(x.id) === Number(g.id) ? 'selected' : ''}>${esc(x.title)}</option>`).join('');
-  const srcCard = (x, withBody) => `<details class="libSrc"><summary><span class="chip gray">${esc(x.kind || '资料')}</span> ${esc(x.title)}</summary>
+  const srcCard = (x, withBody) => {
+    const full = String(x.content || x.snippet || '（无正文）');
+    return `<details class="libSrc"><summary><span class="chip gray">${esc(x.kind || '资料')}</span> ${esc(x.title)} <span class="muted" style="font-size:11px;">· ${full.length} 字</span></summary>
       <div class="libSrcBody">${x.url ? `<div class="libSrcMeta">来源：<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.site || x.url)}</a></div>` : `<div class="libSrcMeta">来源：${esc(x.site || '—')}</div>`}
-      ${withBody ? `<div class="mdBody" style="margin-top:6px;">${mdToHTML(String(x.content || x.snippet || '（无正文）').slice(0, 4000))}</div>` : `<div class="libSrcMeta">${esc(String(x.snippet || x.content || '').slice(0, 120))}…</div>`}</div></details>`;
+      <div class="mdBody libFullText" style="margin-top:6px;">${mdToHTML(full)}</div></div></details>`;
+  };
   let h = `<div class="page">
     <div class="pageHead">
       <a class="back js-back" href="#/g/${g.id}">← 返回目标</a>

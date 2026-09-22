@@ -793,6 +793,15 @@ async function collectSources(goal, queries, onProgress, signal) {
   backup();
   return { saved, blocked };
 }
+/* 清洗抓取到的正文：去掉成片空行与多余空格（网络资料常带大量空白，直接截取会浪费额度） */
+function cleanText(raw) {
+  return String(raw == null ? '' : raw)
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+}
 /* 客户端断开（用户点了「停止」）时，用它把上游 AI 请求也一起终止 */
 function clientSignal(req) {
   const ac = new AbortController();
@@ -824,8 +833,14 @@ function digestBatches(goal) {
   const own = all.filter(x => x.site === '用户提供的图片' || x.site === '导入的资料');
   const net = all.filter(x => !(x.site === '用户提供的图片' || x.site === '导入的资料'));
   // 用户自己提供的资料全文（最多 4000 字/条）；网络资料 900 字/条
-  const items = own.map(x => ({ label: `[用户资料｜${x.kind}] ${x.title}`, body: String(x.content || x.snippet || '').slice(0, 4000) }))
-    .concat(net.map(x => ({ label: `[${x.site}｜${x.kind}] ${x.title}`, body: String(x.content || x.snippet || '').slice(0, 900) })));
+  const ownCap = 6000, netCap = 3000;   // 用户提供的资料几乎读全文；网络资料 3000 字（覆盖绝大多数）
+  const items = own.map(x => {
+    const full = cleanText(x.content || x.snippet || '');
+    return { label: `[用户资料｜${x.kind}] ${x.title}`, body: full.slice(0, ownCap) + (full.length > ownCap ? `\n（本条共 ${full.length} 字，此处截取前 ${ownCap} 字）` : '') };
+  }).concat(net.map(x => {
+    const full = cleanText(x.content || x.snippet || '');
+    return { label: `[${x.site}｜${x.kind}] ${x.title}`, body: full.slice(0, netCap) + (full.length > netCap ? `\n（本条共 ${full.length} 字，此处截取前 ${netCap} 字）` : '') };
+  }));
   const batches = [];
   let cur = [], curLen = 0;
   const LIMIT = 12000;
@@ -908,7 +923,9 @@ function buildLibraryMarkdown(goal) {
       if (x.url) meta.push('链接：' + x.url);
       if (x.published_at) meta.push('时间：' + x.published_at);
       if (meta.length) { L.push('*' + meta.join('　·　') + '*'); L.push(''); }
-      L.push(String(x.content || x.snippet || '（无正文）').slice(0, 4000));
+      const full = cleanText(x.content || x.snippet || '（无正文）');
+      const cap = (x.site === '用户提供的图片' || x.site === '导入的资料') ? 20000 : 4000;
+      L.push(full.slice(0, cap) + (full.length > cap ? `\n\n> （本条共 ${full.length} 字，此处截取前 ${cap} 字）` : ''));
       L.push('');
       L.push('---');
       L.push('');
@@ -1001,8 +1018,9 @@ function sourcesBlock(goal, maxItems, maxLen) {
   const own = all.filter(s => s.site === '用户提供的图片' || s.site === '导入的资料');
   const net = all.filter(s => !(s.site === '用户提供的图片' || s.site === '导入的资料'));
   const fmt = (s, len) => {
-    const body = String(s.content || s.snippet || '').replace(/\s+/g, ' ').slice(0, len);
-    return `- [${s.site}｜${s.kind}] ${s.title}${body ? '：' + body : ''}`;
+    const full = cleanText(s.content || s.snippet || '');
+    const body = full.replace(/\n+/g, ' ').slice(0, len);
+    return `- [${s.site}｜${s.kind}] ${s.title}${body ? '：' + body + (full.length > len ? '…' : '') : ''}`;
   };
   const lines = [''];
   if (own.length) {
@@ -2396,7 +2414,7 @@ async function handleAPI(req, res, u) {
             send({ status: `已通读 ${done}/${info.batches.length} 批`, progress: { done, total: info.batches.length } });
           }
         };
-        await Promise.all(Array.from({ length: Math.min(2, info.batches.length) }, worker));
+        await Promise.all(Array.from({ length: Math.min(3, info.batches.length) }, worker));
         parts.sort((a, b) => a.idx - b.idx);
         send({ status: '正在汇总成主题文档（按主题拆分成多篇）…', progress: { done, total: info.batches.length } });
         const syn = await aiText(digestSynthesisPrompt(parts, info), model, 600000, null, sig);

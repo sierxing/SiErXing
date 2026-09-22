@@ -1451,3 +1451,6 @@ body.railWide .mapPage{left:236px;}
 .npSrcBody{border:1px solid var(--border); border-radius:8px; margin-top:5px; background:var(--bg);}
 .npSrcBody summary{cursor:pointer; padding:5px 9px; font-size:12px; color:var(--muted);}
 .npSrcBody .mdBody{padding:2px 10px 8px; font-size:12.8px;}
+
+/* 资源库：资料全文（带高度上限与滚动） */
+.libFullText{max-height:420px; overflow:auto; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-size:12.8px;}
