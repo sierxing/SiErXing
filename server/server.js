@@ -181,6 +181,40 @@ function enabledBuiltins() {
   for (const b of BUILTIN_COMPONENTS) out[b.id] = componentOn(b.id);
   return out;
 }
+/* ===== 组件分类（用户可自建/重命名/删除，组件可移动分类） ===== */
+function componentCategoryList() {
+  const raw = safeParse(getSetting('component_categories', '[]')) || [];
+  return (Array.isArray(raw) ? raw : []).map(s => String(s).trim()).filter(Boolean);
+}
+function saveComponentCategories(list) {
+  const uniq = [];
+  for (const x of list) { const s = String(x).trim().slice(0, 24); if (s && !uniq.includes(s)) uniq.push(s); }
+  setSetting('component_categories', JSON.stringify(uniq));
+  return uniq;
+}
+function componentCategoryMap() {
+  const raw = safeParse(getSetting('component_category_map', '{}')) || {};
+  return (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+}
+function saveComponentCategoryMap(map) { setSetting('component_category_map', JSON.stringify(map || {})); }
+/** 组件的有效分类：用户指定 > 插件声明 > 其它 */
+function effectiveCategory(id, declared) {
+  const map = componentCategoryMap();
+  const c = map[id];
+  return (c && String(c).trim()) || declared || '其它';
+}
+function allCategoriesWithUsage() {
+  const comps = allComponents();
+  const used = {};
+  for (const c of comps) {
+    if (!c.goalToggle) continue;            // 只统计可在新建目标勾选的组件
+    const k = c.category || '其它';
+    used[k] = (used[k] || 0) + 1;
+  }
+  const declared = componentCategoryList();
+  const auto = Object.keys(used).filter(k => k !== '其它' && !declared.includes(k));
+  return { categories: declared.concat(auto), used };
+}
 function allComponents() {
   const list = BUILTIN_COMPONENTS.map(b => ({ ...b, builtin: true, removable: b.scope !== 'core', client: b.client || '', kind: 'feature' }));
   for (const p of FILE_PLUGINS) {
@@ -189,7 +223,7 @@ function allComponents() {
     try { hasStyle = fs.existsSync(path.join(PUBLIC_DIR, 'plugins', p.id + '.css')); } catch (e) {}
     list.push({
       id: p.id, name: p.name || p.id, icon: p.icon || '✨', desc: p.desc || '',
-      category: p.category || (kind === 'theme' ? '外观主题' : '其它'),
+      category: effectiveCategory(p.id, p.category || (kind === 'theme' ? '外观主题' : '其它')),
       scope: p.scope || (kind === 'theme' ? 'theme' : 'extra'), order: p.order || 100,
       defaultEnabled: !!p.defaultEnabled, goalToggle: p.goalToggle !== false,
       version: p.version || '1.0.0', author: p.author || '',
@@ -2296,6 +2330,59 @@ async function handleAPI(req, res, u) {
       backup();
       return sendJSON(res, 200, { goal: getGoal(n.goal_id) });
     }
+  }
+
+  if (p === '/api/component-categories' && method === 'GET') {
+    const { categories, used } = allCategoriesWithUsage();
+    return sendJSON(res, 200, { categories, used, map: componentCategoryMap() });
+  }
+  if (p === '/api/component-categories' && method === 'POST') {
+    const body = await readBody(req);
+    const name = String(body.name || '').trim().slice(0, 24);
+    if (!name) return sendJSON(res, 400, { error: '分类名不能为空' });
+    const list = componentCategoryList();
+    if (list.includes(name)) return sendJSON(res, 400, { error: '该分类已存在' });
+    list.push(name);
+    saveComponentCategories(list);
+    return sendJSON(res, 201, { ok: true, categories: allCategoriesWithUsage().categories });
+  }
+  if (p === '/api/component-categories' && method === 'PUT') {
+    const body = await readBody(req);
+    const from = String(body.from || '').trim();
+    const to = String(body.name || '').trim().slice(0, 24);
+    if (!from || !to) return sendJSON(res, 400, { error: '参数不完整' });
+    const list = componentCategoryList();
+    const idx = list.indexOf(from);
+    if (idx >= 0) list[idx] = to; else list.push(to);
+    saveComponentCategories(list);
+    const map = componentCategoryMap();
+    for (const k of Object.keys(map)) if (String(map[k]) === from) map[k] = to;
+    saveComponentCategoryMap(map);
+    return sendJSON(res, 200, { ok: true, categories: allCategoriesWithUsage().categories });
+  }
+  const catDelMatch = p.match(/^\/api\/component-categories\/(.+)$/);
+  if (catDelMatch && method === 'DELETE') {
+    const name = decodeURIComponent(catDelMatch[1]).trim();
+    saveComponentCategories(componentCategoryList().filter(x => x !== name));
+    const map = componentCategoryMap();
+    for (const k of Object.keys(map)) if (String(map[k]) === name) delete map[k];   // 组件回落到插件自带分类
+    saveComponentCategoryMap(map);
+    return sendJSON(res, 200, { ok: true, categories: allCategoriesWithUsage().categories });
+  }
+  const compCatMatch = p.match(/^\/api\/components\/([a-z0-9_-]+)\/category$/i);
+  if (compCatMatch && method === 'POST') {
+    const cid = String(compCatMatch[1]);
+    const comp = allComponents().find(c => c.id === cid);
+    if (!comp) return sendJSON(res, 404, { error: '组件不存在' });
+    const body = await readBody(req);
+    const category = String(body.category || '').trim().slice(0, 24) || '其它';
+    const map = componentCategoryMap();
+    if (category === '其它') delete map[cid]; else map[cid] = category;
+    if (category !== '其它' && !componentCategoryList().includes(category)) {
+      const list = componentCategoryList(); list.push(category); saveComponentCategories(list);
+    }
+    saveComponentCategoryMap(map);
+    return sendJSON(res, 200, { ok: true, category: effectiveCategory(cid, comp.category) });
   }
 
   if (p === '/api/service/status' && method === 'GET') {

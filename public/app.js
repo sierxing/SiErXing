@@ -2722,6 +2722,7 @@ function applyComponentStyles(styles) {
 }
 async function loadComponents() {
   try {
+    state.componentCats = await api('/api/component-categories').catch(() => ({ categories: [], used: {}, map: {} }));
     const r = await api('/api/components');
     state.components = r.enabled || {};
     state.componentList = r.components || [];
@@ -2755,6 +2756,12 @@ async function renderComponentsPage() {
           ${c.author ? `<span class="cmpAuthor">by ${esc(c.author)}</span>` : ''}
         </div>
         <div class="cmpDesc">${esc(c.desc || '')}</div>
+        <div class="cmpCatRow">
+          <span class="cmpCatLabel">分类</span>
+          <select class="cmpCatSel" data-comp-cat="${esc(c.id)}">
+            ${(state.componentCats && state.componentCats.categories || []).concat(['其它']).map(k => `<option value="${esc(k)}" ${k === (c.category || '其它') ? 'selected' : ''}>${esc(k)}</option>`).join('')}
+          </select>
+        </div>
         ${c.builtin ? '' : `<div class="cmpFiles">服务端 server/plugins/${esc(c.id)}.js${c.client ? ` · 前端 public/plugins/${esc(c.id)}.js` : ''}${c.hasStyle ? ` · 样式 public/plugins/${esc(c.id)}.css` : ''}</div>`}
       </div>
       <div class="cmpOps">${extraRight || ''}${sw(c)}</div>
@@ -2767,6 +2774,15 @@ async function renderComponentsPage() {
       <div class="spacer"></div>
       <button class="btn small" id="cmpReload">↻ 重新加载</button>
       <label class="btn small primary">⬆ 导入组件<input type="file" id="cmpImport" accept=".json,application/json" hidden></label>
+    </div>
+    <div class="sec">
+      <div class="secTitle">分类管理</div>
+      <p class="hint" style="margin:0 0 10px;">分类用于整理组件，也可以在「新建目标」时<b>按分类批量选择</b>组件。可以新建/重命名/删除分类，并把任意组件移动到别的分类。</p>
+      <div class="catList" id="catList"></div>
+      <div class="consAdd" style="margin-top:10px;">
+        <input type="text" id="catNewName" placeholder="新建分类，例如：学习成长 / 效率工具 / 我的收藏">
+        <button class="btn small primary" id="catAddBtn">新建分类</button>
+      </div>
     </div>
     <div class="sec"><div class="secTitle">核心组件</div>
       <p class="hint" style="margin:0 0 8px;">应用的基础能力，无法关闭。</p>
@@ -2794,6 +2810,57 @@ async function renderComponentsPage() {
     </div>
   </div>`;
   app.innerHTML = html;
+
+  /* ---- 分类管理 ---- */
+  const catsInfo = state.componentCats || { categories: [], used: {} };
+  const cats = (catsInfo.categories || []);
+  const catListEl = document.getElementById('catList');
+  if (catListEl) {
+    catListEl.innerHTML = cats.length ? cats.map(c => `<span class="catItem">
+        <span class="catName">${esc(c)}</span><span class="catCount">${(catsInfo.used || {})[c] || 0}</span>
+        <button class="catOp" data-cat-rename="${esc(c)}" title="重命名">✎</button>
+        <button class="catOp danger" data-cat-del="${esc(c)}" title="删除（组件回到原分类）">×</button>
+      </span>`).join('') : '<span class="muted" style="font-size:12.5px;">还没有自定义分类（组件使用插件自带的分类）</span>';
+    catListEl.querySelectorAll('[data-cat-rename]').forEach(b => b.addEventListener('click', async () => {
+      const from = b.getAttribute('data-cat-rename');
+      const name = prompt('重命名分类：', from);
+      if (name == null || !name.trim() || name.trim() === from) return;
+      try {
+        await api('/api/component-categories', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from, name: name.trim() }) });
+        toast('已重命名');
+        await renderComponentsPage();
+      } catch (e) { toast(e.message); }
+    }));
+    catListEl.querySelectorAll('[data-cat-del]').forEach(b => b.addEventListener('click', async () => {
+      const name = b.getAttribute('data-cat-del');
+      if (!confirm('删除分类「' + name + '」？该分类下的组件会回到它们原本的分类。')) return;
+      try {
+        await api('/api/component-categories/' + encodeURIComponent(name), { method: 'DELETE' });
+        toast('已删除分类');
+        await renderComponentsPage();
+      } catch (e) { toast(e.message); }
+    }));
+  }
+  const catAddBtn = document.getElementById('catAddBtn');
+  if (catAddBtn) catAddBtn.addEventListener('click', async () => {
+    const inp = document.getElementById('catNewName');
+    const name = (inp.value || '').trim();
+    if (!name) return toast('请输入分类名');
+    try {
+      await api('/api/component-categories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+      toast('已新建分类「' + name + '」');
+      await renderComponentsPage();
+    } catch (e) { toast(e.message); }
+  });
+  /* 组件移动分类 */
+  app.querySelectorAll('[data-comp-cat]').forEach(sel => sel.addEventListener('change', async () => {
+    const id = sel.getAttribute('data-comp-cat');
+    try {
+      await api('/api/components/' + encodeURIComponent(id) + '/category', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ category: sel.value }) });
+      toast('已移动到「' + sel.value + '」');
+      await renderComponentsPage();
+    } catch (e) { toast(e.message); }
+  }));
 
   app.querySelectorAll('[data-cmp]').forEach(inp => inp.addEventListener('change', async () => {
     const id = inp.getAttribute('data-cmp');
@@ -3129,16 +3196,19 @@ function pluginButtonsHTML(goal) {
 function pluginPickerHTML() {
   const list = (window.SiErXing ? SiErXing.serverPlugins() : []).filter(p => p.goalToggle);
   if (!list.length) return '';
+  const catCount = {};
+  for (const p of list) { const k = p.category || '其它'; catCount[k] = (catCount[k] || 0) + 1; }
   const cats = ['全部', ...Array.from(new Set(list.map(p => p.category || '其它')))];
   return `<div class="field">
     <label>额外功能组件<span class="ppHint">　可随时在目标页或「组件」页开关；组件会越来越多，这里支持搜索与分类筛选</span></label>
     <div class="ppWrap" data-pp>
       <div class="ppBar">
         <input class="ppSearch" id="ppSearch" placeholder="🔍 搜索组件…" autocomplete="off">
-        <div class="ppCats">${cats.map((c, i) => `<button type="button" class="ppCat ${i === 0 ? 'active' : ''}" data-cat="${esc(c)}">${esc(c)}</button>`).join('')}</div>
+        <div class="ppCats">${cats.map((c, i) => `<button type="button" class="ppCat ${i === 0 ? 'active' : ''}" data-cat="${esc(c)}">${esc(c)}<span class="ppCatN">${c === '全部' ? list.length : (catCount[c] || 0)}</span></button>`).join('')}</div>
         <div class="spacer"></div>
         <span class="ppCount" id="ppCount"></span>
         <button type="button" class="btn tiny" id="ppAllFiltered">全选当前结果</button>
+        <button type="button" class="btn tiny primary" id="ppAllCat" title="把当前分类下的组件全部勾选（批量选择）">批量选择本类</button>
         <button type="button" class="btn tiny" id="ppClear">清空</button>
       </div>
       <div class="ppGrid" id="ppGrid">
@@ -3184,6 +3254,8 @@ function bindPluginPicker() {
       if (show) shown++;
     });
     if (tipEl) tipEl.textContent = shown ? (kw || cat !== '全部' ? '筛选出 ' + shown + ' 个组件' : '把鼠标移到组件上可以看到说明') : '没有匹配的组件';
+    const acb = document.getElementById('ppAllCat');
+    if (acb) acb.textContent = cat === '全部' ? '批量选择本类' : '批量选择「' + cat + '」';
   };
   chips.forEach(c => {
     const inp = c.querySelector('input');
@@ -3201,6 +3273,17 @@ function bindPluginPicker() {
   if (allBtn) allBtn.addEventListener('click', () => {
     chips.forEach(c => { if (c.style.display !== 'none') c.querySelector('input').checked = true; });
     paint();
+  });
+  const allCatBtn = document.getElementById('ppAllCat');
+  if (allCatBtn) allCatBtn.addEventListener('click', () => {
+    const catBtn = wrap.querySelector('.ppCat.active');
+    const cat = catBtn ? catBtn.getAttribute('data-cat') : '全部';
+    let n = 0;
+    chips.forEach(c => {
+      if (cat === '全部' || c.getAttribute('data-cat') === cat) { c.querySelector('input').checked = true; n++; }
+    });
+    paint();
+    toast('已批量选择「' + cat + '」下的 ' + n + ' 个组件');
   });
   const clearBtn = document.getElementById('ppClear');
   if (clearBtn) clearBtn.addEventListener('click', () => { chips.forEach(c => c.querySelector('input').checked = false); paint(); });
