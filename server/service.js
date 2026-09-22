@@ -80,6 +80,21 @@ module.exports = function createService({ appDir, port, log = () => {} }) {
     };
   })();
 
+  /* ---------------- 应用图标（与浏览器标签页图标同款） ---------------- */
+  const iconSrc = {
+    svg: path.join(appDir, 'public', 'icon.svg'),
+    png: path.join(appDir, 'public', 'icon.png'),
+    ico: path.join(appDir, 'public', 'icon.ico')
+  };
+  function installLinuxIcon() {
+    try {
+      const dir = path.join(home, '.local', 'share', 'icons', 'hicolor', '256x256', 'apps');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.copyFileSync(iconSrc.png, path.join(dir, 'sierxing.png'));
+      return 'sierxing';
+    } catch (e) { return ''; }
+  }
+
   /* ---------------- 生成启动脚本内容 ---------------- */
   function launcherContent() {
     const node = process.execPath;
@@ -113,7 +128,7 @@ module.exports = function createService({ appDir, port, log = () => {} }) {
     ].join('\n') + '\n';
   }
 
-  function desktopEntryContent(execLine) {
+  function desktopEntryContent(execLine, iconName) {
     return [
       '[Desktop Entry]',
       'Type=Application',
@@ -124,7 +139,7 @@ module.exports = function createService({ appDir, port, log = () => {} }) {
       'Terminal=false',
       'Categories=Utility;Office;',
       'StartupNotify=false',
-      'Icon=applications-education'
+      `Icon=${iconName || iconSrc.png}`
     ].join('\n') + '\n';
   }
 
@@ -163,11 +178,13 @@ module.exports = function createService({ appDir, port, log = () => {} }) {
           `$sc.TargetPath = "${paths.launcher}"`,
           `$sc.WorkingDirectory = "${appDataOr(paths.binDir)}"`,
           `$sc.Description = "${APP_LABEL} · 目标规划助手"`,
+          `$sc.IconLocation = "${iconSrc.ico.replace(/"/g, '""')}"`,
           '$sc.WindowStyle = 7',
           '$sc.Save()',
           `$sc2 = $ws.CreateShortcut("${paths.startMenu.replace(/"/g, '""')}")`,
           `$sc2.TargetPath = "${paths.launcher}"`,
           `$sc2.WorkingDirectory = "${appDataOr(paths.binDir)}"`,
+          `$sc2.IconLocation = "${iconSrc.ico.replace(/"/g, '""')}"`,
           '$sc2.WindowStyle = 7',
           '$sc2.Save()'
         ].join('; ');
@@ -187,12 +204,15 @@ module.exports = function createService({ appDir, port, log = () => {} }) {
           fs.writeFileSync(paths.desktop, '#!/usr/bin/env bash\n' + launcherContent().replace(/^#!.*\n/, ''), { mode: 0o755 });
           fs.chmodSync(paths.desktop, 0o755);
           result.desktop = true;
+          result.icon = iconSrc.png;   // macOS 可在「显示简介」里把该 PNG 拖到图标上自定义
         } else {
+          const iconName = installLinuxIcon() || iconSrc.png;   // 优先装到 hicolor 主题，失败则用绝对路径
           fs.mkdirSync(path.dirname(paths.applications), { recursive: true });
-          fs.writeFileSync(paths.applications, desktopEntryContent(execLine), 'utf8');
+          fs.writeFileSync(paths.applications, desktopEntryContent(execLine, iconName), 'utf8');
           result.applications = true;
+          result.icon = iconName;
           try {
-            fs.writeFileSync(paths.desktop, desktopEntryContent(execLine), 'utf8');
+            fs.writeFileSync(paths.desktop, desktopEntryContent(execLine, iconName), 'utf8');
             fs.chmodSync(paths.desktop, 0o755);
             result.desktop = true;
             await sh('gio', ['set', paths.desktop, 'metadata::trusted', 'true'], 6000);
@@ -324,7 +344,7 @@ module.exports = function createService({ appDir, port, log = () => {} }) {
     // 退回 XDG autostart
     if (enabled) {
       fs.mkdirSync(path.dirname(paths.autostart), { recursive: true });
-      fs.writeFileSync(paths.autostart, desktopEntryContent(paths.launcher), 'utf8');
+      fs.writeFileSync(paths.autostart, desktopEntryContent(paths.launcher, installLinuxIcon() || iconSrc.png), 'utf8');
       return { ok: true, enabled: true, hint: '当前环境无 systemd --user，已使用 XDG 自启动（登录桌面后启动）' };
     }
     try { fs.unlinkSync(paths.autostart); } catch (e) {}

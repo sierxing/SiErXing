@@ -15,30 +15,86 @@
 
 ---
 
+## 🚀 30 秒上手
+
+### ① 一条命令安装（Linux / macOS）
+
+```bash
+git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git ~/SiErXing && bash ~/SiErXing/install.sh
+```
+
+**Windows**（PowerShell）：
+
+```powershell
+git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git "$env:USERPROFILE\SiErXing"; & "$env:USERPROFILE\SiErXing\install.bat"
+```
+
+> 没有 git？打开 <https://atomgit.com/sierxing/SiErXing> 下载 ZIP → 解压 → 运行 `install.sh`（macOS/Linux）或 `install.bat`（Windows）。
+> 只需要 **Node.js ≥ 22.5**（推荐 24 LTS），**不需要 npm install**（零第三方依赖）。
+
+安装脚本会自动：检查 Node → 启动服务 → **创建桌面图标** → **创建终端命令 `sierxing`** → 询问**开机自启** → 打开浏览器。
+
+### ② 或者：把这段提示词丢给你的 AI 助手，让它帮你装
+
+```text
+请帮我在本机部署并启动「思而行 SiErXing」——一个本地运行的目标规划助手（零第三方依赖，只需要 Node.js）。
+
+步骤：
+1. 检查 Node.js 版本是否 ≥ 22.5；不足则告诉我如何安装（推荐 Node 24 LTS）。
+2. 克隆并安装：
+   git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git ~/SiErXing
+   bash ~/SiErXing/install.sh        # Windows 用 install.bat
+   （脚本会启动服务、创建桌面图标与终端命令 sierxing，并询问是否开机自启）
+3. 验证服务：curl http://localhost:3213/api/health 应返回 {"ok":true}；若端口被占用，改用 PORT=其他端口 启动。
+4. 按我的意愿处理开机自启（开/关都行）：
+   curl -s -X POST http://localhost:3213/api/service/autostart -H 'Content-Type: application/json' -d '{"enabled":true}'
+5. 告诉我：访问地址（默认 http://localhost:3213）、桌面图标名（思而行）、终端命令（sierxing）。
+6. 提醒我必须在页面「设置」里配置 AI 才能使用（见下一步）。
+
+注意：不要 npm install，不要改动系统级配置；所有安装动作只写用户目录，无需管理员权限。
+```
+
+### ③ 配一个 AI（唯一必须做的事）
+
+打开 <http://localhost:3213> → 左侧栏 **⚙ 设置** → 选择接入方式 → 点 **测试连接**：
+
+| 方式 | 需要填什么 |
+| --- | --- |
+| **OpenAI 兼容接口**（推荐） | 点预设一键填好（DeepSeek / 通义千问 / Kimi / 智谱 / OpenAI…），再填 API 密钥 |
+| **本地 Ollama**（离线免费） | 地址 `http://localhost:11434/v1`，模型如 `qwen2.5:14b`，密钥随便填 |
+| **opencode CLI**（已装可选） | 模型填 `provider/model`（如 `opencode-go/deepseek-v4-flash`），地址密钥留空 |
+
+配好后就能用了：**新建目标 → 回答问卷（可逐题深挖）→ 加约束 → 确认骨架 → 细化任务 → 开始执行**。
+第一次打开会有 5 步使用引导；桌面图标与开机自启都可在「设置 → 服务与启动」里随时开关。
+
+> 下面是界面截图与完整功能说明 —— **只想快速用起来的话，看到这里就够了。**
+
+---
+
 ## 界面截图
 
-| 首次使用引导（含界面演示动画） | 目标页：路线图 · 约束 · 下一步 |
-| --- | --- |
+| 首次使用引导（含界面演示动画）           | 目标页：路线图 · 约束 · 下一步        |
+| ---------------------------------------- | --------------------------------------- |
 | ![引导](docs/screenshots/03-guide-2.png) | ![目标页](docs/screenshots/06-goal.png) |
 
-| 全屏导图 | 对话改规划（可直接改路线图） |
-| --- | --- |
+| 全屏导图                             | 对话改规划（可直接改路线图）          |
+| ------------------------------------ | ------------------------------------- |
 | ![导图](docs/screenshots/07-map.png) | ![对话](docs/screenshots/08-chat.png) |
 
-| 规划前问卷（含水平自测，可逐题深挖） | 新建目标（组件选择器） |
-| --- | --- |
+| 规划前问卷（含水平自测，可逐题深挖）           | 新建目标（组件选择器）                        |
+| ---------------------------------------------- | --------------------------------------------- |
 | ![问卷](docs/screenshots/09-questionnaire.png) | ![新建目标](docs/screenshots/05-new-goal.png) |
 
-| 组件中心（开关 / 分类管理 / 换肤） | 设置（接入模型 / 服务与启动） |
-| --- | --- |
+| 组件中心（开关 / 分类管理 / 换肤）          | 设置（接入模型 / 服务与启动）             |
+| ------------------------------------------- | ----------------------------------------- |
 | ![组件](docs/screenshots/12-components.png) | ![设置](docs/screenshots/13-settings.png) |
 
-| 批量导入组件（可多选 + 统一分类） | 每日刷题（内置组件） |
-| --- | --- |
+| 批量导入组件（可多选 + 统一分类）       | 每日刷题（内置组件）                   |
+| --------------------------------------- | -------------------------------------- |
 | ![导入](docs/screenshots/17-import.png) | ![刷题](docs/screenshots/14-daily.png) |
 
-| 版本对比（左旧右新，彩色标注） | 学习教程（真正学会，含练习与自测） |
-| --- | --- |
+| 版本对比（左旧右新，彩色标注）        | 学习教程（真正学会，含练习与自测）        |
+| ------------------------------------- | ----------------------------------------- |
 | ![对比](docs/screenshots/11-diff.png) | ![教程](docs/screenshots/15-tutorial.png) |
 
 > 更多截图见 [`docs/screenshots/`](docs/screenshots/)：每日刷题、引导各步等。
@@ -47,6 +103,7 @@
 
 ## 目录
 
+- [🚀 30 秒上手](#-30-秒上手)
 - [一、核心特色](#一核心特色)
 - [二、功能一览](#二功能一览)
 - [三、快速开始](#三快速开始)
@@ -62,19 +119,19 @@
 
 ## 一、核心特色
 
-| 特色 | 说明 |
-| --- | --- |
-| **先确认，再规划** | 规划前必出问卷（10-14 题，分 6 个板块），含**客观自测题**校准真实水平；每一步规划（骨架/拆分/细化）AI 仍可继续追问 |
-| **逐题「进一步探讨」** | 任何问题都能点开深挖：AI 针对该问题追加 2-5 个更细的子问题，最多 3 层；还能自己**补充额外信息**供 AI 参考 |
-| **手动约束** | 把硬性要求（时间、预算、工具、期限、禁忌）写成「⛓ 规划约束」，规划 / 拆分 / 教程 / 对话全程严格遵守；也能在对话里直接加约束 |
-| **可插拔 AI** | **不强制依赖任何 CLI**：默认走任意 **OpenAI 兼容接口**（OpenAI / DeepSeek / 通义千问 / Kimi / GLM / 硅基流动 / OpenRouter / Ollama / LM Studio / vLLM …），也**可选**使用本机 opencode CLI |
-| **本地优先** | 零第三方依赖（只用 Node 内置模块 + SQLite），数据全部保存在你自己的电脑上，不出本机（除了调用你配置的 AI 接口） |
-| **全过程可视化** | 全屏导图、执行清单、进度统计；每次改动都有**版本快照**与「左旧右新」彩色对比图 + AI 变更汇报 |
-| **对话式改规划** | 右侧可拖拽宽度的对话侧边栏，随时用自然语言让 AI 改路线图，改了什么一目了然（彩色操作清单 + 就地展开的对比图） |
-| **按需生成教程** | 右键任意任务点 → 生成「真正学会」的完整教程（HTML 或 Markdown），讲原理、分步实践、练习与自测清单 |
-| **资料图片识别** | 粘贴 JD / 大纲 / 教材截图，视觉模型提炼成结构化资料源，优先参与规划决策 |
-| **一切皆组件** | 功能与**界面样式**都是组件：左侧栏「🧩 组件」页可逐个开关（基础功能默认开启、可关掉），也可**导入/导出组件包**互相分享；主题皮肤同样是组件（覆盖设计变量即可换肤） |
-| **每日刷题（内置插件）** | 针对编程类目标：LeetCode 热题 100（按 17 个知识点分组），每日任务、完整题面、作答记录（代码 / 笔记 / 用时 / 次数） |
+| 特色                           | 说明                                                                                                                                                                                                          |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **先确认，再规划**       | 规划前必出问卷（10-14 题，分 6 个板块），含**客观自测题**校准真实水平；每一步规划（骨架/拆分/细化）AI 仍可继续追问                                                                                      |
+| **逐题「进一步探讨」**   | 任何问题都能点开深挖：AI 针对该问题追加 2-5 个更细的子问题，最多 3 层；还能自己**补充额外信息**供 AI 参考                                                                                               |
+| **手动约束**             | 把硬性要求（时间、预算、工具、期限、禁忌）写成「⛓ 规划约束」，规划 / 拆分 / 教程 / 对话全程严格遵守；也能在对话里直接加约束                                                                                  |
+| **可插拔 AI**            | **不强制依赖任何 CLI**：默认走任意 **OpenAI 兼容接口**（OpenAI / DeepSeek / 通义千问 / Kimi / GLM / 硅基流动 / OpenRouter / Ollama / LM Studio / vLLM …），也**可选**使用本机 opencode CLI |
+| **本地优先**             | 零第三方依赖（只用 Node 内置模块 + SQLite），数据全部保存在你自己的电脑上，不出本机（除了调用你配置的 AI 接口）                                                                                               |
+| **全过程可视化**         | 全屏导图、执行清单、进度统计；每次改动都有**版本快照**与「左旧右新」彩色对比图 + AI 变更汇报                                                                                                            |
+| **对话式改规划**         | 右侧可拖拽宽度的对话侧边栏，随时用自然语言让 AI 改路线图，改了什么一目了然（彩色操作清单 + 就地展开的对比图）                                                                                                 |
+| **按需生成教程**         | 右键任意任务点 → 生成「真正学会」的完整教程（HTML 或 Markdown），讲原理、分步实践、练习与自测清单                                                                                                            |
+| **资料图片识别**         | 粘贴 JD / 大纲 / 教材截图，视觉模型提炼成结构化资料源，优先参与规划决策                                                                                                                                       |
+| **一切皆组件**           | 功能与**界面样式**都是组件：左侧栏「🧩 组件」页可逐个开关（基础功能默认开启、可关掉），也可**导入/导出组件包**互相分享；主题皮肤同样是组件（覆盖设计变量即可换肤）                                |
+| **每日刷题（内置插件）** | 针对编程类目标：LeetCode 热题 100（按 17 个知识点分组），每日任务、完整题面、作答记录（代码 / 笔记 / 用时 / 次数）                                                                                            |
 
 ---
 
@@ -133,14 +190,14 @@
 
 **左侧栏「🧩 组件」页**（在「设置」下方）集中管理所有组件：
 
-| 分区 | 说明 |
-| --- | --- |
-| 核心组件 | 路线图与规划（应用基础，不可关闭） |
-| 基础功能组件 | 规划前问卷 / 规划约束 / 信息源检索 / 版本对比与汇报 / 对话改规划 / 学习教程 —— **默认开启，可一键关掉**（界面入口与接口一并隐藏） |
-| 主题与界面样式 | 主题组件通过覆盖设计变量换肤，**同时只生效一个**；内置「碳黑」「宣纸」两个示例 |
-| 扩展组件 | 每日刷题、图片资料等独立文件组件：可**按目标启用**、可**导出分享**、可卸载；可**移动到自定义分类** |
-| 分类管理 | 自建 / 重命名 / 删除分类；分类会体现在新建目标的选择器里，支持**按分类批量选择** |
-| 批量导入 | 一次选多个 `*.component.json`，统一归类到指定分类；导入前显示每个包的状态与失败原因 |
+| 分区           | 说明                                                                                                                                     |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| 核心组件       | 路线图与规划（应用基础，不可关闭）                                                                                                       |
+| 基础功能组件   | 规划前问卷 / 规划约束 / 信息源检索 / 版本对比与汇报 / 对话改规划 / 学习教程 ——**默认开启，可一键关掉**（界面入口与接口一并隐藏） |
+| 主题与界面样式 | 主题组件通过覆盖设计变量换肤，**同时只生效一个**；内置「碳黑」「宣纸」两个示例                                                     |
+| 扩展组件       | 每日刷题、图片资料等独立文件组件：可**按目标启用**、可**导出分享**、可卸载；可**移动到自定义分类**                     |
+| 分类管理       | 自建 / 重命名 / 删除分类；分类会体现在新建目标的选择器里，支持**按分类批量选择**                                                   |
+| 批量导入       | 一次选多个`*.component.json`，统一归类到指定分类；导入前显示每个包的状态与失败原因                                                     |
 
 - **组件分类可自管**：在「组件」页可**新建 / 重命名 / 删除分类**，并把任意组件**移动到指定分类**（自定义分类优先于插件自带分类）
 - **新建目标时的组件选择器**：芯片式多选 + **搜索** + **分类筛选（带数量）** + 「全选当前结果」+「**批量选择本类**」（按分类一键勾选整类组件），按「未来上百个组件」的规模设计；每个组件悬停可看说明，右上角显示已选数量
@@ -151,7 +208,7 @@
 
 ### 8. 服务与启动
 
-- **桌面图标**：一键创建（Windows 快捷键 / Linux·macOS 桌面启动器），双击启动并在浏览器打开
+- **桌面图标**：一键创建（Windows 快捷方式 / Linux·macOS 桌面启动器），**图标与浏览器标签页同款**（渐变底白色「思」），双击启动并在浏览器打开
 - **终端命令**：`sierxing`（Linux/macOS 位于 `~/.local/bin`）
 - **开机自启**：安装时可选择，之后随时在「设置 → 服务与启动」里开关
   - Linux：systemd 用户服务（推荐；端口被占用时会自动重试，退出后自动接管）；无 systemd 时退回 XDG 自启动
@@ -172,37 +229,16 @@
 
 ## 三、快速开始
 
-### 一键安装（推荐）
+### 安装与启动方式（细节）
 
-**Linux / macOS**（一条命令：下载 + 安装 + 启动）：
-
-```bash
-git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git ~/SiErXing && bash ~/SiErXing/install.sh
-```
-
-**Windows**（PowerShell 一条命令；或从仓库页下载 ZIP → 解压 → 双击 `install.bat`）：
-
-```powershell
-git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git "$env:USERPROFILE\SiErXing"; & "$env:USERPROFILE\SiErXing\install.bat"
-```
-
-> 没有 git？直接打开 <https://atomgit.com/sierxing/SiErXing> 点「克隆/下载」拿到 ZIP，解压后运行 `install.sh`（macOS/Linux）或 `install.bat`（Windows）即可。
-
-安装程序会自动完成这些事：
-
-1. 检查 Node.js（22.5+，不够会提示去装）
-2. 下载/定位项目并**启动服务**
-3. 创建**桌面图标**（双击即用）与**终端命令** `sierxing`
-4. 询问是否**开机自启**（也可以之后在页面里开关）
-5. 打开浏览器
-
-安装完成后：
+> 一键安装命令见文首 [🚀 30 秒上手](#-30-秒上手)。这里补充各种使用方式与细节。
 
 | 使用方式 | 操作 |
 | --- | --- |
-| 桌面图标 | 双击「思而行」→ 自动启动服务并打开浏览器 |
-| 终端命令 | 输入 `sierxing` 即可启动（已在运行时直接打开浏览器） |
-| 开机自启 | 安装时选择，或稍后在 **设置 → 服务与启动** 里随时开关 |
+| 一键安装 | 见文首：`git clone … && bash install.sh`（Windows 用 `install.bat`） |
+| 桌面图标 | 安装后双击「思而行」→ 自动启动服务并打开浏览器 |
+| 终端命令 | 安装后输入 `sierxing`（已在运行时直接打开浏览器） |
+| 开机自启 | 安装时选择，或随时在 **设置 → 服务与启动** 里开关 |
 | 手动启动 | `./start.sh`（Windows：`start.bat`）或 `npm start` |
 
 > 所有安装动作只写入当前用户目录（`~/.local/bin`、桌面、`~/.config/systemd/user` 等），**不需要管理员权限**。
@@ -240,7 +276,7 @@ node --no-warnings server/server.js
 # 旧版 Node 追加 --experimental-sqlite
 ```
 
-启动后打开 <http://localhost:3213>（端口可用 `PORT` 环境变量修改）。
+启动后打开 [http://localhost:3213](http://localhost:3213)（端口可用 `PORT` 环境变量修改）。
 
 ### 第一次使用
 
@@ -266,29 +302,29 @@ node --no-warnings server/server.js
 **B. 环境变量 / `.env` 文件（适合服务器部署）**
 复制 `.env.example` 为 `.env` 并填写；同名环境变量会作为默认值（网页里填写的值优先）。
 
-| 环境变量 | 说明 |
-| --- | --- |
-| `PORT` | 服务端口（默认 3213） |
-| `SIERXING_PROVIDER` | `openai`（默认）或 `opencode` |
-| `SIERXING_API_BASE` | OpenAI 兼容接口地址，如 `https://api.deepseek.com/v1` |
-| `SIERXING_API_KEY` | API 密钥 |
-| `SIERXING_MODEL` | 文本模型名 |
-| `SIERXING_VISION_MODEL` | 视觉模型名（识别图片用，可留空 = 与文本模型相同） |
-| `SIERXING_AI_TIMEOUT_MS` | 单次请求超时（默认 300000，即 5 分钟） |
+| 环境变量                   | 说明                                                   |
+| -------------------------- | ------------------------------------------------------ |
+| `PORT`                   | 服务端口（默认 3213）                                  |
+| `SIERXING_PROVIDER`      | `openai`（默认）或 `opencode`                      |
+| `SIERXING_API_BASE`      | OpenAI 兼容接口地址，如`https://api.deepseek.com/v1` |
+| `SIERXING_API_KEY`       | API 密钥                                               |
+| `SIERXING_MODEL`         | 文本模型名                                             |
+| `SIERXING_VISION_MODEL`  | 视觉模型名（识别图片用，可留空 = 与文本模型相同）      |
+| `SIERXING_AI_TIMEOUT_MS` | 单次请求超时（默认 300000，即 5 分钟）                 |
 
 ### 常见服务配置示例
 
-| 服务 | Base URL | 模型示例 |
-| --- | --- | --- |
-| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini`、`gpt-4o` |
-| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat`、`deepseek-reasoner` |
+| 服务                   | Base URL                                              | 模型示例                                          |
+| ---------------------- | ----------------------------------------------------- | ------------------------------------------------- |
+| OpenAI                 | `https://api.openai.com/v1`                         | `gpt-4o-mini`、`gpt-4o`                       |
+| DeepSeek               | `https://api.deepseek.com/v1`                       | `deepseek-chat`、`deepseek-reasoner`          |
 | 阿里云百炼（通义千问） | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus`、`qwen-max`；视觉 `qwen-vl-max` |
-| 月之暗面 Kimi | `https://api.moonshot.cn/v1` | `moonshot-v1-8k`、`kimi-k2-0905-preview` |
-| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | `glm-4-plus`；视觉 `glm-4v-plus` |
-| 硅基流动 SiliconFlow | `https://api.siliconflow.cn/v1` | `deepseek-ai/DeepSeek-V3` |
-| OpenRouter | `https://openrouter.ai/api/v1` | 任意其列出的模型 |
-| 本地 Ollama | `http://localhost:11434/v1` | `qwen2.5:14b`（密钥随便填，如 `ollama`） |
-| LM Studio | `http://localhost:1234/v1` | 界面里加载的模型名 |
+| 月之暗面 Kimi          | `https://api.moonshot.cn/v1`                        | `moonshot-v1-8k`、`kimi-k2-0905-preview`      |
+| 智谱 GLM               | `https://open.bigmodel.cn/api/paas/v4`              | `glm-4-plus`；视觉 `glm-4v-plus`              |
+| 硅基流动 SiliconFlow   | `https://api.siliconflow.cn/v1`                     | `deepseek-ai/DeepSeek-V3`                       |
+| OpenRouter             | `https://openrouter.ai/api/v1`                      | 任意其列出的模型                                  |
+| 本地 Ollama            | `http://localhost:11434/v1`                         | `qwen2.5:14b`（密钥随便填，如 `ollama`）      |
+| LM Studio              | `http://localhost:1234/v1`                          | 界面里加载的模型名                                |
 
 > **地址怎么写？** 一般填到 `/v1` 即可（程序会自己拼接 `/chat/completions` 与 `/models`）。
 > 也可以直接填完整地址（以 `/chat/completions` 结尾）。
@@ -305,11 +341,11 @@ node --no-warnings server/server.js
 
 ### 模型能力建议
 
-| 用途 | 建议 |
-| --- | --- |
-| 规划 / 拆分 / 教程（长文本 + JSON） | 选择**上下文较长、指令遵循好**的模型（≥ 32k 上下文更稳） |
-| 问卷 / 追问 / 对话 | 任意对话模型即可 |
-| 图片识别（JD 等） | 需要**视觉模型**（如 `qwen-vl-max`、`gpt-4o`、`glm-4v-plus`），在设置里单独填写 |
+| 用途                                | 建议                                                                                        |
+| ----------------------------------- | ------------------------------------------------------------------------------------------- |
+| 规划 / 拆分 / 教程（长文本 + JSON） | 选择**上下文较长、指令遵循好**的模型（≥ 32k 上下文更稳）                             |
+| 问卷 / 追问 / 对话                  | 任意对话模型即可                                                                            |
+| 图片识别（JD 等）                   | 需要**视觉模型**（如 `qwen-vl-max`、`gpt-4o`、`glm-4v-plus`），在设置里单独填写 |
 
 ---
 
@@ -364,6 +400,7 @@ SiErXing/                     # 项目根目录（目录名用英文，产品名
 │       └── theme-paper.js   #   主题组件：宣纸
 ├── public/
 │   ├── index.html     # 页面骨架
+│   ├── icon.svg/.png/.ico  # 应用图标（浏览器标签页 / 桌面图标 / Windows 快捷方式）
 │   ├── app.js         # 前端核心逻辑（原生 JS，含导图、对话、Markdown 渲染等）
 │   ├── sdk.js         # ★ 前端插件 SDK（SiErXing.registerPlugin）
 │   ├── plugins/       # ★ 前端组件（界面 + 样式，自动加载）
@@ -437,10 +474,10 @@ Base URL 通常需要以 `/v1` 结尾（例如 `https://api.deepseek.com/v1`）�
 
 思而行的功能是**插件化**的：左侧栏里每个「组件」都是一个插件。项目自带两个插件作为范例：
 
-| 插件 id | 名称 | 说明 |
-| --- | --- | --- |
+| 插件 id    | 名称        | 说明                                                                     |
+| ---------- | ----------- | ------------------------------------------------------------------------ |
 | `hot100` | 🧩 每日刷题 | LeetCode 热题 100：知识点分组、每日任务、完整题面、VSCode 作答与作答记录 |
-| `jdfile` | 📷 图片资料 | 粘贴 JD / 大纲 / 教材截图 → 视觉模型提炼 → 写入资料源，优先参与规划 |
+| `jdfile` | 📷 图片资料 | 粘贴 JD / 大纲 / 教材截图 → 视觉模型提炼 → 写入资料源，优先参与规划    |
 
 ### 插件放在哪
 
@@ -515,14 +552,14 @@ module.exports = {
 
 **ctx（宿主能力）**：
 
-| 分组 | 可用能力 |
-| --- | --- |
-| 数据 | `db`（node:sqlite）、`nowISO()`、`safeParse(str, dflt)`、`backup()` |
-| HTTP | `sendJSON(res, code, obj)`、`readBody(req)` |
-| 配置 | `getSetting(key, dflt)`、`setSetting(key, value)` |
-| 系统 | `fs` / `path` / `os` / `spawn` / `APP_DIR` / `DATA_DIR` / `UPLOAD_DIR` / `PUBLIC_DIR` |
+| 分组 | 可用能力                                                                                                                                                                 |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 数据 | `db`（node:sqlite）、`nowISO()`、`safeParse(str, dflt)`、`backup()`                                                                                              |
+| HTTP | `sendJSON(res, code, obj)`、`readBody(req)`                                                                                                                          |
+| 配置 | `getSetting(key, dflt)`、`setSetting(key, value)`                                                                                                                    |
+| 系统 | `fs` / `path` / `os` / `spawn` / `APP_DIR` / `DATA_DIR` / `UPLOAD_DIR` / `PUBLIC_DIR`                                                                    |
 | 业务 | `getGoal(id)`、`sourcesOf(goalId)`、`aiText(prompt, model, timeout)`、`aiTextFiles(prompt, model, files, timeout)`、`currentModel()`、`currentVisionModel()` |
-| 日志 | `log(...)` |
+| 日志 | `log(...)`                                                                                                                                                             |
 
 > 宿主在启动时按文件名顺序加载 `server/plugins/*.js`，调用 `init(ctx)`，并把 `api` 里的路由挂到 HTTP 服务上（在内置接口之后、404 之前匹配）。
 
@@ -564,16 +601,16 @@ module.exports = {
 
 **SiErXing（前端 SDK）可用能力**：
 
-| 能力 | 说明 |
-| --- | --- |
-| `app` | 主内容容器（DOM），直接写 `innerHTML` 即可 |
-| `api(path, opts)` | 请求后端并解析 JSON（失败抛错） |
-| `esc(s)` / `mdToHTML(md)` / `fmtDate(s)` / `safeParse(s,dflt)` | 转义 / Markdown 渲染 / 时间格式化 / 安全解析 |
-| `toast(msg)` / `go(hash)` / `parseRoute()` / `rerender()` | 提示 / 跳转 / 解析路由 / 重渲染当前页 |
-| `state` | 全局状态（`state.goal` / `state.sources` 等） |
-| `loadGoal(id)` / `ensureGoal()` | 加载目标数据（页面渲染前通常需要） |
-| `pluginEnabled(goal, id)` | 判断目标是否启用了某插件 |
-| `serverPlugins()` | 服务端插件元数据（含 `defaultEnabled` 等） |
+| 能力                                                                   | 说明                                              |
+| ---------------------------------------------------------------------- | ------------------------------------------------- |
+| `app`                                                                | 主内容容器（DOM），直接写`innerHTML` 即可       |
+| `api(path, opts)`                                                    | 请求后端并解析 JSON（失败抛错）                   |
+| `esc(s)` / `mdToHTML(md)` / `fmtDate(s)` / `safeParse(s,dflt)` | 转义 / Markdown 渲染 / 时间格式化 / 安全解析      |
+| `toast(msg)` / `go(hash)` / `parseRoute()` / `rerender()`      | 提示 / 跳转 / 解析路由 / 重渲染当前页             |
+| `state`                                                              | 全局状态（`state.goal` / `state.sources` 等） |
+| `loadGoal(id)` / `ensureGoal()`                                    | 加载目标数据（页面渲染前通常需要）                |
+| `pluginEnabled(goal, id)`                                            | 判断目标是否启用了某插件                          |
+| `serverPlugins()`                                                    | 服务端插件元数据（含`defaultEnabled` 等）       |
 
 ### 样式与主题组件
 
@@ -639,16 +676,16 @@ module.exports = {
 - **后端**：Node 内置模块（`node:http` / `node:sqlite` / `node:child_process`），无框架、无 ORM
 - **前端**：原生 JS + CSS，无构建步骤、无 CDN 依赖
 
-| 表 | 用途 |
-| --- | --- |
-| `goals` | 目标（`constraints` 约束、`clarify` 待答问卷、`qa` 问答历史、`plugins` 插件开关） |
-| `nodes` | 路线图节点（level 0 阶段 / 1 小目标 / 2+ 任务，含做法、产出物、验收、时长、依据、状态） |
-| `sources` | 信息源（含类型、发布时间、正文） |
-| `goal_versions` | 版本快照（改动前后 + AI 汇报），用于对比 |
-| `chats` / `chat_sessions` | 对话消息与会话 |
-| `tutorials` | 生成的学习教程（HTML / Markdown） |
-| `problems` / `practice_records` / `daily_plans` | （hot100 插件）题库、作答记录、每日计划 |
-| `jd_images` | （jdfile 插件）上传图片与提炼结果 |
+| 表                                                    | 用途                                                                                      |
+| ----------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `goals`                                             | 目标（`constraints` 约束、`clarify` 待答问卷、`qa` 问答历史、`plugins` 插件开关） |
+| `nodes`                                             | 路线图节点（level 0 阶段 / 1 小目标 / 2+ 任务，含做法、产出物、验收、时长、依据、状态）   |
+| `sources`                                           | 信息源（含类型、发布时间、正文）                                                          |
+| `goal_versions`                                     | 版本快照（改动前后 + AI 汇报），用于对比                                                  |
+| `chats` / `chat_sessions`                         | 对话消息与会话                                                                            |
+| `tutorials`                                         | 生成的学习教程（HTML / Markdown）                                                         |
+| `problems` / `practice_records` / `daily_plans` | （hot100 插件）题库、作答记录、每日计划                                                   |
+| `jd_images`                                         | （jdfile 插件）上传图片与提炼结果                                                         |
 
 ### 主要接口（节选）
 
