@@ -660,10 +660,7 @@ function showNodePanel(id, rerender) {
   div.className = 'nodePanel';
   div.setAttribute('data-node', String(id));
   try { if (localStorage.getItem('sierxing-node-full') === '1') div.classList.add('full'); } catch (e) {}
-  const mask = document.createElement('div');
-  mask.id = 'nodePanelMask';
-  mask.className = 'nodeMask';
-  mask.addEventListener('click', () => { div.remove(); mask.remove(); });
+  // 不再使用灰色遮罩（点击空白处仍会关闭面板）
   div.innerHTML = `
     <div class="npHead">
       <span class="chip">${LEVEL_NAME[n.level] || ''}</span>
@@ -712,7 +709,6 @@ function showNodePanel(id, rerender) {
       <button class="btn small" id="npEdit">编辑</button>
       <button class="btn small danger" id="npDel">删除</button>
     </div>`;
-  document.body.appendChild(mask);
   document.body.appendChild(div);
   const closePanel = () => { div.remove(); const m = document.getElementById('nodePanelMask'); if (m) m.remove(); };
   const fsBtn = document.getElementById('npFull');
@@ -995,7 +991,16 @@ async function taskPoll() {
   try {
     const gid = state.goal ? state.goal.id : 0;
     const r = await api('/api/tasks' + (gid ? '?goalId=' + gid : ''));
-    state.tasks = r.tasks || [];
+    const list = r.tasks || [];
+    // 新任务出现时给个小提示（动画 toast），替代原来的灰色遮罩
+    const known = state.taskKnownIds || (state.taskKnownIds = {});
+    const fresh = list.filter(t => !known[t.id] && (t.status === 'queued' || t.status === 'running'));
+    for (const t of list) known[t.id] = 1;
+    if (fresh.length) {
+      const first = fresh[0];
+      toast('🤖 ' + (TASK_META[first.type] ? TASK_META[first.type].label : 'AI 任务') + '已加入执行列表' + (fresh.length > 1 ? '（共 ' + fresh.length + ' 个）' : '') + ' · 左下角可看进度');
+    }
+    state.tasks = list;
   } catch (e) { return; }
   taskBarRender();
   taskMarkNodes();
