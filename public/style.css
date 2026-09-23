@@ -1454,3 +1454,19 @@ body.railWide .mapPage{left:236px;}
 
 /* 资源库：资料全文（带高度上限与滚动） */
 .libFullText{max-height:420px; overflow:auto; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-size:12.8px;}
+
+/* ============ 优质信息源标记 + 手动添加资料 ============ */
+.siStar{background:none; border:0; cursor:pointer; font-size:15px; line-height:1; padding:0 2px; color:var(--muted); transition:.12s;}
+.siStar:hover{transform:scale(1.15);}
+.siStar.on{color:#f1c40f; text-shadow:0 0 6px rgba(241,196,15,.35);}
+.srcItem.isStar{border-color:rgba(241,196,15,.45); background:rgba(241,196,15,.05);}
+.spStarTip{margin-top:8px; font-size:12.5px; color:var(--text); background:rgba(241,196,15,.10); border:1px solid rgba(241,196,15,.35); border-radius:9px; padding:7px 10px;}
+.srcForm{margin-top:10px; border:1.5px solid var(--accent-border); background:var(--accent-soft); border-radius:11px; padding:11px;}
+.sfRow{display:flex; gap:8px; margin-bottom:8px; align-items:center; flex-wrap:wrap;}
+.sfRow input[type=text],.sfRow input:not([type]),.sfRow select{flex:1; min-width:130px; border:1px solid var(--border); background:var(--card); color:var(--text); border-radius:8px; padding:6px 9px; font-size:12.5px; font-family:inherit;}
+.sfRow textarea{width:100%; min-height:120px; max-height:320px; border:1px solid var(--border); background:var(--card); color:var(--text); border-radius:8px; padding:8px 10px; font-size:12.8px; font-family:inherit; resize:vertical;}
+.sfStar{display:flex; align-items:center; gap:5px; font-size:12.5px; white-space:nowrap;}
+.sfOps{display:flex; gap:8px; align-items:center;}
+.siDet{margin-top:5px;}
+.siDet summary{cursor:pointer; font-size:12.2px; color:var(--muted); line-height:1.6;}
+.siFull{margin-top:6px; max-height:320px; overflow:auto; background:var(--card); border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-size:12.8px;}

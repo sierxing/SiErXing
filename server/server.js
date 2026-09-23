@@ -286,6 +286,7 @@ function pluginCtx() {
   if (!cols.includes('acceptance')) db.exec("ALTER TABLE nodes ADD COLUMN acceptance TEXT NOT NULL DEFAULT '';");
   if (!cols.includes('hours')) db.exec("ALTER TABLE nodes ADD COLUMN hours TEXT NOT NULL DEFAULT '';");
   const scols = db.prepare('PRAGMA table_info(sources)').all().map(c => c.name);
+  if (!scols.includes('quality')) db.exec('ALTER TABLE sources ADD COLUMN quality INTEGER NOT NULL DEFAULT 0;');   // 1=优质信息源
   if (!scols.includes('published_at')) db.exec("ALTER TABLE sources ADD COLUMN published_at TEXT NOT NULL DEFAULT '';");
   const gcols = db.prepare('PRAGMA table_info(goals)').all().map(c => c.name);
   if (!gcols.includes('clarify')) db.exec("ALTER TABLE goals ADD COLUMN clarify TEXT NOT NULL DEFAULT '';");
@@ -823,7 +824,7 @@ function digestsOf(goalId) {
 }
 function sourcesOf(goalId) {
   // 用户自己提供的图片资料（JD / 大纲 / 笔记…）排在最前，其次才是检索到的网络信息源
-  return db.prepare("SELECT * FROM sources WHERE goal_id = ? ORDER BY CASE WHEN site = '用户提供的图片' OR kind = 'JD' THEN 0 ELSE 1 END, id").all(goalId);
+  return db.prepare("SELECT * FROM sources WHERE goal_id = ? ORDER BY quality DESC, CASE WHEN site = '用户提供的图片' OR kind = 'JD' THEN 0 ELSE 1 END, id").all(goalId);
 }
 
 /* ===== AI 规划 ===== */
@@ -834,16 +835,20 @@ function digestBatches(goal) {
   const net = all.filter(x => !(x.site === '用户提供的图片' || x.site === '导入的资料'));
   // 用户自己提供的资料全文（最多 4000 字/条）；网络资料 900 字/条
   const ownCap = 6000, netCap = 3000;   // 用户提供的资料几乎读全文；网络资料 3000 字（覆盖绝大多数）
-  const items = own.map(x => {
+  const starred = all.filter(x => Number(x.quality) === 1);
+  const items = starred.map(x => {
+    const full = cleanText(x.content || x.snippet || '');
+    return { label: `[★优质信息源｜${x.kind}] ${x.title}`, body: full.slice(0, 8000) + (full.length > 8000 ? `\n（本条共 ${full.length} 字，此处截取前 8000 字）` : '') };
+  }).concat(own.map(x => {
     const full = cleanText(x.content || x.snippet || '');
     return { label: `[用户资料｜${x.kind}] ${x.title}`, body: full.slice(0, ownCap) + (full.length > ownCap ? `\n（本条共 ${full.length} 字，此处截取前 ${ownCap} 字）` : '') };
-  }).concat(net.map(x => {
+  })).concat(net.map(x => {
     const full = cleanText(x.content || x.snippet || '');
     return { label: `[${x.site}｜${x.kind}] ${x.title}`, body: full.slice(0, netCap) + (full.length > netCap ? `\n（本条共 ${full.length} 字，此处截取前 ${netCap} 字）` : '') };
   }));
   const batches = [];
   let cur = [], curLen = 0;
-  const LIMIT = 12000;
+  const LIMIT = 16000;
   for (const it of items) {
     const len = it.label.length + it.body.length + 8;
     if (cur.length && curLen + len > LIMIT) { batches.push(cur); cur = []; curLen = 0; }
@@ -1015,15 +1020,22 @@ function sourcesBlock(goal, maxItems, maxLen) {
   const all = sourcesOf(goal.id);
   if (!all.length) return '\n【注意】本次没有检索到网络信息源，请仅依据公开公认的岗位要求与学习路径规划，并在 sources 中注明依据，不确定处标注「待核实」。';
   // 用户自己提供的图片资料（JD / 大纲 / 笔记…）是最高优先级的一手信息
-  const own = all.filter(s => s.site === '用户提供的图片' || s.site === '导入的资料');
-  const net = all.filter(s => !(s.site === '用户提供的图片' || s.site === '导入的资料'));
+  const starred = all.filter(s => Number(s.quality) === 1);
+  const own = all.filter(s => Number(s.quality) !== 1 && (s.site === '用户提供的图片' || s.site === '导入的资料'));
+  const net = all.filter(s => Number(s.quality) !== 1 && !(s.site === '用户提供的图片' || s.site === '导入的资料'));
   const fmt = (s, len) => {
     const full = cleanText(s.content || s.snippet || '');
     const body = full.replace(/\n+/g, ' ').slice(0, len);
     return `- [${s.site}｜${s.kind}] ${s.title}${body ? '：' + body + (full.length > len ? '…' : '') : ''}`;
   };
   const lines = [''];
-    lines.push(`（说明：本目标共收集 ${all.length} 条资料——用户自己提供 ${own.length} 条、网络检索 ${net.length} 条；下面是与你目标最相关的部分，其余资料的结论已由「提炼汇总」概括。）`);
+    lines.push(`（说明：本目标共收集 ${all.length} 条资料——其中优质信息源 ${starred.length} 条、用户自己提供 ${own.length} 条、网络检索 ${net.length} 条；下面是与你目标最相关的部分，其余资料的结论已由「提炼汇总」概括。）`);
+  if (starred.length) {
+    lines.push('【★优质信息源（用户亲自标注，最高优先级——规划必须重点依据）】');
+    lines.push('要求：① 这些是用户认可的高质量参考，知识体系 / 技术栈 / 学习顺序要优先对齐它们；');
+    lines.push('   ② 在 sources 中引用时写明「优质信息源：<标题>」；③ 与其它资料冲突时以优质信息源为准。');
+    for (const s of starred.slice(0, 20)) lines.push('★ ' + fmt(s, Math.max(maxLen, 700)).replace(/^- /, ''));
+  }
   if (own.length) {
     lines.push('【用户自己提供的资料（★最高优先级：用户真实场景的一手信息，必须严格依据）】');
     lines.push('要求：① 其中的硬性条件（学历 / 到岗天数 / 技能要求 / 时间节点 / 知识范围等）必须原样满足，不得忽略或改写；');
@@ -2518,6 +2530,37 @@ async function handleAPI(req, res, u) {
   const sourcesMatch = p.match(/^\/api\/goals\/(\d+)\/sources$/);
   if (sourcesMatch && method === 'GET') {
     return sendJSON(res, 200, { sources: sourcesOf(Number(sourcesMatch[1])) });
+  }
+  const sourcesAddMatch = p.match(/^\/api\/goals\/(\d+)\/sources$/);
+  if (sourcesAddMatch && method === 'POST') {
+    const gid = Number(sourcesAddMatch[1]);
+    const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(gid);
+    if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+    const body = await readBody(req);
+    const title = String(body.title || '').trim().slice(0, 200);
+    const content = String(body.content || body.text || '').trim().slice(0, 40000);
+    if (!title && !content) return sendJSON(res, 400, { error: '请填写标题或正文' });
+    const sr = db.prepare('INSERT INTO sources (goal_id,title,url,site,kind,snippet,content,published_at,created_at,quality) VALUES (?,?,?,?,?,?,?,?,?,?)')
+      .run(gid, title || '手动添加的资料', String(body.url || '').trim().slice(0, 500),
+        String(body.site || '手动添加').slice(0, 40), String(body.kind || '资料').slice(0, 10),
+        String(body.snippet || content.slice(0, 300)).slice(0, 300), content, String(body.published_at || ''), nowISO(), body.quality ? 1 : 0);
+    db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), gid);
+    backup();
+    return sendJSON(res, 200, { ok: true, id: Number(sr.lastInsertRowid), sources: sourcesOf(gid), goal: getGoal(gid) });
+  }
+  const sourceUpdMatch = p.match(/^\/api\/sources\/(\d+)$/);
+  if (sourceUpdMatch && method === 'PUT') {
+    const id = Number(sourceUpdMatch[1]);
+    const row = db.prepare('SELECT * FROM sources WHERE id = ?').get(id);
+    if (!row) return sendJSON(res, 404, { error: '资料不存在' });
+    const body = await readBody(req);
+    const title = body.title != null ? String(body.title).trim().slice(0, 200) : row.title;
+    const content = body.content != null ? String(body.content).trim().slice(0, 40000) : row.content;
+    const kind = body.kind != null ? String(body.kind).slice(0, 10) : row.kind;
+    const quality = body.quality != null ? (body.quality ? 1 : 0) : row.quality;
+    db.prepare('UPDATE sources SET title=?, content=?, kind=?, quality=? WHERE id=?').run(title || row.title, content, kind, quality, id);
+    backup();
+    return sendJSON(res, 200, { ok: true, sources: sourcesOf(row.goal_id) });
   }
   const sourceDelMatch = p.match(/^\/api\/sources\/(\d+)$/);
   if (sourceDelMatch && method === 'DELETE') {

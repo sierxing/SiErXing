@@ -665,7 +665,8 @@ function showNodePanel(id, rerender) {
     <div class="npSrcList">${srcs.length ? srcs.map((s, i) => {
       const lib = findLibSource(s);
       const body = lib ? String(lib.content || lib.snippet || '') : '';
-      return `<div class="npSrc"><div class="npSrcName">${s.source_id ? '🔗' : '📎'} ${esc(s.name || s.title || '')}</div>${s.note ? `<div class="npSrcNote">${esc(s.note)}</div>` : ''}${body ? `<details class="npSrcBody"><summary>查看资料库正文（${body.length} 字）</summary><div class="mdBody">${mdToHTML(body.slice(0, 4000))}</div></details>` : ''}<button class="btn tiny danger npsrcDel" data-npsrc-del="${i}">移除</button></div>`;
+      const isStar = !!(lib && Number(lib.quality) === 1);
+      return `<div class="npSrc ${isStar ? 'isStar' : ''}"><div class="npSrcName">${isStar ? '★' : (s.source_id ? '🔗' : '📎')} ${esc(s.name || s.title || '')}${isStar ? '<span class="chip ok" style="margin-left:6px;">优质</span>' : ''}</div>${s.note ? `<div class="npSrcNote">${esc(s.note)}</div>` : ''}${body ? `<details class="npSrcBody"><summary>查看资料库正文（${body.length} 字）</summary><div class="mdBody">${mdToHTML(body.slice(0, 4000))}</div></details>` : ''}<button class="btn tiny danger npsrcDel" data-npsrc-del="${i}">移除</button></div>`;
     }).join('') : '<div class="muted" style="font-size:12.5px;">未标注资料（本节点只依据提炼汇总与资料索引）</div>'}</div>
     <div class="npSrcAdd">
       <select id="npSrcPick">${(state.sources || []).map(x => `<option value="${x.id}">${esc('[' + x.kind + '] ' + String(x.title).slice(0, 40))}</option>`).join('')}</select>
@@ -2254,16 +2255,19 @@ async function startExpand(id, feedback, answers) {
   }
 }
 function sourceItemHTML(s) {
-  const body = (s.content || s.snippet || '').replace(/\s+/g, ' ').trim();
-  return `<div class="srcItem">
+  const body = String(s.content || s.snippet || '').trim();
+  const star = Number(s.quality) === 1;
+  return `<div class="srcItem ${star ? 'isStar' : ''}">
     <div class="siHead">
+      <button class="siStar ${star ? 'on' : ''}" data-src-star="${s.id}" title="${star ? '已标注为优质信息源（规划会优先参考）' : '标注为优质信息源（规划会优先参考）'}">${star ? '★' : '☆'}</button>
       <span class="chip gray">${esc(s.site || '未知来源')}</span>
       <span class="chip">${esc(s.kind || '资料')}</span>
+      ${star ? '<span class="chip ok" title="规划时优先参考">优质</span>' : ''}
       ${s.published_at ? `<span class="chip ok siDate" title="发布时间">${esc(s.published_at)}</span>` : '<span class="chip warn siDate" title="未标注发布时间（招聘平台在招岗位默认当前有效）">近期</span>'}
       <a class="siTitle" href="${esc(s.url)}" target="_blank" rel="noreferrer">${esc(s.title)}</a>
       <button class="btn tiny danger siDel" data-src="${s.id}" title="删除这条来源">×</button>
     </div>
-    ${body ? `<div class="siBody">${esc(body.slice(0, 240))}${body.length > 240 ? '…' : ''}</div>` : ''}
+    ${body ? `<details class="siDet"><summary>${esc(body.replace(/\s+/g, ' ').slice(0, 120))}${body.length > 120 ? '…' : ''}（${body.length} 字）</summary><div class="siFull mdBody">${mdToHTML(body.slice(0, 20000))}</div></details>` : ''}
   </div>`;
 }
 function srcPanelHTML() {
@@ -2275,11 +2279,31 @@ function srcPanelHTML() {
       <span class="spHint">大厂 JD · 牛客 · BOSS直聘 · 知乎等真实资料，规划时优先依据</span>
       <div class="spacer"></div>
         <button class="btn small" id="collectBtn">${list.length ? '重新收集' : '收集信息源'}</button>
+        <button class="btn small primary" <button class="btn small" id="srcAddBtn" title="粘贴文本、或填写标题与链接，手动添加一条资料（可标为优质信息源）">＋ 添加资料</button>
         <button class="btn small primary" id="digestBtn" title="让 AI 通读全部资料（含你上传的图片资料），提炼成多篇主题汇总，规划时优先依据">🧠 ${digests.length ? '重新提炼' : '信息提炼'}</button>
       </div>`;
   if (state.collecting) {
       h += `<div class="spProgress"><span class="spinner"></span><span id="spStatus">${esc(state.collectStatus || '正在检索…')}</span><div class="spacer"></div><button class="btn tiny" id="collectStop" title="停止本次收集（已收集到的会保留）">⏹ 停止</button></div>`;
   }
+    const starCount = list.filter(x => Number(x.quality) === 1).length;
+    if (starCount) h += `<div class="spStarTip">★ 优质信息源 ${starCount} 条 —— 规划时会重点依据这些资料（可在资料左侧点 ★ 标注/取消）</div>`;
+    if (state.srcFormOpen) {
+      h += `<div class="srcForm">
+        <div class="sfRow"><input id="sfTitle" placeholder="标题（如：Agent 面试知识库 / 某厂 JD）" value="${esc(state.srcFormTitle || '')}"></div>
+        <div class="sfRow">
+          <select id="sfKind">${['资料', 'JD', '面经', '学习路线', '大纲', '笔记', '课程', '资源'].map(k => `<option ${state.srcFormKind === k ? 'selected' : ''}>${k}</option>`).join('')}</select>
+          <input id="sfSite" placeholder="来源（如 GitHub / 某厂官网）" value="${esc(state.srcFormSite || '')}">
+          <label class="sfStar"><input type="checkbox" id="sfQuality" ${state.srcFormQuality ? 'checked' : ''}> 标为优质信息源</label>
+        </div>
+        <div class="sfRow"><input id="sfUrl" placeholder="链接（可选）" value="${esc(state.srcFormUrl || '')}"></div>
+        <div class="sfRow"><textarea id="sfContent" placeholder="把文本粘贴到这里（Ctrl+V 直接粘贴，越完整越好）">${esc(state.srcFormContent || '')}</textarea></div>
+        <div class="sfOps">
+          <button class="btn small primary" id="sfSave">保存为资料</button>
+          <button class="btn small" id="sfPaste">从剪贴板粘贴</button>
+          <button class="btn small" id="sfCancel">取消</button>
+        </div>
+      </div>`;
+    }
     if (state.digesting) {
       const dp = state.digestProgress || {};
       h += `<div class="spProgress"><span class="spinner"></span><span id="spStatus">${esc(state.digestStatus || '正在通读资料…')}</span>${dp.total ? `<span class="muted" style="font-size:11.5px;">（${dp.done || 0}/${dp.total} 批）</span>` : ''}<div class="spacer"></div><button class="btn tiny" id="digestStop" title="停止提炼">⏹ 停止</button></div>`;
@@ -2552,6 +2576,48 @@ function renderGoal() {
   planBtnEl.addEventListener('click', () => startClarify(g.id));
   const emptyPlan = document.getElementById('emptyPlanBtn');
   if (emptyPlan) emptyPlan.addEventListener('click', () => startClarify(g.id));
+  const starBtns = app.querySelectorAll('[data-src-star]');
+  starBtns.forEach(b => b.addEventListener('click', async () => {
+    const id = Number(b.getAttribute('data-src-star'));
+    const cur = (state.sources || []).find(x => Number(x.id) === id);
+    const next = !(cur && Number(cur.quality) === 1);
+    try {
+      const r = await api('/api/sources/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ quality: next }) });
+      state.sources = r.sources || state.sources;
+      toast(next ? '已标为优质信息源：规划时会优先参考' : '已取消优质标记');
+      renderGoal();
+    } catch (e) { toast(e.message); }
+  }));
+  const addBtn = document.getElementById('srcAddBtn');
+  if (addBtn) addBtn.addEventListener('click', () => { state.srcFormOpen = !state.srcFormOpen; renderGoal(); });
+  const sfCancel = document.getElementById('sfCancel');
+  if (sfCancel) sfCancel.addEventListener('click', () => {
+    state.srcFormOpen = false; state.srcFormTitle = ''; state.srcFormContent = ''; state.srcFormUrl = ''; state.srcFormSite = ''; state.srcFormQuality = false; renderGoal();
+  });
+  const sfPaste = document.getElementById('sfPaste');
+  if (sfPaste) sfPaste.addEventListener('click', async () => {
+    try { const t = await navigator.clipboard.readText(); const el = document.getElementById('sfContent'); if (el && t) { el.value = t; toast('已粘贴 ' + t.length + ' 字'); } }
+    catch (e) { toast('读取剪贴板失败，请直接在文本框里按 Ctrl+V 粘贴'); }
+  });
+  const sfSave = document.getElementById('sfSave');
+  if (sfSave) sfSave.addEventListener('click', async () => {
+    const title = (document.getElementById('sfTitle') || {}).value || '';
+    const content = (document.getElementById('sfContent') || {}).value || '';
+    const kind = (document.getElementById('sfKind') || {}).value || '资料';
+    const site = (document.getElementById('sfSite') || {}).value || '手动添加';
+    const url = (document.getElementById('sfUrl') || {}).value || '';
+    const quality = !!(document.getElementById('sfQuality') || {}).checked;
+    if (!title.trim() && !content.trim()) return toast('请填写标题或粘贴正文');
+    sfSave.disabled = true; sfSave.textContent = '保存中…';
+    try {
+      const r = await api('/api/goals/' + g.id + '/sources', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title, content, kind, site, url, quality }) });
+      state.sources = r.sources || state.sources;
+      state.goal = r.goal || state.goal;
+      state.srcFormOpen = false; state.srcFormTitle = ''; state.srcFormContent = ''; state.srcFormUrl = ''; state.srcFormSite = ''; state.srcFormQuality = false;
+      toast('已添加资料' + (quality ? '（优质信息源）' : ''));
+      renderGoal();
+    } catch (e) { toast(e.message); sfSave.disabled = false; sfSave.textContent = '保存为资料'; }
+  });
   const cb = document.getElementById('collectBtn');
   if (cb) cb.addEventListener('click', () => startCollect(g.id));
   const cs = document.getElementById('collectStop');
