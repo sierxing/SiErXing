@@ -224,11 +224,20 @@ module.exports = function createSync(ctx) {
     try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { return null; }
   }
 
+  /* 本地最后改动时间：不能只看 goals——节点/资料/汇总的改动同样重要，
+     否则"新生成的节点"会被判定为比远端旧而被覆盖（曾导致节点消失） */
   function localChangeAt() {
-    try {
-      const row = db.prepare('SELECT MAX(updated_at) AS t FROM goals').get();
-      return row && row.t ? String(row.t) : '';
-    } catch (e) { return ''; }
+    let latest = '';
+    for (const t of ['goals', 'nodes', 'sources', 'source_digests', 'tutorials', 'goal_versions', 'jd_images', 'practice_records', 'daily_plans']) {
+      for (const col of ['updated_at', 'created_at']) {
+        try {
+          const row = db.prepare(`SELECT MAX(${col}) AS t FROM ${t}`).get();
+          const v = row && row.t ? String(row.t) : '';
+          if (v && v > latest) latest = v;
+        } catch (e) {}
+      }
+    }
+    return latest;
   }
 
   /* ---------------- 上传 / 拉取 ---------------- */
