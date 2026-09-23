@@ -1139,18 +1139,45 @@ document.addEventListener('click', async e => {
   if (rr.view !== 'tutorial') return;
   const tut = ((state.goal && state.goal.tutorials) || []).find(x => Number(x.id) === Number(rr.id));
   if (!tut) return;
-  const host = document.getElementById('tutHost') || document.querySelector('.tutWrap') || document.getElementById('app');
+  // 找到教程正文容器（iframe / md 渲染区），只替换它，不动整个页面
+  const contentEl = document.getElementById('tutFrame') || document.querySelector('.tutBody') || document.querySelector('.mdBody');
   if (eb) {
     if (tutEditing) return;
     tutEditing = true;
-    const old = tut.content || '';
-    host.innerHTML = '<div class="tutEditorWrap"><textarea id="tutEditor" spellcheck="false"></textarea></div>';
+    // 取最新内容：优先服务端（避免用过期缓存导致空白）
+    let src = tut.content || '';
+    try {
+      const r = await api('/api/goals/' + state.goal.id);
+      const fresh = ((r.goal && r.goal.tutorials) || []).find(x => Number(x.id) === Number(rr.id));
+      if (fresh && fresh.content) src = fresh.content;
+    } catch (e) {}
+    const wrap = document.createElement('div');
+    wrap.id = 'tutEditorWrap';
+    wrap.className = 'tutEditorWrap';
+    wrap.innerHTML = '<div class="tutEditorBar">正在编辑（' + (tut.format === 'md' ? 'Markdown' : 'HTML') + '）· 改完点「💾 保存」，或点「取消」放弃</div><textarea id="tutEditor" spellcheck="false"></textarea>';
+    if (contentEl && contentEl.parentNode) {
+      contentEl.style.display = 'none';
+      contentEl.parentNode.insertBefore(wrap, contentEl);
+    } else {
+      const app = document.getElementById('app');
+      if (app) app.appendChild(wrap);
+    }
     const ta = document.getElementById('tutEditor');
-    ta.value = old;
-    ta.style.cssText = 'width:100%; min-height:60vh; border:1px solid var(--border); border-radius:10px; padding:12px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.8px; line-height:1.6; background:var(--card); color:var(--text);';
+    ta.value = src;
     const sv = document.getElementById('tutSaveBtn'); if (sv) sv.hidden = false;
     const mb = document.getElementById('tutManualBtn'); if (mb) mb.textContent = '✎ 编辑中…';
-    toast('已进入编辑模式：改完点「💾 保存」（会进版本历史）');
+    const cb = document.getElementById('tutCancelBtn');
+    if (cb) cb.hidden = false;
+    toast('已进入编辑模式（正文已填入，共 ' + src.length + ' 字）');
+    return;
+  }
+  const cbtn = e.target.closest && e.target.closest('#tutCancelBtn');
+  if (cbtn) {
+    tutEditing = false;
+    renderTutorialPage(rr.id);
+    const sv2 = document.getElementById('tutSaveBtn'); if (sv2) sv2.hidden = true;
+    const cb2 = document.getElementById('tutCancelBtn'); if (cb2) cb2.hidden = true;
+    const mb2 = document.getElementById('tutManualBtn'); if (mb2) mb2.textContent = '✎ 手动编辑';
     return;
   }
   if (sb) {
@@ -1905,6 +1932,7 @@ async function renderTutorialPage(tid) {
       <button class="btn small" id="tutEditBtn" title="在右侧对话栏里说你想怎么改，AI 会按意见修改（保留原有内容，只改需要改的地方）">💬 让 AI 修改</button>
       <button class="btn small" id="tutManualBtn" title="直接手动编辑并保存（Markdown / HTML 都可以）">✎ 手动编辑</button>
       <button class="btn small primary" id="tutSaveBtn" hidden>💾 保存</button>
+      <button class="btn small" id="tutCancelBtn" hidden>取消</button>
       <span class="mapTitle">📘 ${esc(t.title)}</span>
       <span class="chip gray">${isHtml ? 'HTML' : 'Markdown'}</span>
       <span class="chip gray">约 ${sizeK}k 字</span>
