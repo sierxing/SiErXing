@@ -1128,6 +1128,45 @@ function selBoxInit() {
 }
 selBoxInit();   // 文档级监听：导图页 Ctrl+拖拽框选
 
+/* ===== 教程：手动编辑与保存 ===== */
+const TUTMANUAL_BOUND = true;
+let tutEditing = false;
+document.addEventListener('click', async e => {
+  const eb = e.target.closest && e.target.closest('#tutManualBtn');
+  const sb = e.target.closest && e.target.closest('#tutSaveBtn');
+  if (!eb && !sb) return;
+  const rr = parseRoute();
+  if (rr.view !== 'tutorial') return;
+  const tut = ((state.goal && state.goal.tutorials) || []).find(x => Number(x.id) === Number(rr.id));
+  if (!tut) return;
+  const host = document.getElementById('tutHost') || document.querySelector('.tutWrap') || document.getElementById('app');
+  if (eb) {
+    if (tutEditing) return;
+    tutEditing = true;
+    const old = tut.content || '';
+    host.innerHTML = '<div class="tutEditorWrap"><textarea id="tutEditor" spellcheck="false"></textarea></div>';
+    const ta = document.getElementById('tutEditor');
+    ta.value = old;
+    ta.style.cssText = 'width:100%; min-height:60vh; border:1px solid var(--border); border-radius:10px; padding:12px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.8px; line-height:1.6; background:var(--card); color:var(--text);';
+    const sv = document.getElementById('tutSaveBtn'); if (sv) sv.hidden = false;
+    const mb = document.getElementById('tutManualBtn'); if (mb) mb.textContent = '✎ 编辑中…';
+    toast('已进入编辑模式：改完点「💾 保存」（会进版本历史）');
+    return;
+  }
+  if (sb) {
+    const ta = document.getElementById('tutEditor');
+    if (!ta) return;
+    sb.disabled = true; sb.textContent = '保存中…';
+    try {
+      await api('/api/tutorials/' + rr.id + '/edit', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: ta.value }) });
+      toast('✅ 已保存（可在「📜 版本对比」回滚）');
+      tutEditing = false;
+      try { await loadGoal(state.goal.id); } catch (e2) {}
+      renderTutorialPage(rr.id);
+    } catch (err) { toast(err.message); }
+    sb.disabled = false; sb.textContent = '💾 保存';
+  }
+});
 /* ===== 教程：让 AI 修改（全局委托，避免绑定时机问题） ===== */
 const TUTEDIT_BOUND = true;
 document.addEventListener('click', async e => {
@@ -1523,7 +1562,7 @@ async function aiSend() {
     state.aiMsgs.push({ id: 0, role: 'user', content: msgT, ops: '[]', created_at: new Date().toISOString() });
     try {
       await api('/api/tutorials/' + rrTut.id + '/edit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ feedback: msgT }) });
-      state.aiMsgs.push({ id: 0, role: 'assistant', content: '收到！已把这条修改意见交给 AI，正在重写这份教程。\n\n进度可以在左下角任务中心看到（切页面也不影响）；完成后教程会自动刷新，也可以点「📜 版本对比」回滚。', ops: '[]', created_at: new Date().toISOString() });
+      state.aiMsgs.push({ id: 0, role: 'assistant', content: '收到！已把这条修改意见交给 AI，它会**保留原有内容**、只改需要改的地方。\n\n进度可以在左下角任务中心看到（切页面也不影响）；完成后教程会自动刷新，也可以点「📜 版本对比」回滚。', ops: '[]', created_at: new Date().toISOString() });
       toast('🤖 已提交教程修改任务（完成后自动刷新）');
     } catch (e) {
       state.aiMsgs.push({ id: 0, role: 'assistant', content: '提交失败：' + e.message, ops: '[]', created_at: new Date().toISOString() });
@@ -1863,7 +1902,9 @@ async function renderTutorialPage(tid) {
   app.innerHTML = `<div class="tutPage">
     <div class="tutHead">
       <a class="back" href="#/g/${t.goal_id}">← 返回目标</a>
-      <button class="btn small" id="tutEditBtn" title="把修改意见交给 AI，它会重写这份教程（保留历史版本）">💬 让 AI 修改</button>
+      <button class="btn small" id="tutEditBtn" title="在右侧对话栏里说你想怎么改，AI 会按意见修改（保留原有内容，只改需要改的地方）">💬 让 AI 修改</button>
+      <button class="btn small" id="tutManualBtn" title="直接手动编辑并保存（Markdown / HTML 都可以）">✎ 手动编辑</button>
+      <button class="btn small primary" id="tutSaveBtn" hidden>💾 保存</button>
       <span class="mapTitle">📘 ${esc(t.title)}</span>
       <span class="chip gray">${isHtml ? 'HTML' : 'Markdown'}</span>
       <span class="chip gray">约 ${sizeK}k 字</span>

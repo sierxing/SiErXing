@@ -3028,6 +3028,25 @@ function redactText(raw) {
     });
     return sendJSON(res, 200, { ok: true, taskId });
   }
+  const tutSaveMatch = p.match(/^\/api\/tutorials\/(\d+)$/);
+  if (tutSaveMatch && method === 'PUT') {
+    const tid = Number(tutSaveMatch[1]);
+    const tut = db.prepare('SELECT * FROM tutorials WHERE id = ?').get(tid);
+    if (!tut) return sendJSON(res, 404, { error: '教程不存在' });
+    const body = await readBody(req);
+    const content = body.content != null ? String(body.content) : '';
+    if (!content.trim()) return sendJSON(res, 400, { error: '内容不能为空' });
+    const goal = db.prepare('SELECT * FROM goals WHERE id = ?').get(tut.goal_id);
+    try {
+      const vid = beginVersion(tut.goal_id, '手动编辑教程：' + String(tut.title || '').slice(0, 20));
+      db.prepare('UPDATE tutorials SET content = ?, updated_at = ? WHERE id = ?').run(content, nowISO(), tid);
+      await finishVersion(goal, vid, '手动编辑教程：' + String(tut.title || '').slice(0, 20), false);
+    } catch (e) {
+      db.prepare('UPDATE tutorials SET content = ?, updated_at = ? WHERE id = ?').run(content, nowISO(), tid);
+    }
+    backup();
+    return sendJSON(res, 200, { ok: true, length: content.length });
+  }
   const tutMatch = p.match(/^\/api\/tutorials\/(\d+)$/);
   if (tutMatch) {
     const id = Number(tutMatch[1]);
