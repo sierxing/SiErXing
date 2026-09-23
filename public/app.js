@@ -2019,6 +2019,7 @@ async function renderTutorialPage(tid) {
       : `<div class="tutBody mdBody">${mdToHTML(t.content)}</div>`}
   </div>`;
   if (isHtml) document.getElementById('tutFrame').setAttribute('srcdoc', tutThemedHTML(t.content));
+  setTimeout(() => { try { tutTocBuild(tid); } catch (e) {} }, 200);   // 侧边目录大纲
   document.getElementById('tutDl').addEventListener('click', () => {
     const blob = new Blob([t.content], { type: isHtml ? 'text/html;charset=utf-8' : 'text/markdown;charset=utf-8' });
     const a = document.createElement('a');
