@@ -1847,6 +1847,10 @@ async function delNode(id) {
     toast('已删除');
   } catch (e) { toast(e.message); }
 }
+/* 取某个节点的直接子节点 */
+function db2Kids(id) {
+  return ((state.goal && state.goal.nodes) || []).filter(x => Number(x.parent_id) === Number(id));
+}
 function showCtxMenu(x, y, id) {
   const n = state.goal.nodes.find(v => v.id === id);
   if (!n) return;
@@ -1865,6 +1869,8 @@ function showCtxMenu(x, y, id) {
     <button data-act="expand">✨ AI 深度拆分（搜集资料后细化）</button>
     <button data-act="discuss">💬 提意见调整划分（和 AI 讨论）</button>
     <button data-act="tut">📘 生成学习教程（掌握这个任务）</button>
+    ${kids.length ? `<button data-act="tutkids">📚 为全部子节点生成教程（${kids.length} 个，并行）</button>` : ''}
+    ${kids.length ? `<button data-act="expandkids">✨ 逐个拆分全部子节点（${kids.length} 个，并行）</button>` : ''}
     ${tuts.length ? `<button data-act="tutview">📖 查看教程（${tuts.length}）</button>` : ''}
     <button data-act="sources">📚 资料与提炼汇总（${srcs.length}）</button>
     <div class="ctxSep"></div>
@@ -1882,6 +1888,31 @@ function showCtxMenu(x, y, id) {
   };
   bind('expand', () => startExpand(id));
   bind('tut', () => showTutorialDialog(id));
+  bind('tutkids', async () => {
+    const list = db2Kids(id);
+    if (!list.length) return toast('这个节点还没有子节点');
+    if (!confirm('为全部 ' + list.length + ' 个子节点生成教程？\n\n会并行处理（最多 3 个同时），可在左下角任务中心看进度，切页面也不影响。')) return;
+    for (const k of list) {
+      try {
+        await fetch('/api/nodes/' + k.id + '/tutorial', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ format: 'md', note: '按父节点「' + String(n.title).slice(0, 30) + '」的学习要求，为这个子节点写一份完整、可执行的教程' })
+        });
+      } catch (e) {}
+    }
+    toast('已提交 ' + list.length + ' 个教程任务（见左下角任务中心）');
+  });
+  bind('expandkids', async () => {
+    const list = db2Kids(id);
+    if (!list.length) return toast('这个节点还没有子节点');
+    if (!confirm('逐个拆分全部 ' + list.length + ' 个子节点？\n\n会并行处理（最多 3 个同时），可在左下角任务中心查看进度。')) return;
+    for (const k of list) {
+      try {
+        await fetch('/api/nodes/' + k.id + '/expand', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ feedback: '' }) });
+      } catch (e) {}
+    }
+    toast('已提交 ' + list.length + ' 个拆分任务（见左下角任务中心）');
+  });
   bind('tutview', () => {
     const list = tutorialsOfNode(id);
     if (list.length === 1) go('#/t/' + list[0].id);
