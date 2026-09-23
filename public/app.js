@@ -1175,10 +1175,16 @@ document.addEventListener('click', async e => {
   const cbtn = e.target.closest && e.target.closest('#tutCancelBtn');
   if (cbtn) {
     tutEditing = false;
-    renderTutorialPage(rr.id);
+    try { const w = document.getElementById('tutEditorWrap'); if (w) w.remove(); } catch (e2) {}
+    try {
+      const ce = document.getElementById('tutFrame') || document.querySelector('.tutBody') || document.querySelector('.mdBody');
+      if (ce) ce.style.display = '';
+    } catch (e2) {}
     const sv2 = document.getElementById('tutSaveBtn'); if (sv2) sv2.hidden = true;
     const cb2 = document.getElementById('tutCancelBtn'); if (cb2) cb2.hidden = true;
     const mb2 = document.getElementById('tutManualBtn'); if (mb2) mb2.textContent = '✎ 手动编辑';
+    try { renderTutorialPage(rr.id); } catch (e2) { try { await loadGoal(state.goal.id); renderTutorialPage(rr.id); } catch (e3) { location.hash = '#/t/' + rr.id; location.reload(); } }
+    toast('已取消编辑');
     return;
   }
   if (sb) {
@@ -1186,9 +1192,13 @@ document.addEventListener('click', async e => {
     if (!ta) return;
     sb.disabled = true; sb.textContent = '保存中…';
     try {
-      await api('/api/tutorials/' + rr.id + '/edit', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: ta.value }) });
+      await api('/api/tutorials/' + rr.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: ta.value }) });
       toast('✅ 已保存（可在「📜 版本对比」回滚）');
       tutEditing = false;
+      try { const w = document.getElementById('tutEditorWrap'); if (w) w.remove(); } catch (e2) {}
+      const sv3 = document.getElementById('tutSaveBtn'); if (sv3) sv3.hidden = true;
+      const cb3 = document.getElementById('tutCancelBtn'); if (cb3) cb3.hidden = true;
+      const mb3 = document.getElementById('tutManualBtn'); if (mb3) mb3.textContent = '✎ 手动编辑';
       try { await loadGoal(state.goal.id); } catch (e2) {}
       renderTutorialPage(rr.id);
     } catch (err) { toast(err.message); }
