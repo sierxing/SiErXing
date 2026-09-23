@@ -1078,11 +1078,11 @@ async function selAct(act) {
   selBarRender();
 }
 function selBoxInit() {
-  const vp = document.getElementById('mapViewport');
-  if (!vp || vp.getAttribute('data-selbound')) return;
-  vp.setAttribute('data-selbound', '1');
-  vp.addEventListener('mousedown', e => {
+  if (selBoxInit._done) return;
+  selBoxInit._done = true;
+  document.addEventListener('mousedown', e => {
     if (!e.ctrlKey || e.button !== 0) return;
+    if (!e.target.closest || !e.target.closest('#mapViewport')) return;
     e.preventDefault(); e.stopPropagation();
     const start = { x: e.clientX, y: e.clientY };
     const box = document.createElement('div');
@@ -1111,6 +1111,7 @@ function selBoxInit() {
     document.addEventListener('mouseup', onUp);
   }, true);
 }
+selBoxInit();   // 文档级监听：导图页 Ctrl+拖拽框选
 
 /* ===== AI 助手（右侧侧边栏） ===== */
 function opChipHTML(o) {
