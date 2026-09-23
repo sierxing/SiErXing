@@ -217,6 +217,7 @@ async function renderHome() {
       <div class="spacer"></div>
       <button class="btn" id="guideBtn">📖 使用引导</button>
       <button class="btn primary" id="newBtn">＋ 新建目标</button>
+      <label class="btn" title="导入别人分享的 *.share.json（含规划与资料库）">⬆ 导入分享<input type="file" id="shareImportFile" accept=".json,application/json" hidden></label>
     </div>
     ${setupCardHTML()}
     ${disabledComponentsHTML()}`;
@@ -227,6 +228,7 @@ async function renderHome() {
       <div class="ebTitle">还没有目标</div>
       <div class="ebText">任何想达成的目标（转行就业、学一门技能、考研考证、做出作品…），AI 会先与你反复确认，再拆成可执行的路径。</div>
       <button class="btn primary" id="emptyNewBtn">＋ 新建目标</button>
+      <label class="btn" style="margin-left:8px;">⬆ 导入分享<input type="file" id="shareImportFile2" accept=".json,application/json" hidden></label>
     </div>`;
   }
   if (goals.length) {
@@ -258,6 +260,18 @@ async function renderHome() {
 
   const gb = document.getElementById('guideBtn');
   if (gb) gb.addEventListener('click', () => showGuide(0));
+  app.querySelectorAll('#shareImportFile, #shareImportFile2').forEach(inp => inp.addEventListener('change', async () => {
+    const file = (inp.files || [])[0];
+    inp.value = '';
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      const r = await api('/api/share/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+      toast('已导入分享：' + r.counts.nodes + ' 个节点 · ' + r.counts.sources + ' 条资料 · ' + r.counts.digests + ' 篇汇总');
+      state.goals = (await api('/api/goals')).goals || [];
+      go('#/g/' + r.goalId);
+    } catch (e) { toast(e.message); }
+  }));
   const nb = document.getElementById('newBtn');
   if (nb) nb.addEventListener('click', () => { state.showNew = !state.showNew; renderHome(); });
   const eb = document.getElementById('emptyNewBtn');
@@ -1980,7 +1994,7 @@ function planPanelHTML() {
   if (!g) return '';
   if (state.planning) {
     return `<div class="planPanel" id="planPanel">
-      <div class="ppHead"><span class="spinner"></span><span id="ppStatus">${esc(state.planStatus || 'AI 正在规划…')}</span><span class="ppTime" id="ppTime">0s</span><div class="spacer"></div><button class="btn tiny" id="planStop" title="停止这次生成（已生成的内容不会丢，可随时重新开始或继续）">⏹ 停止</button></div>
+      <div class="ppHead"><span class="spinner"></span><span id="ppStatus">${esc(state.planStatus || 'AI 正在规划…')}${state.planTaskCount ? '（已生成 ' + state.planTaskCount + ' 个任务，中断后可继续）' : ''}</span><span class="ppTime" id="ppTime">0s</span><div class="spacer"></div><button class="btn tiny" id="planStop" title="停止这次生成（已生成的内容不会丢，可随时重新开始或继续）">⏹ 停止</button></div>
       <div class="ppTrack"><div class="ppTrackIn"></div></div>
       <div class="ppLive" id="ppLive" hidden></div>
       <details class="ppRaw"><summary>查看 AI 原始输出</summary><pre class="ppText" id="ppText"></pre></details>
@@ -2161,9 +2175,11 @@ async function startPlanTasks(id, answers) {
     if (d.questions) asked = { stage: 'tasks', feedback: '', data: d.questions };
     if (d.goal) {
       state.goal = d.goal;
-      const cnt = state.goal.nodes.filter(n => !state.goal.nodes.some(x => Number(x.parent_id) === n.id)).length;
-      const el = document.getElementById('ppStatus');
-      if (el && state.planStatus) el.textContent = state.planStatus + '　[已有 ' + cnt + ' 个任务]';
+      // 每完成一个阶段就立刻渲染：用户能马上看到新任务；即使中断，数据已保存，可继续
+      state.planTaskCount = (state.goal.nodes || []).filter(n => Number(n.level) >= 2).length;
+      const rr2 = parseRoute();
+      if (rr2.view === 'map' && rr2.id === id) { renderMapPage(); bindPlanningPanel(); }
+      else if (rr2.view === 'goal' && rr2.id === id) { renderGoal(); bindPlanningPanel(); }
     }
   }, state.planAbort.signal).catch(e => ({ done: true, error: e.message }));
   clearInterval(planTimer);
@@ -2534,6 +2550,7 @@ function renderGoal() {
       <a class="back js-back" href="#/">← 返回</a>
       <div class="spacer"></div>
       <button class="btn" id="editGoalBtn">编辑目标</button>
+      <a class="btn" id="shareGoalBtn" href="/api/goals/${g.id}/share" download title="把这份规划与资料库打包分享给别人（对方可一键导入）">🔗 分享</a>
       ${compOn('chat') ? '<button class="btn" id="chatBtn">💬 AI 助手</button>' : ''}
       ${pluginButtonsHTML(g)}
       ${g.nodes.length && compOn('versions') ? '<button class="btn" id="verBtn">📜 版本对比</button>' : ''}

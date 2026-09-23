@@ -2594,6 +2594,89 @@ async function handleAPI(req, res, u) {
   if (sourcesMatch && method === 'GET') {
     return sendJSON(res, 200, { sources: sourcesOf(Number(sourcesMatch[1])) });
   }
+  /* 一键分享：把「规划（骨架+任务）+ 资料库 + 提炼汇总」打包成可分享文件 */
+  const shareMatch = p.match(/^\/api\/goals\/(\d+)\/share$/);
+  if (shareMatch && method === 'GET') {
+    const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(Number(shareMatch[1]));
+    if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+    const nodes = db.prepare('SELECT * FROM nodes WHERE goal_id = ? ORDER BY level, sort_order, id').all(g.id);
+    const sources = db.prepare('SELECT * FROM sources WHERE goal_id = ? ORDER BY quality DESC, id').all(g.id);
+    const digests = digestsOf(g.id);
+    const out = {
+      format: 'sierxing-share', version: 1, exportedAt: nowISO(),
+      from: { device: os.hostname() },
+      goal: {
+        title: g.title, profile: g.profile, weekly_hours: g.weekly_hours, deadline: g.deadline,
+        materials: g.materials, summary: g.summary, constraints: safeParse(g.constraints) || []
+      },
+      counts: { nodes: nodes.length, sources: sources.length, digests: digests.length },
+      nodes: nodes.map(n => ({
+        id: n.id, parent_id: n.parent_id, level: n.level, sort_order: n.sort_order, title: n.title,
+        detail: n.detail, artifact: n.artifact, acceptance: n.acceptance, hours: n.hours, status: n.status,
+        sources: safeParse(n.sources) || []
+      })),
+      sources: sources.map(x => ({
+        title: x.title, url: x.url, site: x.site, kind: x.kind, snippet: x.snippet,
+        content: x.content, published_at: x.published_at, quality: Number(x.quality) || 0
+      })),
+      digests: digests.map(d => ({ topic: d.topic, title: d.title, content: d.content }))
+    };
+    const fname = encodeURIComponent('规划分享-' + String(g.title).replace(/[\\/:*?"<>|]/g, '').slice(0, 20) + '.share.json');
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Disposition': "attachment; filename=\"share.json\"; filename*=UTF-8''" + fname
+    });
+    return res.end(JSON.stringify(out, null, 1));
+  }
+  /* 一键导入分享文件：新建一个目标（含规划、资料库与提炼汇总） */
+  if (p === '/api/share/import' && method === 'POST') {
+    const body = await readBody(req);
+    if (!body || body.format !== 'sierxing-share') return sendJSON(res, 400, { error: '不是有效的分享文件（需要 *.share.json）' });
+    const gg = body.goal || {};
+    const t = nowISO();
+    const gr = db.prepare('INSERT INTO goals (title, profile, weekly_hours, deadline, materials, summary, constraints, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+      .run(String(gg.title || '来自分享的目标').slice(0, 200), String(gg.profile || '').slice(0, 4000),
+        String(gg.weekly_hours || '').slice(0, 50), String(gg.deadline || '').slice(0, 50),
+        String(gg.materials || '').slice(0, 8000), String(gg.summary || '').slice(0, 800),
+        JSON.stringify(Array.isArray(gg.constraints) ? gg.constraints.slice(0, 30) : []), 'review', t, t);
+    const gid = Number(gr.lastInsertRowid);
+    // 节点（按层级顺序插入，维护旧 id → 新 id 映射）
+    const idMap = new Map();
+    let nodeCount = 0;
+    const sorted = (Array.isArray(body.nodes) ? body.nodes : []).slice().sort((a, b) => (Number(a.level) || 0) - (Number(b.level) || 0));
+    for (const n of sorted) {
+      const parentNew = n.parent_id ? (idMap.get(Number(n.parent_id)) || null) : null;
+      insertNode(gid, parentNew, Number(n.level) || 0, String(n.title || '节点').slice(0, 200),
+        String(n.detail || '').slice(0, 2000), Array.isArray(n.sources) ? n.sources.slice(0, 20) : [],
+        Number(n.sort_order) || 0, { artifact: String(n.artifact || '').slice(0, 500), acceptance: String(n.acceptance || '').slice(0, 500), hours: String(n.hours || '').slice(0, 50) });
+      const newId = db.prepare('SELECT last_insert_rowid() AS id').get().id;
+      if (Number(n.id)) idMap.set(Number(n.id), newId);
+      nodeCount++;
+    }
+    // 资料库
+    let srcCount = 0;
+    for (const x of (Array.isArray(body.sources) ? body.sources : []).slice(0, 800)) {
+      const title = String(x.title || '').trim().slice(0, 200);
+      const content = String(x.content || '').trim().slice(0, 40000);
+      if (!title && !content) continue;
+      db.prepare('INSERT INTO sources (goal_id,title,url,site,kind,snippet,content,published_at,created_at,quality) VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run(gid, title || '分享的资料', String(x.url || '').slice(0, 500), String(x.site || '来自分享').slice(0, 40),
+          String(x.kind || '资料').slice(0, 10), String(x.snippet || content.slice(0, 300)).slice(0, 300),
+          content, String(x.published_at || ''), t, x.quality ? 1 : 0);
+      srcCount++;
+    }
+    // 提炼汇总
+    let digCount = 0;
+    for (const d of (Array.isArray(body.digests) ? body.digests : []).slice(0, 20)) {
+      const content = String(d.content || '').slice(0, 30000);
+      if (!content.trim()) continue;
+      db.prepare('INSERT INTO source_digests (goal_id, topic, title, content, sources_count, created_at) VALUES (?,?,?,?,?,?)')
+        .run(gid, String(d.topic || '').slice(0, 60), String(d.title || d.topic || '汇总').slice(0, 120), content, srcCount, t);
+      digCount++;
+    }
+    backup();
+    return sendJSON(res, 200, { ok: true, goalId: gid, counts: { nodes: nodeCount, sources: srcCount, digests: digCount }, goal: getGoal(gid) });
+  }
   const sourcesAddMatch = p.match(/^\/api\/goals\/(\d+)\/sources$/);
   if (sourcesAddMatch && method === 'POST') {
     const gid = Number(sourcesAddMatch[1]);
