@@ -995,7 +995,22 @@ async function taskPoll() {
     // 新任务出现时给个小提示（动画 toast），替代原来的灰色遮罩
     const known = state.taskKnownIds || (state.taskKnownIds = {});
     const fresh = list.filter(t => !known[t.id] && (t.status === 'queued' || t.status === 'running'));
-    for (const t of list) known[t.id] = 1;
+    // 有任务刚刚完成 → 重新拉取目标数据（教程/节点），保证界面能看到结果
+    const finishedNow = list.filter(t => known[t.id] && ['done', 'failed', 'cancelled'].includes(t.status) && !known['done_' + t.id]);
+    for (const t of list) {
+      known[t.id] = 1;
+      if (['done', 'failed', 'cancelled'].includes(t.status)) known['done_' + t.id] = 1;
+    }
+    if (finishedNow.length && state.goal) {
+      const okCount = finishedNow.filter(t => t.status === 'done').length;
+      if (okCount) toast('✅ ' + okCount + ' 个 AI 任务完成，界面已更新');
+      try { await loadGoal(state.goal.id); } catch (e) {}
+      const rr = parseRoute();
+      if (rr.view === 'goal' || rr.view === 'map' || rr.view === 'tutorial') rerenderCurrent();
+      // 节点面板开着的话，刷新它的内容
+      const np = document.getElementById('nodePanel');
+      if (np) { const nid = Number(np.getAttribute('data-node')); if (nid) { try { showNodePanel(nid); } catch (e) {} } }
+    }
     if (fresh.length) {
       const first = fresh[0];
       toast('🤖 ' + (TASK_META[first.type] ? TASK_META[first.type].label : 'AI 任务') + '已加入执行列表' + (fresh.length > 1 ? '（共 ' + fresh.length + ' 个）' : '') + ' · 左下角可看进度');
