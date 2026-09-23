@@ -897,6 +897,10 @@ function opChipHTML(o) {
   if (o.op === 'move') return `<div class="chOp opMove"><span class="opTag">移动</span><span class="opTitle">${esc(t)}</span></div>`;
   if (o.op === 'constraint') return `<div class="chOp opCons"><span class="opTag">约束</span><span class="opTitle">${esc(t)}</span></div>`;
   if (o.op === 'status') return `<div class="chOp opStatus"><span class="opTag">状态</span><span class="opTitle">${esc(t)}</span><span class="opNote">→ ${esc(o.status === 'done' ? '已完成' : o.status === 'doing' ? '进行中' : '未开始')}</span></div>`;
+  if (o.op === 'add_source') return `<div class="chOp opAdd"><span class="opTag">资料</span><span class="opTitle">${esc(t)}</span><span class="opNote">已存入资料库</span></div>`;
+  if (o.op === 'delete_source') return `<div class="chOp opDel"><span class="opTag">删资料</span><span class="opTitle">${esc(t)}</span></div>`;
+  if (o.op === 'update_goal') return `<div class="chOp opEdit"><span class="opTag">目标</span><span class="opTitle">${esc(t)}</span></div>`;
+  if (o.op === 'start') return `<div class="chOp opAdd"><span class="opTag">启动</span><span class="opTitle">${esc(t)}</span></div>`;
   return `<div class="chOp opEdit"><span class="opTag">修改</span><span class="opTitle">${esc(t)}</span></div>`;
 }
 function chatBubbleHTML(m, goalId) {
@@ -1289,7 +1293,17 @@ async function aiSend() {
           finished = true;
           state.goal = d.goal;
           state.aiMsgs.push({ id: d.id, role: 'assistant', content: d.reply, ops: JSON.stringify(d.applied || []), version_id: d.versionId || 0, created_at: new Date().toISOString() });
-          if (d.applied && d.applied.length) toast('已修改 ' + d.applied.length + ' 处，可在导图查看');
+          if (d.applied && d.applied.length) {
+            const starts = d.applied.filter(x => x && x.op === 'start');
+            const others = d.applied.filter(x => x && x.op !== 'start');
+            if (others.length) toast('已执行 ' + others.length + ' 项操作，可在目标页查看');
+            for (const st of starts) {
+              setTimeout(() => {
+                if (st.action === 'digest') startDigest(state.goal.id);
+                else if (st.action === 'collect') startCollect(state.goal.id);
+              }, 300);
+            }
+          }
           if (d.errors && d.errors.length) toast('部分操作未生效：' + d.errors[0]);
         }
         if (d.error) { finished = true; toast(d.error); }

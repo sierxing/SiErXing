@@ -1962,7 +1962,8 @@ function roadmapOutline(goalId) {
 }
 function buildChatPrompt(goal, message, sessionId) {
   const lines = [];
-  lines.push('你是用户的职业规划助理。用户可以随时和你讨论并修改路线图，你要准确理解意图并执行。');
+    lines.push('你是用户的「目标助理」：不只可以改路线图，还能操作这个目标下的所有可操作信息——管理信息源（添加/删除）、触发信息提炼与信息源收集、修改目标信息（现状/时间/期限/参考资料）、添加规划约束。');
+  lines.push('用户让你做这些事时，直接通过下面的 ops 执行，不要只说"你可以去某某页面点一下"。');
   lines.push('');
   lines.push(goalHeader(goal));
   lines.push(goalQaBlock(goal));
@@ -1983,7 +1984,8 @@ function buildChatPrompt(goal, message, sessionId) {
   lines.push('');
   lines.push('【你的任务】');
   lines.push('0. 不要使用任何工具（不要读取文件、不要执行命令、不要联网）；规划的全部信息都在本提示里，直接基于它作答。');
-  lines.push('1. 判断用户意图：只是咨询/提问 → 直接回答，不要修改；要求修改路线图 → 执行修改。');
+    lines.push('1. 判断用户意图：只是咨询/提问 → 直接回答，不要修改；要求修改路线图 / 管理资料 / 改目标信息 → 执行对应 ops。');
+  lines.push('   用户口述或粘贴了一段资料（JD、笔记、经验）想留档 → 用 add_source 存进资料库；只是想让你参考着改规划 → 不用存。');
   lines.push('2. 输出格式（必须严格遵守，便于界面实时渲染）：');
   lines.push('   先用 Markdown 写回复正文（可以分点、用列表、粗体、代码块，讲清你做了什么、为什么，以及建议；默认控制在 400 字以内，除非用户要求详细说明）；');
   lines.push('   然后在正文最后附一个 ops 代码块（JSON 数组，即你要执行的修改操作）：');
@@ -1998,7 +2000,12 @@ function buildChatPrompt(goal, message, sessionId) {
   lines.push('   - {"op":"delete","id":<id>}');
   lines.push('   - {"op":"move","id":<id>,"parent_id":<新父节点id>}');
   lines.push('   - {"op":"status","id":<id>,"status":"todo|doing|done"}');
-  lines.push('   - {"op":"constraint","text":"约束内容"}（用户提出长期性要求时使用，如「以后不要安排付费资源」「我只有周末能学」；这类要求应记为约束而不是改节点）');
+    lines.push('   - {"op":"constraint","text":"约束内容"}（用户提出长期性要求时使用，如「以后不要安排付费资源」「我只有周末能学」；这类要求应记为约束而不是改节点）');
+  lines.push('   - {"op":"add_source","title":"资料标题","kind":"JD|面经|大纲|笔记|资料","content":"资料正文（尽量完整）","url":"可选链接","site":"来源（可选，默认 对话添加）"}（用户口述/粘贴一份资料时，直接存进资料库）');
+  lines.push('   - {"op":"delete_source","title":"资料标题关键词"}（删除资料库里的一条资料，只有用户明确要求才用）');
+  lines.push('   - {"op":"update_goal","fields":{"title":"","profile":"现状","weekly_hours":"每周可投入","deadline":"期望期限","materials":"参考资料"}}（只填要改的字段）');
+  lines.push('   - {"op":"digest"}（用户要求「提炼资料 / 汇总资料 / 通读全部资料」时使用：会启动信息提炼，把全部资料整理成多篇主题汇总，规划时优先依据）');
+  lines.push('   - {"op":"collect"}（用户要求「再收集一些资料 / 找找岗位信息」时使用：会启动信息源检索）');
   lines.push('4. 修改要精准：用户说改哪个就改哪个，不要顺手大改；单次最多 20 个操作。');
   lines.push('5. 删除要谨慎：只有用户明确要求才删除；阶段（最外层节点）不要删除，除非用户明确要求。');
   lines.push('6. 新增任务必须带 detail（怎么做，60-120 字）与 hours；依据已确认的问答与用户现状。');
@@ -2059,7 +2066,41 @@ function applyChatOps(goalId, ops) {
         list.push({ text, created_at: nowISO(), source: 'chat' });
         db.prepare('UPDATE goals SET constraints = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(list), nowISO(), goalId);
         applied.push({ op: 'constraint', title: text.slice(0, 60) });
-      } else if (kind === 'status') {
+      } else if (kind === 'add_source' || kind === 'source') {
+          const title = String(op.title || '').trim().slice(0, 200);
+          const content = String(op.content || op.text || '').trim().slice(0, 20000);
+          if (!title && !content) { errors.push('信息源内容为空'); continue; }
+          const dup = db.prepare("SELECT id FROM sources WHERE goal_id = ? AND ((title != '' AND title = ?) OR (content != '' AND content = ?)) LIMIT 1").get(goalId, title, content);
+          if (dup) { errors.push('这条资料已存在：' + (title || content).slice(0, 30)); continue; }
+          const kindV = String(op.kind || '资料').slice(0, 10);
+          const siteV = String(op.site || '对话添加').slice(0, 40);
+          const sr = db.prepare('INSERT INTO sources (goal_id,title,url,site,kind,snippet,content,published_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+            .run(goalId, title || '对话添加的资料', String(op.url || ''), siteV, kindV, String(op.snippet || content.slice(0, 300)).slice(0, 300), content, String(op.published_at || ''), nowISO());
+          applied.push({ op: 'add_source', id: Number(sr.lastInsertRowid), title: (title || '资料').slice(0, 60) });
+      } else if (kind === 'delete_source') {
+          const key = String(op.title || op.title_match || op.id || '').trim();
+          if (!key) { errors.push('请给出要删除的资料标题'); continue; }
+          const row = db.prepare("SELECT id,title FROM sources WHERE goal_id = ? AND title LIKE ? LIMIT 1").get(goalId, '%' + key.slice(0, 40) + '%');
+          if (!row) { errors.push('没找到资料：' + key.slice(0, 30)); continue; }
+          db.prepare('DELETE FROM sources WHERE id = ?').run(row.id);
+          applied.push({ op: 'delete_source', id: row.id, title: String(row.title).slice(0, 60) });
+      } else if (kind === 'update_goal' || kind === 'goal') {
+          const f = op.fields || op;
+          const cur = db.prepare('SELECT * FROM goals WHERE id = ?').get(goalId);
+          const pick = (k, max) => (f[k] != null ? String(f[k]).trim().slice(0, max) : null);
+          const title = pick('title', 200) || cur.title;
+          const profile = pick('profile', 4000) != null ? pick('profile', 4000) : cur.profile;
+          const weekly = pick('weekly_hours', 50) != null ? pick('weekly_hours', 50) : cur.weekly_hours;
+          const deadline = pick('deadline', 50) != null ? pick('deadline', 50) : cur.deadline;
+          const materials = pick('materials', 8000) != null ? pick('materials', 8000) : cur.materials;
+          db.prepare('UPDATE goals SET title=?, profile=?, weekly_hours=?, deadline=?, materials=?, updated_at=? WHERE id=?')
+            .run(title, profile, weekly, deadline, materials, nowISO(), goalId);
+          applied.push({ op: 'update_goal', title: '已更新目标信息' });
+      } else if (kind === 'digest' || kind === 'digest_sources' || kind === 'extract') {
+          applied.push({ op: 'start', action: 'digest', title: '开始信息提炼（通读全部资料 → 多篇主题汇总）' });
+      } else if (kind === 'collect' || kind === 'collect_sources') {
+          applied.push({ op: 'start', action: 'collect', title: '开始收集信息源' });
+        } else if (kind === 'status') {
         const n = nodeOf(op.id);
         if (!n) { errors.push('节点不存在：' + op.id); continue; }
         const st = ['todo', 'doing', 'done'].includes(op.status) ? op.status : n.status;
@@ -2139,7 +2180,7 @@ function extractReplyField(s) {
 function parseChatOutput(text) {
   let s = String(text || '').trim();
   let ops = [];
-  const valid = o => o && typeof o === 'object' && ['add', 'update', 'delete', 'move', 'status', 'constraint'].includes(String(o.op || o.type || '').toLowerCase());
+  const valid = o => o && typeof o === 'object' && ['add', 'update', 'delete', 'move', 'status', 'constraint', 'add_source', 'delete_source', 'update_goal', 'goal', 'source', 'digest', 'digest_sources', 'extract', 'collect', 'collect_sources'].includes(String(o.op || o.type || '').toLowerCase());
   const takeOps = arr => (Array.isArray(arr) ? arr.filter(valid).slice(0, 25) : []);
   // 1) ```ops 代码块（推荐格式）
   const m = s.match(/```ops[ \t]*\r?\n?([\s\S]*?)```/i);
