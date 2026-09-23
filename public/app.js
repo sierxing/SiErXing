@@ -1144,13 +1144,14 @@ document.addEventListener('click', async e => {
   if (eb) {
     if (tutEditing) return;
     tutEditing = true;
-    // 取最新内容：优先服务端（避免用过期缓存导致空白）
-    let src = tut.content || '';
+    // 取最新内容：目标接口只返回教程元信息，正文要按教程 id 单独取
+    let src = '';
     try {
-      const r = await api('/api/goals/' + state.goal.id);
-      const fresh = ((r.goal && r.goal.tutorials) || []).find(x => Number(x.id) === Number(rr.id));
+      const r = await api('/api/tutorials/' + rr.id);
+      const fresh = r.tutorial || r;
       if (fresh && fresh.content) src = fresh.content;
     } catch (e) {}
+    if (!src) src = tut.content || '';
     const wrap = document.createElement('div');
     wrap.id = 'tutEditorWrap';
     wrap.className = 'tutEditorWrap';
