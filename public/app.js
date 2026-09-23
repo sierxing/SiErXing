@@ -106,11 +106,12 @@ document.addEventListener('click', e => {
   if (!panel) return;
   if (e.target.closest('.nodePanel') || e.target.closest('.ctxMenu') || e.target.closest('[data-detail]') || e.target.closest('[data-cycle]') || e.target.closest('#nextOpen')) return;
   panel.remove();
+  const npMask = document.getElementById('nodePanelMask'); if (npMask) npMask.remove();
 });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     const panel = document.getElementById('nodePanel');
-    if (panel) panel.remove();
+    if (panel) { panel.remove(); const m = document.getElementById('nodePanelMask'); if (m) m.remove(); }
     document.querySelectorAll('.ctxMenu').forEach(m => m.remove());
   }
 });
@@ -660,10 +661,16 @@ function showNodePanel(id, rerender) {
   div.id = 'nodePanel';
   div.className = 'nodePanel';
   div.setAttribute('data-node', String(id));
+  try { if (localStorage.getItem('sierxing-node-full') === '1') div.classList.add('full'); } catch (e) {}
+  const mask = document.createElement('div');
+  mask.id = 'nodePanelMask';
+  mask.className = 'nodeMask';
+  mask.addEventListener('click', () => { div.remove(); mask.remove(); });
   div.innerHTML = `
     <div class="npHead">
       <span class="chip">${LEVEL_NAME[n.level] || ''}</span>
       <span class="npTitle">${esc(n.title)}</span>
+      <button class="btn tiny" id="npFull" title="全屏 / 退出全屏">${(() => { try { return localStorage.getItem('sierxing-node-full') === '1' ? '⛶ 退出全屏' : '⛶ 全屏'; } catch (e) { return '⛶ 全屏'; } })()}</button>
       <button class="btn tiny" id="npClose">×</button>
     </div>
     <div class="npStatus">
@@ -707,7 +714,15 @@ function showNodePanel(id, rerender) {
       <button class="btn small" id="npEdit">编辑</button>
       <button class="btn small danger" id="npDel">删除</button>
     </div>`;
+  document.body.appendChild(mask);
   document.body.appendChild(div);
+  const closePanel = () => { div.remove(); const m = document.getElementById('nodePanelMask'); if (m) m.remove(); };
+  const fsBtn = document.getElementById('npFull');
+  if (fsBtn) fsBtn.addEventListener('click', () => {
+    const on = div.classList.toggle('full');
+    try { localStorage.setItem('sierxing-node-full', on ? '1' : '0'); } catch (e) {}
+    fsBtn.textContent = on ? '⛶ 退出全屏' : '⛶ 全屏';
+  });
   const saveNodeSources = async list => {
     try {
       const r = await api('/api/nodes/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sources: list }) });
@@ -741,7 +756,7 @@ function showNodePanel(id, rerender) {
     list.push({ name: name.trim().slice(0, 120), note: note.trim().slice(0, 300) });
     saveNodeSources(list);
   });
-  document.getElementById('npClose').addEventListener('click', () => div.remove());
+  document.getElementById('npClose').addEventListener('click', closePanel);
   const tutBtn = document.getElementById('npTutBtn');
   if (tutBtn) tutBtn.addEventListener('click', () => { div.remove(); showTutorialDialog(id); });
   const adjBtn = document.getElementById('npAdjustBtn');

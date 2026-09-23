@@ -255,11 +255,21 @@ main{padding:26px 0 90px;}
 .stDot.done{border-color:var(--ok); background:var(--ok);}
 
 /* 节点详情抽屉 */
+/* 任务节点卡片：居中大卡片（像页面预览），支持全屏 */
 .nodePanel{
-  position:fixed; right:20px; bottom:20px; width:400px; max-width:92vw; max-height:66vh; overflow:auto;
+  position:fixed; left:50%; top:50%; transform:translate(-50%, -50%);
+  width:min(900px, 94vw); max-height:88vh; overflow:auto;
   background:var(--card); border:1px solid var(--border); border-radius:var(--r-lg);
-  box-shadow:var(--shadow-lg); padding:18px 20px; z-index:120;
+  box-shadow:0 24px 70px rgba(10,8,25,.32); padding:20px 24px; z-index:130;
+  animation:npIn .18s ease;
 }
+@keyframes npIn{from{opacity:0; transform:translate(-50%,-46%) scale(.98);} to{opacity:1; transform:translate(-50%,-50%) scale(1);}}
+.nodePanel.full{width:96vw; max-width:none; height:92vh; max-height:92vh;}
+.nodeMask{position:fixed; inset:0; background:rgba(15,14,28,.44); z-index:125; animation:npFade .18s ease;}
+@keyframes npFade{from{opacity:0;} to{opacity:1;}}
+.nodePanel .npDetail{font-size:13px; line-height:1.75;}
+.nodePanel .npSrcName{font-size:13px;}
+.nodePanel .npSrcNote{font-size:12.5px;}
 .npHead{display:flex; align-items:center; gap:9px; margin-bottom:10px;}
 .npTitle{font-weight:700; font-size:14px; flex:1; line-height:1.5;}
 .npDetail{font-size:12.5px; color:var(--muted); white-space:pre-wrap; line-height:1.7; margin-bottom:12px;}
@@ -269,7 +279,7 @@ main{padding:26px 0 90px;}
 .npSrcName{font-size:12.5px; color:var(--ok); word-break:break-all; font-weight:500;}
 .npSrcNote{font-size:12px; color:var(--muted); margin-top:3px; line-height:1.6;}
 .npOps{display:flex; gap:8px; margin-top:14px;}
-@media (max-width:760px){ .nodePanel{right:10px; left:10px; bottom:10px; width:auto;} .mtree{max-height:60vh;} }
+@media (max-width:760px){ .nodePanel{width:96vw; max-height:92vh;} .nodePanel.full{width:100vw; height:100vh; border-radius:0;} .mtree{max-height:60vh;} }
 
 /* ============ 设置 ============ */
 .sec .field{max-width:420px;}
