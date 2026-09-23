@@ -165,10 +165,11 @@ async function route() {
     const hasGoalCtx = (r.view === 'goal' || r.view === 'map' || r.view === 'tutorial');   // 教程页也能用 AI 助手
     const fab = document.getElementById('aiFab');
     const drw = document.getElementById('aiDrawer');
-    if (!hasGoalCtx) {
+    if (!hasGoalCtx && r.view !== 'tutorial') {
       if (fab) fab.classList.add('hidden');
       if (drw) drw.classList.remove('open');
     }
+    if (r.view === 'tutorial') { if (fab) fab.classList.remove('hidden'); }   // 教程页保留 AI 助手入口
     if (r.view === 'home') { setHeader(r); await renderHome(); }
     else if (r.view === 'settings') { setHeader(r); await renderSettings(); }
     else if (r.view === 'guide') { setHeader(r); await renderHome(); showGuide(r.step - 1); }
