@@ -1370,16 +1370,29 @@ function showShareDialog(goalId) {
   const div = document.createElement('div');
   div.id = 'shareDlg';
   div.className = 'shareMask';
+  const MODULES = [
+    { k: 'goal', label: '目标信息', note: '标题 / 每周投入 / 期限 / 总结' },
+    { k: 'profile', label: '现状与背景', note: '可能含个人隐私（学校 / 专业 / 经历）', privacy: true },
+    { k: 'materials', label: '参考资料', note: '目标里粘贴的 JD / 大纲等', privacy: true },
+    { k: 'constraints', label: '规划约束', note: '硬性要求（时间 / 预算等）' },
+    { k: 'nodes', label: '规划（阶段 / 小目标 / 任务）', note: '完整路线图与完成状态' },
+    { k: 'sources', label: '资料库', note: '全部资料（含优质标记与正文）' },
+    { k: 'digests', label: '提炼汇总 MD', note: 'AI 通读资料后的主题汇总' }
+  ];
   div.innerHTML = `<div class="shareBox">
     <div class="shareTitle">🔗 分享这份规划与资料库</div>
-    <p class="shareHint">分享包包含：目标信息与约束 · 完整规划（阶段 / 小目标 / 任务）· 资料库全部资料（含优质标记）· 提炼汇总 MD。<br>对方在首页点「⬆ 导入分享」即可完整还原。</p>
-    <label class="shareOpt"><input type="radio" name="shareRedact" value="1" checked>
-      <span><b>隐去个人隐私后再分享（推荐）</b><br><span class="muted">隐去学校 / 单位 / 年级 / 姓名 / 手机号 / 邮箱 / 证件号等，能力描述保留</span></span></label>
-    <label class="shareOpt"><input type="radio" name="shareRedact" value="0">
-      <span><b>按原样分享</b><br><span class="muted">包含你的现状原文（如学校、专业、年级）</span></span></label>
+    <p class="shareHint">选择要分享的内容（取消勾选即可排除）；对方在首页点「⬆ 导入分享」即可完整还原。</p>
+    <div class="shareMods">
+      ${MODULES.map(m => `<label class="shareMod"><input type="checkbox" data-mod="${m.k}" checked>
+        <span><b>${esc(m.label)}</b>${m.privacy ? ' <span class="chip warn" style="font-size:10px;">含隐私</span>' : ''}<br><span class="muted">${esc(m.note)}</span></span></label>`).join('')}
+    </div>
+    <label class="shareOpt" style="margin-top:4px;"><input type="checkbox" id="shareRedactBox" checked>
+      <span><b>隐去个人隐私（推荐）</b><br><span class="muted">把学校 / 单位 / 年级 / 姓名 / 手机号 / 邮箱 / 证件号替换成「已隐去」</span></span></label>
     <div class="shareOps">
       <button class="btn primary" id="shareOk">导出分享文件</button>
       <button class="btn" id="shareCancel">取消</button>
+      <button class="btn tiny" id="shareAll">全选</button>
+      <button class="btn tiny" id="shareNone">全不选</button>
     </div>
   </div>`;
   document.body.appendChild(div);
@@ -1388,11 +1401,16 @@ function showShareDialog(goalId) {
   const onKey = e => { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); } };
   document.addEventListener('keydown', onKey);
   div.querySelector('#shareCancel').addEventListener('click', close);
+  const allBox = div.querySelector('#shareAll');
+  if (allBox) allBox.addEventListener('click', () => div.querySelectorAll('[data-mod]').forEach(x => { x.checked = true; }));
+  const noneBox = div.querySelector('#shareNone');
+  if (noneBox) noneBox.addEventListener('click', () => div.querySelectorAll('[data-mod]').forEach(x => { x.checked = false; }));
   div.querySelector('#shareOk').addEventListener('click', () => {
-    const picked = div.querySelector('input[name=shareRedact]:checked');
-    const redact = !picked || picked.value !== '0';
+    const mods = [...div.querySelectorAll('[data-mod]')].filter(x => x.checked).map(x => x.getAttribute('data-mod'));
+    if (!mods.length) return toast('至少勾选一项要分享的内容');
+    const redact = !!(div.querySelector('#shareRedactBox') || {}).checked;
     const a = document.createElement('a');
-    a.href = '/api/goals/' + goalId + '/share' + (redact ? '' : '?redact=0');
+    a.href = '/api/goals/' + goalId + '/share?parts=' + encodeURIComponent(mods.join(',')) + (redact ? '' : '&redact=0');
     a.download = '';
     document.body.appendChild(a); a.click(); a.remove();
     close();

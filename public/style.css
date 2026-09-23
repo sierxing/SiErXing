@@ -1493,3 +1493,9 @@ body.railWide .mapPage{left:236px;}
 .shareOpt:hover{border-color:var(--accent-border);}
 .shareOpt input{margin-top:4px; accent-color:var(--accent);}
 .shareOps{display:flex; gap:8px; justify-content:flex-end; margin-top:12px;}
+
+/* 分享弹窗：模块勾选 */
+.shareMods{max-height:44vh; overflow:auto; margin-bottom:8px;}
+.shareMod{display:flex; gap:9px; align-items:flex-start; border:1px solid var(--border); border-radius:9px; padding:7px 10px; margin-bottom:6px; cursor:pointer; font-size:12.6px; line-height:1.6;}
+.shareMod:hover{border-color:var(--accent-border); background:var(--soft);}
+.shareMod input{margin-top:4px; accent-color:var(--accent);}

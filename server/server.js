@@ -2631,23 +2631,36 @@ function redactText(raw) {
     const digests = digestsOf(g.id);
     const redact = u.searchParams.get('redact') !== '0';   // 默认隐去个人隐私
     const R = x => (redact ? redactText(x) : x);
+    // 导出内容按模块勾选：parts 逗号分隔，缺省=全部
+    const partsRaw = String(u.searchParams.get('parts') || '').trim();
+    const want = k => !partsRaw || partsRaw.split(',').map(x => x.trim()).includes(k);
+    const inc = { goal: want('goal'), profile: want('profile'), materials: want('materials'), constraints: want('constraints'), nodes: want('nodes'), sources: want('sources'), digests: want('digests') };
     const out = {
       format: 'sierxing-share', version: 1, exportedAt: nowISO(),
       redacted: redact,
       from: { device: redact ? '（已隐去设备名）' : os.hostname() },
+      included: inc,
       goal: {
-        title: R(g.title), profile: R(g.profile), weekly_hours: g.weekly_hours, deadline: g.deadline,
-        materials: R(g.materials), summary: R(g.summary),
-        constraints: (safeParse(g.constraints) || []).map(x => Object.assign({}, x, { text: R(x && x.text) }))
+        title: inc.goal ? R(g.title) : '（未包含目标标题）',
+        profile: inc.profile ? R(g.profile) : '',
+        weekly_hours: inc.goal ? g.weekly_hours : '',
+        deadline: inc.goal ? g.deadline : '',
+        materials: inc.materials ? R(g.materials) : '',
+        summary: inc.goal ? R(g.summary) : '',
+        constraints: inc.constraints ? (safeParse(g.constraints) || []).map(x => Object.assign({}, x, { text: R(x && x.text) })) : []
       },
-      counts: { nodes: nodes.length, sources: sources.length, digests: digests.length },
-      nodes: nodes.map(n => ({
+      counts: {
+        nodes: inc.nodes ? nodes.length : 0,
+        sources: inc.sources ? sources.length : 0,
+        digests: inc.digests ? digests.length : 0
+      },
+      nodes: (inc.nodes ? nodes : []).map(n => ({
         id: n.id, parent_id: n.parent_id, level: n.level, sort_order: n.sort_order, title: R(n.title),
         detail: R(n.detail), artifact: R(n.artifact), acceptance: R(n.acceptance), hours: n.hours, status: n.status,
         sources: (safeParse(n.sources) || []).map(s2 => (redact && s2 && typeof s2 === 'object'
           ? Object.assign({}, s2, { name: R(s2.name), note: R(s2.note) }) : s2))
       })),
-      sources: sources.map(x => {
+      sources: (inc.sources ? sources : []).map(x => {
         // 用户自己提供的资料里可能含个人隐私（简历/截图文字）：也一并脱敏；网络资料原样保留
         const own = x.site === '用户提供的图片' || x.site === '导入的资料' || x.site === '手动添加' || x.site === '对话添加';
         return {
@@ -2657,7 +2670,7 @@ function redactText(raw) {
           published_at: x.published_at, quality: Number(x.quality) || 0
         };
       }),
-      digests: digests.map(d => ({ topic: d.topic, title: d.title, content: d.content }))
+      digests: (inc.digests ? digests : []).map(d => ({ topic: d.topic, title: d.title, content: d.content }))
     };
     const fname = encodeURIComponent('规划分享-' + String(g.title).replace(/[\\/:*?"<>|]/g, '').slice(0, 20) + '.share.json');
     res.writeHead(200, {
