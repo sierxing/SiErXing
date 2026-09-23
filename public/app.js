@@ -1030,7 +1030,7 @@ function aiEnsureDOM() {
     <div class="adMsgs" id="adMsgs"></div>
     <div class="adResizeY" id="adResizeY" title="上下拖动调整输入框高度（双击复位）"></div>
     <div class="adInput">
-      <textarea id="adText" rows="1" placeholder="告诉 AI 你想怎么改（Enter 发送，Shift+Enter 换行，不限字数）"></textarea>
+      <textarea id="adText" rows="1" placeholder="可以让它：改路线图 / 把这段资料存进资料库 / 提炼全部资料 / 再收集些资料 / 加一条约束 / 改目标现状与时间（Enter 发送）"></textarea>
       <button class="btn primary" id="adSend">发送</button>
     </div>
     <div class="adResizeX" id="adResizeX" title="左右拖动调整侧边栏宽度（双击复位）"></div>`;
