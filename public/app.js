@@ -385,7 +385,7 @@ function taskNodeHTML(t) {
   const open = nodeOpen(key, false);
   return `<div class="mtitem" data-id="${t.id}">
     <div class="mtnode mttask ${st}${hasKids ? ' hasKids' : ''}" data-node-id="${t.id}" data-detail="${t.id}" title="点击查看详情 · 右键打开菜单">
-      ${hasKids ? `<span class="arrow" data-childtoggle="${key}">${open ? '▾' : '▸'}</span>` : ''}
+      ${hasKids ? `<span class="arrow ${open ? 'open' : ''}" data-childtoggle="${key}" title="${open ? '收起' : '展开'}子节点">${open ? '▾' : '▸'}</span>` : ''}
       <button class="stDot ${st}" data-cycle="${t.id}" title="点击切换：未开始 → 进行中 → 已完成">${st === 'done' ? '✓' : ''}</button>
       <span class="mtTaskTitle">${esc(t.title)}</span>
       ${t.hours ? `<span class="mtHours">${esc(t.hours)}</span>` : ''}
@@ -2391,6 +2391,7 @@ async function startPlanTasks(id, answers) {
     if (d.questions) asked = { stage: 'tasks', feedback: '', data: d.questions };
     if (d.goal) {
       state.goal = d.goal;
+      try { if (d.nodeId) nodeOpen('t' + d.nodeId, true); } catch (e) {}
       // 每完成一个阶段就立刻渲染：用户能马上看到新任务；即使中断，数据已保存，可继续
       state.planTaskCount = (state.goal.nodes || []).filter(n => Number(n.level) >= 2).length;
       const rr2 = parseRoute();
