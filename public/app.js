@@ -1136,12 +1136,11 @@ document.addEventListener('click', async e => {
   const rr = parseRoute();
   if (rr.view !== 'tutorial') return;
   const t = ((state.goal && state.goal.tutorials) || []).find(x => Number(x.id) === Number(rr.id));
-  const fb = prompt('想让 AI 怎么改这份教程？\n\n例如：第三章再展开讲讲 / 多给一个完整代码示例 / 练习换成更简单的 / 补充常见错误排查');
-  if (!fb || !fb.trim()) return;
-  try {
-    await api('/api/tutorials/' + rr.id + '/edit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ feedback: fb.trim() }) });
-    toast('🤖 已提交修改任务（左下角可看进度，完成后自动刷新）');
-  } catch (err) { toast(err.message); }
+  aiToggle(true);
+  setTimeout(() => {
+    const ta = document.getElementById('adText');
+    if (ta) { ta.placeholder = '说出你想怎么改这份教程，例如：第三章再展开讲讲 / 多给一个完整代码示例 / 练习换成更简单的'; ta.focus(); }
+  }, 200);
 });
 /* ===== AI 助手（右侧侧边栏） ===== */
 function opChipHTML(o) {
@@ -1512,6 +1511,26 @@ function aiUpdateSendBtn() {
 }
 async function aiSend() {
   if (state.aiBusy) return;
+  // 教程页：消息作为修改意见，交给后台任务重写教程（完成后自动刷新渲染）
+  const rrTut = parseRoute();
+  if (rrTut.view === 'tutorial') {
+    const taT = document.getElementById('adText');
+    const msgT = (taT && taT.value || '').trim();
+    if (!msgT) return;
+    if (!(await ensureAIConfigured())) return;
+    taT.value = ''; state.aiDraft = '';
+    state.aiMsgs = state.aiMsgs || [];
+    state.aiMsgs.push({ id: 0, role: 'user', content: msgT, ops: '[]', created_at: new Date().toISOString() });
+    try {
+      await api('/api/tutorials/' + rrTut.id + '/edit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ feedback: msgT }) });
+      state.aiMsgs.push({ id: 0, role: 'assistant', content: '收到！已把这条修改意见交给 AI，正在重写这份教程。\n\n进度可以在左下角任务中心看到（切页面也不影响）；完成后教程会自动刷新，也可以点「📜 版本对比」回滚。', ops: '[]', created_at: new Date().toISOString() });
+      toast('🤖 已提交教程修改任务（完成后自动刷新）');
+    } catch (e) {
+      state.aiMsgs.push({ id: 0, role: 'assistant', content: '提交失败：' + e.message, ops: '[]', created_at: new Date().toISOString() });
+    }
+    aiRender();
+    return;
+  }
   if (!(await ensureAIConfigured())) return;
   const ta = document.getElementById('adText');
   const msg = (ta.value || '').trim();
