@@ -260,15 +260,6 @@ async function renderHome() {
 
   const gb = document.getElementById('guideBtn');
   if (gb) gb.addEventListener('click', () => showGuide(0));
-  const sg = document.getElementById('shareGoalBtn');
-  if (sg) sg.addEventListener('click', () => {
-    const redact = confirm('分享时隐去个人隐私？\n\n点「确定」= 隐去学校 / 公司 / 年级 / 姓名 / 联系方式后再分享（推荐）\n点「取消」= 按原样分享（含你的现状原文）');
-    const a = document.createElement('a');
-    a.href = '/api/goals/' + g.id + '/share' + (redact ? '' : '?redact=0');
-    a.download = '';
-    document.body.appendChild(a); a.click(); a.remove();
-    toast(redact ? '已导出（隐私已隐去）' : '已导出（原样，含个人现状）');
-  });
   app.querySelectorAll('#shareImportFile, #shareImportFile2').forEach(inp => inp.addEventListener('change', async () => {
     const file = (inp.files || [])[0];
     inp.value = '';
@@ -1055,8 +1046,7 @@ function aiEnsureDOM() {
     <div class="adResizeY" id="adResizeY" title="上下拖动调整输入框高度（双击复位）"></div>
     <div class="adInput">
       <textarea id="adText" rows="1" placeholder="可以让它：改路线图 / 把这段资料存进资料库 / 提炼全部资料 / 再收集些资料 / 加一条约束 / 改目标现状与时间（Enter 发送）"></textarea>
-      <button class="btn primary" id="adSend">发送</button>
-      <button class="btn danger" id="adStop" hidden title="停止本轮对话（已生成的部分会保留）">⏹ 停止</button>
+      <button class="adSendBtn" id="adSend" title="发送（Enter）">➤</button>
     </div>
     <div class="adResizeX" id="adResizeX" title="左右拖动调整侧边栏宽度（双击复位）"></div>`;
   document.body.appendChild(d);
@@ -1071,9 +1061,9 @@ function aiEnsureDOM() {
   ta.addEventListener('input', () => { state.aiDraft = ta.value; aiAutoGrow(); });
   ta.addEventListener('paste', () => setTimeout(aiAutoGrow, 0));
   ta.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); aiSend(); } });
-  d.querySelector('#adSend').addEventListener('click', () => aiSend());
-  d.querySelector('#adStop').addEventListener('click', () => {
-    if (state.aiAbort) { state.aiAbort.abort(); toast('正在停止…'); }
+  d.querySelector('#adSend').addEventListener('click', () => {
+    if (state.aiBusy) { if (state.aiAbort) { state.aiAbort.abort(); toast('正在停止…'); } }
+    else aiSend();
   });
   d.querySelector('#adMsgs').addEventListener('click', e => {
     const b = e.target.closest('.chDiffBtn');
@@ -1090,7 +1080,7 @@ function aiToggle(open) {
   if (d) d.classList.toggle('open', open);
   if (fab) fab.classList.toggle('hidden', open);
   document.body.classList.toggle('aiOpen', !!open);
-  if (open) { aiApplyWidth(state.aiWidth || 440, false); aiApplyInputH(state.aiInputH || 60, false); aiFocusInput(); }
+  if (open) { aiApplyWidth(state.aiWidth || 440, false); aiApplyInputH(state.aiInputH || 60, false); aiFocusInput(); setTimeout(aiUpdateSendBtn, 0); }
 }
 function aiAutoGrow() {
   const ta = document.getElementById('adText');
@@ -1274,6 +1264,13 @@ function aiRender() {
   }
   aiRenderMsgs();
 }
+/* 发送键在工作时变成停止键 */
+function aiUpdateSendBtn() {
+  const b = document.getElementById('adSend');
+  if (!b) return;
+  if (state.aiBusy) { b.classList.add('stop'); b.textContent = '⏹'; b.title = '停止本轮对话（已生成的部分会保留）'; }
+  else { b.classList.remove('stop'); b.textContent = '➤'; b.title = '发送（Enter）'; }
+}
 async function aiSend() {
   if (state.aiBusy) return;
   if (!(await ensureAIConfigured())) return;
@@ -1290,7 +1287,7 @@ async function aiSend() {
   state.aiBusy = true;
   state.aiAbort = new AbortController();
   state.aiStream = { text: '', thinking: '正在理解你的要求…', t0: Date.now() };
-  { const sb = document.getElementById('adStop'); if (sb) sb.hidden = false; const sendB = document.getElementById('adSend'); if (sendB) sendB.disabled = true; }
+  aiUpdateSendBtn();
   aiRenderMsgs();
   if (state.aiTick) clearInterval(state.aiTick);
   state.aiTick = setInterval(() => { if (state.aiStream) chatRenderStream(); }, 1000);
@@ -1348,7 +1345,7 @@ async function aiSend() {
     state.aiBusy = false;
     state.aiAbort = null;
     state.aiStream = null;
-    { const sb = document.getElementById('adStop'); if (sb) sb.hidden = true; const sendB = document.getElementById('adSend'); if (sendB) sendB.disabled = false; }
+    aiUpdateSendBtn();
     const s = (state.aiSessions || []).find(x => x.id === state.aiSessionId);
     if (s) s.msg_count = (s.msg_count || 0) + 2;
     aiRender();
@@ -1365,6 +1362,42 @@ async function aiSend() {
 /* ===== 学习教程 ===== */
 function tutorialsOfNode(nodeId) {
   return ((state.goal && state.goal.tutorials) || []).filter(t => Number(t.node_id) === Number(nodeId));
+}
+/* 分享弹窗（页面内，避免浏览器拦截 confirm） */
+function showShareDialog(goalId) {
+  const old = document.getElementById('shareDlg');
+  if (old) old.remove();
+  const div = document.createElement('div');
+  div.id = 'shareDlg';
+  div.className = 'shareMask';
+  div.innerHTML = `<div class="shareBox">
+    <div class="shareTitle">🔗 分享这份规划与资料库</div>
+    <p class="shareHint">分享包包含：目标信息与约束 · 完整规划（阶段 / 小目标 / 任务）· 资料库全部资料（含优质标记）· 提炼汇总 MD。<br>对方在首页点「⬆ 导入分享」即可完整还原。</p>
+    <label class="shareOpt"><input type="radio" name="shareRedact" value="1" checked>
+      <span><b>隐去个人隐私后再分享（推荐）</b><br><span class="muted">隐去学校 / 单位 / 年级 / 姓名 / 手机号 / 邮箱 / 证件号等，能力描述保留</span></span></label>
+    <label class="shareOpt"><input type="radio" name="shareRedact" value="0">
+      <span><b>按原样分享</b><br><span class="muted">包含你的现状原文（如学校、专业、年级）</span></span></label>
+    <div class="shareOps">
+      <button class="btn primary" id="shareOk">导出分享文件</button>
+      <button class="btn" id="shareCancel">取消</button>
+    </div>
+  </div>`;
+  document.body.appendChild(div);
+  const close = () => div.remove();
+  div.addEventListener('click', e => { if (e.target === div) close(); });
+  const onKey = e => { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); } };
+  document.addEventListener('keydown', onKey);
+  div.querySelector('#shareCancel').addEventListener('click', close);
+  div.querySelector('#shareOk').addEventListener('click', () => {
+    const picked = div.querySelector('input[name=shareRedact]:checked');
+    const redact = !picked || picked.value !== '0';
+    const a = document.createElement('a');
+    a.href = '/api/goals/' + goalId + '/share' + (redact ? '' : '?redact=0');
+    a.download = '';
+    document.body.appendChild(a); a.click(); a.remove();
+    close();
+    toast(redact ? '已导出分享文件（隐私已隐去）' : '已导出分享文件（原样，含个人现状）');
+  });
 }
 function showTutorialDialog(nodeId) {
   const n = state.goal.nodes.find(x => x.id === nodeId);
@@ -2714,6 +2747,8 @@ function renderGoal() {
     try { await api('/api/goals/' + g.id, { method: 'DELETE' }); toast('已删除'); go('#/'); } catch (e) { toast(e.message); }
   });
   document.getElementById('editGoalBtn').addEventListener('click', () => { state.showEdit = !state.showEdit; renderGoal(); });
+  const shareBtn = document.getElementById('shareGoalBtn');
+  if (shareBtn) shareBtn.addEventListener('click', () => showShareDialog(g.id));
   const ef = document.getElementById('editGoalForm');
   if (ef) {
     document.getElementById('egCancel').addEventListener('click', () => { state.showEdit = false; renderGoal(); });

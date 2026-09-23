@@ -1470,3 +1470,26 @@ body.railWide .mapPage{left:236px;}
 .siDet{margin-top:5px;}
 .siDet summary{cursor:pointer; font-size:12.2px; color:var(--muted); line-height:1.6;}
 .siFull{margin-top:6px; max-height:320px; overflow:auto; background:var(--card); border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-size:12.8px;}
+
+/* ============ AI 助手：输入框内嵌发送/停止按钮 ============ */
+.adInput{position:relative;}
+.adInput textarea{padding-right:46px !important;}
+.adSendBtn{
+  position:absolute; right:8px; bottom:8px; width:30px; height:30px; border-radius:50%;
+  border:0; background:var(--accent); color:#fff; font-size:14px; line-height:1; cursor:pointer;
+  display:flex; align-items:center; justify-content:center; box-shadow:0 2px 8px rgba(0,0,0,.18);
+  transition:.15s; padding:0;
+}
+.adSendBtn:hover{transform:scale(1.08);}
+.adSendBtn.stop{background:#e74c3c; font-size:12px;}
+.adSendBtn:disabled{opacity:.5; cursor:default; transform:none;}
+
+/* ============ 分享弹窗 ============ */
+.shareMask{position:fixed; inset:0; z-index:300; background:rgba(15,15,25,.45); display:flex; align-items:center; justify-content:center; padding:20px;}
+.shareBox{background:var(--card); border-radius:14px; padding:20px 22px; max-width:470px; width:100%; box-shadow:0 20px 60px rgba(0,0,0,.3);}
+.shareTitle{font-size:15px; font-weight:700; margin-bottom:8px;}
+.shareHint{font-size:12.5px; color:var(--muted); line-height:1.75; margin-bottom:12px;}
+.shareOpt{display:flex; gap:9px; align-items:flex-start; border:1.5px solid var(--border); border-radius:10px; padding:9px 11px; margin-bottom:8px; cursor:pointer; font-size:12.8px; line-height:1.65;}
+.shareOpt:hover{border-color:var(--accent-border);}
+.shareOpt input{margin-top:4px; accent-color:var(--accent);}
+.shareOps{display:flex; gap:8px; justify-content:flex-end; margin-top:12px;}
