@@ -168,7 +168,7 @@ const BUILTIN_COMPONENTS = [
     desc: '自动检索真实资料（时间筛选 + 广告过滤）作为规划依据，也可手动导入' },
   { id: 'versions',    name: '版本对比与汇报', icon: '📜', scope: 'base', defaultEnabled: true, category: '基础功能组件', order: 13,
     desc: '每次改动保存版本快照，可左右对比差异，并生成 AI 变更汇报' },
-  { id: 'chat',        name: '对话改规划',   icon: '💬', scope: 'base', defaultEnabled: true, category: '基础功能组件', order: 14,
+  { id: 'chat',        name: 'AI 助手',   icon: '💬', scope: 'base', defaultEnabled: true, category: '基础功能组件', order: 14,
     desc: '右侧对话侧边栏：随时用自然语言让 AI 修改路线图（支持多会话与模型切换）' },
   { id: 'tutorial',    name: '学习教程',     icon: '📘', scope: 'base', defaultEnabled: true, category: '基础功能组件', order: 15,
     desc: '为任意任务点生成“真正学会”的完整教程（HTML / Markdown，含练习与自测）' }
@@ -2228,6 +2228,7 @@ function parseChatOutput(text) {
 }
 function streamChat(req, res, goal, message, session) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
+  const sig = clientSignal(req);   // 用户在对话里点「停止」时，终止上游 AI 请求
   const model = (session && session.model) ? session.model : currentModel();
   const sessionId = session ? session.id : 0;
   const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} };
@@ -2247,6 +2248,7 @@ function streamChat(req, res, goal, message, session) {
         prompt: buildChatPrompt(goal, message, sessionId),
         model: model || currentModel(),
         timeoutMs: 420000,
+        signal: sig,
         onEvent: ev => {
           if (ev.text) send({ text: ev.text });
           else if (ev.thinking) send({ thinking: summarizeThinking(ev.thinking) });
@@ -2275,7 +2277,8 @@ function streamChat(req, res, goal, message, session) {
       backup();
       send({ done: true, id: Number(ins.lastInsertRowid), reply, applied, errors, versionId: vid, goal: getGoal(goal.id) });
     } catch (e) {
-      send({ error: e.message });
+      if (e && e.cancelled) send({ cancelled: true, status: '已停止（本轮未执行任何修改）' });
+      else send({ error: e.message });
     }
     res.end();
   })();

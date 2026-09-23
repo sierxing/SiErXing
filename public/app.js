@@ -583,7 +583,7 @@ function renderMapPage() {
       <button class="btn small" id="zoomFit" title="适应屏幕">适应</button>
       <button class="btn small" id="foldAll">全部折叠</button>
       <button class="btn small" id="expandAll">全部展开</button>
-      ${compOn('chat') ? '<button class="btn small" id="mapChatBtn">💬 对话改规划</button>' : ''}
+      ${compOn('chat') ? '<button class="btn small" id="mapChatBtn">💬 AI 助手</button>' : ''}
       ${compOn('versions') ? '<button class="btn small" id="mapVerBtn">📜 版本对比</button>' : ''}
     </div>
     ${reportCardHTML()}
@@ -1008,7 +1008,7 @@ function aiEnsureDOM() {
   const fab = document.createElement('button');
   fab.id = 'aiFab';
   fab.className = 'aiFab';
-  fab.title = '和 AI 对话改规划';
+  fab.title = '打开 AI 助手（改规划 / 存资料 / 加约束…）';
   fab.textContent = '💬';
   fab.addEventListener('click', () => aiToggle(true));
   document.body.appendChild(fab);
@@ -1017,7 +1017,7 @@ function aiEnsureDOM() {
   d.className = 'aiDrawer';
   d.innerHTML = `
     <div class="adHead">
-      <span class="adTitle">💬 对话改规划</span>
+      <span class="adTitle">💬 AI 助手</span>
       <div class="spacer"></div>
       <button class="adIco" id="adNew" title="新建对话">＋</button>
       <button class="adIco" id="adRename" title="重命名当前对话">✎</button>
@@ -1033,6 +1033,7 @@ function aiEnsureDOM() {
     <div class="adInput">
       <textarea id="adText" rows="1" placeholder="可以让它：改路线图 / 把这段资料存进资料库 / 提炼全部资料 / 再收集些资料 / 加一条约束 / 改目标现状与时间（Enter 发送）"></textarea>
       <button class="btn primary" id="adSend">发送</button>
+      <button class="btn danger" id="adStop" hidden title="停止本轮对话（已生成的部分会保留）">⏹ 停止</button>
     </div>
     <div class="adResizeX" id="adResizeX" title="左右拖动调整侧边栏宽度（双击复位）"></div>`;
   document.body.appendChild(d);
@@ -1048,13 +1049,16 @@ function aiEnsureDOM() {
   ta.addEventListener('paste', () => setTimeout(aiAutoGrow, 0));
   ta.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); aiSend(); } });
   d.querySelector('#adSend').addEventListener('click', () => aiSend());
+  d.querySelector('#adStop').addEventListener('click', () => {
+    if (state.aiAbort) { state.aiAbort.abort(); toast('正在停止…'); }
+  });
   d.querySelector('#adMsgs').addEventListener('click', e => {
     const b = e.target.closest('.chDiffBtn');
     if (b) toggleChatDiff(b);
   });
 }
 function aiToggle(open) {
-  if (open && typeof compOn === 'function' && !compOn('chat')) { toast('「对话改规划」组件已关闭：左侧栏 → 🧩 组件 可开启'); return; }
+  if (open && typeof compOn === 'function' && !compOn('chat')) { toast('「AI 助手」组件已关闭：左侧栏 → 🧩 组件 可开启'); return; }
   aiEnsureDOM();
   state.aiOpen = open;
   try { localStorage.setItem('sierxing-ai-open', open ? '1' : '0'); } catch (e) {}
@@ -1261,12 +1265,14 @@ async function aiSend() {
   state.aiMsgs = state.aiMsgs || [];
   state.aiMsgs.push({ id: 0, role: 'user', content: msg, ops: '[]', created_at: new Date().toISOString() });
   state.aiBusy = true;
+  state.aiAbort = new AbortController();
   state.aiStream = { text: '', thinking: '正在理解你的要求…', t0: Date.now() };
+  { const sb = document.getElementById('adStop'); if (sb) sb.hidden = false; const sendB = document.getElementById('adSend'); if (sendB) sendB.disabled = true; }
   aiRenderMsgs();
   if (state.aiTick) clearInterval(state.aiTick);
   state.aiTick = setInterval(() => { if (state.aiStream) chatRenderStream(); }, 1000);
   try {
-    const resp = await fetch('/api/chat-sessions/' + state.aiSessionId + '/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: msg }) });
+    const resp = await fetch('/api/chat-sessions/' + state.aiSessionId + '/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: msg }), signal: state.aiAbort.signal });
     if (!resp.ok || !resp.body) throw new Error('无法连接对话服务');
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
@@ -1307,21 +1313,29 @@ async function aiSend() {
           }
           if (d.errors && d.errors.length) toast('部分操作未生效：' + d.errors[0]);
         }
+        if (d.cancelled) { finished = true; toast(d.status || '已停止本轮对话'); }
         if (d.error) { finished = true; toast(d.error); }
       }
     }
     if (!finished) toast('对话中断，可重试');
   } catch (e) {
-    toast(e.message);
+    if (e && e.name !== 'AbortError') toast(e.message);
   } finally {
     if (state.aiTick) { clearInterval(state.aiTick); state.aiTick = null; }
     state.aiBusy = false;
+    state.aiAbort = null;
     state.aiStream = null;
+    { const sb = document.getElementById('adStop'); if (sb) sb.hidden = true; const sendB = document.getElementById('adSend'); if (sendB) sendB.disabled = false; }
     const s = (state.aiSessions || []).find(x => x.id === state.aiSessionId);
     if (s) s.msg_count = (s.msg_count || 0) + 2;
     aiRender();
     const rr = parseRoute();
-    if ((rr.view === 'goal' || rr.view === 'map') && rr.id === state.goal.id) rerenderCurrent();
+    // 对话可能改了资料 / 约束 / 目标信息 / 节点：重新拉一次数据，保证界面同步
+    if ((rr.view === 'goal' || rr.view === 'map' || rr.view === 'library') && state.goal) {
+      try { await loadGoal(state.goal.id); } catch (e) {}
+      if (rr.view === 'library') renderLibraryPage();
+      else rerenderCurrent();
+    }
   }
 }
 
@@ -2520,7 +2534,7 @@ function renderGoal() {
       <a class="back js-back" href="#/">← 返回</a>
       <div class="spacer"></div>
       <button class="btn" id="editGoalBtn">编辑目标</button>
-      ${compOn('chat') ? '<button class="btn" id="chatBtn">💬 对话改规划</button>' : ''}
+      ${compOn('chat') ? '<button class="btn" id="chatBtn">💬 AI 助手</button>' : ''}
       ${pluginButtonsHTML(g)}
       ${g.nodes.length && compOn('versions') ? '<button class="btn" id="verBtn">📜 版本对比</button>' : ''}
       <button class="btn primary" id="planBtn">${g.nodes.length ? '重新规划（AI 先澄清）' : '开始 AI 规划（AI 先澄清）'}</button>
