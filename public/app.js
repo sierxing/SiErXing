@@ -388,11 +388,7 @@ function taskNodeHTML(t) {
       <span class="mtTaskTitle">${esc(t.title)}</span>
       ${t.hours ? `<span class="mtHours">${esc(t.hours)}</span>` : ''}
       <span class="srcBadge ${srcN ? '' : 'warn'}" title="${srcN ? '已标注信息源' : '未标注信息源'}">📎${srcN}</span>
-      <span class="nodeOps">
-        <button class="btn tiny" data-expand="${t.id}" title="AI 深度拆分（先搜集资料再细化）">✨</button>
-        <button class="btn tiny" data-edit="${t.id}" title="编辑">✎</button>
-        <button class="btn tiny danger" data-del="${t.id}" title="删除">×</button>
-      </span>
+      <span class="nodeOps">${t.aiBusy ? '<span class="aiTag">AI</span>' : ''}</span>
     </div>
     ${hasKids ? `<div class="mtbranch" style="display:${open ? 'flex' : 'none'}; flex-direction:column; align-items:stretch;">
       ${t.children.map(c => taskNodeHTML(c)).join('')}
@@ -919,7 +915,96 @@ function bindConstraints(g) {
   }));
 }
 
-/* ===== 对话改规划（右侧侧边栏） ===== */
+/* ============ 后台 AI 任务中心（切换页面不影响，任意页面可见） ============ */
+const TASK_META = {
+  expand: { icon: '✨', label: 'AI 拆分' },
+  tutorial: { icon: '📘', label: '生成教程' },
+  digest: { icon: '🧠', label: '信息提炼' },
+  collect: { icon: '🔍', label: '收集资料' },
+  image: { icon: '📷', label: '识别图片' }
+};
+function taskActive(t) { return t && (t.status === 'running' || t.status === 'queued'); }
+function taskBarEnsure() {
+  let el = document.getElementById('taskBar');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'taskBar';
+    el.className = 'taskBar';
+    document.body.appendChild(el);
+  }
+  return el;
+}
+function taskBarRender() {
+  const all = state.tasks || [];
+  const active = all.filter(taskActive);
+  const recent = all.filter(t => !taskActive(t)).slice(-3);
+  const el = taskBarEnsure();
+  if (!active.length && !recent.length) { el.hidden = true; el.innerHTML = ''; return; }
+  el.hidden = false;
+  const open = state.taskOpen;
+  el.innerHTML = `<button class="taskPill ${active.length ? 'busy' : ''}" id="taskPill">
+      ${active.length ? `<span class="spinner" style="width:12px;height:12px;border-width:2px;"></span> ${active.length} 个 AI 任务进行中` : `🤖 AI 任务（${recent.length}）`}
+      <span class="taskCaret">${open ? '▾' : '▸'}</span>
+    </button>
+    ${open ? `<div class="taskList">
+      ${all.length ? all.slice(-8).map(t => {
+        const m = TASK_META[t.type] || { icon: '🤖', label: t.type };
+        return `<div class="taskItem ${t.status}">
+          <span class="taskIcon">${m.icon}</span>
+          <div class="taskMain">
+            <div class="taskTitle">${esc(t.title || m.label)}</div>
+            <div class="taskMsg">${esc(t.message || '')}${t.nodeId ? ' · 节点 #' + t.nodeId : ''}${t.note ? ' · 备注：' + esc(String(t.note).slice(0, 40)) : ''}</div>
+            ${t.status === 'running' ? `<div class="taskProg"><i style="width:${t.progress || 0}%"></i></div>` : ''}
+          </div>
+          ${taskActive(t) ? `<button class="btn tiny" data-task-cancel="${t.id}">停止</button>` : `<span class="taskState">${t.status === 'done' ? '✓ 完成' : t.status === 'failed' ? '✗ 失败' : '已停止'}</span>`}
+        </div>`;
+      }).join('') : '<div class="muted" style="font-size:12px;padding:6px;">暂无任务</div>'}
+      ${recent.length ? `<button class="btn tiny" id="taskClear" style="margin:6px 0 2px;">清除已完成</button>` : ''}
+    </div>` : ''}`;
+  const pill = el.querySelector('#taskPill');
+  if (pill) pill.addEventListener('click', () => { state.taskOpen = !state.taskOpen; taskBarRender(); });
+  el.querySelectorAll('[data-task-cancel]').forEach(b => b.addEventListener('click', async () => {
+    try { await api('/api/tasks/' + b.getAttribute('data-task-cancel') + '/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); toast('已请求停止'); await taskPoll(); } catch (e) { toast(e.message); }
+  }));
+  const clr = el.querySelector('#taskClear');
+  if (clr) clr.addEventListener('click', async () => {
+    try { await api('/api/tasks/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ goalId: state.goal ? state.goal.id : 0 }) }); await taskPoll(); } catch (e) {}
+  });
+}
+/* 给正在被 AI 处理的节点加动画标记 */
+function taskMarkNodes() {
+  const busy = (state.tasks || []).filter(t => t.status === 'running' && t.nodeId);
+  const map = {};
+  for (const t of busy) map[String(t.nodeId)] = t.message || 'AI 处理中…';
+  document.querySelectorAll('[data-node-id]').forEach(el => {
+    const id = el.getAttribute('data-node-id');
+    const msg = map[id];
+    if (msg) {
+      el.classList.add('aiBusy');
+      el.setAttribute('data-ai-msg', msg);
+    } else {
+      el.classList.remove('aiBusy');
+      el.removeAttribute('data-ai-msg');
+    }
+  });
+}
+let taskTimer = null;
+async function taskPoll() {
+  try {
+    const gid = state.goal ? state.goal.id : 0;
+    const r = await api('/api/tasks' + (gid ? '?goalId=' + gid : ''));
+    state.tasks = r.tasks || [];
+  } catch (e) { return; }
+  taskBarRender();
+  taskMarkNodes();
+}
+function taskStart() {
+  if (taskTimer) return;
+  taskPoll();
+  taskTimer = setInterval(taskPoll, 2000);
+}
+
+/* ===== AI 助手（右侧侧边栏） ===== */
 function opChipHTML(o) {
   const t = String(o.title || '').slice(0, 40);
   if (o.op === 'add') return `<div class="chOp opAdd"><span class="opTag">新增</span><span class="opTitle">${esc(t)}</span></div>`;
@@ -4567,6 +4652,7 @@ function pluginGoButtonsBind() {
   });
   BOOTED = true;
   route();
+  taskStart();
   checkUpdateOnBoot();
   if (!guideDone()) {
     setTimeout(() => { if (!document.getElementById('guideMask')) showGuide(0); }, 500);

@@ -191,10 +191,12 @@ main{padding:26px 0 90px;}
 
 /* ============ 思维导图（路径可视化） ============ */
 .mtree{
-  position:relative; display:flex; align-items:flex-start; overflow:auto;
+  position:relative; display:flex; align-items:center; overflow:auto;   /* 根节点相对整棵树垂直居中 → 展开时上下对称 */
   padding:28px 26px 44px 6px; min-height:220px; max-height:calc(100vh - 240px);
   background:var(--soft); border:1px solid var(--border); border-radius:var(--r-lg);
 }
+/* 分支列垂直居中：展开后子节点在父节点上下对称分布，而不是一律往下堆 */
+.mtbranch{display:flex; flex-direction:column; justify-content:center;}
 .mtnode{
   position:relative; background:var(--card); border:1.5px solid var(--border);
   border-radius:11px; padding:8px 12px; font-size:13px; cursor:pointer;
@@ -1509,3 +1511,43 @@ body.railWide .mapPage{left:236px;}
 .shareMod{display:flex; gap:9px; align-items:flex-start; border:1px solid var(--border); border-radius:9px; padding:7px 10px; margin-bottom:6px; cursor:pointer; font-size:12.6px; line-height:1.6;}
 .shareMod:hover{border-color:var(--accent-border); background:var(--soft);}
 .shareMod input{margin-top:4px; accent-color:var(--accent);}
+
+/* ============ 后台 AI 任务中心 ============ */
+.taskBar{position:fixed; left:12px; bottom:14px; z-index:140; max-width:min(430px, calc(100vw - 110px));}
+.taskPill{
+  display:flex; align-items:center; gap:8px; border:1px solid var(--border); background:var(--card);
+  color:var(--text); border-radius:999px; padding:7px 14px; font-size:12.5px; cursor:pointer;
+  box-shadow:0 8px 24px rgba(20,18,40,.16); font-family:inherit;
+}
+.taskPill.busy{border-color:var(--accent-border); background:var(--accent-soft); color:var(--accent); font-weight:600;}
+.taskCaret{font-size:10px; color:var(--muted);}
+.taskList{
+  margin-bottom:8px; background:var(--card); border:1px solid var(--border); border-radius:12px;
+  box-shadow:0 12px 34px rgba(20,18,40,.2); padding:8px; max-height:52vh; overflow:auto;
+}
+.taskItem{display:flex; gap:8px; align-items:flex-start; padding:7px 8px; border-radius:9px;}
+.taskItem.running{background:var(--accent-soft);}
+.taskItem.failed{background:rgba(231,76,60,.08);}
+.taskIcon{font-size:14px; flex:none;}
+.taskMain{flex:1; min-width:0;}
+.taskTitle{font-size:12.5px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.taskMsg{font-size:11.5px; color:var(--muted); margin-top:2px; line-height:1.5;}
+.taskProg{height:4px; background:var(--soft); border-radius:3px; margin-top:5px; overflow:hidden;}
+.taskProg i{display:block; height:100%; background:var(--accent); transition:width .3s;}
+.taskState{font-size:11.5px; color:var(--muted); flex:none;}
+
+/* 节点正在被 AI 处理：呼吸光环 + 文案 */
+.mtnode.aiBusy, .mttask.aiBusy{
+  border-color:var(--accent) !important;
+  animation:aiPulse 1.5s ease-in-out infinite;
+}
+.mtnode.aiBusy:after{
+  content:'AI 处理中';
+  position:absolute; right:-6px; top:-9px; font-size:9.5px; line-height:1;
+  background:var(--accent); color:#fff; padding:3px 6px; border-radius:999px;
+  box-shadow:0 2px 8px rgba(99,102,241,.4); white-space:nowrap;
+}
+@keyframes aiPulse{
+  0%,100%{box-shadow:0 0 0 0 rgba(99,102,241,.42);}
+  50%{box-shadow:0 0 0 8px rgba(99,102,241,0);}
+}

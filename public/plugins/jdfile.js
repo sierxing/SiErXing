@@ -69,7 +69,7 @@ function drawJDPage() {
     for (const it of items) {
       if (it.type && it.type.startsWith('image/')) {
         const f = it.getAsFile();
-        if (f) { e.preventDefault(); uploadJDFile(f); return; }
+        if (f) { e.preventDefault(); jdEnqueue([f]); return; }
       }
     }
     toast('剪贴板里没有图片，请先截图/复制图片');
@@ -79,10 +79,10 @@ function drawJDPage() {
   paste.addEventListener('drop', e => {
     e.preventDefault(); paste.classList.remove('over');
     const f = (e.dataTransfer.files || [])[0];
-    if (f) uploadJDFile(f);
+    if (f) jdEnqueue([f]);
   });
   const fi = document.getElementById('jdFile');
-  fi.addEventListener('change', () => { for (const f of Array.from(fi.files || [])) uploadJDFile(f); fi.value = ''; });
+  fi.addEventListener('change', () => { const arr = Array.from(fi.files || []); if (arr.length) jdEnqueue(arr); fi.value = ''; });
   const imp = document.getElementById('jdImportFile');
 
   if (imp) imp.addEventListener('change', async () => {
@@ -171,14 +171,32 @@ function drawJDPage() {
     } catch (e) {
       toast(e.message);
     } finally {
-      state.jdBusy = false;
-      state.jdStatus = '';
       try { const r = await api('/api/goals/' + state.goal.id + '/jd-images'); state.jdImages = r.images || []; } catch (e) {}
       drawJDPage();
     }
   }
-  async function uploadJDFile(file) {
-  if (state.jdBusy) return toast('正在识别上一张，请稍候');
+  /* 多图并行：最多 3 张同时识别，超出的自动排队（切页面不影响，服务端后台继续） */
+const JD_CONCURRENT = 3;
+state.jdQueue = state.jdQueue || [];
+state.jdRunning = state.jdRunning || 0;
+function jdPump() {
+  while (state.jdRunning < JD_CONCURRENT && state.jdQueue.length) {
+    const f = state.jdQueue.shift();
+    state.jdRunning++;
+    uploadJDFile(f).finally(() => { state.jdRunning--; jdPump(); });
+  }
+  if (state.jdQueue.length || state.jdRunning) {
+    state.jdBusy = true;
+    state.jdStatus = (state.jdRunning ? '正在识别 ' + state.jdRunning + ' 张' : '') + (state.jdQueue.length ? '（排队 ' + state.jdQueue.length + ' 张）' : '');
+  } else { state.jdBusy = false; state.jdStatus = ''; }
+  try { drawJDPage(); } catch (e) {}
+}
+function jdEnqueue(files) {
+  for (const f of files) state.jdQueue.push(f);
+  toast('已加入 ' + files.length + ' 张图片（并行识别，最多 3 张同时处理）');
+  jdPump();
+}
+async function uploadJDFile(file) {
   if (!file.type || !file.type.startsWith('image/')) return toast('请粘贴图片文件');
   if (file.size > 8 * 1024 * 1024) return toast('图片过大（8MB 以内）');
   state.jdBusy = true;

@@ -17,6 +17,7 @@ const { loadPlugins, pluginMeta, matchRoute } = require('./plugins');
 const createService = require('./service');
 const createSync = require('./sync');
 const createUpdate = require('./update');
+const createTasks = require('./tasks');
 
 const APP_DIR = path.resolve(__dirname, '..');
 const DATA_DIR = path.join(APP_DIR, 'data');
@@ -144,6 +145,7 @@ function currentVisionModel() {
 
 const service = createService({ appDir: APP_DIR, port: PORT, log: (...a) => console.log(...a) });
 const update = createUpdate({ appDir: APP_DIR, port: PORT, log: (...a) => console.log(...a) });
+const tasks = createTasks({ log: (...a) => console.log(...a) });
 let sync = null;   // 多端同步（在 backup 定义后初始化）
 
 sync = createSync({
@@ -277,7 +279,7 @@ function pluginCtx() {
     db, nowISO, safeParse, sendJSON, readBody, getSetting, setSetting, backup,
     log: (...a) => console.log(...a),
     fs, path, os, spawn, APP_DIR, DATA_DIR, UPLOAD_DIR, PUBLIC_DIR,
-    getGoal, sourcesOf, aiText, aiTextFiles, currentModel, currentVisionModel
+    getGoal, sourcesOf, aiText, aiTextFiles, currentModel, currentVisionModel, tasks
   };
 }
 (function migrate() {
@@ -2365,7 +2367,8 @@ function cleanTutorialText(txt, format) {
 function streamTutorial(req, res, node, format, note) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   const model = currentModel();
-  const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} };
+  const tk = tasks.begin({ type: 'tutorial', title: '生成教程：' + (node ? node.title : ''), goalId: node ? node.goal_id : 0, nodeId: node ? node.id : 0, note: note || '' });
+    const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} if (obj && obj.status) tk.progress(undefined, obj.status); };
   (async () => {
     try {
       const goal = db.prepare('SELECT * FROM goals WHERE id = ?').get(node.goal_id);
@@ -2383,8 +2386,10 @@ function streamTutorial(req, res, node, format, note) {
       backup();
       send({ done: true, tutorial: { id: tid, node_id: node.id, title, format, created_at: t, chars: txt.length }, goal: getGoal(goal.id) });
     } catch (e) {
+      tk.fail(e);
       send({ error: e.message });
     }
+    tk.done({ ok: true });
     res.end();
   })();
 }
@@ -2484,7 +2489,7 @@ async function handleAPI(req, res, u) {
     const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(id);
     if (!g) return sendJSON(res, 404, { error: '目标不存在' });
     res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache' });
-    const sig = clientSignal(req);
+    const sig = tk.signal;   // 只有主动取消才中断；切换/关闭页面不影响后台继续
     (async () => {
       try {
         const r = await collectForGoal(g, s => { try { res.write(`data: ${JSON.stringify(s)}\n\n`); } catch (e) {} }, sig);
@@ -2773,7 +2778,8 @@ function redactText(raw) {
     let feedback = '', answers = null;
     try { const b = await readBody(req); feedback = String(b.feedback || '').trim(); if (b && typeof b.answers === 'object') answers = b.answers; } catch (e) {}
     res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache' });
-    const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} };
+    const tk = tasks.begin({ type: 'expand', title: 'AI 拆分：' + (n ? n.title : ''), goalId: n ? n.goal_id : 0, nodeId: id, note: feedback });
+      const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} if (obj && obj.status) tk.progress(undefined, obj.status); };
     (async () => {
       try {
         const goal = db.prepare('SELECT * FROM goals WHERE id = ?').get(n.goal_id);
@@ -2847,8 +2853,10 @@ function redactText(raw) {
           send({ done: true, added, goal: getGoal(goal.id), sources: sourcesOf(goal.id), report: report2, versionId: vid });
         }
       } catch (e) {
+        tk.fail(e);
         send({ error: e.message });
       }
+      tk.done({ ok: true });
       res.end();
     })();
     return;
@@ -3171,6 +3179,20 @@ function redactText(raw) {
     }
     saveComponentCategoryMap(map);
     return sendJSON(res, 200, { ok: true, category: effectiveCategory(cid, comp.category) });
+  }
+
+  /* ---- 后台 AI 任务（切换页面不影响；可并行、可取消） ---- */
+  if (p === '/api/tasks' && method === 'GET') {
+    const gid = Number(u.searchParams.get('goalId') || 0);
+    return sendJSON(res, 200, { tasks: tasks.list(gid || 0), status: tasks.status() });
+  }
+  const taskCancelMatch = p.match(/^\/api\/tasks\/(\d+)\/cancel$/);
+  if (taskCancelMatch && method === 'POST') {
+    return sendJSON(res, 200, tasks.cancel(Number(taskCancelMatch[1])));
+  }
+  if (p === '/api/tasks/clear' && method === 'POST') {
+    const b = await readBody(req).catch(() => ({}));
+    return sendJSON(res, 200, tasks.clear(b && b.goalId ? Number(b.goalId) : 0));
   }
 
   /* ---- 更新检查与一键更新 ---- */

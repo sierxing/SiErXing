@@ -8,11 +8,11 @@
 'use strict';
 let db, nowISO, safeParse, sendJSON, readBody, getSetting, setSetting, backup, log;
 let fs, path, os, spawn, APP_DIR, DATA_DIR, UPLOAD_DIR, PUBLIC_DIR;
-let getGoal, sourcesOf, aiText, aiTextFiles, currentModel, currentVisionModel;
+let getGoal, sourcesOf, aiText, aiTextFiles, currentModel, currentVisionModel, tasks;
 function bind(ctx) {
   ({ db, nowISO, safeParse, sendJSON, readBody, getSetting, setSetting, backup, log } = ctx);
   ({ fs, path, os, spawn, APP_DIR, DATA_DIR, UPLOAD_DIR, PUBLIC_DIR } = ctx);
-  ({ getGoal, sourcesOf, aiText, aiTextFiles, currentModel, currentVisionModel } = ctx);
+  ({ getGoal, sourcesOf, aiText, aiTextFiles, currentModel, currentVisionModel, tasks } = ctx);
 }
 
 const SCHEMA = `
@@ -325,7 +325,8 @@ function imageToText(data) {
 }
 function streamJDImage(req, res, goal, dataUrl, note, reuseSourceId) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
-  const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} };
+  const tk = (typeof tasks !== 'undefined' && tasks) ? tasks.begin({ type: 'image', title: '识别图片：' + String(goal.title || '').slice(0, 20), goalId: goal.id, nodeId: 0, note: note || '' }) : null;
+  const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} if (tk && obj && obj.status) tk.progress(undefined, obj.status); };
   (async () => {
     let fname = '', buf = null, mime = '';
     try {
