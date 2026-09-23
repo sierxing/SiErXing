@@ -162,7 +162,7 @@ async function route() {
   document.body.classList.toggle('mapMode', r.view === 'map');
   try {
     aiEnsureDOM();
-    const hasGoalCtx = (r.view === 'goal' || r.view === 'map');
+    const hasGoalCtx = (r.view === 'goal' || r.view === 'map' || r.view === 'tutorial');   // 教程页也能用 AI 助手
     const fab = document.getElementById('aiFab');
     const drw = document.getElementById('aiDrawer');
     if (!hasGoalCtx) {
