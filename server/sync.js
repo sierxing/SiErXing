@@ -177,7 +177,15 @@ module.exports = function createSync(ctx) {
 
   function applySnapshot(snap) {
     if (!snap || snap.format !== 'sierxing-sync' || !snap.data) throw new Error('不是有效的同步快照');
-    backup();   // 导入前先备份，出问题可回滚
+    // 安全阀：远端快照的目标数明显少于本地时拒绝导入（避免空快照/误删把本地数据清空）
+      try {
+        const localGoals = db.prepare('SELECT COUNT(*) AS c FROM goals').get().c || 0;
+        const remoteGoals = Array.isArray(snap.data.goals) ? snap.data.goals.length : 0;
+        if (localGoals >= 1 && remoteGoals < localGoals) {
+          throw new Error('已拒绝导入：远端快照只有 ' + remoteGoals + ' 个目标，本地有 ' + localGoals + ' 个（如需强制导入，请先在本机删掉多余目标）');
+        }
+      } catch (e) { if (/已拒绝导入/.test(e.message)) throw e; }
+      backup();   // 导入前先备份，出问题可回滚
     db.exec('BEGIN');
     try {
       for (const t of SYNC_TABLES) {
