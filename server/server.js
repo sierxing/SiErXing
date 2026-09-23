@@ -1515,6 +1515,28 @@ function buildExpandPrompt(goal, node, sources) {
   lines.push('5. 若按「关键机制」需要先提问，则只输出 {"questions":[...]}，不要输出 tasks。');
   return lines.join('\n');
 }
+/* 按用户意见修改已有教程 */
+function buildTutorialEditPrompt(goal, node, tut, feedback, format) {
+  const lines = [];
+  lines.push('你是耐心、严谨的技术导师。用户对**已生成的教程**提出了修改意见，请按要求改好它。');
+  lines.push('');
+  lines.push(goalHeader(goal));
+  lines.push(constraintsBlock(goal));
+  lines.push('');
+  lines.push('【教程主题】' + String(tut.title || (node && node.title) || ''));
+  if (node && node.detail) lines.push('任务说明：' + node.detail);
+  lines.push('');
+  lines.push('【用户的修改意见（必须全部满足）】' + String(feedback || '').slice(0, 1500));
+  lines.push('');
+  lines.push('【修改要求】');
+  lines.push('1. 在**保留原有优质内容**的基础上，按用户意见修改（增删改均可）；不要无故删掉原有章节；');
+  lines.push('2. 保持原有格式与结构风格，篇幅可增可减，但要保证「能照着学会」；');
+  lines.push('3. 直接输出修改后的完整教程正文（' + (format === 'md' ? 'Markdown' : 'HTML') + '），不要任何解释或前后缀。');
+  lines.push('');
+  lines.push('【原教程正文】');
+  lines.push(String(tut.content || '').slice(0, 30000));
+  return lines.join('\n');
+}
 function buildTutorialPrompt(goal, node, format, note) {
   const levelName = { 0: '阶段', 1: '小目标', 2: '任务', 3: '子任务', 4: '步骤', 5: '步骤' }[node.level] || '任务';
   const lines = [];
@@ -2971,6 +2993,40 @@ function redactText(raw) {
     let format = 'md', note = '';
     try { const b = await readBody(req); format = b.format === 'html' ? 'html' : 'md'; note = String(b.note || '').trim().slice(0, 500); } catch (e) {}
     return streamTutorial(req, res, n, format, note);
+  }
+  const tutEditMatch = p.match(/^\/api\/tutorials\/(\d+)\/edit$/);
+  if (tutEditMatch && method === 'POST') {
+    const tid = Number(tutEditMatch[1]);
+    const tut = db.prepare('SELECT * FROM tutorials WHERE id = ?').get(tid);
+    if (!tut) return sendJSON(res, 404, { error: '教程不存在' });
+    const body = await readBody(req).catch(() => ({}));
+    const feedback = String((body && body.feedback) || '').trim().slice(0, 1500);
+    if (!feedback) return sendJSON(res, 400, { error: '请填写修改意见' });
+    const goal = db.prepare('SELECT * FROM goals WHERE id = ?').get(tut.goal_id);
+    const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(tut.node_id);
+    const taskId = tasks.submit({
+      type: 'tutorial', title: '修改教程：' + String(tut.title || '').slice(0, 30), goalId: tut.goal_id, nodeId: tut.node_id, note: feedback,
+      run: async ({ progress, signal }) => {
+        progress(5, '正在按你的意见修改教程…');
+        const txt = await ai.text({ prompt: buildTutorialEditPrompt(goal, node, tut, feedback, tut.format), model: currentModel(), timeoutMs: 600000, signal });
+        progress(80, '正在保存新版本…');
+        let out = String(txt || '').trim();
+        out = out.replace(/^```(?:markdown|md|html)?\s*/i, '').replace(/```\s*$/, '');
+        if (!out || out.length < 80) throw new Error('AI 返回内容为空，请重试');
+        // 保留历史版本（写入 goal_versions 便于回滚），再覆盖教程内容
+        try {
+          const vid = beginVersion(tut.goal_id, '教程修改：' + String(tut.title || '').slice(0, 20));
+          db.prepare('UPDATE tutorials SET content = ?, updated_at = ? WHERE id = ?').run(out, nowISO(), tid);
+          await finishVersion(goal, vid, '教程修改：' + String(tut.title || '').slice(0, 20), false);
+        } catch (e) {
+          db.prepare('UPDATE tutorials SET content = ?, updated_at = ? WHERE id = ?').run(out, nowISO(), tid);
+        }
+        progress(100, '修改完成');
+        backup();
+        return { tutorialId: tid, length: out.length };
+      }
+    });
+    return sendJSON(res, 200, { ok: true, taskId });
   }
   const tutMatch = p.match(/^\/api\/tutorials\/(\d+)$/);
   if (tutMatch) {

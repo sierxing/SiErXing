@@ -1128,6 +1128,21 @@ function selBoxInit() {
 }
 selBoxInit();   // 文档级监听：导图页 Ctrl+拖拽框选
 
+/* ===== 教程：让 AI 修改（全局委托，避免绑定时机问题） ===== */
+const TUTEDIT_BOUND = true;
+document.addEventListener('click', async e => {
+  const btn = e.target.closest && e.target.closest('#tutEditBtn');
+  if (!btn) return;
+  const rr = parseRoute();
+  if (rr.view !== 'tutorial') return;
+  const t = ((state.goal && state.goal.tutorials) || []).find(x => Number(x.id) === Number(rr.id));
+  const fb = prompt('想让 AI 怎么改这份教程？\n\n例如：第三章再展开讲讲 / 多给一个完整代码示例 / 练习换成更简单的 / 补充常见错误排查');
+  if (!fb || !fb.trim()) return;
+  try {
+    await api('/api/tutorials/' + rr.id + '/edit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ feedback: fb.trim() }) });
+    toast('🤖 已提交修改任务（左下角可看进度，完成后自动刷新）');
+  } catch (err) { toast(err.message); }
+});
 /* ===== AI 助手（右侧侧边栏） ===== */
 function opChipHTML(o) {
   const t = String(o.title || '').slice(0, 40);
@@ -1829,6 +1844,7 @@ async function renderTutorialPage(tid) {
   app.innerHTML = `<div class="tutPage">
     <div class="tutHead">
       <a class="back" href="#/g/${t.goal_id}">← 返回目标</a>
+      <button class="btn small" id="tutEditBtn" title="把修改意见交给 AI，它会重写这份教程（保留历史版本）">💬 让 AI 修改</button>
       <span class="mapTitle">📘 ${esc(t.title)}</span>
       <span class="chip gray">${isHtml ? 'HTML' : 'Markdown'}</span>
       <span class="chip gray">约 ${sizeK}k 字</span>
