@@ -1034,6 +1034,84 @@ function tutThemedHTML(html) {
   return css + t;
 }
 
+/* ============ Ctrl + 左键拖拽：框选节点批量操作 ============ */
+function selNodesList() { return (state.selNodes || []).filter(id => (state.goal.nodes || []).some(n => Number(n.id) === Number(id))); }
+function selBarRender() {
+  let el = document.getElementById('selBar');
+  const ids = selNodesList();
+  if (!ids.length) { if (el) el.remove(); return; }
+  if (!el) { el = document.createElement('div'); el.id = 'selBar'; el.className = 'selBar'; document.body.appendChild(el); }
+  el.innerHTML = `<span class="selCount">已选 ${ids.length} 个节点</span>
+    <button class="btn tiny primary" data-sel="done">✓ 标记完成</button>
+    <button class="btn tiny" data-sel="todo">○ 标记未开始</button>
+    <button class="btn tiny" data-sel="expand">✨ AI 拆分</button>
+    <button class="btn tiny" data-sel="tut">📘 生成教程</button>
+    <button class="btn tiny danger" data-sel="del">× 删除</button>
+    <button class="btn tiny" data-sel="clear">取消选择</button>`;
+  el.querySelectorAll('[data-sel]').forEach(b => b.addEventListener('click', () => selAct(b.getAttribute('data-sel'))));
+}
+async function selAct(act) {
+  const ids = selNodesList();
+  if (!ids.length) return;
+  if (act === 'clear') { state.selNodes = []; selBarRender(); return; }
+  if (act === 'del') {
+    if (!confirm('删除选中的 ' + ids.length + ' 个节点？\\n\\n它们下面的子节点也会一并删除（会进版本历史，可回滚）。')) return;
+    for (const id of ids) { try { await api('/api/nodes/' + id, { method: 'DELETE' }); } catch (e) {} }
+    state.selNodes = [];
+    toast('已删除 ' + ids.length + ' 个节点');
+  } else if (act === 'done' || act === 'todo') {
+    for (const id of ids) { try { await api('/api/nodes/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: act }) }); } catch (e) {} }
+    toast('已更新 ' + ids.length + ' 个节点的状态');
+  } else if (act === 'expand' || act === 'tut') {
+    for (const id of ids) {
+      try {
+        await fetch('/api/nodes/' + id + '/' + (act === 'expand' ? 'expand' : 'tutorial'), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(act === 'expand' ? { feedback: '' } : { format: 'md', note: '为这个节点写一份完整可执行的教程' })
+        });
+      } catch (e) {}
+    }
+    toast('已提交 ' + ids.length + ' 个' + (act === 'expand' ? '拆分' : '教程') + '任务（左下角任务中心可看进度）');
+  }
+  try { await loadGoal(state.goal.id); } catch (e) {}
+  rerenderCurrent();
+  selBarRender();
+}
+function selBoxInit() {
+  const vp = document.getElementById('mapViewport');
+  if (!vp || vp.getAttribute('data-selbound')) return;
+  vp.setAttribute('data-selbound', '1');
+  vp.addEventListener('mousedown', e => {
+    if (!e.ctrlKey || e.button !== 0) return;
+    e.preventDefault(); e.stopPropagation();
+    const start = { x: e.clientX, y: e.clientY };
+    const box = document.createElement('div');
+    box.className = 'selBox';
+    document.body.appendChild(box);
+    const onMove = ev => {
+      const x1 = Math.min(start.x, ev.clientX), y1 = Math.min(start.y, ev.clientY);
+      const x2 = Math.max(start.x, ev.clientX), y2 = Math.max(start.y, ev.clientY);
+      box.style.left = x1 + 'px'; box.style.top = y1 + 'px';
+      box.style.width = (x2 - x1) + 'px'; box.style.height = (y2 - y1) + 'px';
+      document.querySelectorAll('[data-node-id]').forEach(el => {
+        const r = el.getBoundingClientRect();
+        const hit = !(r.right < x1 || r.left > x2 || r.bottom < y1 || r.top > y2);
+        el.classList.toggle('selHit', hit);
+      });
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      box.remove();
+      const hits = [...document.querySelectorAll('[data-node-id].selHit')];
+      document.querySelectorAll('.selHit').forEach(x => x.classList.remove('selHit'));
+      if (hits.length) { state.selNodes = hits.map(x => Number(x.getAttribute('data-node-id'))); selBarRender(); toast('已选中 ' + hits.length + ' 个节点（可批量删除 / 标记 / AI 处理）'); }
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, true);
+}
+
 /* ===== AI 助手（右侧侧边栏） ===== */
 function opChipHTML(o) {
   const t = String(o.title || '').slice(0, 40);
