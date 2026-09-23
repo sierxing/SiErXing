@@ -1863,6 +1863,7 @@ function showCtxMenu(x, y, id) {
   if (old) old.remove();
   const srcs = safeParse(n.sources, []);
   const tuts = tutorialsOfNode(id);
+  const kids = db2Kids(id);   // 批量操作子节点用（之前漏了这行，导致右键菜单报错打不开）
   const div = document.createElement('div');
   div.id = 'ctxMenu';
   div.className = 'ctxMenu';
