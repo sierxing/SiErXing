@@ -1299,6 +1299,60 @@ function askBlock(round, subject) {
   else lines.push('注意：不要重复已问过的问题；能合理推断的不要问；影响很小的问题不要问。');
   return lines.join('\n');
 }
+/* 某个阶段的小目标偏少时，按知识点补足 */
+function buildStageGoalsPrompt(goal, stage) {
+  const lines = [];
+  lines.push('你是资深职业路径规划师。下面这个「阶段」的小目标太少，没有覆盖它要掌握的知识点。');
+  lines.push('请把它的小目标补足：**阶段说明里提到的每个知识点 / 技术点 / 能力项都要有独立的小目标**（一个知识点一个，不要合并）。');
+  lines.push('要求：① 保留原有小目标（措辞可微调）；② 补齐缺失的；③ 小目标要能独立验收、能力或成果导向；');
+  lines.push('④ 一般 5-10 个，知识点多可到 16 个；⑤ 每个小目标给 1-3 条 sources 依据（name 写来源，note 写依据）。');
+  lines.push('');
+  lines.push(goalHeader(goal));
+  lines.push(digestsBlock(goal));
+  lines.push(sourcesBlock(goal, 40, 200));
+  lines.push('');
+  lines.push('【当前阶段】' + String(stage.title || ''));
+  lines.push('阶段说明：' + String(stage.detail || ''));
+  lines.push('【当前的小目标（太少）】');
+  (stage.goals || []).forEach((g, i) => lines.push(`${i + 1}. ${g.title}${g.detail ? '（' + g.detail + '）' : ''}`));
+  lines.push('');
+  lines.push('只输出一个 JSON 对象：{"goals":[{"title":"小目标","detail":"60-120字说明","sources":[{"name":"","note":""}]}]}');
+  return lines.join('\n');
+}
+async function expandThinStages(goal, skeleton, model, send, sig) {
+  const stages = (skeleton && skeleton.stages) || [];
+  const need = [];
+  for (let i = 0; i < stages.length; i++) {
+    const st = stages[i];
+    const goals = Array.isArray(st.goals) ? st.goals : [];
+    const text = String(st.title || '') + ' ' + String(st.detail || '');
+    const marks = (text.match(/[、,，/；;]/g) || []).length;   // 阶段说明里列了几项
+    // 小目标偏少、且说明里明显列了多个知识点 → 需要补足
+    if (goals.length < 5 && marks >= 2) need.push(i);
+  }
+  if (!need.length) return skeleton;
+  send({ status: `有 ${need.length} 个阶段的小目标偏少，正在按知识点补足…` });
+  for (const i of need) {
+    if (sig && sig.aborted) { const e = new Error('已停止'); e.cancelled = true; throw e; }
+    const st = stages[i];
+    send({ status: `补足第 ${i + 1}/${stages.length} 个阶段：${String(st.title || '').slice(0, 20)}…` });
+    try {
+      const before = (st.goals || []).length;
+      const txt = await aiTextProgress(buildStageGoalsPrompt(goal, st), model, 300000, send, '小目标', sig);
+      const data = extractJSON(txt);
+      const list = Array.isArray(data && data.goals) ? data.goals : (Array.isArray(data) ? data : []);
+      const clean = list.filter(x => x && String(x.title || '').trim()).slice(0, 18);
+      if (clean.length > before) {
+        st.goals = clean;
+        console.log('[plan] 阶段补足:', String(st.title).slice(0, 20), before, '→', clean.length, '个小目标');
+      }
+    } catch (e) {
+      if (e && e.cancelled) throw e;
+      console.log('[plan] 阶段补足失败（忽略）:', e.message);
+    }
+  }
+  return skeleton;
+}
 function buildSkeletonPrompt(goal) {
   const round = db.prepare('SELECT ask_round FROM goals WHERE id = ?').get(goal.id).ask_round || 0;
   const lines = [];
@@ -1321,10 +1375,12 @@ function buildSkeletonPrompt(goal) {
   lines.push('   · 跨度大 / 多线并行（补基础 + 做项目 + 求职 + 长期习惯）：6-9 个阶段，资料要求多时最多 12 个；');
   lines.push('   · 从当前起点按能力/成果递进，最后一个阶段必须是「求职落地 / 投递面试 / 成果验收」这类收口阶段；');
   lines.push('   · 判断标准：每个阶段应是「一个能独立验收的能力台阶」，太大就拆、太小就合并。');
-  lines.push('3. 每个阶段的小目标数量**按该阶段要覆盖的知识点决定**，不要为了少而合并掉内容：');
-  lines.push('   · 每个知识点 / 技术点 / 硬性条件都应能落到某个小目标上；一般 5-8 个，内容多的阶段可到 12 个（不超过 12 个）；');
+  lines.push('3. 【小目标数量必须按需决定，不要所有阶段都给同样数量】写每个阶段之前，先做这一步：');
+  lines.push('   · 列出该阶段要覆盖的知识点 / 技术点 / 能力项（可参考提炼汇总里的技术栈篇与用户资料），记下个数 N；');
+  lines.push('   · 小目标数量 ≈ N（一个知识点至少一个小目标，**不要合并**）；每个阶段一般 5-10 个，知识点多的阶段可到 16 个；');
+  lines.push('   · 反面示例（不要这样）：每个阶段都只给 4 个、把「Python 语法 + 数据结构 + 算法 + 工程规范」挤进一个目标里；');
   lines.push('   · 小目标要「能独立验收」、能力或成果导向（如「掌握 X 并完成 Y 练习」「能用 Z 做出 W」）；');
-  lines.push('   · 【自检】输出前逐个核对资料里的技术栈与知识点：有没有哪个在本阶段找不到落点？有就补一个小目标。');
+  lines.push('   · 【自检】输出前逐条核对：本阶段涉及的每个技术点/知识点，是否都能找到对应的小目标？没有就补。');
   lines.push('4. 每个节点 detail 写 60-120 字：说明要达成什么、为什么这样安排。');
   lines.push('5. 每个节点都要给 sources 依据：**阶段给 3-5 条、小目标给 1-3 条**（不要空着）；name 写明实际来源（站点名+标题要点，用户资料写「用户提供的资料」），note 写依据了什么要求/结论。');
   lines.push('   优先引用：① 用户提供的资料 ② 提炼汇总里的结论 ③ 下面列出的资料；不同阶段尽量引用与它最相关的不同资料，让依据分布开来。');
@@ -1629,17 +1685,17 @@ function normalizeSkeleton(stages) {
     if (!title && goals.length) {
       const last = out[out.length - 1];
       if (last && !last.goals.length) {           // 上一个阶段还空着，直接补进去
-        last.goals = goals.slice(0, 4);
+        last.goals = goals.slice(0, 20);
         if (!last.detail && raw.detail) last.detail = raw.detail;
       } else {
         const base = pending || { title: '', detail: '', sources: [] };
-        out.push({ title: base.title, detail: base.detail || raw.detail || '', sources: base.sources || raw.sources || [], goals: goals.slice(0, 4) });
+        out.push({ title: base.title, detail: base.detail || raw.detail || '', sources: base.sources || raw.sources || [], goals: goals.slice(0, 20) });
       }
       pending = null;
       continue;
     }
     if (title && goals.length) {
-      out.push({ title, detail: raw.detail || '', sources: raw.sources || [], goals: goals.slice(0, 4) });
+      out.push({ title, detail: raw.detail || '', sources: raw.sources || [], goals: goals.slice(0, 20) });
       pending = null;
       continue;
     }
@@ -1648,7 +1704,7 @@ function normalizeSkeleton(stages) {
     const last = out[out.length - 1];
     if (!last.detail && pending.detail) last.detail = pending.detail;
   }
-  return out.filter(s => s.title && s.goals.length).slice(0, 8);
+  return out.filter(s => s.title && s.goals.length).slice(0, 14);
 }
 function saveSkeleton(goalId, plan) {
   const stages = normalizeSkeleton(plan.stages);
@@ -1775,7 +1831,7 @@ function streamPlan(req, res, goal, answers) {
       if (!skeleton || !Array.isArray(skeleton.stages) || !skeleton.stages.length) {
         console.log('[plan] 骨架解析失败（将重试），原始输出前 400 字:', String(skeletonText || '').slice(0, 400).replace(/\n/g, ' '));
         send({ status: '正在重新整理规划结果…' });
-        skeletonText = await aiTextProgress(planPrompt + '\n\n【重要】你上一次的输出不是合法 JSON（可能被截断或夹带了说明文字）。请严格只输出一个 JSON 对象，不要任何解释、不要代码块标记；阶段数量按目标规模决定（3-9 个，不要凑数）、每阶段 3-5 个小目标，detail 精简到 60 字以内。', model, 600000, send, '阶段/小目标', sig);
+        skeletonText = await aiTextProgress(planPrompt + '\n\n【重要】你上一次的输出不是合法 JSON（可能被截断或夹带了说明文字）。请严格只输出一个 JSON 对象，不要任何解释、不要代码块标记；阶段数量按目标规模决定（3-12 个，不要凑数）；**小目标数量按该阶段要覆盖的知识点决定（一个知识点至少一个，一般 5-10 个，多的可到 16 个）**，不要所有阶段都只给 4 个；detail 可精简到 60 字以内。', model, 600000, send, '阶段/小目标', sig);
         skeleton = extractJSON(skeletonText);
         if (skeleton && Array.isArray(skeleton.questions) && skeleton.questions.length) {
           saveGoalQuestions(goal.id, 'plan', skeleton);
@@ -1788,6 +1844,8 @@ function streamPlan(req, res, goal, answers) {
           throw new Error('骨架生成失败（模型返回内容不完整），请重试；若反复失败可在设置里换一个模型');
         }
       }
+      // 小目标偏少的阶段自动补足（按知识点拆细），保证覆盖度
+      skeleton = await expandThinStages(goal, skeleton, model, send, sig);
       const vid = beginVersion(goal.id, '生成新骨架');
       saveSkeleton(goal.id, skeleton);
       db.prepare('UPDATE goals SET status = ?, error = ?, updated_at = ? WHERE id = ?').run('review', '', nowISO(), goal.id);
@@ -1898,6 +1956,7 @@ function buildRefineSkeletonPrompt(goal, current, feedback) {
   lines.push('');
   lines.push('【要求】');
   lines.push('1. 只调整用户指出的问题，其余尽量保持原样（**除非用户明确要求增加 / 删除 / 合并阶段，否则阶段数量、顺序、命名保持稳定**）。用户说"阶段太少/太多/想加一个 XX 阶段"时，就按要求调整数量。');
+  lines.push('   · 用户说某个阶段「小目标太少 / 没覆盖到 X」时：直接给该阶段补足小目标（一个知识点一个，必要时可到 16 个），不要只做表面微调。');
   lines.push('2. 输出完整的调整后骨架，格式与输入一致。');
   lines.push('3. 只输出一个 JSON 对象：{"summary":"总体思路","stages":[{"title":"","detail":"","sources":[{"name":"","note":""}],"goals":[{"title":"","detail":"","sources":[{"name":"","note":""}]}]}]}');
   lines.push('4. 若按「关键机制」需要先提问，则只输出 {"questions":[...]}，不要输出 stages。');
