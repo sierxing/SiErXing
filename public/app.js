@@ -260,6 +260,15 @@ async function renderHome() {
 
   const gb = document.getElementById('guideBtn');
   if (gb) gb.addEventListener('click', () => showGuide(0));
+  const sg = document.getElementById('shareGoalBtn');
+  if (sg) sg.addEventListener('click', () => {
+    const redact = confirm('分享时隐去个人隐私？\n\n点「确定」= 隐去学校 / 公司 / 年级 / 姓名 / 联系方式后再分享（推荐）\n点「取消」= 按原样分享（含你的现状原文）');
+    const a = document.createElement('a');
+    a.href = '/api/goals/' + g.id + '/share' + (redact ? '' : '?redact=0');
+    a.download = '';
+    document.body.appendChild(a); a.click(); a.remove();
+    toast(redact ? '已导出（隐私已隐去）' : '已导出（原样，含个人现状）');
+  });
   app.querySelectorAll('#shareImportFile, #shareImportFile2').forEach(inp => inp.addEventListener('change', async () => {
     const file = (inp.files || [])[0];
     inp.value = '';
@@ -2550,7 +2559,7 @@ function renderGoal() {
       <a class="back js-back" href="#/">← 返回</a>
       <div class="spacer"></div>
       <button class="btn" id="editGoalBtn">编辑目标</button>
-      <a class="btn" id="shareGoalBtn" href="/api/goals/${g.id}/share" download title="把这份规划与资料库打包分享给别人（对方可一键导入）">🔗 分享</a>
+      <button class="btn" id="shareGoalBtn" title="把这份规划与资料库打包分享给别人（对方可一键导入）。默认隐去学校/公司/姓名/联系方式等隐私">🔗 分享</button>
       ${compOn('chat') ? '<button class="btn" id="chatBtn">💬 AI 助手</button>' : ''}
       ${pluginButtonsHTML(g)}
       ${g.nodes.length && compOn('versions') ? '<button class="btn" id="verBtn">📜 版本对比</button>' : ''}

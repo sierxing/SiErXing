@@ -2594,7 +2594,34 @@ async function handleAPI(req, res, u) {
   if (sourcesMatch && method === 'GET') {
     return sendJSON(res, 200, { sources: sourcesOf(Number(sourcesMatch[1])) });
   }
-  /* 一键分享：把「规划（骨架+任务）+ 资料库 + 提炼汇总」打包成可分享文件 */
+  /* 分享脱敏：隐去学校 / 公司 / 年级 / 姓名 / 联系方式等个人隐私（保留能力描述，规划依据不受影响） */
+function redactText(raw) {
+  let t = String(raw == null ? '' : raw);
+  if (!t) return t;
+  // 联系方式
+  t = t.replace(/1[3-9]\d{9}/g, '（已隐去手机号）');
+  t = t.replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, '（已隐去邮箱）');
+  t = t.replace(/\d{17}[\dXx]/g, '（已隐去证件号）');
+  t = t.replace(/[Qq][Qq]?\s*[:：]\s*\d{5,12}/g, '（已隐去 QQ）');
+  t = t.replace(/(微信|wechat|wx)\s*[:：]\s*[\w.-]{4,30}/gi, '（已隐去微信）');
+  // 姓名
+  t = t.replace(/(姓名|名字|我叫|本人)\s*[:：]?\s*[\u4e00-\u9fa5]{2,4}/g, '（已隐去姓名）');
+  // 学校（含「中国石油大学（北京）」这类带括号的写法）
+  t = t.replace(/[\u4e00-\u9fa5]{2,14}(大学|学院|学校)[（(][^)）]{1,10}[)）]/g, '（已隐去学校）');
+  t = t.replace(/[\u4e00-\u9fa5]{2,14}(大学|学院|学校)/g, '（已隐去学校）');
+  // 公司
+  t = t.replace(/[\u4e00-\u9fa5]{2,14}(股份有限公司|有限责任公司|有限公司|集团|研究院|研究所)/g, '（已隐去单位）');
+  t = t.replace(/[\u4e00-\u9fa5]{2,10}(科技有限公司|科技公司|公司)/g, '（已隐去单位）');
+  // 年级 / 学历阶段
+  t = t.replace(/(研一|研二|研三|大一|大二|大三|大四|博一|博二|博三|博四)/g, '（已隐去年级）');
+  // 清理替换后残留的重复括号 / 空括号
+  t = t.replace(/（已隐去(学校|单位|姓名|年级|手机号|邮箱|证件号|QQ|微信)）\s*[）)]/g, '（已隐去$1）');
+  t = t.replace(/（（+/g, '（');
+  t = t.replace(/））+/g, '）');
+  t = t.replace(/\s*（已隐去学校）/g, '（已隐去学校）');
+  return t;
+}
+/* 一键分享：把「规划（骨架+任务）+ 资料库 + 提炼汇总」打包成可分享文件 */
   const shareMatch = p.match(/^\/api\/goals\/(\d+)\/share$/);
   if (shareMatch && method === 'GET') {
     const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(Number(shareMatch[1]));
@@ -2602,23 +2629,34 @@ async function handleAPI(req, res, u) {
     const nodes = db.prepare('SELECT * FROM nodes WHERE goal_id = ? ORDER BY level, sort_order, id').all(g.id);
     const sources = db.prepare('SELECT * FROM sources WHERE goal_id = ? ORDER BY quality DESC, id').all(g.id);
     const digests = digestsOf(g.id);
+    const redact = u.searchParams.get('redact') !== '0';   // 默认隐去个人隐私
+    const R = x => (redact ? redactText(x) : x);
     const out = {
       format: 'sierxing-share', version: 1, exportedAt: nowISO(),
-      from: { device: os.hostname() },
+      redacted: redact,
+      from: { device: redact ? '（已隐去设备名）' : os.hostname() },
       goal: {
-        title: g.title, profile: g.profile, weekly_hours: g.weekly_hours, deadline: g.deadline,
-        materials: g.materials, summary: g.summary, constraints: safeParse(g.constraints) || []
+        title: R(g.title), profile: R(g.profile), weekly_hours: g.weekly_hours, deadline: g.deadline,
+        materials: R(g.materials), summary: R(g.summary),
+        constraints: (safeParse(g.constraints) || []).map(x => Object.assign({}, x, { text: R(x && x.text) }))
       },
       counts: { nodes: nodes.length, sources: sources.length, digests: digests.length },
       nodes: nodes.map(n => ({
-        id: n.id, parent_id: n.parent_id, level: n.level, sort_order: n.sort_order, title: n.title,
-        detail: n.detail, artifact: n.artifact, acceptance: n.acceptance, hours: n.hours, status: n.status,
-        sources: safeParse(n.sources) || []
+        id: n.id, parent_id: n.parent_id, level: n.level, sort_order: n.sort_order, title: R(n.title),
+        detail: R(n.detail), artifact: R(n.artifact), acceptance: R(n.acceptance), hours: n.hours, status: n.status,
+        sources: (safeParse(n.sources) || []).map(s2 => (redact && s2 && typeof s2 === 'object'
+          ? Object.assign({}, s2, { name: R(s2.name), note: R(s2.note) }) : s2))
       })),
-      sources: sources.map(x => ({
-        title: x.title, url: x.url, site: x.site, kind: x.kind, snippet: x.snippet,
-        content: x.content, published_at: x.published_at, quality: Number(x.quality) || 0
-      })),
+      sources: sources.map(x => {
+        // 用户自己提供的资料里可能含个人隐私（简历/截图文字）：也一并脱敏；网络资料原样保留
+        const own = x.site === '用户提供的图片' || x.site === '导入的资料' || x.site === '手动添加' || x.site === '对话添加';
+        return {
+          title: R(x.title), url: x.url, site: x.site, kind: x.kind,
+          snippet: own ? R(x.snippet) : x.snippet,
+          content: own ? R(x.content) : x.content,
+          published_at: x.published_at, quality: Number(x.quality) || 0
+        };
+      }),
       digests: digests.map(d => ({ topic: d.topic, title: d.title, content: d.content }))
     };
     const fname = encodeURIComponent('规划分享-' + String(g.title).replace(/[\\/:*?"<>|]/g, '').slice(0, 20) + '.share.json');
