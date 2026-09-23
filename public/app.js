@@ -30,6 +30,8 @@ function toggleTheme() {
   localStorage.setItem('sierxing-theme', currentThemeEff() === 'dark' ? 'light' : 'dark');
   applyTheme();
 }
+/* 教程页跟随主题：切换后重新渲染 */
+try { const rr0 = parseRoute(); if (rr0.view === 'tutorial') renderTutorialPage(rr0.id); } catch (e) {}
 applyTheme();
 
 /* 单段文本的行内 Markdown（**粗体** / `代码` / 链接 / *斜体*）→ HTML（先转义，安全） */
@@ -1004,6 +1006,29 @@ function taskStart() {
   taskTimer = setInterval(taskPoll, 2000);
 }
 
+/* 让生成的 HTML 教程跟随应用主题（黑夜/白天） */
+function tutThemedHTML(html) {
+  const dark = (typeof currentThemeEff === 'function' && currentThemeEff() === 'dark');
+  const v = dark
+    ? { bg: '#14131c', fg: '#e8e7f2', card: '#1c1b26', border: '#2e2c3d', muted: '#9c9ab0', code: '#191822', accent: '#8b9cff' }
+    : { bg: '#ffffff', fg: '#1f2430', card: '#f8f9fb', border: '#e5e7eb', muted: '#6b7280', code: '#f3f4f6', accent: '#4f46e5' };
+  const css = `<style id="sx-theme">
+  html,body{background:${v.bg} !important;color:${v.fg} !important;}
+  body{--bg:${v.bg};--fg:${v.fg};--card:${v.card};--border:${v.border};--muted:${v.muted};}
+  a{color:${v.accent} !important;}
+  pre,code,pre code{background:${v.code} !important;color:${v.fg} !important;border-color:${v.border} !important;}
+  blockquote{border-left-color:${v.border} !important;color:${v.muted} !important;background:${v.card} !important;}
+  table,th,td{border-color:${v.border} !important;}
+  th{background:${v.card} !important;}
+  hr{border-color:${v.border} !important;}
+  .tip,.note,.warn,.card,.box,section>div{background:${v.card} !important;border-color:${v.border} !important;color:${v.fg} !important;}
+  </style>`;
+  const t = String(html || '');
+  if (/<\/head>/i.test(t)) return t.replace(/<\/head>/i, css + '</head>');
+  if (/<body[^>]*>/i.test(t)) return t.replace(/<body[^>]*>/i, m => m + css);
+  return css + t;
+}
+
 /* ===== AI 助手（右侧侧边栏） ===== */
 function opChipHTML(o) {
   const t = String(o.title || '').slice(0, 40);
@@ -1717,7 +1742,7 @@ async function renderTutorialPage(tid) {
       ? `<iframe class="tutFrame" id="tutFrame" sandbox="allow-same-origin allow-popups"></iframe>`
       : `<div class="tutBody mdBody">${mdToHTML(t.content)}</div>`}
   </div>`;
-  if (isHtml) document.getElementById('tutFrame').setAttribute('srcdoc', t.content);
+  if (isHtml) document.getElementById('tutFrame').setAttribute('srcdoc', tutThemedHTML(t.content));
   document.getElementById('tutDl').addEventListener('click', () => {
     const blob = new Blob([t.content], { type: isHtml ? 'text/html;charset=utf-8' : 'text/markdown;charset=utf-8' });
     const a = document.createElement('a');
