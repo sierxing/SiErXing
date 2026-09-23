@@ -2075,6 +2075,7 @@ function applyChatOps(goalId, ops) {
         if (!text) { errors.push('约束内容为空'); continue; }
         const g2 = db.prepare('SELECT constraints FROM goals WHERE id = ?').get(goalId);
         const list = safeParse(g2.constraints) || [];
+        if (list.some(x => String(x.text || '').trim() === text)) { errors.push('这条约束已经有了'); continue; }
         list.push({ text, created_at: nowISO(), source: 'chat' });
         db.prepare('UPDATE goals SET constraints = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(list), nowISO(), goalId);
         applied.push({ op: 'constraint', title: text.slice(0, 60) });
