@@ -1205,6 +1205,67 @@ document.addEventListener('click', async e => {
     sb.disabled = false; sb.textContent = '💾 保存';
   }
 });
+/* ===== 教程大纲（侧边栏）：点击跳转 + 当前章节高亮 + 阅读进度 ===== */
+function tutTocBuild(tid) {
+  const old = document.getElementById('tutToc'); if (old) old.remove();
+  const body = document.querySelector('.tutBody') || document.querySelector('.mdBody');
+  if (!body) return;
+  const heads = [...body.querySelectorAll('h1,h2,h3,h4')].filter(h => (h.textContent || '').trim());
+  if (heads.length < 2) return;   // 章节太少就不显示
+  const toc = document.createElement('div');
+  toc.id = 'tutToc';
+  toc.className = 'tutToc';
+  toc.innerHTML = `<div class="tutTocTitle">📑 目录（${heads.length}）</div>`
+    + heads.map((h, i) => {
+      h.id = 'tutsec-' + i;
+      const lv = Number(h.tagName.slice(1));
+      return `<a class="tutTocItem lv${Math.min(lv, 4)}" data-toc="${i}">${esc((h.textContent || '').trim().slice(0, 40))}</a>`;
+    }).join('')
+    + `<div class="tutTocProg" id="tutTocProg">阅读位置：—</div>`;
+  document.body.appendChild(toc);
+  toc.querySelectorAll('[data-toc]').forEach(a => a.addEventListener('click', () => {
+    const h = document.getElementById('tutsec-' + a.getAttribute('data-toc'));
+    if (!h) return;
+    const y = h.getBoundingClientRect().top + window.scrollY - 110;   // 给吸顶顶栏留位置
+    window.scrollTo({ top: y, behavior: 'smooth' });
+  }));
+  // 滚动时高亮当前章节 + 显示阅读进度
+  let raf = 0;
+  const onScroll = () => {
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      let cur = 0;
+      for (let i = 0; i < heads.length; i++) {
+        const r = heads[i].getBoundingClientRect();
+        if (r.top <= 140) cur = i; else break;
+      }
+      toc.querySelectorAll('[data-toc]').forEach(a => a.classList.toggle('active', Number(a.getAttribute('data-toc')) === cur));
+      const prog = document.getElementById('tutTocProg');
+      if (prog) {
+        const h = window.scrollY + window.innerHeight;
+        const pct = Math.min(100, Math.round(h / document.body.scrollHeight * 100));
+        prog.textContent = '阅读位置：第 ' + (cur + 1) + '/' + heads.length + ' 节 · 全文 ' + pct + '%';
+      }
+      try { localStorage.setItem('sierxing-tut-pos-' + tid, String(cur)); } catch (e) {}
+    });
+  };
+  window.removeEventListener('scroll', window.__tutTocScroll || (() => {}));
+  window.__tutTocScroll = onScroll;
+  window.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+  // 回到上次阅读位置
+  try {
+    const saved = Number(localStorage.getItem('sierxing-tut-pos-' + tid) || 0);
+    if (saved > 0 && saved < heads.length) {
+      setTimeout(() => {
+        const h = document.getElementById('tutsec-' + saved);
+        if (h) window.scrollTo({ top: h.getBoundingClientRect().top + window.scrollY - 110, behavior: 'smooth' });
+      }, 400);
+    }
+  } catch (e) {}
+}
+
 /* ===== 教程：让 AI 修改（全局委托，避免绑定时机问题） ===== */
 const TUTEDIT_BOUND = true;
 document.addEventListener('click', async e => {
