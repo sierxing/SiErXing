@@ -355,6 +355,7 @@ function streamJDImage(req, res, goal, dataUrl, note, reuseSourceId) {
           if (looksNoVision(txt)) throw noVisionError();
           data = extractJSON(txt);
         } catch (e) {
+      if (tk) tk.fail(e);
           console.log('[jdfile] 重试失败:', e.message);
           if (/不支持读图/.test(e.message)) throw e;
         }
@@ -401,6 +402,7 @@ function streamJDImage(req, res, goal, dataUrl, note, reuseSourceId) {
       } catch (e2) {}
       send({ error: e.message });
     }
+    if (tk) tk.done({ ok: true });
     res.end();
   })();
 }
