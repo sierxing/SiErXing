@@ -1602,8 +1602,15 @@ body.railWide .mapPage{left:236px;}
 .tutEditorBar{font-size:12.5px; color:var(--muted); margin-bottom:6px;}
 #tutEditor{width:100%; min-height:62vh; border:1px solid var(--border); border-radius:10px; padding:12px; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12.8px; line-height:1.7; background:var(--card); color:var(--text); resize:vertical;}
 
-/* ============ 教程书签 ============ */
-.tutBmForm{display:flex; gap:8px; margin-bottom:8px; flex-wrap:wrap;}
-.tutBmForm input{flex:1; min-width:140px; border:1px solid var(--border); background:var(--card); color:var(--text); border-radius:8px; padding:6px 10px; font-size:12.5px; font-family:inherit;}
-.tutBmRow{display:flex; align-items:center; gap:8px; flex-wrap:wrap; border:1px solid var(--border); border-radius:9px; padding:7px 10px; margin-top:6px; background:var(--bg);}
-.tutBmSec{font-size:12.5px; font-weight:600;}
+
+/* ============ 组件页：分类模块 + 卡片 ============ */
+.cmpGrid{display:grid; grid-template-columns:repeat(auto-fill,minmax(310px,1fr)); gap:10px;}
+.cmpCard{border:1px solid var(--border); border-radius:12px; padding:12px 13px; background:var(--bg); display:flex; flex-direction:column; gap:8px; transition:.15s;}
+.cmpCard:hover{border-color:var(--accent-border); box-shadow:var(--shadow-sm);}
+.cmpCard.isCore{border-style:dashed;}
+.cmpCardTop{display:flex; align-items:flex-start; gap:9px;}
+.cmpCardTop .cmpName{flex:1; min-width:0;}
+.cmpCardTop .cmpOps{flex:none; display:flex; gap:6px; align-items:center;}
+.cmpCard .cmpDesc{font-size:12.5px; color:var(--muted); line-height:1.65;}
+.cmpCard .cmpCatRow{display:flex; align-items:center; gap:8px;}
+.cmpCardOps{display:flex; gap:8px;}

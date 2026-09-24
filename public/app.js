@@ -704,7 +704,7 @@ function showNodePanel(id, rerender) {
       <div class="npSrcTitle">📘 学习教程（${tuts.length}）</div>
       ${tuts.length ? tuts.map(t => `<a class="npTutItem" href="#/t/${t.id}"><span class="npTutName">${esc(t.title)}</span><span class="chip gray">${t.format === 'html' ? 'HTML' : 'MD'}</span></a>`).join('') : '<div class="muted" style="font-size:12.5px;">还没有教程：生成一份「掌握该任务知识点」的完整教程</div>'}
       <button class="btn small primary" id="npTutBtn" style="margin-top:8px;">📘 生成完整教程（HTML / Markdown）</button>
-      <label class="btn small" style="margin-top:8px;" title="把写好的 .md / .html 文件导入为该节点的教程">⬆ 导入教程<input type="file" id="npTutFile" accept=".md,.markdown,.html,.htm,.txt" hidden></label>
+      ${(compOn('tutbookmark') && window.TutBookmark) ? window.TutBookmark.nodeImportHTML() : ''}
     </div>
     <div class="npAdjust">
       <div class="npSrcTitle">💬 对当前划分有意见？直接告诉 AI，它会按你的意见调整</div>
@@ -757,23 +757,7 @@ function showNodePanel(id, rerender) {
     saveNodeSources(list);
   });
   document.getElementById('npClose').addEventListener('click', closePanel);
-  const tutFile = document.getElementById('npTutFile');
-  if (tutFile) tutFile.addEventListener('change', async () => {
-    const file = (tutFile.files || [])[0];
-    tutFile.value = '';
-    if (!file) return;
-    const ext = String(file.name || '').split('.').pop().toLowerCase();
-    const format = (ext === 'html' || ext === 'htm') ? 'html' : 'md';
-    try {
-      const text = await file.text();
-      if (!text.trim()) return toast('文件是空的');
-      const r = await api('/api/nodes/' + id + '/tutorials/import', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: String(file.name).replace(/\.[^.]+$/, '').slice(0, 100), format, content: text }) });
-      state.goal = r.goal;
-      toast('已导入教程');
-      showNodePanel(id, rerenderFn);
-    } catch (e) { toast(e.message); }
-  });
+  if (window.TutBookmark && compOn('tutbookmark')) window.TutBookmark.bindNodeImport(div, id, (r) => { state.goal = r.goal; showNodePanel(id, rerenderFn); });
   const tutBtn = document.getElementById('npTutBtn');
   if (tutBtn) tutBtn.addEventListener('click', () => { div.remove(); showTutorialDialog(id); });
   const adjBtn = document.getElementById('npAdjustBtn');
@@ -1291,51 +1275,6 @@ function tutTocBuild(tid) {
 }
 
 /* ===== 教程书签：按章节打标签（记录位置/重点，可跳回） ===== */
-function tutBmJump(idx) {
-  const h = document.getElementById('tutsec-' + idx);
-  if (!h) return toast('该章节不在当前渲染中');
-  window.scrollTo({ top: h.getBoundingClientRect().top + window.scrollY - 110, behavior: 'smooth' });
-}
-async function tutBmInit(tid) {
-  const listEl = document.getElementById('tutBmList');
-  if (!listEl) return;
-  const load = async () => {
-    let items = [];
-    try { const r = await api('/api/tutorials/' + tid + '/bookmarks'); items = r.bookmarks || []; } catch (e) {}
-    listEl.innerHTML = items.length ? items.map(b => `<div class="tutBmRow">
-      <span class="chip">${esc(b.label || '标签')}</span>
-      <span class="tutBmSec">${esc(b.section_title || ('第 ' + (Number(b.section_idx) + 1) + ' 节'))}</span>
-      ${b.note ? `<span class="muted" style="font-size:11.5px;">${esc(b.note)}</span>` : ''}
-      <div class="spacer"></div>
-      <button class="btn tiny" data-bm-go="${b.section_idx}">跳转</button>
-      <button class="btn tiny danger" data-bm-del="${b.id}">删除</button>
-    </div>`).join('') : '<span class="muted" style="font-size:12.5px;">还没有标签：在上面点「＋ 标记当前章节」（会自动定位到你正在读的章节）</span>';
-    listEl.querySelectorAll('[data-bm-go]').forEach(x => x.addEventListener('click', () => tutBmJump(Number(x.getAttribute('data-bm-go')))));
-    listEl.querySelectorAll('[data-bm-del]').forEach(x => x.addEventListener('click', async () => {
-      if (!confirm('删除这个标签？')) return;
-      try { await api('/api/bookmarks/' + x.getAttribute('data-bm-del'), { method: 'DELETE' }); load(); } catch (e) { toast(e.message); }
-    }));
-  };
-  await load();
-  const addBtn = document.getElementById('tutBmAdd');
-  if (addBtn) addBtn.addEventListener('click', async () => {
-    let cur = window.__tutCur || { idx: 0, title: '' };
-    if (!cur.title) {   // 目录还没建好时的兜底：读高亮目录项
-      const act = document.querySelector('#tutToc .tutTocItem.active');
-      if (act) cur = { idx: Number(act.getAttribute('data-toc')) || 0, title: act.textContent.trim().slice(0, 80) };
-    }
-    const label = (document.getElementById('tutBmLabel').value || '').trim();
-    const note = (document.getElementById('tutBmNote').value || '').trim();
-    try {
-      await api('/api/tutorials/' + tid + '/bookmarks', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ section_idx: cur.idx || 0, section_title: cur.title || '', label, note }) });
-      document.getElementById('tutBmLabel').value = '';
-      document.getElementById('tutBmNote').value = '';
-      toast('已标记：' + (label || cur.title || ('第 ' + ((cur.idx || 0) + 1) + ' 节')));
-      load();
-    } catch (e) { toast(e.message); }
-  });
-}
 /* ===== 教程：让 AI 修改（全局委托，避免绑定时机问题） ===== */
 const TUTEDIT_BOUND = true;
 document.addEventListener('click', async e => {
@@ -2086,19 +2025,11 @@ async function renderTutorialPage(tid) {
     ${isHtml
       ? `<iframe class="tutFrame" id="tutFrame" sandbox="allow-same-origin allow-popups"></iframe>`
       : `<div class="tutBody mdBody">${mdToHTML(t.content)}</div>`}
-    ${compOn('tutbookmark') ? `<div class="sec" id="tutBmSec">
-      <div class="secTitle">🔖 阅读标签 <span class="muted" style="font-weight:400;font-size:11.5px;">· 记录读到哪、标重点/待复习（组件可开关）</span>
-        <div class="spacer"></div><button class="btn tiny primary" id="tutBmAdd">＋ 标记当前章节</button></div>
-      <div class="tutBmForm">
-        <input id="tutBmLabel" placeholder="标签（如：已读 / 重点 / 待复习，默认用章节名）">
-        <input id="tutBmNote" placeholder="备注（可选）">
-      </div>
-      <div id="tutBmList"><span class="muted" style="font-size:12.5px;">加载中…</span></div>
-    </div>` : ''}
+    ${(compOn('tutbookmark') && window.TutBookmark) ? window.TutBookmark.sectionHTML() : ''}
   </div>`;
   if (isHtml) document.getElementById('tutFrame').setAttribute('srcdoc', tutThemedHTML(t.content));
   setTimeout(() => { try { tutTocBuild(tid); } catch (e) {} }, 200);   // 侧边目录大纲
-  tutBmInit(tid);
+  if (window.TutBookmark && compOn('tutbookmark')) window.TutBookmark.init(tid);
   document.getElementById('tutDl').addEventListener('click', () => {
     const blob = new Blob([t.content], { type: isHtml ? 'text/html;charset=utf-8' : 'text/markdown;charset=utf-8' });
     const a = document.createElement('a');
@@ -3894,37 +3825,62 @@ async function renderComponentsPage() {
   state.componentCats = catsRes;                 // 分类实时刷新（新建后立即出现）
   applyComponentStyles(r.styles || []);
   const comps = r.components || [];
-  const core = comps.filter(c => c.scope === 'core');
-  const base = comps.filter(c => c.scope === 'base');
-  const themes = comps.filter(c => c.kind === 'theme');
-  const extras = comps.filter(c => c.scope !== 'core' && c.scope !== 'base' && c.kind !== 'theme');
+  // 按分类分组：每个分类是一个模块，卡片放在所属模块里；改分类后卡片会真正搬过去
+  const groups = {};
+  for (const c of comps) { const k = c.category || '其它'; (groups[k] = groups[k] || []).push(c); }
+  const customOrder = (state.componentCats && state.componentCats.categories) || [];
+  const catRank = k => k === '核心组件' ? 0 : k === '基础功能组件' ? 1 : 99;
+  const catOrder = Object.keys(groups).concat(customOrder.filter(k => !groups[k])).filter((k, i, a) => a.indexOf(k) === i).sort((a, b) => {
+    const ra = catRank(a), rb = catRank(b);
+    if (ra !== rb) return ra - rb;
+    const ia = customOrder.indexOf(a), ib = customOrder.indexOf(b);
+    const na = ia < 0 ? 999 : ia, nb = ib < 0 ? 999 : ib;
+    if (na !== nb) return na - nb;
+    if (a === '其它') return 1;
+    if (b === '其它') return -1;
+    return String(a).localeCompare(String(b), 'zh');
+  });
   const sw = (c) => `<label class="cmpSwitch" title="${c.scope === 'core' ? '核心组件不可关闭' : '开启 / 关闭'}">
       <input type="checkbox" data-cmp="${esc(c.id)}" ${state.components[c.id] !== false ? 'checked' : ''} ${c.scope === 'core' ? 'disabled' : ''}>
       <span class="cmpSlider"></span>
     </label>`;
-  const row = (c, extraRight) => `<div class="cmpRow ${c.scope === 'core' ? 'isCore' : ''}">
+  const catOptions = [...new Set([...customOrder, ...Object.keys(groups), '其它'])];
+const card = (c) => `<div class="cmpCard ${c.scope === 'core' ? 'isCore' : ''}">
+    <div class="cmpCardTop">
       <span class="cmpIcon">${c.icon || '✨'}</span>
-      <div class="cmpMain">
-        <div class="cmpName">${esc(c.name)}
-          ${c.scope === 'core' ? '<span class="chip gray">核心 · 不可关闭</span>' : ''}
-          ${c.kind === 'theme' ? '<span class="chip gray">主题皮肤</span>' : ''}
-          ${c.builtin ? '' : '<span class="chip">第三方组件</span>'}
-          ${c.version ? `<span class="cmpVer">v${esc(c.version)}</span>` : ''}
-          ${c.author ? `<span class="cmpAuthor">by ${esc(c.author)}</span>` : ''}
-        </div>
-        <div class="cmpDesc">${esc(c.desc || '')}</div>
-        <div class="cmpCatRow">
-          <span class="cmpCatLabel">分类</span>
-          <select class="cmpCatSel" data-comp-cat="${esc(c.id)}">
-            ${(state.componentCats && state.componentCats.categories || []).concat(['其它']).map(k => `<option value="${esc(k)}" ${k === (c.category || '其它') ? 'selected' : ''}>${esc(k)}</option>`).join('')}
-          </select>
-        </div>
-        ${c.builtin ? '' : `<div class="cmpFiles">服务端 server/plugins/${esc(c.id)}.js${c.client ? ` · 前端 public/plugins/${esc(c.id)}.js` : ''}${c.hasStyle ? ` · 样式 public/plugins/${esc(c.id)}.css` : ''}</div>`}
+      <div class="cmpName">${esc(c.name)}
+        ${c.scope === 'core' ? '<span class="chip gray">核心 · 不可关闭</span>' : ''}
+        ${c.kind === 'theme' ? '<span class="chip gray">主题皮肤</span>' : ''}
+        ${c.builtin ? '' : '<span class="chip">第三方组件</span>'}
+        ${c.goalToggle && c.scope !== 'core' ? '<span class="chip gray" title="可在新建目标时勾选、也可在目标页开关">按目标启用</span>' : ''}
+        ${c.version ? `<span class="cmpVer">v${esc(c.version)}</span>` : ''}
+        ${c.author ? `<span class="cmpAuthor">by ${esc(c.author)}</span>` : ''}
       </div>
-      <div class="cmpOps">${extraRight || ''}
+      <div class="cmpOps">
         <button class="btn tiny cmpPin" data-cmp-pin="${esc(c.id)}" title="${(state.componentPins || []).includes(c.id) ? '移出常用' : '加入常用（侧边栏置顶）'}">${(state.componentPins || []).includes(c.id) ? '★' : '☆'}</button>
         ${sw(c)}</div>
-    </div>`;
+    </div>
+    <div class="cmpDesc">${esc(c.desc || '')}</div>
+    <div class="cmpCatRow">
+      <span class="cmpCatLabel">分类</span>
+      <select class="cmpCatSel" data-comp-cat="${esc(c.id)}">
+        ${catOptions.map(k => `<option value="${esc(k)}" ${k === (c.category || '其它') ? 'selected' : ''}>${esc(k)}</option>`).join('')}
+      </select>
+    </div>
+    ${c.builtin ? '' : `<div class="cmpCardOps">
+      <a class="btn tiny" href="/api/components/${esc(c.id)}/export">导出</a>
+      <button class="btn tiny danger" data-cmp-del="${esc(c.id)}">卸载</button>
+    </div>
+    <div class="cmpFiles">服务端 server/plugins/${esc(c.id)}.js${c.client ? ` · 前端 public/plugins/${esc(c.id)}.js` : ''}${c.hasStyle ? ` · 样式 public/plugins/${esc(c.id)}.css` : ''}</div>`}
+  </div>`;
+const modHint = (k, list) => {
+  const hints = [];
+  if (k === '核心组件') hints.push('应用的基础能力，无法关闭。');
+  if (list.some(c => c.kind === 'theme')) hints.push('主题组件通过覆盖设计变量换肤（同时只生效一个）；开启即立即应用，关掉则回到默认外观。');
+  if (list.some(c => !c.builtin)) hints.push('独立文件组件，可以导出分享给别人，也可以卸载。带「按目标启用」的组件可在新建目标时勾选。');
+  if (!hints.length) hints.push('默认全部开启；不需要的功能可以关掉，界面入口与接口会一并隐藏。');
+  return `<p class="hint" style="margin:0 0 8px;">${hints.join('')}</p>`;
+};
   let html = `<div class="page">
     <div class="pageHead">
       <a class="back js-back" href="#/">← 返回</a>
@@ -3943,23 +3899,10 @@ async function renderComponentsPage() {
         <button class="btn small primary" id="catAddBtn">新建分类</button>
       </div>
     </div>
-    <div class="sec"><div class="secTitle">核心组件</div>
-      <p class="hint" style="margin:0 0 8px;">应用的基础能力，无法关闭。</p>
-      ${core.map(c => row(c)).join('')}
-    </div>
-    <div class="sec"><div class="secTitle">基础功能组件</div>
-      <p class="hint" style="margin:0 0 8px;">默认全部开启；不需要的功能可以关掉，界面入口与接口会一并隐藏。</p>
-      ${base.map(c => row(c)).join('')}
-    </div>
-    <div class="sec"><div class="secTitle">主题与界面样式</div>
-      <p class="hint" style="margin:0 0 8px;">主题组件通过覆盖设计变量换肤（同时只生效一个）；开启即立即应用，关掉则回到默认外观。</p>
-      ${themes.map(c => row(c)).join('') || '<div class="muted" style="font-size:13px;">还没有主题组件</div>'}
-    </div>
-    <div class="sec"><div class="secTitle">扩展组件</div>
-      <p class="hint" style="margin:0 0 8px;">独立文件组件，可以导出分享给别人，也可以卸载。带「按目标启用」的组件可在新建目标时勾选。</p>
-      ${extras.map(c => row(c, `${c.goalToggle ? '<span class="chip gray" title="可在新建目标时勾选、也可在目标页开关">按目标启用</span>' : ''}
-        ${c.builtin ? '' : `<a class="btn tiny" href="/api/components/${esc(c.id)}/export">导出</a><button class="btn tiny danger" data-cmp-del="${esc(c.id)}">卸载</button>`}`)).join('') || '<div class="muted" style="font-size:13px;">还没有扩展组件</div>'}
-    </div>
+    ${catOrder.map(k => `<div class="sec" data-catmod="${esc(k)}"><div class="secTitle">${esc(k)}<span class="muted" style="font-weight:400;font-size:12px;">（${(groups[k] || []).length}）</span></div>
+      ${modHint(k, groups[k] || [])}
+      ${(groups[k] || []).length ? `<div class="cmpGrid">${groups[k].map(c => card(c)).join('')}</div>` : '<div class="muted" style="font-size:13px;">（空分类：把某个组件的分类改到这里，它就会搬过来）</div>'}
+    </div>`).join('')}
     <div class="sec"><div class="secTitle">分享组件</div>
       <p class="hint" style="line-height:1.9;">
         · 导出：点组件的「导出」得到 <code>*.component.json</code> 文件（含服务端代码、前端代码与样式），发给别人即可<br>

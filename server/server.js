@@ -119,17 +119,6 @@ CREATE TABLE IF NOT EXISTS tutorials (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS tutorial_bookmarks (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  tutorial_id INTEGER NOT NULL,
-  goal_id INTEGER NOT NULL DEFAULT 0,
-  node_id INTEGER NOT NULL DEFAULT 0,
-  section_idx INTEGER NOT NULL DEFAULT 0,
-  section_title TEXT NOT NULL DEFAULT '',
-  label TEXT NOT NULL DEFAULT '',
-  note TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL
-);
 CREATE TABLE IF NOT EXISTS sources (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   goal_id INTEGER NOT NULL,
@@ -185,8 +174,6 @@ const BUILTIN_COMPONENTS = [
     desc: '右侧对话侧边栏：随时用自然语言让 AI 修改路线图（支持多会话与模型切换）' },
   { id: 'tutorial',    name: '学习教程',     icon: '📘', scope: 'base', defaultEnabled: true, category: '基础功能组件', order: 15,
     desc: '为任意任务点生成“真正学会”的完整教程（HTML / Markdown，含练习与自测）' },
-    { id: 'tutbookmark', name: '教程书签',     icon: '🔖', scope: 'base', defaultEnabled: true, category: '基础功能组件', order: 16,
-      desc: '在教程里按章节打标签：记录读到哪、标重点/待复习，点击跳回对应章节（随多端同步）' }
 ];
 
 function componentSettings() {
@@ -3091,47 +3078,6 @@ function redactText(raw) {
       return sendJSON(res, 200, { ok: true });
     }
   }
-  const tutBmListMatch = p.match(/^\/api\/tutorials\/(\d+)\/bookmarks$/);
-  if (tutBmListMatch && method === 'GET') {
-    return sendJSON(res, 200, { bookmarks: db.prepare('SELECT * FROM tutorial_bookmarks WHERE tutorial_id = ? ORDER BY id').all(Number(tutBmListMatch[1])) });
-  }
-  if (tutBmListMatch && method === 'POST') {
-    const tid = Number(tutBmListMatch[1]);
-    const tut = db.prepare('SELECT * FROM tutorials WHERE id = ?').get(tid);
-    if (!tut) return sendJSON(res, 404, { error: '教程不存在' });
-    const body = await readBody(req);
-    const label = String(body.label || '').trim().slice(0, 60);
-    const sectionTitle = String(body.section_title || body.sectionTitle || '').trim().slice(0, 80);
-    const idx = Math.max(0, Number(body.section_idx ?? body.sectionIdx) || 0);
-    if (!label && !sectionTitle) return sendJSON(res, 400, { error: '请填写标签或章节' });
-    const r = db.prepare('INSERT INTO tutorial_bookmarks (tutorial_id, goal_id, node_id, section_idx, section_title, label, note, created_at) VALUES (?,?,?,?,?,?,?,?)')
-      .run(tid, tut.goal_id, tut.node_id, idx, sectionTitle, label || sectionTitle, String(body.note || '').trim().slice(0, 300), nowISO());
-    backup();
-    return sendJSON(res, 200, { ok: true, id: Number(r.lastInsertRowid) });
-  }
-  const tutBmDelMatch = p.match(/^\/api\/bookmarks\/(\d+)$/);
-  if (tutBmDelMatch && method === 'DELETE') {
-    db.prepare('DELETE FROM tutorial_bookmarks WHERE id = ?').run(Number(tutBmDelMatch[1]));
-    return sendJSON(res, 200, { ok: true });
-  }
-  const tutImpMatch = p.match(/^\/api\/nodes\/(\d+)\/tutorials\/import$/);
-  if (tutImpMatch && method === 'POST') {
-    const nid = Number(tutImpMatch[1]);
-    const n = db.prepare('SELECT * FROM nodes WHERE id = ?').get(nid);
-    if (!n) return sendJSON(res, 404, { error: '节点不存在' });
-    const body = await readBody(req);
-    const format = String(body.format || 'md').toLowerCase() === 'html' ? 'html' : 'md';
-    const content = String(body.content || '');
-    if (!content.trim()) return sendJSON(res, 400, { error: '内容不能为空' });
-    if (content.length > 300000) return sendJSON(res, 400, { error: '内容过大（30 万字符以内）' });
-    const title = String(body.title || '').trim().slice(0, 120) || (String(n.title || '').slice(0, 80) + '（导入的教程）');
-    const r = db.prepare('INSERT INTO tutorials (goal_id, node_id, title, format, content, created_at, updated_at) VALUES (?,?,?,?,?,?,?)')
-      .run(n.goal_id, nid, title, format, content, nowISO(), nowISO());
-    db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), n.goal_id);
-    backup();
-    return sendJSON(res, 200, { ok: true, id: Number(r.lastInsertRowid), goal: getGoal(n.goal_id) });
-  }
-
   const planTasksMatch = p.match(/^\/api\/goals\/(\d+)\/plan\/tasks$/);
   if (planTasksMatch && method === 'POST') {
     const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(Number(planTasksMatch[1]));
