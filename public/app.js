@@ -996,6 +996,32 @@ function taskMarkNodes() {
     }
   });
 }
+/* 教程页：刚结束的任务里有当前这份的更新 → 无感刷新（保滚动；手动编辑中不覆盖；失败给明确提示） */
+async function refreshTutorialIfUpdated(tid, finished) {
+  let detail = null;
+  try { detail = await api('/api/tutorials/' + tid); } catch (e) { return { refreshed: false }; }
+  const nodeId = detail && detail.node ? Number(detail.node.id) : 0;
+  const rel = (finished || []).filter(t => t.type === 'tutorial' && (
+    (t.result && Number(t.result.tutorialId) === Number(tid)) || (nodeId && Number(t.nodeId) === nodeId)));
+  const done = rel.filter(t => t.status === 'done');
+  const failed = rel.filter(t => t.status === 'failed');
+  if (!done.length && !failed.length) return { refreshed: false };
+  if (!done.length) {
+    toast('❌ 教程更新失败：' + String((failed[0] && failed[0].error) || '未知错误').slice(0, 140));
+    return { refreshed: false };
+  }
+  if (document.getElementById('tutEditor')) {
+    toast('✅ AI 已生成新版教程（你正在手动编辑，已保留你的草稿：取消编辑后即看新版）');
+    return { refreshed: false };
+  }
+  const serverUpdated = (detail.tutorial && detail.tutorial.updated_at) || '';
+  if (state.tutUpdatedAt && serverUpdated && serverUpdated === state.tutUpdatedAt) return { refreshed: false };  // 同一目标别的教程的任务
+  const y = window.scrollY;
+  try { await renderTutorialPage(tid); } catch (e) { toast(e.message); return { refreshed: false }; }
+  try { window.scrollTo(0, y); } catch (e) {}
+  toast('✅ 教程已更新');
+  return { refreshed: true };
+}
 let taskTimer = null;
 async function taskPoll() {
   try {
@@ -1014,14 +1040,22 @@ async function taskPoll() {
       if (['done', 'failed', 'cancelled'].includes(t.status)) known['done_' + t.id] = 1;
     }
     if (finishedNow.length && gid) {
-      const okCount = finishedNow.filter(t => t.status === 'done').length;
-      if (okCount) toast('✅ ' + okCount + ' 个 AI 任务完成，界面已更新');
-      try { await loadGoal(gid); } catch (e) {}
       const rr = parseRoute();
-      if (rr.view === 'goal' || rr.view === 'map' || rr.view === 'tutorial') rerenderCurrent();
+      if (rr.view === 'tutorial' && rr.id) {
+        // 教程页：只刷当前这份（别家任务不打扰阅读），其它完成任务照常提示
+        const res = await refreshTutorialIfUpdated(Number(rr.id), finishedNow);
+        const others = finishedNow.filter(t => t.status === 'done' && t.type !== 'tutorial');
+        if (others.length) toast('✅ ' + others.length + ' 个 AI 任务完成，界面已更新');
+        if (!res.refreshed) { try { await loadGoal(gid); } catch (e) {} }
+      } else {
+        const okCount = finishedNow.filter(t => t.status === 'done').length;
+        if (okCount) toast('✅ ' + okCount + ' 个 AI 任务完成，界面已更新');
+        try { await loadGoal(gid); } catch (e) {}
+        if (rr.view === 'goal' || rr.view === 'map' || rr.view === 'tutorial') rerenderCurrent();
       // 节点面板开着的话，刷新它的内容
       const np = document.getElementById('nodePanel');
       if (np) { const nid = Number(np.getAttribute('data-node')); if (nid) { try { showNodePanel(nid); } catch (e) {} } }
+      }
     }
     if (fresh.length) {
       const first = fresh[0];
@@ -1146,28 +1180,30 @@ let tutEditing = false;
 document.addEventListener('click', async e => {
   const eb = e.target.closest && e.target.closest('#tutManualBtn');
   const sb = e.target.closest && e.target.closest('#tutSaveBtn');
-  if (!eb && !sb) return;
+  const cb0 = e.target.closest && e.target.closest('#tutCancelBtn');
+  if (!eb && !sb && !cb0) return;
   const rr = parseRoute();
   if (rr.view !== 'tutorial') return;
   const tut = ((state.goal && state.goal.tutorials) || []).find(x => Number(x.id) === Number(rr.id));
-  if (!tut) return;
   // 找到教程正文容器（iframe / md 渲染区），只替换它，不动整个页面
   const contentEl = document.getElementById('tutFrame') || document.querySelector('.tutBody') || document.querySelector('.mdBody');
   if (eb) {
     if (tutEditing) return;
     tutEditing = true;
-    // 取最新内容：目标接口只返回教程元信息，正文要按教程 id 单独取
-    let src = '';
+    // 取最新内容：按教程 id 单独取（直接打开/刷新教程页时 state.goal 里没有它，也能编辑）
+    let src = '', fmt = (tut && tut.format) || 'md';
     try {
       const r = await api('/api/tutorials/' + rr.id);
       const fresh = r.tutorial || r;
       if (fresh && fresh.content) src = fresh.content;
+      if (fresh && fresh.format) fmt = fresh.format;
     } catch (e) {}
-    if (!src) src = tut.content || '';
+    if (!src) src = (tut && tut.content) || '';
+    if (!src) { tutEditing = false; toast('教程内容加载失败，请刷新后重试'); return; }
     const wrap = document.createElement('div');
     wrap.id = 'tutEditorWrap';
     wrap.className = 'tutEditorWrap';
-    wrap.innerHTML = '<div class="tutEditorBar">正在编辑（' + (tut.format === 'md' ? 'Markdown' : 'HTML') + '）· 改完点「💾 保存」，或点「取消」放弃</div><textarea id="tutEditor" spellcheck="false"></textarea>';
+    wrap.innerHTML = '<div class="tutEditorBar">正在编辑（' + (fmt === 'md' ? 'Markdown' : 'HTML') + '）· 改完点「💾 保存」，或点「取消」放弃</div><textarea id="tutEditor" spellcheck="false"></textarea>';
     if (contentEl && contentEl.parentNode) {
       contentEl.style.display = 'none';
       contentEl.parentNode.insertBefore(wrap, contentEl);
@@ -1195,7 +1231,8 @@ document.addEventListener('click', async e => {
     const sv2 = document.getElementById('tutSaveBtn'); if (sv2) sv2.hidden = true;
     const cb2 = document.getElementById('tutCancelBtn'); if (cb2) cb2.hidden = true;
     const mb2 = document.getElementById('tutManualBtn'); if (mb2) mb2.textContent = '✎ 手动编辑';
-    try { renderTutorialPage(rr.id); } catch (e2) { try { await loadGoal(state.goal.id); renderTutorialPage(rr.id); } catch (e3) { location.hash = '#/t/' + rr.id; location.reload(); } }
+    if (state.goal) { try { await loadGoal(state.goal.id); } catch (e2) {} }
+    try { await renderTutorialPage(rr.id); } catch (e2) { location.reload(); }
     toast('已取消编辑');
     return;
   }
@@ -1211,7 +1248,7 @@ document.addEventListener('click', async e => {
       const sv3 = document.getElementById('tutSaveBtn'); if (sv3) sv3.hidden = true;
       const cb3 = document.getElementById('tutCancelBtn'); if (cb3) cb3.hidden = true;
       const mb3 = document.getElementById('tutManualBtn'); if (mb3) mb3.textContent = '✎ 手动编辑';
-      try { await loadGoal(state.goal.id); } catch (e2) {}
+      if (state.goal) { try { await loadGoal(state.goal.id); } catch (e2) {} }
       renderTutorialPage(rr.id);
     } catch (err) { toast(err.message); }
     sb.disabled = false; sb.textContent = '💾 保存';
@@ -2077,6 +2114,7 @@ async function renderTutorialPage(tid) {
   const r = await api('/api/tutorials/' + tid);
   const t = r.tutorial, node = r.node, goal = r.goal;
   state.tutGoalId = t ? t.goal_id : 0;   // 侧边栏绑定到该目标的会话（刷新也不丢记录）
+  state.tutUpdatedAt = t ? (t.updated_at || '') : '';   // 任务轮询用它判断内容是否真变了
   const isHtml = t.format === 'html';
   const sizeK = Math.max(1, Math.round((t.content || '').length / 1000));
   app.innerHTML = `<div class="tutPage">
@@ -2196,6 +2234,10 @@ function rerenderCurrent() {
   const r = parseRoute();
   if (r.view === 'map' && state.goal) renderMapPage();
   else if (r.view === 'goal' && state.goal) renderGoal();
+  else if (r.view === 'tutorial' && r.id) {
+    const y = window.scrollY;
+    renderTutorialPage(r.id).then(() => { try { window.scrollTo(0, y); } catch (e) {} }).catch(e => toast(e.message));
+  }
 }
 async function setNodeStatus(id, status) {
   try {
