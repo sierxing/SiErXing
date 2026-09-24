@@ -158,6 +158,10 @@ function setHeader(r) {
 
 async function route() {
   document.querySelectorAll('.ctxMenu').forEach(m => m.remove());
+  // 教程目录大纲只属于教程页：切到别的页面时移除（含滚动监听，避免残留）
+  const oldToc = document.getElementById('tutToc');
+  if (oldToc) oldToc.remove();
+  if (window.__tutTocScroll) { try { window.removeEventListener('scroll', window.__tutTocScroll); } catch (e) {} window.__tutTocScroll = null; }
   const r = parseRoute();
   document.body.classList.toggle('mapMode', r.view === 'map');
   try {
@@ -3593,10 +3597,12 @@ function drawGuide() {
       if (prov === 'opencode' && !model2) { msg.textContent = '请填写模型名（如 opencode-go/deepseek-v4-flash）'; msg.style.color = 'var(--warn)'; return; }
       saveBtn.disabled = true; saveBtn.textContent = '测试中…'; msg.textContent = '';
       try {
-        await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-          ai_provider: prov, ai_base_url: base, ai_api_key: key,
+        const guideBody = {
+          ai_provider: prov, ai_base_url: base,
           model: prov === 'openai' ? model1 : model2, ai_opencode_agent: agent
-        }) });
+        };
+        if (key) guideBody.ai_api_key = key;   // 留空就不发送，避免清空已保存的密钥
+        await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(guideBody) });
         const t = await api('/api/ai/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
         if (t.ok) { msg.textContent = '✅ 连接正常，可以开始用了'; msg.style.color = 'var(--ok)'; toast('AI 已配置好'); }
         else { msg.textContent = '❌ ' + (t.message || '连接失败'); msg.style.color = 'var(--danger)'; }
@@ -4382,7 +4388,7 @@ async function renderSettings() {
           ${AI_PRESETS.map((p, i) => `<button type="button" class="presetChip" data-preset="${i}">${esc(p.name)}</button>`).join('')}
         </div>
         <div class="field"><label>API 地址（Base URL）</label><input id="aiBase" value="${esc(s.ai_base_url || '')}" placeholder="如 https://api.deepseek.com/v1"></div>
-        <div class="field"><label>API 密钥</label><input id="aiKey" type="password" value="${esc(s.ai_api_key || '')}" placeholder="${s.env_keys && s.env_keys.key ? '已通过环境变量提供（留空则用环境变量）' : 'sk-...'}"></div>
+        <div class="field"><label>API 密钥</label><input id="aiKey" type="password" value="" placeholder="${s.ai_api_key ? '已保存（留空则不修改）' : (s.env_keys && s.env_keys.key ? '已通过环境变量提供（留空则用环境变量）' : 'sk-...')}"></div>
         <div class="field"><label>视觉模型（可选：用于识别图片资料）</label>
           <input id="aiVisionModel" list="modelList" value="${esc(s.ai_vision_model || '')}" placeholder="如 qwen-vl-max / gpt-4o / glm-4v-plus">
         </div>
@@ -4439,15 +4445,20 @@ async function renderSettings() {
 
   const pv = document.getElementById('aiProvider');
   const val = id => { const el = document.getElementById(id); return el ? el.value : ''; };
-  const collect = () => ({
-    ai_provider: pv.value,
-    ai_base_url: val('aiBase'),
-    ai_api_key: val('aiKey'),
-    model: val('aiModel'),
-    ai_vision_model: val('aiVisionModel'),
-    ai_timeout_ms: val('aiTimeout'),
-    ai_opencode_agent: val('aiAgent')
-  });
+  const collect = () => {
+    const body = {
+      ai_provider: pv.value,
+      ai_base_url: val('aiBase'),
+      model: val('aiModel'),
+      ai_vision_model: val('aiVisionModel'),
+      ai_timeout_ms: val('aiTimeout'),
+      ai_opencode_agent: val('aiAgent')
+    };
+    // 密钥框留空 = 没碰过，不发送（否则空字符串会清空已保存的密钥）
+    const k = val('aiKey');
+    if (k) body.ai_api_key = k;
+    return body;
+  };
   const save = async () => {
     await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(collect()) });
     state.aiStatus = await api('/api/ai/status').catch(() => null);
