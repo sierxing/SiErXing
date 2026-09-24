@@ -4850,6 +4850,12 @@ function setRailExpanded(v) {
   renderRail();
 }
 function railCompItemHTML(e, pinned, active) {
+  if (e.bm) {
+    return `<button class="railCompItem" data-rail-bm title="打开教程后点我呼出书签面板">
+      <span class="rciIcon">${e.icon}</span>
+      <span class="rciName">${esc(e.label)}</span>
+    </button>`;
+  }
   return `<a class="railCompItem ${active ? 'active' : ''} ${pinned ? 'pinned' : ''}" href="${e.hash}" draggable="true"
       data-rail-comp="${esc(e.id)}" data-cat="${esc(e.category || '其它')}" title="${esc(e.label)}${pinned ? '（常用）' : ''}">
       <span class="rciIcon">${e.icon}</span>
@@ -4864,13 +4870,18 @@ function railCompsHTML() {
   const metaOf = id => (SiErXing.serverPlugins() || []).find(x => x.id === id) || {};
   const entries = ((window.SiErXing && g) ? SiErXing.goalEntries(g) : [])
     .filter(e => { const m = metaOf(e.id); return !(m.builtin && m.scope === 'base'); });
-  // 教程书签没有独立页面（住在每篇教程里），但要在模块里常驻一个入口
+  // 教程书签没有独立页面（住在每篇教程里）：作为普通条目进入分组，和其他组件一样显示图标+全名
   const bmOn = compOn('tutbookmark') && !!window.TutBookmark;
-  if (!entries.length && !bmOn) {
+  if (bmOn) {
+    const bmMeta = metaOf('tutbookmark');
+    entries.unshift({ id: 'tutbookmark', label: '教程书签', icon: bmMeta.icon || '🔖', category: bmMeta.category || '其它', bm: true });
+  }
+  if (!entries.length) {
     return `<button class="railItem railCompToggle" id="railCompToggle" title="本目标还没有扩展组件">
         <span class="railIcon">📦</span><span class="railLabel">组件</span>
       </button>`;
   }
+  if (g && g.id) for (const e of entries) { if (typeof e.hash === 'function') e.hash = e.hash(g.id); }
   const pins = (state.componentPins || []).filter(id => entries.some(e => e.id === id));
   const groups = {};
   for (const e of entries) {
@@ -4885,15 +4896,7 @@ function railCompsHTML() {
     </button>`;
   if (railExpanded()) {
     h += `<div class="railComps" id="railComps">`;
-    if (bmOn) {
-      h += `<div class="railGroup">
-          <div class="railGroupHead">🔖 教程书签</div>
-          <div class="railGroupBody"><button class="railCompItem" data-rail-bm title="打开教程后点我呼出书签面板">
-            <span class="rciIcon">🔖</span>
-            <span class="rciName">书签</span>
-          </button></div>
-        </div>`;
-    }
+
     h += `<div class="railGroup" data-drop-group="pins">
         <div class="railGroupHead">⭐ 常用 <span class="rgHint">（拖到这里置顶）</span></div>
         <div class="railGroupBody" data-group="pins">
