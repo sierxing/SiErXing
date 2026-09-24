@@ -161,6 +161,7 @@ async function route() {
   // 教程目录大纲只属于教程页：切到别的页面时移除（含滚动监听，避免残留）
   const oldToc = document.getElementById('tutToc');
   if (oldToc) oldToc.remove();
+  if (window.TutBookmark) { try { window.TutBookmark.unmount(); } catch (e) {} }
   if (window.__tutTocScroll) { try { window.removeEventListener('scroll', window.__tutTocScroll); } catch (e) {} window.__tutTocScroll = null; }
   const r = parseRoute();
   document.body.classList.toggle('mapMode', r.view === 'map');
@@ -2011,6 +2012,7 @@ async function renderTutorialPage(tid) {
     <div class="tutHead">
       <a class="back" href="#/g/${t.goal_id}">← 返回目标</a>
       <button class="btn small" id="tutEditBtn" title="在右侧对话栏里说你想怎么改，AI 会按意见修改（保留原有内容，只改需要改的地方）">💬 让 AI 修改</button>
+      ${(compOn('tutbookmark') && window.TutBookmark) ? `<button class="btn small" id="tutBmBtn" title="随时标记阅读位置（不用翻到底部）">🔖 标签</button>` : ''}
       <button class="btn small" id="tutManualBtn" title="直接手动编辑并保存（Markdown / HTML 都可以）">✎ 手动编辑</button>
       <button class="btn small primary" id="tutSaveBtn" hidden>💾 保存</button>
       <button class="btn small" id="tutCancelBtn" hidden>取消</button>
@@ -2025,11 +2027,15 @@ async function renderTutorialPage(tid) {
     ${isHtml
       ? `<iframe class="tutFrame" id="tutFrame" sandbox="allow-same-origin allow-popups"></iframe>`
       : `<div class="tutBody mdBody">${mdToHTML(t.content)}</div>`}
-    ${(compOn('tutbookmark') && window.TutBookmark) ? window.TutBookmark.sectionHTML() : ''}
+    {/* 书签为浮动面板（顶栏按钮呼出），此处不占位 */}
   </div>`;
   if (isHtml) document.getElementById('tutFrame').setAttribute('srcdoc', tutThemedHTML(t.content));
   setTimeout(() => { try { tutTocBuild(tid); } catch (e) {} }, 200);   // 侧边目录大纲
-  if (window.TutBookmark && compOn('tutbookmark')) window.TutBookmark.init(tid);
+  if (window.TutBookmark && compOn('tutbookmark')) {
+    window.TutBookmark.badge(tid);
+    const tbb = document.getElementById('tutBmBtn');
+    if (tbb) tbb.addEventListener('click', () => window.TutBookmark.toggle(tid));
+  }
   document.getElementById('tutDl').addEventListener('click', () => {
     const blob = new Blob([t.content], { type: isHtml ? 'text/html;charset=utf-8' : 'text/markdown;charset=utf-8' });
     const a = document.createElement('a');

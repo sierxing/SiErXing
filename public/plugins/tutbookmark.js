@@ -15,61 +15,88 @@
     window.scrollTo({ top: h.getBoundingClientRect().top + window.scrollY - 110, behavior: 'smooth' });
   }
 
-  async function init(tid) {
-    const listEl = document.getElementById('tutBmList');
-    if (!listEl) return;
-    const load = async () => {
-      let items = [];
-      try { const r = await api('/api/tutorials/' + tid + '/bookmarks'); items = r.bookmarks || []; } catch (e) {}
-      listEl.innerHTML = items.length ? items.map(b => `<div class="tutBmRow">
-        <span class="chip">${esc(b.label || '标签')}</span>
-        <span class="tutBmSec">${esc(b.section_title || ('第 ' + (Number(b.section_idx) + 1) + ' 节'))}</span>
-        ${b.note ? `<span class="muted" style="font-size:11.5px;">${esc(b.note)}</span>` : ''}
-        <div class="spacer"></div>
-        <button class="btn tiny" data-bm-go="${b.section_idx}">跳转</button>
-        <button class="btn tiny danger" data-bm-del="${b.id}">删除</button>
-      </div>`).join('') : '<span class="muted" style="font-size:12.5px;">还没有标签：在上面点「＋ 标记当前章节」（会自动定位到你正在读的章节）</span>';
-      listEl.querySelectorAll('[data-bm-go]').forEach(x => x.addEventListener('click', () => jump(Number(x.getAttribute('data-bm-go')))));
-      listEl.querySelectorAll('[data-bm-del]').forEach(x => x.addEventListener('click', async () => {
-        if (!confirm('删除这个标签？')) return;
-        try { await api('/api/bookmarks/' + x.getAttribute('data-bm-del'), { method: 'DELETE' }); load(); } catch (e) { toast(e.message); }
-      }));
-    };
-    await load();
-    const addBtn = document.getElementById('tutBmAdd');
-    if (addBtn) addBtn.addEventListener('click', async () => {
-      let cur = window.__tutCur || { idx: 0, title: '' };
-      if (!cur.title) {   // 目录还没建好时的兜底：读高亮目录项
-        const act = document.querySelector('#tutToc .tutTocItem.active');
-        if (act) cur = { idx: Number(act.getAttribute('data-toc')) || 0, title: act.textContent.trim().slice(0, 80) };
-      }
-      const label = (document.getElementById('tutBmLabel').value || '').trim();
-      const note = (document.getElementById('tutBmNote').value || '').trim();
-      try {
-        await api('/api/tutorials/' + tid + '/bookmarks', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ section_idx: cur.idx || 0, section_title: cur.title || '', label, note }) });
-        document.getElementById('tutBmLabel').value = '';
-        document.getElementById('tutBmNote').value = '';
-        toast('已标记：' + (label || cur.title || ('第 ' + ((cur.idx || 0) + 1) + ' 节')));
-        load();
-      } catch (e) { toast(e.message); }
-    });
+  /* 浮动面板：随时呼出，不用翻到底部 */
+  function panelEl() { return document.getElementById('tutBmPanel'); }
+  function curSection() {
+    let cur = window.__tutCur || { idx: 0, title: '' };
+    if (!cur.title) {
+      const act = document.querySelector('#tutToc .tutTocItem.active');
+      if (act) cur = { idx: Number(act.getAttribute('data-toc')) || 0, title: act.textContent.trim().slice(0, 80) };
+    }
+    return cur;
   }
-
+  async function refreshList(tid) {
+    const listEl = document.getElementById('tutBmList');
+    if (!listEl) return 0;
+    let items = [];
+    try { const r = await api('/api/tutorials/' + tid + '/bookmarks'); items = r.bookmarks || []; } catch (e) {}
+    listEl.innerHTML = items.length ? items.map(b => `<div class="tutBmRow">
+      <span class="chip">${esc(b.label || '标签')}</span>
+      <span class="tutBmSec">${esc(b.section_title || ('第 ' + (Number(b.section_idx) + 1) + ' 节'))}</span>
+      ${b.note ? `<span class="muted" style="font-size:11.5px;">${esc(b.note)}</span>` : ''}
+      <div class="spacer"></div>
+      <button class="btn tiny" data-bm-go="${b.section_idx}">跳转</button>
+      <button class="btn tiny danger" data-bm-del="${b.id}">删除</button>
+    </div>`).join('') : '<span class="muted" style="font-size:12.5px;">还没有标签：填个标签点「标记当前章节」</span>';
+    listEl.querySelectorAll('[data-bm-go]').forEach(x => x.addEventListener('click', () => jump(Number(x.getAttribute('data-bm-go')))));
+    listEl.querySelectorAll('[data-bm-del]').forEach(x => x.addEventListener('click', async () => {
+      if (!confirm('删除这个标签？')) return;
+      try { await api('/api/bookmarks/' + x.getAttribute('data-bm-del'), { method: 'DELETE' }); refreshList(tid); updateBadge(tid); } catch (e) { toast(e.message); }
+    }));
+    return items.length;
+  }
+  async function updateBadge(tid) {
+    const btn = document.getElementById('tutBmBtn');
+    if (!btn) return;
+    try {
+      const r = await api('/api/tutorials/' + tid + '/bookmarks');
+      const n = (r.bookmarks || []).length;
+      btn.innerHTML = n ? `🔖 标签 (${n})` : '🔖 标签';
+    } catch (e) {}
+  }
+  function refreshCur() {
+    const el = document.getElementById('tutBmCurSec');
+    if (!el) return;
+    const cur = curSection();
+    el.textContent = cur.title || ('第 ' + ((cur.idx || 0) + 1) + ' 节');
+  }
   window.TutBookmark = {
-    /* 教程页书签区 HTML */
-    sectionHTML() {
-      return `<div class="sec" id="tutBmSec">
-        <div class="secTitle">🔖 阅读标签 <span class="muted" style="font-weight:400;font-size:11.5px;">· 记录读到哪、标重点/待复习（组件可开关）</span>
-          <div class="spacer"></div><button class="btn tiny primary" id="tutBmAdd">＋ 标记当前章节</button></div>
+    /* 打开/关闭浮动面板（顶栏按钮调用，随时可用） */
+    toggle(tid) {
+      const old = panelEl();
+      if (old) { old.remove(); return; }
+      const div = document.createElement('div');
+      div.id = 'tutBmPanel';
+      div.className = 'tutBmPanel';
+      div.innerHTML = `<div class="tutBmPanelHead"><span>🔖 阅读标签</span><button class="btn tiny" id="tutBmClose">×</button></div>
+        <div class="tutBmCur">当前章节：<b id="tutBmCurSec">…</b></div>
         <div class="tutBmForm">
-          <input id="tutBmLabel" placeholder="标签（如：已读 / 重点 / 待复习，默认用章节名）">
+          <input id="tutBmLabel" placeholder="标签（如：已读 / 重点 / 待复习）">
           <input id="tutBmNote" placeholder="备注（可选）">
         </div>
-        <div id="tutBmList"><span class="muted" style="font-size:12.5px;">加载中…</span></div>
-      </div>`;
+        <button class="btn tiny primary" id="tutBmAdd" style="width:100%;">＋ 标记当前章节</button>
+        <div id="tutBmList" style="margin-top:8px;"><span class="muted" style="font-size:12.5px;">加载中…</span></div>`;
+      document.body.appendChild(div);
+      div.querySelector('#tutBmClose').addEventListener('click', () => div.remove());
+      div.querySelector('#tutBmAdd').addEventListener('click', async () => {
+        const cur = curSection();
+        const label = (div.querySelector('#tutBmLabel').value || '').trim();
+        const note = (div.querySelector('#tutBmNote').value || '').trim();
+        try {
+          await api('/api/tutorials/' + tid + '/bookmarks', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ section_idx: cur.idx || 0, section_title: cur.title || '', label, note }) });
+          div.querySelector('#tutBmLabel').value = '';
+          div.querySelector('#tutBmNote').value = '';
+          toast('已标记：' + (label || cur.title || ('第 ' + ((cur.idx || 0) + 1) + ' 节')));
+          refreshList(tid); updateBadge(tid);
+        } catch (e) { toast(e.message); }
+      });
+      refreshCur(); refreshList(tid);
     },
-    init,
+    /* 路由切换时清理 */
+    unmount() { const p = panelEl(); if (p) p.remove(); },
+    init(tid) { this.toggle(tid); },
+    badge: updateBadge,
     jump,
     /* 节点面板：导入教程按钮 HTML */
     nodeImportHTML() {
@@ -96,6 +123,5 @@
       });
     }
   };
-
   SiErXing.registerPlugin({ id: 'tutbookmark' });
 })();
