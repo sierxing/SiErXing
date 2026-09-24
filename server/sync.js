@@ -21,7 +21,7 @@ const { spawn } = require('node:child_process');
 
 // 参与同步的表（顺序无关，导入时先清空再写入）
 const SYNC_TABLES = [
-  'goals', 'nodes', 'sources', 'tutorials', 'goal_versions',
+  'goals', 'nodes', 'sources', 'tutorials', 'tutorial_bookmarks', 'goal_versions',
   'chat_sessions', 'chats', 'problems', 'practice_records', 'daily_plans', 'jd_images'
 ];
 // 不参与同步的列：题面正文与代码模板体积大，且每台设备用本机 LeetCode 登录态自己抓即可；
