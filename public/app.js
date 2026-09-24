@@ -3943,6 +3943,7 @@ const modHint = (k, list) => {
         await api('/api/component-categories', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from, name: name.trim() }) });
         toast('已重命名');
         await renderComponentsPage();
+        renderRail();
       } catch (e) { toast(e.message); }
     }));
     catListEl.querySelectorAll('[data-cat-del]').forEach(b => b.addEventListener('click', async () => {
@@ -3952,6 +3953,7 @@ const modHint = (k, list) => {
         await api('/api/component-categories/' + encodeURIComponent(name), { method: 'DELETE' });
         toast('已删除分类');
         await renderComponentsPage();
+        renderRail();
       } catch (e) { toast(e.message); }
     }));
   }
@@ -3964,6 +3966,7 @@ const modHint = (k, list) => {
       await api('/api/component-categories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
       toast('已新建分类「' + name + '」');
 await renderComponentsPage();
+renderRail();
         await loadComponents();
     } catch (e) { toast(e.message); }
   });
@@ -3974,6 +3977,7 @@ await renderComponentsPage();
       await api('/api/components/' + encodeURIComponent(id) + '/category', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ category: sel.value }) });
       toast('已移动到「' + sel.value + '」');
       await renderComponentsPage();
+      renderRail();
     } catch (e) { toast(e.message); }
   }));
 
@@ -3997,6 +4001,7 @@ await renderComponentsPage();
       state.components = r.enabled || state.components;
       toast(enabled ? '已开启组件' : '已关闭组件');
       await renderComponentsPage();
+      renderRail();
     } catch (e) { toast(e.message); inp.checked = !enabled; }
   }));
   app.querySelectorAll('[data-cmp-del]').forEach(b => b.addEventListener('click', async () => {
@@ -4684,6 +4689,7 @@ function pluginButtonsHTML(goal) {
   if (!window.SiErXing) return '';
   return SiErXing.goalEntries(goal)
     .filter(e => e.header !== false)
+    .filter(e => compOn(e.id))
     .map(e => `<button class="btn" data-plugin-go="${esc(e.hash(goal.id))}">${e.icon} ${esc(e.label)}</button>`).join('');
 }
 /* 目标页：按目标开关组件（之前只有接口没有入口） */
@@ -4705,12 +4711,14 @@ async function showGoalPluginsMenu(gid, anchor) {
   m.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 270)) + 'px';
   m.style.top = (r.bottom + 6) + 'px';
   m.style.width = '260px';
-  m.innerHTML = `<div class="ctxTitle">本目标的扩展组件</div>` + list.map(p => `
-    <label class="gpRow">
+  m.innerHTML = `<div class="ctxTitle">本目标的扩展组件</div>` + list.map(p => {
+    const off = !compOn(p.id);
+    return `
+    <label class="gpRow${off ? ' off' : ''}">
       <span class="rciIcon">${p.icon || '🧩'}</span>
-      <span class="gpName">${esc(p.name || p.id)}${p.desc ? `<span class="gpDesc">${esc(p.desc)}</span>` : ''}</span>
-      <span class="cmpSwitch"><input type="checkbox" data-gp="${esc(p.id)}" ${enabled[p.id] ? 'checked' : ''}><span class="cmpSlider"></span></span>
-    </label>`).join('');
+      <span class="gpName">${esc(p.name || p.id)}${off ? '<span class="gpDesc">全局已关闭，去组件页开启</span>' : (p.desc ? `<span class="gpDesc">${esc(p.desc)}</span>` : '')}</span>
+      <span class="cmpSwitch"><input type="checkbox" data-gp="${esc(p.id)}" ${enabled[p.id] ? 'checked' : ''} ${off ? 'disabled' : ''}><span class="cmpSlider"></span></span>
+    </label>`; }).join('');
   document.body.appendChild(m);
   m.querySelectorAll('[data-gp]').forEach(inp => inp.addEventListener('change', async () => {
     const pid = inp.getAttribute('data-gp');
@@ -4868,8 +4876,10 @@ function railCompsHTML() {
   const g = state.goal;
   // 左栏只放「扩展组件」：内置基础功能组件（问卷/约束/图片资料…）的入口在目标页里，不在这里重复
   const metaOf = id => (SiErXing.serverPlugins() || []).find(x => x.id === id) || {};
-  const entries = ((window.SiErXing && g) ? SiErXing.goalEntries(g) : [])
+  let entries = ((window.SiErXing && g) ? SiErXing.goalEntries(g) : [])
     .filter(e => { const m = metaOf(e.id); return !(m.builtin && m.scope === 'base'); });
+  // 与组件管理同步：全局开关关闭的组件不在侧边栏显示
+  entries = entries.filter(e => compOn(e.id));
   // 教程书签没有独立页面（住在每篇教程里）：作为普通条目进入分组，和其他组件一样显示图标+全名
   const bmOn = compOn('tutbookmark') && !!window.TutBookmark;
   if (bmOn) {

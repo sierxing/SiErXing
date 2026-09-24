@@ -1621,3 +1621,6 @@ button.railCompItem{background:none; border:0; font:inherit; color:inherit; widt
 .gpRow:hover{background:var(--soft);}
 .gpName{flex:1; min-width:0; font-weight:600; display:flex; flex-direction:column; gap:1px;}
 .gpDesc{font-weight:400; font-size:11px; color:var(--muted); line-height:1.5;}
+/* 目标页组件面板：全局关闭项置灰 */
+.gpRow.off{opacity:.55;}
+.gpRow.off .gpName{color:var(--muted);}
