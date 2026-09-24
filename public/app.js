@@ -3064,6 +3064,7 @@ function renderGoal() {
       <button class="btn" id="shareGoalBtn" title="把这份规划与资料库打包分享给别人（对方可一键导入）。默认隐去学校/公司/姓名/联系方式等隐私">🔗 分享</button>
       ${compOn('chat') ? '<button class="btn" id="chatBtn">💬 AI 助手</button>' : ''}
       ${pluginButtonsHTML(g)}
+      ${goalPluginsHTML(g)}
       ${g.nodes.length && compOn('versions') ? '<button class="btn" id="verBtn">📜 版本对比</button>' : ''}
       <button class="btn primary" id="planBtn">${g.nodes.length ? '重新规划（AI 先澄清）' : '开始 AI 规划（AI 先澄清）'}</button>
       <button class="btn danger" id="delGoalBtn">删除</button>
@@ -3218,6 +3219,11 @@ function renderGoal() {
   document.getElementById('editGoalBtn').addEventListener('click', () => { state.showEdit = !state.showEdit; renderGoal(); });
   const shareBtn = document.getElementById('shareGoalBtn');
   if (shareBtn) shareBtn.addEventListener('click', () => showShareDialog(g.id));
+  const gpBtn = document.getElementById('goalPluginsBtn');
+  if (gpBtn) gpBtn.addEventListener('click', () => {
+    if (document.getElementById('goalPluginMenu')) document.getElementById('goalPluginMenu').remove();
+    else showGoalPluginsMenu(g.id, gpBtn);
+  });
   const ef = document.getElementById('editGoalForm');
   if (ef) {
     document.getElementById('egCancel').addEventListener('click', () => { state.showEdit = false; renderGoal(); });
@@ -4679,6 +4685,45 @@ function pluginButtonsHTML(goal) {
   return SiErXing.goalEntries(goal)
     .filter(e => e.header !== false)
     .map(e => `<button class="btn" data-plugin-go="${esc(e.hash(goal.id))}">${e.icon} ${esc(e.label)}</button>`).join('');
+}
+/* 目标页：按目标开关组件（之前只有接口没有入口） */
+function goalPluginsHTML(g) {
+  if (!window.SiErXing) return '';
+  const list = (SiErXing.serverPlugins() || []).filter(p => p.goalToggle);
+  if (!list.length) return '';
+  return `<button class="btn" id="goalPluginsBtn" title="为本目标开关扩展组件">🧩 组件</button>`;
+}
+async function showGoalPluginsMenu(gid, anchor) {
+  document.querySelectorAll('#goalPluginMenu').forEach(x => x.remove());
+  let enabled = {};
+  try { const r = await api('/api/goals/' + gid + '/plugins'); enabled = r.enabled || {}; } catch (e) { toast(e.message); return; }
+  const list = (SiErXing.serverPlugins() || []).filter(p => p.goalToggle);
+  const m = document.createElement('div');
+  m.id = 'goalPluginMenu';
+  m.className = 'ctxMenu';
+  const r = anchor.getBoundingClientRect();
+  m.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 270)) + 'px';
+  m.style.top = (r.bottom + 6) + 'px';
+  m.style.width = '260px';
+  m.innerHTML = `<div class="ctxTitle">本目标的扩展组件</div>` + list.map(p => `
+    <label class="gpRow">
+      <span class="rciIcon">${p.icon || '🧩'}</span>
+      <span class="gpName">${esc(p.name || p.id)}${p.desc ? `<span class="gpDesc">${esc(p.desc)}</span>` : ''}</span>
+      <span class="cmpSwitch"><input type="checkbox" data-gp="${esc(p.id)}" ${enabled[p.id] ? 'checked' : ''}><span class="cmpSlider"></span></span>
+    </label>`).join('');
+  document.body.appendChild(m);
+  m.querySelectorAll('[data-gp]').forEach(inp => inp.addEventListener('change', async () => {
+    const pid = inp.getAttribute('data-gp');
+    try {
+      await api('/api/goals/' + gid + '/plugins', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ plugin_id: pid, enabled: inp.checked }) });
+      toast(inp.checked ? '已为本目标启用' : '已为本目标关闭');
+      await loadGoal(gid);
+      renderGoal();
+      renderRail();
+      const fresh = document.getElementById('goalPluginsBtn');
+      if (fresh) showGoalPluginsMenu(gid, fresh);
+    } catch (e) { toast(e.message); inp.checked = !inp.checked; }
+  }));
 }
 function pluginPickerHTML() {
   const list = (window.SiErXing ? SiErXing.serverPlugins() : []).filter(p => p.goalToggle);
