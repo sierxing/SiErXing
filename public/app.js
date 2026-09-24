@@ -1254,8 +1254,9 @@ function tutTocBuild(tid) {
   const rz = toc.querySelector('#tutTocResize');
   if (rz) rz.addEventListener('mousedown', e => {
     e.preventDefault();
+    const left0 = toc.getBoundingClientRect().left;
     const move = ev => {
-      const w = Math.max(160, Math.min(360, Math.round(ev.clientX - 24)));
+      const w = Math.max(160, Math.min(360, Math.round(ev.clientX - left0)));
       toc.style.width = w + 'px';
       try { localStorage.setItem('sierxing-toc-w', String(w)); } catch (err) {}
     };
