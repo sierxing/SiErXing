@@ -451,11 +451,18 @@ function insertNode(goalId, parentId, level, title, detail, sources, sortOrder, 
     .run(goalId, parentId || null, level, String(title || '').trim().slice(0, 200), String(detail || '').trim().slice(0, 2000),
       String(ex.artifact || '').trim().slice(0, 500), String(ex.acceptance || '').trim().slice(0, 500), String(ex.hours || '').trim().slice(0, 50),
       normalizeSources(sources), 'todo', sortOrder || 0, t, t);
+  /* 建节点即建目录：一个节点对应一个文件夹，子目录嵌在父目录下（失败只记日志，不影响建节点） */
+  try {
+    const nid = db.prepare('SELECT last_insert_rowid() AS id').get().id;
+    if (nid) for (const pl of PLUGINS) { try { if (typeof pl.onNodeCreated === 'function') pl.onNodeCreated(goalId, nid, pluginCtx()); } catch (e) { console.error('[plugin]', pl.id, 'onNodeCreated 失败:', e.message); } }
+  } catch (e) { console.error('[workspace] 建目录失败:', e.message); }
 }
 function deleteNodeTree(id) {
   const children = db.prepare('SELECT id FROM nodes WHERE parent_id = ?').all(id).map(x => x.id);
   for (const c of children) deleteNodeTree(c);
   db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
+  /* 节点删除时同步删掉目录映射（磁盘文件保留，避免误删代码） */
+  try { db.prepare('DELETE FROM node_workspaces WHERE node_id = ?').run(id); } catch (e) {}
 }
 
 /* ===== 信息源获取（必应搜索 + 页面抓取） ===== */
@@ -1751,6 +1758,7 @@ function saveSkeleton(goalId, plan) {
   if (!stages.length) throw new Error('骨架结构异常（没有可用阶段），请重试');
   const old = db.prepare('SELECT id FROM nodes WHERE goal_id = ?').all(goalId).map(x => x.id);
   for (const id of old) db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
+  try { db.prepare('DELETE FROM node_workspaces WHERE goal_id = ?').run(goalId); } catch (e) {}
   const summary = String(plan.summary || '').slice(0, 800);
   db.prepare('UPDATE goals SET summary = ?, status = ?, error = ?, updated_at = ? WHERE id = ?').run(summary, 'planning', '', nowISO(), goalId);
   const stageIds = [];

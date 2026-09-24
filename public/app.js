@@ -2068,6 +2068,8 @@ async function renderTutorialPage(tid) {
       <button class="btn small" id="tutTocBtn" title="显示 / 隐藏左侧目录">📑 目录</button>
       ${(compOn('notes') && window.NodeNotes) ? `<button class="btn small" id="tutNoteBtn" title="展开 / 收起右侧笔记栏">🗒 笔记</button>` : ''}
       ${(compOn('tutbookmark') && window.TutBookmark) ? `<button class="btn small" id="tutBmBtn" title="随时标记阅读位置（不用翻到底部）">🔖 标签</button>` : ''}
+      ${(compOn('workspace') && window.Workspace) ? `<button class="btn small primary" id="tutCodeBtn" title="为当前节点建好代码目录并用 VSCode 打开，边看教程边写代码（子目录嵌在父目录下，无需手动管理）">💻 写代码</button>` : ''}
+      ${(compOn('workspace') && window.Workspace) ? `<button class="btn small" id="tutPackBtn" title="把整个目标的代码目录一键打包成 zip 下载">📦 打包</button>` : ''}
       <button class="btn small" id="tutManualBtn" title="直接手动编辑并保存（Markdown / HTML 都可以）">✎ 手动编辑</button>
       <button class="btn small primary" id="tutSaveBtn" hidden>💾 保存</button>
       <button class="btn small" id="tutCancelBtn" hidden>取消</button>
@@ -2078,7 +2080,7 @@ async function renderTutorialPage(tid) {
       <button class="btn small" id="tutDl">下载</button>
       <button class="btn small danger" id="tutDel">删除</button>
     </div>
-    <div class="tutMeta">${node ? '对应任务：' + esc(node.title) : ''}${goal ? '　·　所属目标：' + esc(goal.title) : ''}　·　生成于 ${esc(fmtDate(t.created_at))}</div>
+    <div class="tutMeta">${node ? '对应任务：' + esc(node.title) : ''}${goal ? '　·　所属目标：' + esc(goal.title) : ''}　·　生成于 ${esc(fmtDate(t.created_at))}${(compOn('workspace') && window.Workspace) ? '　·　<span class="wsHint" id="wsHint"></span>' : ''}</div>
     ${isHtml
       ? `<iframe class="tutFrame" id="tutFrame" sandbox="allow-same-origin allow-popups"></iframe>`
       : `<div class="tutBody mdBody">${mdToHTML(t.content)}</div>`}
@@ -2104,6 +2106,9 @@ async function renderTutorialPage(tid) {
     window.TutBookmark.badge(tid);
     const tbb = document.getElementById('tutBmBtn');
     if (tbb) tbb.addEventListener('click', () => window.TutBookmark.toggle(tid));
+  }
+  if (window.Workspace && compOn('workspace')) {
+    try { window.Workspace.bindTutorial(tid, node, goal); } catch (e) {}
   }
   document.getElementById('tutDl').addEventListener('click', () => {
     const blob = new Blob([t.content], { type: isHtml ? 'text/html;charset=utf-8' : 'text/markdown;charset=utf-8' });
@@ -3131,6 +3136,7 @@ function renderGoal() {
       <div class="spacer"></div>
       <button class="btn" id="editGoalBtn">编辑目标</button>
       <button class="btn" id="shareGoalBtn" title="把这份规划与资料库打包分享给别人（对方可一键导入）。默认隐去学校/公司/姓名/联系方式等隐私">🔗 分享</button>
+      ${compOn('workspace') ? '<button class="btn" id="wsPackBtn" title="把整个目标的代码目录一键打包成 zip 下载（一个节点对应一个文件夹，子目录嵌在父目录下）">📦 打包代码</button>' : ''}
       ${compOn('chat') ? '<button class="btn" id="chatBtn">💬 AI 助手</button>' : ''}
       ${pluginButtonsHTML(g)}
       ${goalPluginsHTML(g)}
@@ -3184,6 +3190,7 @@ function renderGoal() {
   if (chatBtn) chatBtn.addEventListener('click', () => aiToggle(true));
   const verBtn = document.getElementById('verBtn');
   if (verBtn) verBtn.addEventListener('click', () => showVersionsPanel(g.id));
+  if (window.Workspace && compOn('workspace')) { try { window.Workspace.bindGoal(g); } catch (e) {} }
   const planBtnEl = document.getElementById('planBtn');
   planBtnEl.addEventListener('click', () => startClarify(g.id));
   const emptyPlan = document.getElementById('emptyPlanBtn');

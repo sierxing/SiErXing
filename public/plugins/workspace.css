@@ -1,0 +1,6 @@
+/* 代码目录（扩展组件）：教程页目录提示 */
+.wsHint{
+  font-size:12px; color:var(--muted); overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap; max-width:340px;
+}
+@media (max-width:1100px){ .wsHint{display:none;} }
