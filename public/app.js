@@ -161,6 +161,8 @@ async function route() {
   // 教程目录大纲只属于教程页：切到别的页面时移除（含滚动监听，避免残留）
   const oldToc = document.getElementById('tutToc');
   if (oldToc) oldToc.remove();
+  const oldTocTab = document.getElementById('tutTocTab');
+  if (oldTocTab) oldTocTab.remove();
   if (window.TutBookmark) { try { window.TutBookmark.unmount(); } catch (e) {} }
   if (window.NodeNotes) { try { window.NodeNotes.unmount(); } catch (e) {} }
   if (window.__tutTocScroll) { try { window.removeEventListener('scroll', window.__tutTocScroll); } catch (e) {} window.__tutTocScroll = null; }
@@ -1220,6 +1222,19 @@ function tutTocWidth() {
   try { const w = Number(localStorage.getItem('sierxing-toc-w')) || 220; return Math.max(160, Math.min(360, w)); }
   catch (e) { return 220; }
 }
+function tutTocShowTab(tid) {
+  if (document.getElementById('tutTocTab') || document.getElementById('tutToc')) return;
+  const tab = document.createElement('button');
+  tab.id = 'tutTocTab';
+  tab.className = 'tutTocTab';
+  tab.title = '展开目录';
+  tab.textContent = '📑 目录';
+  tab.addEventListener('click', () => {
+    try { localStorage.setItem('sierxing-toc-open', '1'); } catch (e) {}
+    try { tutTocBuild(tid); } catch (e) {}
+  });
+  document.body.appendChild(tab);
+}
 function tutTocBuild(tid) {
   const body = document.querySelector('.tutBody') || document.querySelector('.mdBody');
   if (!body) return;
@@ -1228,6 +1243,8 @@ function tutTocBuild(tid) {
   heads.forEach((h, i) => { h.id = 'tutsec-' + i; });
   // 面板只在展开时建；追踪常驻（书签要用）
   const old = document.getElementById('tutToc'); if (old) old.remove();
+  const oldTab = document.getElementById('tutTocTab'); if (oldTab) oldTab.remove();
+  if (!tutTocOpen()) tutTocShowTab(tid);
   const toc = document.createElement('div');
   toc.id = 'tutToc';
   toc.className = 'tutToc';
@@ -1239,7 +1256,10 @@ function tutTocBuild(tid) {
     }).join('')
     + `<div class="tutTocProg" id="tutTocProg">阅读位置：—</div>
     <div class="tutTocResize" id="tutTocResize" title="拖动调宽"></div>`;
-  if (tutTocOpen()) document.body.appendChild(toc);
+  if (tutTocOpen()) {
+    document.body.appendChild(toc);
+    const tb = document.getElementById('tutTocTab'); if (tb) tb.remove();
+  }
   toc.querySelectorAll('[data-toc]').forEach(a => a.addEventListener('click', () => {
     const h = document.getElementById('tutsec-' + a.getAttribute('data-toc'));
     if (!h) return;
@@ -1250,6 +1270,7 @@ function tutTocBuild(tid) {
   if (hideBtn) hideBtn.addEventListener('click', () => {
     try { localStorage.setItem('sierxing-toc-open', '0'); } catch (e) {}
     toc.remove();
+    tutTocShowTab(tid);
   });
   const rz = toc.querySelector('#tutTocResize');
   if (rz) rz.addEventListener('mousedown', e => {
