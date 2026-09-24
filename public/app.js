@@ -4819,7 +4819,9 @@ function railCompsHTML() {
   const metaOf = id => (SiErXing.serverPlugins() || []).find(x => x.id === id) || {};
   const entries = ((window.SiErXing && g) ? SiErXing.goalEntries(g) : [])
     .filter(e => { const m = metaOf(e.id); return !(m.builtin && m.scope === 'base'); });
-  if (!entries.length) {
+  // 教程书签没有独立页面（住在每篇教程里），但要在模块里常驻一个入口
+  const bmOn = compOn('tutbookmark') && !!window.TutBookmark;
+  if (!entries.length && !bmOn) {
     return `<button class="railItem railCompToggle" id="railCompToggle" title="本目标还没有扩展组件">
         <span class="railIcon">📦</span><span class="railLabel">组件</span>
       </button>`;
@@ -4838,6 +4840,15 @@ function railCompsHTML() {
     </button>`;
   if (railExpanded()) {
     h += `<div class="railComps" id="railComps">`;
+    if (bmOn) {
+      h += `<div class="railGroup">
+          <div class="railGroupHead">🔖 教程书签</div>
+          <div class="railGroupBody"><button class="railCompItem" data-rail-bm title="打开教程后点我呼出书签面板">
+            <span class="rciIcon">🔖</span>
+            <span class="rciName">书签</span>
+          </button></div>
+        </div>`;
+    }
     h += `<div class="railGroup" data-drop-group="pins">
         <div class="railGroupHead">⭐ 常用 <span class="rgHint">（拖到这里置顶）</span></div>
         <div class="railGroupBody" data-group="pins">
@@ -4897,6 +4908,12 @@ function bindRailComps() {
   if (tg) tg.addEventListener('click', () => setRailExpanded(!railExpanded()));
   const box = document.getElementById('railComps');
   if (!box) return;
+  const bmBtn = box.querySelector('[data-rail-bm]');
+  if (bmBtn) bmBtn.addEventListener('click', () => {
+    const rr = parseRoute();
+    if (rr.view === 'tutorial' && rr.id && window.TutBookmark) window.TutBookmark.toggle(rr.id);
+    else toast('🔖 书签住在教程里：打开任意一篇教程，点顶栏「标签」即可标记');
+  });
   // 右键菜单
   box.querySelectorAll('[data-rail-comp]').forEach(el => el.addEventListener('contextmenu', e => {
     e.preventDefault();
