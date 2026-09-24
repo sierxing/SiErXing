@@ -5004,7 +5004,8 @@ function renderRail() {
   const th = document.getElementById('railTheme');
   if (th) th.addEventListener('click', toggleTheme);
   bindRailComps();
-  const wide = railExpanded() && !!(state.goal && SiErXing.goalEntries(state.goal).length);
+  // 展开且有内容（页面类组件入口 / 书签入口）时才加宽；只看有没有渲染出列表，不再要求目标有页面类插件
+  const wide = railExpanded() && !!document.getElementById('railComps');
   el.classList.toggle('wide', wide);
   document.body.classList.toggle('railWide', wide);
   document.body.classList.add('hasRail');
