@@ -4402,6 +4402,7 @@ async function renderSettings() {
       <div class="field"><label>模型（Model）*</label>
         <input id="aiModel" list="modelList" value="${esc(s.model || '')}" placeholder="如 deepseek-chat / qwen-plus / opencode-go/deepseek-v4-flash">
         <datalist id="modelList">${models.map(m => `<option value="${esc(m)}"></option>`).join('')}</datalist>
+        <div class="hint" id="modelHint" style="margin-top:4px;"></div>
       </div>
       <div class="toolbarRow" style="margin-top:12px;">
         <button class="btn primary" id="saveSettings">保存设置</button>
@@ -4467,7 +4468,23 @@ async function renderSettings() {
     document.getElementById('openaiCfg').hidden = pv.value !== 'openai';
     document.getElementById('opencodeCfg').hidden = pv.value === 'openai';
   };
-  pv.addEventListener('change', async () => { toggleProvider(); try { await save(); toast('已保存接入方式'); } catch (e) { toast(e.message); } });
+  const checkModel = () => {
+    const box = document.getElementById('modelHint');
+    if (!box) return;
+    const m = (document.getElementById('aiModel').value || '').trim();
+    const b = (document.getElementById('aiBase').value || '').trim();
+    if (pv.value === 'openai' && m.includes('/')) {
+      box.innerHTML = '⚠️ 这种 <code>xxx/yyy</code> 格式是 <b>opencode CLI 的模型写法</b>，填在这里 API 会报 400（模型不存在）。用 API key 请填服务商原生模型名（如 DeepSeek 填 <code>deepseek-chat</code>）；想用这个模型请把接入方式切到 opencode。';
+      box.style.color = 'var(--warn)';
+    } else if (pv.value === 'openai' && /deepseek\.com/.test(b) && m && !/^(deepseek-chat|deepseek-reasoner)$/.test(m)) {
+      box.innerHTML = '⚠️ DeepSeek 官方接口只有 <code>deepseek-chat</code> / <code>deepseek-reasoner</code> 两个模型，填别的会 400。';
+      box.style.color = 'var(--warn)';
+    } else { box.textContent = ''; }
+  };
+  document.getElementById('aiModel').addEventListener('input', checkModel);
+  document.getElementById('aiBase').addEventListener('input', checkModel);
+  checkModel();
+  pv.addEventListener('change', async () => { toggleProvider(); checkModel(); try { await save(); toast('已保存接入方式'); } catch (e) { toast(e.message); } });
   document.getElementById('presetRow').addEventListener('click', e => {
     const b = e.target.closest('[data-preset]');
     if (!b) return;
