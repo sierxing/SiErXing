@@ -3028,6 +3028,13 @@ function redactText(raw) {
     if (!feedback) return sendJSON(res, 400, { error: '请填写修改意见' });
     const goal = db.prepare('SELECT * FROM goals WHERE id = ?').get(tut.goal_id);
     const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(tut.node_id);
+    // 修改意见记入对话（刷新也不丢）：调用方传当前会话 id，且必须属于同一目标
+    let sess = null;
+    const sidRaw = body && body.session_id != null ? Number(body.session_id) : 0;
+    if (sidRaw) {
+      sess = db.prepare('SELECT * FROM chat_sessions WHERE id = ?').get(sidRaw);
+      if (!sess || Number(sess.goal_id) !== Number(tut.goal_id)) return sendJSON(res, 400, { error: '对话不存在或不属于该目标，请刷新后重试' });
+    }
     const taskId = tasks.submit({
       type: 'tutorial', title: '修改教程：' + String(tut.title || '').slice(0, 30), goalId: tut.goal_id, nodeId: tut.node_id, note: feedback,
       run: async ({ progress, signal }) => {
@@ -3037,6 +3044,11 @@ function redactText(raw) {
         let out = String(txt || '').trim();
         out = out.replace(/^```(?:markdown|md|html)?\s*/i, '').replace(/```\s*$/, '');
         if (!out || out.length < 80) throw new Error('AI 返回内容为空，请重试');
+        // 防截断兜底：原文很长、新文却只有一小截时，宁可报错也不覆盖好教程
+        const origLen = String(tut.content || '').length;
+        if (origLen > 3000 && out.length < Math.max(500, Math.floor(origLen * 0.2))) {
+          throw new Error('AI 返回内容过短（仅原文 ' + Math.round(out.length / Math.max(1, origLen) * 100) + '%，疑似被截断），已保留原教程：请重试，或把修改意见拆小一点分多次提');
+        }
         // 保留历史版本（写入 goal_versions 便于回滚），再覆盖教程内容
         try {
           const vid = beginVersion(tut.goal_id, '教程修改：' + String(tut.title || '').slice(0, 20));
@@ -3050,7 +3062,23 @@ function redactText(raw) {
         return { tutorialId: tid, length: out.length };
       }
     });
-    return sendJSON(res, 200, { ok: true, taskId });
+    // 先落库对话记录（任务在后台跑，记录立刻可见；刷新后从会话里读出来）
+    if (sess) {
+      const t = nowISO();
+      try {
+        db.prepare('INSERT INTO chats (goal_id, session_id, role, content, created_at) VALUES (?,?,?,?,?)')
+          .run(tut.goal_id, sess.id, 'user', ('【教程修改 · ' + String(tut.title || '').slice(0, 40) + '】' + feedback).slice(0, 3000), t);
+        db.prepare('INSERT INTO chats (goal_id, session_id, role, content, created_at) VALUES (?,?,?,?,?)')
+          .run(tut.goal_id, sess.id, 'assistant', ('收到！已把这条修改意见交给 AI（任务 #' + taskId + '），它会保留原有内容、只改需要改的地方。\n\n进度可以在左下角任务中心看到（切页面也不影响）；完成后教程会自动刷新，也可以点「📜 版本对比」回滚。').slice(0, 3000), t);
+        if (!sess.title || sess.title === '新对话') {
+          const autoTitle = String(feedback).replace(/\s+/g, ' ').trim().slice(0, 24);
+          if (autoTitle) db.prepare('UPDATE chat_sessions SET title = ? WHERE id = ?').run(autoTitle, sess.id);
+        }
+        db.prepare('UPDATE chat_sessions SET updated_at = ? WHERE id = ?').run(t, sess.id);
+        backup();
+      } catch (e) { console.error('[tutEdit] 对话落库失败:', e.message); }
+    }
+    return sendJSON(res, 200, { ok: true, taskId, sessionId: sess ? sess.id : 0 });
   }
   const tutSaveMatch = p.match(/^\/api\/tutorials\/(\d+)$/);
   if (tutSaveMatch && method === 'PUT') {

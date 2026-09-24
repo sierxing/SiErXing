@@ -185,15 +185,14 @@ async function route() {
     else if (r.view === 'library') { setHeader(r); await renderLibraryPage(); }
     else if (r.view === 'map') { await loadGoal(r.id); setHeader(r); renderMapPage(); }
     else if (r.view === 'diff') { await loadGoal(r.id); setHeader(r); await renderDiffPage(r.vid); }
-    else if (r.view === 'tutorial') { setHeader(r); await renderTutorialPage(r.id); }
+    else if (r.view === 'tutorial') { setHeader(r); await renderTutorialPage(r.id); await aiBindGoal(state.tutGoalId); }
     else if (r.view === 'chat') { await loadGoal(r.id); setHeader(r); renderGoal(); }
 
     else if (r.view === 'plugin') { setHeader(r); await r.route.render(r.match, window.SiErXing); }
     else { await loadGoal(r.id); setHeader(r); if (!state.components) await loadComponents(); renderGoal(); }
     renderRail();
     if (r.view === 'goal' || r.view === 'map') {
-      if (state.aiGoalId !== r.id) { state.aiGoalId = r.id; state.aiSessionId = 0; state.aiMsgs = []; await aiLoadModels(); await aiLoadSessions(r.id); }
-      else aiRender();
+      await aiBindGoal(r.id);
       if (r.openAI) aiToggle(true);
       else {
         const open = state.aiOpen != null ? state.aiOpen : (localStorage.getItem('sierxing-ai-open') === '1');
@@ -1000,7 +999,9 @@ function taskMarkNodes() {
 let taskTimer = null;
 async function taskPoll() {
   try {
-    const gid = state.goal ? state.goal.id : 0;
+    const rr0 = (typeof parseRoute === 'function') ? parseRoute() : {};
+    // 教程页没有 state.goal：用教程所属目标过滤/刷新，否则任务完成不会自动刷教程
+    const gid = (state.goal ? state.goal.id : 0) || (rr0.view === 'tutorial' ? (state.tutGoalId || 0) : 0);
     const r = await api('/api/tasks' + (gid ? '?goalId=' + gid : ''));
     const list = r.tasks || [];
     // 新任务出现时给个小提示（动画 toast），替代原来的灰色遮罩
@@ -1012,10 +1013,10 @@ async function taskPoll() {
       known[t.id] = 1;
       if (['done', 'failed', 'cancelled'].includes(t.status)) known['done_' + t.id] = 1;
     }
-    if (finishedNow.length && state.goal) {
+    if (finishedNow.length && gid) {
       const okCount = finishedNow.filter(t => t.status === 'done').length;
       if (okCount) toast('✅ ' + okCount + ' 个 AI 任务完成，界面已更新');
-      try { await loadGoal(state.goal.id); } catch (e) {}
+      try { await loadGoal(gid); } catch (e) {}
       const rr = parseRoute();
       if (rr.view === 'goal' || rr.view === 'map' || rr.view === 'tutorial') rerenderCurrent();
       // 节点面板开着的话，刷新它的内容
@@ -1579,6 +1580,12 @@ function aiFocusInput() {
   const ta = document.getElementById('adText');
   if (ta) setTimeout(() => ta.focus(), 60);
 }
+/* 侧边栏绑定到某目标的会话（目标页 / 导图页 / 教程页共用；同目标不重复加载） */
+async function aiBindGoal(gid) {
+  if (!gid) return;
+  if (state.aiGoalId !== gid) { state.aiGoalId = gid; state.aiSessionId = 0; state.aiMsgs = []; await aiLoadModels(); await aiLoadSessions(gid); }
+  else aiRender();
+}
 async function aiLoadSessions(goalId) {
   if (!goalId) return;
   state.aiSessions = state.aiSessions || [];
@@ -1614,10 +1621,11 @@ async function aiSwitchSession(sid) {
   aiFocusInput();
 }
 async function aiNewSession() {
-  if (!state.goal) return toast('请先进入一个目标');
+  const gid = (state.goal && state.goal.id) || state.tutGoalId;
+  if (!gid) return toast('请先进入一个目标');
   if (state.aiBusy) return toast('AI 正在回复，请稍候');
   try {
-    const r = await api('/api/goals/' + state.goal.id + '/chat-sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: state.aiModel || '' }) });
+    const r = await api('/api/goals/' + gid + '/chat-sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: state.aiModel || '' }) });
     state.aiSessions = [r.session].concat(state.aiSessions || []);
     state.aiSessionId = r.session.id;
     state.aiMsgs = [];
@@ -1675,7 +1683,12 @@ function aiRenderMsgs() {
   if (!box) return;
   const msgs = state.aiMsgs || [];
   if (!msgs.length && !state.aiStream) {
-    box.innerHTML = `<div class="chatEmpty">
+    const isTut = (typeof parseRoute === 'function' && parseRoute().view === 'tutorial');
+    box.innerHTML = isTut ? `<div class="chatEmpty">
+      <div class="ceIcon">📘</div>
+      <div class="ceTitle">告诉我这份教程怎么改</div>
+      <div class="ceText">意见会记在当前对话里（刷新也不丢），AI 在后台重写，完成后教程自动刷新。例如：<br>「第三章再展开讲讲，多给一个完整代码示例」<br>「练习换成更简单的，加一节常见报错排查」</div>
+    </div>` : `<div class="chatEmpty">
       <div class="ceIcon">💬</div>
       <div class="ceTitle">随时告诉我怎么改</div>
       <div class="ceText">路线图定稿后也能继续调整。例如：<br>「第二阶段太笼统了，帮我拆成更细的任务」<br>「我已经会 Python 基础了，把相关的入门任务删掉」<br>「加一个 Docker 部署的任务，放在项目阶段最后」</div>
@@ -1712,24 +1725,28 @@ function aiUpdateSendBtn() {
 }
 async function aiSend() {
   if (state.aiBusy) return;
-  // 教程页：消息作为修改意见，交给后台任务重写教程（完成后自动刷新渲染）
+  // 教程页：消息作为修改意见，交给后台任务重写教程（记录记入当前会话，刷新也不丢；完成后自动刷新渲染）
   const rrTut = parseRoute();
   if (rrTut.view === 'tutorial') {
     const taT = document.getElementById('adText');
     const msgT = (taT && taT.value || '').trim();
     if (!msgT) return;
     if (!(await ensureAIConfigured())) return;
+    const gid = state.tutGoalId || (state.goal && state.goal.id);
+    if (!gid) { toast('教程对应的目标不存在'); return; }
+    if (state.aiGoalId !== gid) { state.aiGoalId = gid; state.aiSessionId = 0; state.aiMsgs = []; await aiLoadModels(); await aiLoadSessions(gid); }
+    if (!state.aiSessionId) { toast('对话初始化失败，请刷新后重试'); return; }
     taT.value = ''; state.aiDraft = '';
-    state.aiMsgs = state.aiMsgs || [];
-    state.aiMsgs.push({ id: 0, role: 'user', content: msgT, ops: '[]', created_at: new Date().toISOString() });
     try {
-      await api('/api/tutorials/' + rrTut.id + '/edit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ feedback: msgT }) });
-      state.aiMsgs.push({ id: 0, role: 'assistant', content: '收到！已把这条修改意见交给 AI，它会**保留原有内容**、只改需要改的地方。\n\n进度可以在左下角任务中心看到（切页面也不影响）；完成后教程会自动刷新，也可以点「📜 版本对比」回滚。', ops: '[]', created_at: new Date().toISOString() });
+      const rt = await api('/api/tutorials/' + rrTut.id + '/edit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ feedback: msgT, session_id: state.aiSessionId }) });
+      if (rt.sessionId) state.aiSessionId = rt.sessionId;
+      await aiLoadMsgs();   // 把服务端刚落库的用户意见 + 回执读出来
       toast('🤖 已提交教程修改任务（完成后自动刷新）');
     } catch (e) {
+      state.aiMsgs = state.aiMsgs || [];
       state.aiMsgs.push({ id: 0, role: 'assistant', content: '提交失败：' + e.message, ops: '[]', created_at: new Date().toISOString() });
+      aiRender();
     }
-    aiRender();
     return;
   }
   if (!(await ensureAIConfigured())) return;
@@ -2059,6 +2076,7 @@ async function renderTutorialPage(tid) {
   app.innerHTML = '<p class="muted">加载教程…</p>';
   const r = await api('/api/tutorials/' + tid);
   const t = r.tutorial, node = r.node, goal = r.goal;
+  state.tutGoalId = t ? t.goal_id : 0;   // 侧边栏绑定到该目标的会话（刷新也不丢记录）
   const isHtml = t.format === 'html';
   const sizeK = Math.max(1, Math.round((t.content || '').length / 1000));
   app.innerHTML = `<div class="tutPage">

@@ -170,10 +170,15 @@ async function openaiText(c, opts) {
   const useStream = !!(onEvent && opts.stream !== false);
   const mdl = model || c.model;
   if (!mdl) throw new Error('未配置模型名（在「设置」里填写，或设置环境变量 SIERXING_MODEL）');
+  // 输出上限：默认 16000（覆盖完整教程/长回复），各调用方可通过 maxTokens 覆盖；
+  // 不传时很多接口默认只给 4k 左右，长教程会被拦腰截断。
+  const maxTokens = Number(opts.maxTokens) || 16000;
+  if (!useStream) return openaiLongText(c, { model: mdl, prompt, images, timeoutMs, signal, onEvent, maxTokens });
   const body = {
     model: mdl,
     messages: [{ role: 'user', content: messageContent(prompt, images) }],
-    stream: useStream
+    stream: true,
+    max_tokens: maxTokens
   };
   const res = await openaiRequest(c, body, timeoutMs, signal);
   if (!useStream) {
@@ -219,6 +224,50 @@ async function openaiText(c, opts) {
   }
   if (!text) throw new Error('AI 没有返回内容（检查模型名/额度，或稍后重试）');
   return text;
+}
+
+/* 非流式长文本（含截断自动续写）：finish_reason=length 时接着往下要，直到写完 */
+const CONTINUE_SUFFIX = '\n\n（上次输出到这里就中断了，请从中断处紧接着继续往下输出剩余部分：不要重复已输出的内容，不要加开头语或解释）';
+async function openaiOnce(c, messages, mdl, maxTokens, timeoutMs, signal) {
+  const res = await openaiRequest(c, { model: mdl, messages, stream: false, max_tokens: maxTokens }, timeoutMs, signal);
+  const j = await res.json().catch(() => null);
+  const ch = j && j.choices && j.choices[0];
+  const text = ch && ch.message && ch.message.content;
+  if (typeof text !== 'string') {
+    const raw = (j && j.error && (j.error.message || j.error.code)) || '返回内容为空（检查模型名是否正确）';
+    throw new Error('AI 返回异常：' + String(typeof raw === 'string' ? raw : JSON.stringify(raw)).slice(0, 300));
+  }
+  return { text, finish: (ch && ch.finish_reason) || '' };
+}
+function isTokenLimitError(e) {
+  return /max_tokens|maximum context|context length|token[^a-z]*limit|tokens[^a-z]*limit|too long|too_large|content.*too/i.test(String((e && e.message) || ''));
+}
+async function openaiLongText(c, { model: mdl, prompt, images, timeoutMs, signal, onEvent, maxTokens }) {
+  let tokens = maxTokens, shrunk = 0;
+  const firstMessages = [{ role: 'user', content: messageContent(prompt, images) }];
+  let full = '', rounds = 0;
+  let messages = firstMessages;
+  for (;;) {
+    let r;
+    try {
+      r = await openaiOnce(c, messages, mdl, tokens, timeoutMs, signal);
+    } catch (e) {
+      // 部分模型/中转不支持这么大的 max_tokens：减半重试（16k→8k→4k）
+      if (isTokenLimitError(e) && tokens > 4000 && shrunk < 2) {
+        tokens = Math.floor(tokens / 2); shrunk++;
+        messages = firstMessages; full = ''; rounds = 0;
+        continue;
+      }
+      throw e;
+    }
+    full += r.text;
+    if (r.finish !== 'length') return full;
+    rounds++;
+    if (rounds >= 4) throw new Error('AI 输出过长（多次续写仍未写完）：请把这次要求拆小一点，分多次提');
+    if (onEvent) { try { onEvent({ thinking: '输出较长，正在继续生成（第 ' + (rounds + 1) + ' 段）…' }); } catch (e2) {} }
+    // 续写只带尾部 3000 字做衔接，不带全文，省上下文
+    messages = [{ role: 'user', content: '你正在写一份教程，上次输出到下面这个位置就中断了' + CONTINUE_SUFFIX + '\n\n【已输出内容的尾部】\n' + full.slice(-3000) }];
+  }
 }
 
 async function openaiModels(c) {
