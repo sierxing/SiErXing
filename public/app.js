@@ -162,6 +162,7 @@ async function route() {
   const oldToc = document.getElementById('tutToc');
   if (oldToc) oldToc.remove();
   if (window.TutBookmark) { try { window.TutBookmark.unmount(); } catch (e) {} }
+  if (window.NodeNotes) { try { window.NodeNotes.unmount(); } catch (e) {} }
   if (window.__tutTocScroll) { try { window.removeEventListener('scroll', window.__tutTocScroll); } catch (e) {} window.__tutTocScroll = null; }
   const r = parseRoute();
   document.body.classList.toggle('mapMode', r.view === 'map');
@@ -1214,30 +1215,58 @@ document.addEventListener('click', async e => {
   }
 });
 /* ===== 教程大纲（侧边栏）：点击跳转 + 当前章节高亮 + 阅读进度 ===== */
+function tutTocOpen() { try { return localStorage.getItem('sierxing-toc-open') !== '0'; } catch (e) { return true; } }
+function tutTocWidth() {
+  try { const w = Number(localStorage.getItem('sierxing-toc-w')) || 220; return Math.max(160, Math.min(360, w)); }
+  catch (e) { return 220; }
+}
 function tutTocBuild(tid) {
-  const old = document.getElementById('tutToc'); if (old) old.remove();
   const body = document.querySelector('.tutBody') || document.querySelector('.mdBody');
   if (!body) return;
   const heads = [...body.querySelectorAll('h1,h2,h3,h4')].filter(h => (h.textContent || '').trim());
   if (heads.length < 2) return;   // 章节太少就不显示
+  heads.forEach((h, i) => { h.id = 'tutsec-' + i; });
+  // 面板只在展开时建；追踪常驻（书签要用）
+  const old = document.getElementById('tutToc'); if (old) old.remove();
   const toc = document.createElement('div');
   toc.id = 'tutToc';
   toc.className = 'tutToc';
-  toc.innerHTML = `<div class="tutTocTitle">📑 目录（${heads.length}）</div>`
+  toc.style.width = tutTocWidth() + 'px';
+  toc.innerHTML = `<div class="tutTocTitle"><span>📑 目录（${heads.length}）</span><div class="spacer"></div><button class="btn tiny" id="tutTocHide" title="收起（顶栏「目录」可再打开）">« 收起</button></div>`
     + heads.map((h, i) => {
-      h.id = 'tutsec-' + i;
       const lv = Number(h.tagName.slice(1));
       return `<a class="tutTocItem lv${Math.min(lv, 4)}" data-toc="${i}">${esc((h.textContent || '').trim().slice(0, 40))}</a>`;
     }).join('')
-    + `<div class="tutTocProg" id="tutTocProg">阅读位置：—</div>`;
-  document.body.appendChild(toc);
+    + `<div class="tutTocProg" id="tutTocProg">阅读位置：—</div>
+    <div class="tutTocResize" id="tutTocResize" title="拖动调宽"></div>`;
+  if (tutTocOpen()) document.body.appendChild(toc);
   toc.querySelectorAll('[data-toc]').forEach(a => a.addEventListener('click', () => {
     const h = document.getElementById('tutsec-' + a.getAttribute('data-toc'));
     if (!h) return;
     const y = h.getBoundingClientRect().top + window.scrollY - 110;   // 给吸顶顶栏留位置
     window.scrollTo({ top: y, behavior: 'smooth' });
   }));
-  // 滚动时高亮当前章节 + 显示阅读进度
+  const hideBtn = toc.querySelector('#tutTocHide');
+  if (hideBtn) hideBtn.addEventListener('click', () => {
+    try { localStorage.setItem('sierxing-toc-open', '0'); } catch (e) {}
+    toc.remove();
+  });
+  const rz = toc.querySelector('#tutTocResize');
+  if (rz) rz.addEventListener('mousedown', e => {
+    e.preventDefault();
+    const move = ev => {
+      const w = Math.max(160, Math.min(360, Math.round(ev.clientX - 24)));
+      toc.style.width = w + 'px';
+      try { localStorage.setItem('sierxing-toc-w', String(w)); } catch (err) {}
+    };
+    const up = () => {
+      document.removeEventListener('mousemove', move);
+      document.removeEventListener('mouseup', up);
+    };
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+  });
+  // 滚动时高亮当前章节 + 显示阅读进度（面板收起时也跑，供书签定位）
   let raf = 0;
   const onScroll = () => {
     if (raf) return;
@@ -1248,7 +1277,8 @@ function tutTocBuild(tid) {
         const r = heads[i].getBoundingClientRect();
         if (r.top <= 140) cur = i; else break;
       }
-      toc.querySelectorAll('[data-toc]').forEach(a => a.classList.toggle('active', Number(a.getAttribute('data-toc')) === cur));
+      const items = toc.querySelectorAll('[data-toc]');
+      if (items.length) items.forEach(a => a.classList.toggle('active', Number(a.getAttribute('data-toc')) === cur));
       try { window.__tutCur = { idx: cur, title: String((heads[cur] || {}).textContent || '').trim().slice(0, 80) }; } catch (e) {}
       const prog = document.getElementById('tutTocProg');
       if (prog) {
@@ -1274,6 +1304,7 @@ function tutTocBuild(tid) {
     }
   } catch (e) {}
 }
+
 
 /* ===== 教程书签：按章节打标签（记录位置/重点，可跳回） ===== */
 /* ===== 教程：让 AI 修改（全局委托，避免绑定时机问题） ===== */
@@ -2012,6 +2043,8 @@ async function renderTutorialPage(tid) {
     <div class="tutHead">
       <a class="back" href="#/g/${t.goal_id}">← 返回目标</a>
       <button class="btn small" id="tutEditBtn" title="在右侧对话栏里说你想怎么改，AI 会按意见修改（保留原有内容，只改需要改的地方）">💬 让 AI 修改</button>
+      <button class="btn small" id="tutTocBtn" title="显示 / 隐藏左侧目录">📑 目录</button>
+      ${(compOn('notes') && window.NodeNotes) ? `<button class="btn small" id="tutNoteBtn" title="展开 / 收起右侧笔记栏">🗒 笔记</button>` : ''}
       ${(compOn('tutbookmark') && window.TutBookmark) ? `<button class="btn small" id="tutBmBtn" title="随时标记阅读位置（不用翻到底部）">🔖 标签</button>` : ''}
       <button class="btn small" id="tutManualBtn" title="直接手动编辑并保存（Markdown / HTML 都可以）">✎ 手动编辑</button>
       <button class="btn small primary" id="tutSaveBtn" hidden>💾 保存</button>
@@ -2031,6 +2064,20 @@ async function renderTutorialPage(tid) {
   </div>`;
   if (isHtml) document.getElementById('tutFrame').setAttribute('srcdoc', tutThemedHTML(t.content));
   setTimeout(() => { try { tutTocBuild(tid); } catch (e) {} }, 200);   // 侧边目录大纲
+  const tutNoteBtn = document.getElementById('tutNoteBtn');
+  if (tutNoteBtn && window.NodeNotes && compOn('notes')) {
+    const nid = node ? node.id : 0;
+    tutNoteBtn.addEventListener('click', () => window.NodeNotes.toggle(tid, nid, node ? node.title : ''));
+    if (nid) window.NodeNotes.mount(tid, nid, node.title);
+  }
+  const tutTocBtn = document.getElementById('tutTocBtn');
+  if (tutTocBtn) tutTocBtn.addEventListener('click', () => {
+    try {
+      const v = localStorage.getItem('sierxing-toc-open') !== '0';
+      localStorage.setItem('sierxing-toc-open', v ? '0' : '1');
+    } catch (e) {}
+    try { tutTocBuild(tid); } catch (e) {}
+  });
   if (window.TutBookmark && compOn('tutbookmark')) {
     window.TutBookmark.badge(tid);
     const tbb = document.getElementById('tutBmBtn');

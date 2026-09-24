@@ -199,6 +199,8 @@ $d="D:\SiErXing"; git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git 
 - 右键任务点 → 生成完整教程，可选 **HTML**（图文排版，含目录/提示框/清单样式）或 **Markdown**
 - 教程内容以「真正掌握」为目标：能力清单、前置知识、原理讲解、分步实践（做什么/为什么/怎么做/自检/排错）、动手练习、掌握自测清单、验收对应、延伸学习
 - 生成后可在线阅读、下载（.html / .md）、删除；节点面板里可随时回看历史教程
+- **📑 左侧目录**：按教程章节自动生成，点击跳转、滚动高亮当前章节、显示阅读进度并记住位置；可折叠、可拖动调宽
+- **✍️ 学习笔记**（扩展组件，可开关）：教程页右侧栏，在对应节点记 Markdown 笔记，一边看一边记，输入即实时渲染、自动保存；可折叠、可拖动调宽，随多端同步
 - **🔖 教程书签**（扩展组件，可开关/导出/卸载）：在教程里按章节打标签——记录读到哪、标重点/待复习，点击跳回对应章节；书签随多端同步
 - **⬆ 导入教程**：节点面板里可把写好的 `.md` / `.html` 文件直接导入为该节点的教程（标题默认用文件名）
 
@@ -223,7 +225,7 @@ $d="D:\SiErXing"; git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git 
 | 核心组件       | 路线图与规划（应用基础，不可关闭）                                                                                                       |
 | 基础功能组件   | 规划前问卷 / 规划约束 / 信息源检索 / 版本对比与汇报 / 对话改规划 / 学习教程 / 图片资料 ——**默认开启，可一键关掉**（界面入口与接口一并隐藏） |
 | 主题与界面样式 | 主题组件通过覆盖设计变量换肤，**同时只生效一个**；内置「碳黑」「宣纸」两个示例                                                     |
-| 扩展组件       | 每日刷题、教程书签等独立文件组件：可**按目标启用**、可**导出分享**、可卸载；可**移动到自定义分类**                     |
+| 扩展组件       | 每日刷题、教程书签、学习笔记等独立文件组件：可**按目标启用**、可**导出分享**、可卸载；可**移动到自定义分类**                     |
 | 组件展示       | 按**分类**分模块展示，组件以**卡片**形式放在所属分类模块里；改某个组件的分类，卡片会真正搬到对应模块 |
 | 分类管理       | 自建 / 重命名 / 删除分类；分类会体现在新建目标的选择器里，支持**按分类批量选择**                                                   |
 | 批量导入       | 一次选多个`*.component.json`，统一归类到指定分类；导入前显示每个包的状态与失败原因                                                     |
@@ -773,6 +775,7 @@ module.exports = {
 | `chats` / `chat_sessions`                         | 对话消息与会话                                                                            |
 | `tutorials`                                         | 生成的学习教程（HTML / Markdown）                                                         |
 | `tutorial_bookmarks`                                | 教程书签（章节标签，随同步）                                                              |
+| `node_notes`                                        | 学习笔记（按节点，随同步）                                                                |
 | `problems` / `practice_records` / `daily_plans` | （hot100 插件）题库、作答记录、每日计划                                                   |
 | `jd_images`                                         | （jdfile 插件）上传图片与提炼结果                                                         |
 
@@ -792,6 +795,7 @@ POST /api/goals/:id/plan/tasks           逐阶段细化任务
 POST /api/nodes/:id/expand               节点深度拆分 / 按意见调整
 POST /api/nodes/:id/tutorial             生成学习教程（md / html）
 POST /api/nodes/:id/tutorials/import      导入教程文件为该节点教程
+GET/PUT /api/nodes/:id/note                学习笔记读取/保存（Markdown）
 GET/POST /api/tutorials/:id/bookmarks     教程书签列表/添加；DELETE /api/bookmarks/:id 删除
 POST /api/goals/:id/chat-sessions        ... 会话管理与对话（SSE 流式）
 GET  /api/goals/:id/versions             版本列表；GET /api/versions/:id 对比数据

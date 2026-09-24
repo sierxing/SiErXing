@@ -521,10 +521,12 @@ body.mapMode{overflow:hidden;}
 .tutHead .back{white-space:nowrap;}
 /* 教程大纲（侧边） */
 .tutToc{
-  position:fixed; left:calc(50% + 520px); top:110px; width:220px; max-height:70vh; overflow:auto;
+  position:fixed; left:24px; top:110px; width:220px; max-height:70vh; overflow:auto;
   background:var(--card); border:1px solid var(--border); border-radius:12px; padding:10px 12px;
   box-shadow:var(--shadow-sm); z-index:25;
 }
+.tutTocResize{position:absolute; right:-4px; top:0; bottom:0; width:9px; cursor:col-resize;}
+.tutTocResize:hover{background:var(--accent-soft);}
 .tutTocTitle{font-size:12px; font-weight:700; color:var(--muted); margin-bottom:6px; display:flex; align-items:center; gap:6px;}
 .tutTocItem{display:block; font-size:12.3px; line-height:1.5; color:var(--text); text-decoration:none; padding:4px 6px; border-radius:7px; cursor:pointer; border-left:2px solid transparent;}
 .tutTocItem:hover{background:var(--soft);}

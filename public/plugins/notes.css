@@ -1,0 +1,26 @@
+/* 学习笔记（扩展组件）：教程页右侧栏 */
+.nodeNotes{
+  position:fixed; right:22px; top:110px; bottom:26px; width:340px; max-width:calc(100vw - 44px);
+  z-index:60; background:var(--card); border:1px solid var(--border);
+  border-radius:13px; box-shadow:var(--shadow-lg);
+  display:flex; flex-direction:column; padding:11px 12px; overflow:hidden;
+  animation:nnIn .18s ease;
+}
+@keyframes nnIn{from{opacity:0; transform:translateX(10px);} to{opacity:1; transform:none;}}
+.nnHead{display:flex; align-items:center; gap:8px; font-size:13.5px; font-weight:700; padding-bottom:8px; border-bottom:1px solid var(--border); flex:none;}
+.nnSub{font-size:11.5px; color:var(--muted); font-weight:400; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:150px;}
+.nnMeta{display:flex; justify-content:space-between; font-size:11px; color:var(--muted); padding:6px 1px; flex:none;}
+#nnEditor{
+  flex:1 1 42%; min-height:120px; resize:none;
+  border:1px solid var(--border); border-radius:9px; padding:9px 10px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12.6px; line-height:1.7;
+  background:var(--bg); color:var(--text);
+}
+#nnEditor:focus{outline:none; border-color:var(--accent-border);}
+.nnPrevLabel{font-size:11.5px; font-weight:700; color:var(--muted); padding:8px 1px 4px; flex:none;}
+#nnPreview{flex:1 1 42%; min-height:100px; overflow:auto; border:1px solid var(--border); border-radius:9px; padding:9px 11px; font-size:12.8px; background:var(--bg);}
+.nnResize{position:absolute; left:-4px; top:0; bottom:0; width:9px; cursor:col-resize;}
+.nnResize:hover{background:var(--accent-soft);}
+@media (max-width:1100px){
+  .nodeNotes{top:auto; bottom:12px; max-height:62vh;}
+}
