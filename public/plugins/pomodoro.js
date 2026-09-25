@@ -158,7 +158,7 @@
         `<div id="pomoStatus" class="pomoStatus">待开始</div>` +
         `<div class="pomoRows"><label>专注 <input id="pomoFocusMin" type="number" min="1" max="180" step="1"> 分钟</label>` +
         `<label>休息 <input id="pomoBreakMin" type="number" min="1" max="180" step="1"> 分钟</label></div>` +
-        `<div class="pomoBtns"><button id="pomoMain" class="btn small primary">开始专注</button><button id="pomoStop" class="btn small">结束</button></div>` +
+        `<div class="pomoBtns"><button id="pomoMain" class="btn small primary">开始专注</button><button id="pomoStop" class="btn small">结束</button><a id="pomoStats" class="btn small" href="#/studystats" title="学习统计：按天/按节点看学了多久">📊</a></div>` +
         `<div class="pomoHint">时间到会弹窗 + 系统通知 + 提示音，切页面、刷视频也能收到</div>` +
       `</div>` +
       `<div id="pomoModalWrap" class="pomoModalWrap" hidden><div class="pomoModal">` +
@@ -307,6 +307,8 @@
     el('pomoToday').textContent = S.doneToday ? ('今日 ' + S.doneToday + '🍅') : '';
     const main = el('pomoMain');
     main.textContent = S.running ? '⏸ 暂停' : (ms > 0 && ms < total ? '▶ 继续' : (S.phase === 'break' ? '开始休息' : '开始专注'));
+    // 学习统计组件关闭时隐藏 📊 入口
+    try { el('pomoStats').style.display = (typeof compOn === 'function' && compOn('studystats') === false) ? 'none' : ''; } catch (e) {}
     const dis = S.running;
     el('pomoFocusMin').disabled = dis;
     el('pomoBreakMin').disabled = dis;

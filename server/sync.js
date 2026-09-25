@@ -21,7 +21,7 @@ const { spawn } = require('node:child_process');
 
 // 参与同步的表（顺序无关，导入时先清空再写入）
 const SYNC_TABLES = [
-  'goals', 'nodes', 'sources', 'tutorials', 'tutorial_bookmarks', 'node_notes', 'node_workspaces', 'goal_versions',
+  'goals', 'nodes', 'sources', 'tutorials', 'tutorial_bookmarks', 'node_notes', 'node_workspaces', 'goal_versions', 'study_records',
   'chat_sessions', 'chats', 'problems', 'practice_records', 'daily_plans', 'jd_images'
 ];
 // 不参与同步的列：题面正文与代码模板体积大，且每台设备用本机 LeetCode 登录态自己抓即可；
@@ -229,7 +229,7 @@ module.exports = function createSync(ctx) {
      否则"新生成的节点"会被判定为比远端旧而被覆盖（曾导致节点消失） */
   function localChangeAt() {
     let latest = '';
-    for (const t of ['goals', 'nodes', 'sources', 'source_digests', 'tutorials', 'tutorial_bookmarks', 'node_notes', 'node_workspaces', 'goal_versions', 'jd_images', 'practice_records', 'daily_plans']) {
+    for (const t of ['goals', 'nodes', 'sources', 'source_digests', 'tutorials', 'tutorial_bookmarks', 'node_notes', 'node_workspaces', 'goal_versions', 'study_records', 'jd_images', 'practice_records', 'daily_plans']) {
       for (const col of ['updated_at', 'created_at']) {
         try {
           const row = db.prepare(`SELECT MAX(${col}) AS t FROM ${t}`).get();

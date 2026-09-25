@@ -48,7 +48,8 @@
 .pomoRows input{width:52px; flex:none; padding:4px 6px; border-radius:7px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:12.5px;}
 .pomoRows input:disabled{opacity:.5;}
 .pomoBtns{display:flex; gap:6px;}
-.pomoBtns .btn{flex:1;}
+.pomoBtns .btn{flex:1; text-align:center;}
+.pomoBtns #pomoStats{flex:none; padding-left:9px; padding-right:9px; text-decoration:none;}
 .pomoHint{font-size:11px; color:var(--muted); margin-top:8px; line-height:1.5;}
 /* 完成弹窗（全应用置顶） */
 .pomoModalWrap{
