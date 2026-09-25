@@ -9,7 +9,7 @@
  * 由 app.js 经路由自动渲染（仅当组件启用…入口层面；页面本身打开即查）。
  */
 (function () {
-  const { api, esc } = SiErXing;
+  const { api, esc, toast } = SiErXing;
 
   function enabled() { try { return typeof compOn === 'function' ? compOn('studystats') !== false : true; } catch (e) { return true; } }
   function pomoState() { try { return window.Pomodoro ? window.Pomodoro.state() : null; } catch (e) { return null; } }
@@ -34,25 +34,37 @@
   }
   async function credit(nid, sec) {
     sec = Math.round(sec);
-    if (!(nid > 0) || !(sec >= 1)) return;
+    if (!(nid > 0) || !(sec >= 1)) return null;
     try {
-      await api('/api/study/credit', {
+      return await api('/api/study/credit', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ node_id: nid, seconds: Math.min(sec, 600) })
       });
-    } catch (e) {}
+    } catch (e) {
+      // 绑定的节点被删了：自动解绑，避免之后的时间全丢黑洞
+      if (/节点不存在/.test(e.message || '') && pomoState() && pomoState().bind && pomoState().bind.nodeId === nid) {
+        try { await window.Pomodoro.setBind(0, true); toast('绑定的节点已不存在，已自动解绑'); } catch (e2) {}
+      }
+      return null;
+    }
   }
   async function tick() {
     const now = Date.now();
     const dt = Math.min((now - lastAt) / 1000, CAP_SEC);
     lastAt = now;
     const st = pomoState();
+    if (!st || !st.running || st.phase !== 'focus') return;
+    // ① 已绑定节点：在哪页都记到它（与番茄钟同步）
+    if (st.bind && st.bind.nodeId > 0) { credit(st.bind.nodeId, dt); return; }
+    // ② 未绑定：看哪篇教程记哪（旧行为）
     const tid = curTid();
-    if (!st || !st.running || st.phase !== 'focus' || !(tid > 0)) return;
+    if (!(tid > 0)) return;
     const nid = await resolveNode(tid);
     if (nid > 0) credit(nid, dt);
     else pending[tid] = (pending[tid] || 0) + dt;
   }
+  /* 番茄钟暂停/结束/完成时调用：把零头立刻记上 */
+  function flush() { try { tick(); } catch (e) {} }
   setInterval(() => {
     try { if (enabled()) tick(); } catch (e) {}
   }, TICK_MS);
@@ -191,6 +203,6 @@
     ]
   });
 
-  /* 对外极小接口（测试用） */
-  window.StudyStats = { _tick: tick, _cache: nodeCache };
+  /* 对外极小接口（测试 / 跨插件用） */
+  window.StudyStats = { _tick: tick, flush, _cache: nodeCache };
 })();

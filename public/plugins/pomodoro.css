@@ -51,6 +51,27 @@
 .pomoBtns .btn{flex:1; text-align:center;}
 .pomoBtns #pomoStats{flex:none; padding-left:9px; padding-right:9px; text-decoration:none;}
 .pomoHint{font-size:11px; color:var(--muted); margin-top:8px; line-height:1.5;}
+/* 绑定行 */
+.pomoBind{
+  display:flex; align-items:center; gap:6px; width:100%;
+  margin:0 0 8px; padding:5px 8px; border-radius:8px;
+  border:1px dashed var(--border); background:none; cursor:pointer;
+  font-size:12px; color:var(--muted); text-align:left;
+}
+.pomoBind.on{border-style:solid; border-color:var(--accent-border); color:var(--text); background:var(--accent-soft);}
+.pomoBind:hover{border-color:var(--accent-border);}
+.pomoBindT{flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:700;}
+.pomoUnbind{flex:none; width:18px; height:18px; line-height:18px; text-align:center; border-radius:50%; color:var(--muted); font-size:13px;}
+.pomoUnbind:hover{background:var(--danger, #e5484d); color:#fff;}
+/* 绑定选择器 */
+.pomoPick{ text-align:left; }
+.pomoPick .pomoModalTitle{text-align:center;}
+#pomoPickQ{width:100%; box-sizing:border-box; padding:7px 10px; margin:8px 0; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:13px;}
+.pomoPickCurBtn{width:100%; margin-bottom:6px;}
+.pomoPickList{max-height:220px; overflow:auto; display:flex; flex-direction:column; gap:6px; margin-bottom:10px;}
+.pomoPickItem{display:flex; align-items:center; gap:8px; padding:7px 10px; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--text); cursor:pointer; text-align:left; font-size:12.5px;}
+.pomoPickItem:hover{border-color:var(--accent-border); background:var(--accent-soft);}
+.pomoPickT{flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
 /* 完成弹窗（全应用置顶） */
 .pomoModalWrap{
   position:fixed; inset:0; z-index:1300;

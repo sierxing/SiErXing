@@ -8,10 +8,11 @@
  * 注意：上报接口故意不调 backup()——心跳频率高，全量备份吃不消；
  * 数据照常进同步快照，随其它数据的同步时机一起上传。
  */
-let db, sendJSON, readBody, nowISO;
+let db, sendJSON, readBody, backup, nowISO;
 function bind(ctx) {
-  ({ db, sendJSON, readBody, nowISO } = ctx);
+  ({ db, sendJSON, readBody, backup, nowISO } = ctx);
 }
+let lastBackupAt = 0;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS study_records (
@@ -80,6 +81,11 @@ module.exports = {
           ON CONFLICT(day, node_id) DO UPDATE SET focus_sec = focus_sec + excluded.focus_sec,
             node_title = excluded.node_title, goal_title = excluded.goal_title, updated_at = excluded.updated_at`)
           .run(day, n.goal_id, nodeId, String(n.title || '').slice(0, 120), g ? String(g.title || '').slice(0, 120) : '', sec, t, t);
+        // 节流备份：长时间专注时也定期落盘 + 触发同步（5 分钟一次，避免 WAL 只进不出）
+        try {
+          const nowMs = Date.now();
+          if (nowMs - lastBackupAt > 5 * 60 * 1000) { lastBackupAt = nowMs; if (typeof backup === 'function') backup(); }
+        } catch (e) {}
         return sendJSON(res, 200, { ok: true, day, credited: sec });
       }
     },
@@ -121,6 +127,39 @@ module.exports = {
         });
         const total = out.reduce((a, x) => a + x.focus_sec, 0);
         return sendJSON(res, 200, { day, records: out, total_sec: total });
+      }
+    },
+    {
+      /* 节点查询（供番茄钟绑定用）：?id= 取单个；?q= 搜标题；都不带返回最近学过的 */
+      method: 'GET',
+      pattern: /^\/api\/study\/nodes$/,
+      handler: async (req, res, u, ctx) => {
+        if (u.pathname !== '/api/study/nodes') return false;
+        const id = Number(u.searchParams.get('id')) || 0;
+        const q = String(u.searchParams.get('q') || '').trim().slice(0, 40);
+        const limit = Math.max(1, Math.min(30, Number(u.searchParams.get('limit')) || 10));
+        const one = nid => {
+          const n = db.prepare('SELECT id, goal_id, title FROM nodes WHERE id = ?').get(nid);
+          if (!n) return null;
+          const g = db.prepare('SELECT id, title FROM goals WHERE id = ?').get(n.goal_id);
+          return { node_id: n.id, node_title: n.title, goal_id: n.goal_id, goal_title: g ? g.title : '' };
+        };
+        if (id) {
+          const n = one(id);
+          if (!n) return sendJSON(res, 404, { error: '节点不存在' });
+          return sendJSON(res, 200, { node: n });
+        }
+        if (q) {
+          const rows = db.prepare('SELECT id, goal_id, title FROM nodes WHERE title LIKE ? ORDER BY id DESC LIMIT ?').all('%' + q + '%', limit);
+          return sendJSON(res, 200, {
+            nodes: rows.map(n => {
+              const g = db.prepare('SELECT id, title FROM goals WHERE id = ?').get(n.goal_id);
+              return { node_id: n.id, node_title: n.title, goal_id: n.goal_id, goal_title: g ? g.title : '' };
+            })
+          });
+        }
+        const rows = db.prepare('SELECT node_id, MAX(updated_at) AS t FROM study_records GROUP BY node_id ORDER BY t DESC LIMIT ?').all(limit);
+        return sendJSON(res, 200, { nodes: rows.map(r => one(r.node_id)).filter(Boolean) });
       }
     },
     {

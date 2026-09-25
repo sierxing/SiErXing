@@ -89,6 +89,51 @@ app.addEventListener('click', e => {
   const g = e.target.closest('[data-go]');
   if (g) { e.preventDefault(); go(g.getAttribute('data-go')); }
 });
+/* ============ 页面返回栈：回到上一个页面 + 当时的滚动位置 ============ */
+const NavHist = { stack: [], lastHash: '', fromBack: false, pendingScroll: null };
+function navCurHash() { return location.hash || '#/'; }
+/* 每次进入 route() 调用：记下从哪来、离开时看到哪；返回导航则取出待恢复的滚动 */
+function navTrack() {
+  const to = navCurHash();
+  const from = NavHist.lastHash;
+  if (!NavHist.fromBack && from && from !== to) {
+    const top = NavHist.stack[NavHist.stack.length - 1];
+    if (top && top.hash === from) top.scroll = window.scrollY || 0;
+    else NavHist.stack.push({ hash: from, scroll: window.scrollY || 0 });
+    NavHist.stack.push({ hash: to, scroll: 0 });
+    if (NavHist.stack.length > 60) NavHist.stack.splice(0, NavHist.stack.length - 60);
+  } else if (!from) {
+    NavHist.stack.push({ hash: to, scroll: 0 });
+  }
+  NavHist.lastHash = to;
+  const ps = NavHist.pendingScroll;
+  NavHist.fromBack = false;
+  NavHist.pendingScroll = null;
+  return ps;
+}
+/* 返回按钮统一入口：回到上一个页面（fallback 给深链接直达时用） */
+function goBack(fallback) {
+  const cur = navCurHash();
+  let idx = -1;
+  for (let i = NavHist.stack.length - 1; i >= 0; i--) {
+    if (NavHist.stack[i].hash === cur) { idx = i; break; }
+  }
+  const prev = idx > 0 ? NavHist.stack[idx - 1] : null;
+  if (!prev) {
+    if (fallback) location.hash = fallback;
+    else if (window.history.length > 1) window.history.back();
+    return;
+  }
+  NavHist.fromBack = true;
+  NavHist.pendingScroll = prev.scroll || 0;
+  location.hash = prev.hash;
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest && e.target.closest('[data-back]');
+  if (!b) return;
+  e.preventDefault();
+  goBack(b.getAttribute('data-back'));
+});
 /* 进入组件管理页的入口在左侧栏中渲染 */
 (function initAI() {
   let savedW = 0, savedH = 0;
@@ -167,6 +212,7 @@ async function route() {
   if (window.NodeNotes) { try { window.NodeNotes.unmount(); } catch (e) {} }
   if (window.__tutTocScroll) { try { window.removeEventListener('scroll', window.__tutTocScroll); } catch (e) {} window.__tutTocScroll = null; }
   const r = parseRoute();
+  const backScroll = navTrack();   // 先记滚动（此时还是旧页面），返回导航则带回待恢复位置
   document.body.classList.toggle('mapMode', r.view === 'map');
   try {
     aiEnsureDOM();
@@ -204,6 +250,11 @@ async function route() {
           if (d2) d2.classList.remove('open');
         }
       }
+    }
+    if (backScroll != null) {
+      // 返回导航：渲染完回到离开时的位置（内容可能是异步图片，补一次）
+      requestAnimationFrame(() => { try { window.scrollTo(0, backScroll); } catch (e) {} });
+      setTimeout(() => { try { window.scrollTo(0, backScroll); } catch (e) {} }, 150);
     }
   } catch (e) {
     app.innerHTML = '<p class="muted">页面出错：' + esc(e.message) + '</p>';
@@ -580,7 +631,7 @@ function renderMapPage() {
   const stages = buildTree(g.nodes);
   const pct = g.tasks_total ? Math.round(g.tasks_done / g.tasks_total * 100) : 0;
   if (!stages.length) {
-    app.innerHTML = `<div class="mapPage"><div class="mapToolbar"><a class="back" href="#/g/${g.id}">← 返回</a><span class="mapTitle">${esc(g.title)}</span></div>
+    app.innerHTML = `<div class="mapPage"><div class="mapToolbar"><button class="back" data-back="#/g/${g.id}">← 返回</button><span class="mapTitle">${esc(g.title)}</span></div>
       <div class="mapViewport" id="mapViewport"><div class="emptyBox" style="margin:90px auto; max-width:440px;">
         <div class="ebIcon">🧭</div><div class="ebTitle">还没有路径</div><div class="ebText">回到执行页开始 AI 规划，生成路径后再来看图。</div>
         <a class="btn primary" href="#/g/${g.id}">返回执行页</a>
@@ -593,7 +644,7 @@ function renderMapPage() {
   })();
   app.innerHTML = `<div class="mapPage">
     <div class="mapToolbar">
-      <a class="back" href="#/g/${g.id}">← 返回执行页</a>
+      <button class="back" data-back="#/g/${g.id}">← 返回执行页</button>
       <span class="mapTitle">${esc(g.title)}</span>
       <span class="chip gray">${g.tasks_done}/${g.tasks_total} · ${pct}%</span>
       <div class="spacer"></div>
@@ -1177,6 +1228,43 @@ selBoxInit();   // 文档级监听：导图页 Ctrl+拖拽框选
 /* ===== 教程：手动编辑与保存 ===== */
 const TUTMANUAL_BOUND = true;
 let tutEditing = false;
+/* 进入手动编辑时算出源码偏移：Markdown 优先按目录追踪到的当前章节标题找对应 # 行，否则按滚动比例映射 */
+function tutEditPos(src, fmt, ratioFb) {
+  try {
+    if (fmt === 'md' && window.__tutCur && window.__tutCur.title) {
+      const norm = s => String(s || '').replace(/^[#\s>]+/, '').replace(/[*`_~\[\]()#-]/g, '').replace(/\s+/g, '').slice(0, 60);
+      const want = norm(window.__tutCur.title);
+      if (want) {
+        const lines = String(src).split('\n');
+        let off = 0;
+        for (const ln of lines) {
+          if (/^#{1,4}\s/.test(ln)) {
+            const h = norm(ln);
+            if (h && (h === want || h.startsWith(want) || want.startsWith(h))) return { off, sec: (window.__tutCur.idx || 0) + 1 };
+          }
+          off += ln.length + 1;
+        }
+      }
+    }
+  } catch (e) {}
+  // 兜底：按正文滚动比例映射到源码位置（HTML 教程也走这里；ratioFb 是替换 DOM 前量好的）
+  try {
+    let ratio = (typeof ratioFb === 'number') ? ratioFb : -1;
+    if (ratio < 0) {
+      ratio = 0;
+      const body = document.querySelector('.tutBody') || document.querySelector('.mdBody');
+      if (body) {
+        const r = body.getBoundingClientRect();
+        const total = r.height - window.innerHeight;
+        if (total > 0) ratio = Math.max(0, Math.min(1, (0 - r.top) / total));
+      } else {
+        const total = document.body.scrollHeight - window.innerHeight;
+        if (total > 0) ratio = Math.max(0, Math.min(1, window.scrollY / total));
+      }
+    }
+    return { off: Math.floor(String(src).length * ratio), sec: 0 };
+  } catch (e) { return { off: 0, sec: 0 }; }
+}
 document.addEventListener('click', async e => {
   const eb = e.target.closest && e.target.closest('#tutManualBtn');
   const sb = e.target.closest && e.target.closest('#tutSaveBtn');
@@ -1190,6 +1278,16 @@ document.addEventListener('click', async e => {
   if (eb) {
     if (tutEditing) return;
     tutEditing = true;
+    // 先记下阅读位置（DOM 替换前量滚动比例，编辑框里直接跳过去）
+    let editRatio = 0;
+    try {
+      const bd0 = document.querySelector('.tutBody') || document.querySelector('.mdBody');
+      if (bd0) {
+        const rr0 = bd0.getBoundingClientRect();
+        const tt0 = rr0.height - window.innerHeight;
+        if (tt0 > 0) editRatio = Math.max(0, Math.min(1, (0 - rr0.top) / tt0));
+      }
+    } catch (e) {}
     // 取最新内容：按教程 id 单独取（直接打开/刷新教程页时 state.goal 里没有它，也能编辑）
     let src = '', fmt = (tut && tut.format) || 'md';
     try {
@@ -1213,11 +1311,24 @@ document.addEventListener('click', async e => {
     }
     const ta = document.getElementById('tutEditor');
     ta.value = src;
+    // 跳到当前阅读位置，而不是从头开始找
+    let editJumpSec = 0;
+    try {
+      const ep = tutEditPos(src, fmt, editRatio);
+      editJumpSec = ep.sec || 0;
+      if (ep.off > 0) {
+        ta.setSelectionRange(ep.off, ep.off);
+        ta.focus();
+        requestAnimationFrame(() => {
+          try { ta.scrollTop = Math.max(0, (ep.off / Math.max(1, src.length)) * ta.scrollHeight - ta.clientHeight / 2); } catch (e2) {}
+        });
+      } else ta.focus();
+    } catch (e2) { try { ta.focus(); } catch (e3) {} }
     const sv = document.getElementById('tutSaveBtn'); if (sv) sv.hidden = false;
     const mb = document.getElementById('tutManualBtn'); if (mb) mb.textContent = '✎ 编辑中…';
     const cb = document.getElementById('tutCancelBtn');
     if (cb) cb.hidden = false;
-    toast('已进入编辑模式（正文已填入，共 ' + src.length + ' 字）');
+    toast('已进入编辑模式（正文已填入，共 ' + src.length + ' 字' + (editJumpSec ? '，已定位到第 ' + editJumpSec + ' 节附近' : '') + '）');
     return;
   }
   const cbtn = e.target.closest && e.target.closest('#tutCancelBtn');
@@ -2119,7 +2230,7 @@ async function renderTutorialPage(tid) {
   const sizeK = Math.max(1, Math.round((t.content || '').length / 1000));
   app.innerHTML = `<div class="tutPage">
     <div class="tutHead">
-      <a class="back" href="#/g/${t.goal_id}">← 返回目标</a>
+      <button class="back" data-back="#/g/${t.goal_id}">← 返回目标</button>
       <button class="btn small" id="tutEditBtn" title="在右侧对话栏里说你想怎么改，AI 会按意见修改（保留原有内容，只改需要改的地方）">💬 让 AI 修改</button>
       <button class="btn small" id="tutTocBtn" title="显示 / 隐藏左侧目录">📑 目录</button>
       ${(compOn('notes') && window.NodeNotes) ? `<button class="btn small" id="tutNoteBtn" title="展开 / 收起右侧笔记栏">🗒 笔记</button>` : ''}
@@ -2192,7 +2303,7 @@ async function renderDiffPage(vid) {
   for (const n of newNodes) newK[keyOfNode(newNodes, n)] = n;
   let html = `<div class="diffPage">
     <div class="diffHead">
-      <a class="back" href="#/g/${data.version.goal_id}">← 返回</a>
+      <button class="back" data-back="#/g/${data.version.goal_id}">← 返回</button>
       <span class="mapTitle">${esc((data.goal && data.goal.title) || '')} · 路线变更对比</span>
       <span class="chip">${esc(data.version.reason || '变更')}</span>
       <span class="hint">${fmtDate(data.version.created_at)} 的版本 ↔ 当前</span>
@@ -3192,7 +3303,7 @@ function renderGoal() {
   const st = (g.status === 'planning' && !state.planning) ? ['上次规划中断', 'warn'] : (stMap[g.status] || (state.planning ? ['规划中…', ''] : ['待规划', 'warn']));
   let html = `<div class="page">
     <div class="pageHead">
-      <a class="back js-back" href="#/">← 返回</a>
+      <button class="back js-back" data-back="#/">← 返回</button>
       <div class="spacer"></div>
       <button class="btn" id="editGoalBtn">编辑目标</button>
       <button class="btn" id="shareGoalBtn" title="把这份规划与资料库打包分享给别人（对方可一键导入）。默认隐去学校/公司/姓名/联系方式等隐私">🔗 分享</button>
@@ -3885,7 +3996,7 @@ async function renderLibraryPage() {
   };
   let h = `<div class="page">
     <div class="pageHead">
-      <a class="back js-back" href="#/g/${g.id}">← 返回目标</a>
+      <button class="back js-back" data-back="#/g/${g.id}">← 返回目标</button>
       <h2 class="title">📚 资源库</h2>
       <span class="muted" style="font-size:12.5px;">资料 ${sources.length} 条（自己提供 ${own.length} / 网络 ${net.length}）· 汇总 ${digests.length} 篇</span>
       <div class="spacer"></div>
@@ -4031,7 +4142,7 @@ const modHint = (k, list) => {
 };
   let html = `<div class="page">
     <div class="pageHead">
-      <a class="back js-back" href="#/">← 返回</a>
+      <button class="back js-back" data-back="#/">← 返回</button>
       <h2 class="title" style="margin-left:10px;">🧩 组件</h2>
       <span class="hint" style="margin-left:10px;">功能与界面样式都由组件提供，可自由开关、导入分享</span>
       <div class="spacer"></div>
@@ -4528,7 +4639,7 @@ async function renderSettings() {
     : '识别图片需要支持视觉的模型（如 qwen-vl-max / gpt-4o / glm-4v-plus）；留空则用上面的文本模型，若它不支持读图，识图会提示失败。';
 
   let html = `<div class="page">
-    <div class="pageHead"><a class="back js-back" href="#/">← 返回</a><h2 class="title" style="margin-left:10px;">设置</h2>
+    <div class="pageHead"><button class="back js-back" data-back="#/">← 返回</button><h2 class="title" style="margin-left:10px;">设置</h2>
       <div class="spacer"></div>
       <span class="aiBadge ${configured ? 'ok' : 'bad'}">${configured ? '✓ AI 已配置' : '未配置 AI'}</span>
     </div>`;
