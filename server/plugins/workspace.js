@@ -107,6 +107,14 @@ function wsStat(abs) {
 }
 function wsFindCode() {
   const cands = process.platform === 'win32' ? ['code.cmd', 'code'] : ['code'];
+  if (process.platform === 'darwin') {
+    // macOS 上 VSCode 的 code 命令经常不在 PATH 里，加上自带路径兜底
+    cands.push('/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code');
+    try {
+      const home = require('node:os').homedir();
+      if (home) cands.push(path.join(home, 'Applications/Visual Studio Code.app/Contents/Resources/app/bin/code'));
+    } catch (e) {}
+  }
   return (async () => {
     for (const c of cands) {
       try {
