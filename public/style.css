@@ -93,6 +93,8 @@ main{padding:26px 0 90px;}
 .title::before{content:""; width:4px; height:17px; background:linear-gradient(180deg,var(--accent),var(--accent-2)); border-radius:3px;}
 .back{color:var(--muted); text-decoration:none; font-size:13px; padding:5px 0;}
 button.back{background:none; border:0; cursor:pointer; font-size:13px;}
+/* hidden 属性必须压过 .btn 等基类的 display（否则空按钮会露出来） */
+[hidden]{display:none !important;}
 /* 路线图卡片折叠 */
 .cardFold{min-width:26px; text-align:center;}
 /* “继续学习”卡片 */
