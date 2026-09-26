@@ -32,30 +32,39 @@
 .ssPill{font-size:12px; color:var(--muted); background:var(--bg); border:1px solid var(--border); border-radius:999px; padding:3px 11px; font-variant-numeric:tabular-nums;}
 .ssPill b{color:var(--text);}
 .ssSecTitle{font-size:13.5px; font-weight:700; margin:16px 0 8px; color:var(--muted);}
-/* 当天 24 小时轴：6 条 × 4 小时（桌面左三右三，手机单列） */
-.ssDayAxes{display:grid; grid-template-columns:1fr 1fr; gap:10px 14px; grid-auto-flow:column; grid-template-rows:repeat(3, auto);}
-.ssAxis{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:9px 12px 7px; min-width:0;}
+/* 当天 24 小时轴：定死 flex 列（左 0/4/8、右 12/16/20），不依赖网格自动排列 */
+.ssAxView{display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); margin:2px 0 8px;}
+.ssViewBtn{border:1px solid var(--border); background:var(--bg); color:var(--muted); border-radius:999px; padding:3px 12px; font-size:12px; cursor:pointer;}
+.ssViewBtn.active{border-color:var(--accent-border); color:var(--accent); background:var(--accent-soft); font-weight:700;}
+.ssDayAxes{display:flex; gap:10px 14px;}
+.ssDayAxes.cols2{flex-direction:row;}
+.ssDayAxes.cols1{flex-direction:column;}
+.ssCol{flex:1; min-width:0; display:flex; flex-direction:column; gap:10px;}
+.ssAxis{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:8px 12px 6px; min-width:0;}
 .ssAxisHead{display:flex; align-items:center; justify-content:space-between; font-size:12px; font-weight:700; color:var(--muted); margin-bottom:2px;}
 .ssAxisTot{color:var(--accent); font-variant-numeric:tabular-nums;}
-.ssAxisTrack{position:relative; height:30px;}
+.ssAxisTrack{position:relative; height:26px;}
 .ssAxisGrid{position:absolute; inset:0;}
 .ssTick{position:absolute; top:0; bottom:0; width:1px; background:var(--border); opacity:.8;}
 .ssTick i{position:absolute; top:-1px; transform:translateX(-50%); font-style:normal; font-size:10px; color:var(--muted); font-variant-numeric:tabular-nums;}
 .ssTick:first-child i{transform:none;}
 .ssTick:last-child i{transform:translateX(-100%);}
 .ssAxisSegs{position:absolute; inset:0;}
-.ssSegB{position:absolute; top:7px; height:16px; border-radius:5px; cursor:pointer; min-width:2px;}
+/* 瘦身视觉 + 透明大热区：看着细，悬停零压力 */
+.ssSegB{position:absolute; top:7px; height:12px; border-radius:4px; cursor:pointer; min-width:2px;}
+.ssSegB::after{content:''; position:absolute; left:-2px; right:-2px; top:-8px; bottom:-8px;}
 .ssSegB.k-focus{background:#22c55e;}
 .ssSegB.k-rest{background:#f59e0b;}
 .ssSegB.k-away{background:#94a3b8;}
 .ssSegB:hover{filter:brightness(1.12);}
-.ssSegDot2{position:absolute; top:10px; width:9px; height:9px; border-radius:50%; transform:translateX(-50%); cursor:pointer;}
+.ssSegDot2{position:absolute; top:9px; width:7px; height:7px; border-radius:50%; transform:translateX(-50%); cursor:pointer;}
+.ssSegDot2::after{content:''; position:absolute; inset:-10px;}
 .ssSegDot2.k-focus{background:#22c55e;}
 .ssSegDot2.k-rest{background:#f59e0b;}
 .ssSegDot2.k-away{background:#94a3b8;}
 .ssAxisCaps{position:relative; height:15px;}
 .ssSegCap{position:absolute; top:0; font-size:10.5px; color:var(--muted); white-space:nowrap; font-variant-numeric:tabular-nums;}
-.ssLegend{display:flex; gap:14px; align-items:center; margin-top:10px; font-size:12px; color:var(--muted); grid-column:1 / -1; flex-wrap:wrap;}
+.ssLegend{display:flex; gap:14px; align-items:center; margin-top:10px; font-size:12px; color:var(--muted); flex-wrap:wrap;}
 .ssLgDot{display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:4px;}
 .ssLgDot.k-focus{background:#22c55e;}
 .ssLgDot.k-rest{background:#f59e0b;}
@@ -88,6 +97,6 @@
   .ssCell{min-height:44px;}
   .ssSummary{flex-direction:column;}
   .ssStat{max-width:none;}
-  .ssDayAxes{grid-template-columns:1fr; grid-auto-flow:row; grid-template-rows:none;}
+  .ssDayAxes.cols2{flex-direction:column;}
   .ssDayTotal b{font-size:25px;}
 }

@@ -289,16 +289,24 @@
     if (!m) return NaN;
     return Number(m[1]) * 60 + Number(m[2]);
   }
+  function axesView() { try { return localStorage.getItem('sierxing-stats-axes') || 'cols2'; } catch (e) { return 'cols2'; } }
+  function setAxesView(v) { try { localStorage.setItem('sierxing-stats-axes', v); } catch (e) {} }
   function renderAxes(box, segs) {
     if (!box.dataset.built) {
-      box.innerHTML = `<div class="ssDayAxes">` + AXES.map((a, i) =>
-        `<div class="ssAxis" data-ax="${i}" style="grid-row:${(i % 3) + 1};grid-column:${Math.floor(i / 3) + 1}"><div class="ssAxisHead"><span>${pad(a[0])}:00 – ${pad(a[1])}:00</span><span class="ssAxisTot" id="ssAxTot${i}"></span></div>` +
+      // 定死两列容器：左 0/4/8、右 12/16/20；单列模式只是竖排，不搬 DOM
+      const col = idxs => idxs.map(i => {
+        const a = AXES[i];
+        return `<div class="ssAxis" data-ax="${i}"><div class="ssAxisHead"><span>${pad(a[0])}:00 – ${pad(a[1])}:00</span><span class="ssAxisTot" id="ssAxTot${i}"></span></div>` +
         `<div class="ssAxisTrack"><div class="ssAxisGrid">${[0, 1, 2, 3, 4].map(h => `<span class="ssTick" style="left:${h * 25}%"><i>${pad(a[0] + h)}</i></span>`).join('')}</div>` +
-        `<div class="ssAxisSegs" id="ssAxSegs${i}"></div><div class="ssAxisCaps" id="ssAxCaps${i}"></div></div></div>`
-      ).join('') +
-      `<div class="ssLegend"><span><i class="ssLgDot k-focus"></i>专注</span><span><i class="ssLgDot k-rest"></i>休息</span><span><i class="ssLgDot k-away"></i>暂离</span><span class="muted">悬停（触屏点一下）看详情</span></div></div>`;
+        `<div class="ssAxisSegs" id="ssAxSegs${i}"></div><div class="ssAxisCaps" id="ssAxCaps${i}"></div></div></div>`;
+      }).join('');
+      box.innerHTML = `<div class="ssDayAxes ${axesView()}" id="ssDayAxes"><div class="ssCol">${col([0, 1, 2])}</div><div class="ssCol">${col([3, 4, 5])}</div></div>` +
+      `<div class="ssLegend"><span><i class="ssLgDot k-focus"></i>专注</span><span><i class="ssLgDot k-rest"></i>休息</span><span><i class="ssLgDot k-away"></i>暂离</span><span class="muted">悬停（触屏点一下）看详情</span></div>`;
       box.dataset.built = '1';
       bindAxTip(box);
+    } else {
+      const w = document.getElementById('ssDayAxes');
+      if (w) w.className = 'ssDayAxes ' + axesView();
     }
     segById = {};
     AXES.forEach((a, i) => {
@@ -423,11 +431,20 @@
         `<div class="ssDayHero" id="ssDayHero"><div class="ssDayTop"><span class="ssDayDate">📅 ${mm}月${dd}日 · ${weekdayStr(selDay)}</span><span class="ssLive" hidden>● 直播</span></div>` +
         `<div class="ssDayTotal"><b id="ssDayFocus">0秒</b><span>专注</span></div>` +
         `<div class="ssDayPills"><span class="ssPill">☕ 休息 <b id="ssDayRest">0秒</b></span><span class="ssPill">📵 暂离 <b id="ssDayAway">0秒</b></span></div></div>` +
-        `<div class="ssSecTitle" id="ssTlTitle" hidden>⏱ 当天时间线</div><div class="ssTl" id="ssTl"></div>` +
+        `<div class="ssSecTitle" id="ssTlTitle" hidden>⏱ 当天时间线</div><div class="ssAxView" id="ssAxView" hidden><span>排列：</span><button class="ssViewBtn" data-v="cols2">左右两列</button><button class="ssViewBtn" data-v="cols1">上下单列</button></div><div class="ssTl" id="ssTl"></div>` +
         `<div class="ssSecTitle" id="ssNodeTitle" hidden>📖 按节点</div><div id="ssNodeRows"></div>` +
         `<div class="ssEmpty" id="ssEmpty" hidden><div class="ebText">这天还没记录。开着番茄钟、打开一篇教程专注，时间会自动记到对应节点上；切出应用的时间会记为暂离。</div></div>` +
         `<div class="ssFoot muted">暂离指本页面不可见的时段（切标签页/最小化/刷视频等），网页拿不到其它标签页地址，只能记到这个粒度。</div>`;
       builtDay = selDay;
+      box.querySelectorAll('.ssViewBtn').forEach(b => {
+        if (b.getAttribute('data-v') === axesView()) b.classList.add('active');
+        b.addEventListener('click', () => {
+          setAxesView(b.getAttribute('data-v'));
+          const w = document.getElementById('ssDayAxes');
+          if (w) w.className = 'ssDayAxes ' + axesView();
+          box.querySelectorAll('.ssViewBtn').forEach(x => x.classList.toggle('active', x === b));
+        });
+      });
     }
     patchDay(box, d);
     updateLive();
@@ -440,10 +457,12 @@
     setText('ssDayAway', fmtDur(t.away));
     const tl = d.timeline || [], recs = d.records || [];
     const tlTitle = document.getElementById('ssTlTitle');
+    const axView = document.getElementById('ssAxView');
     const nodeTitle = document.getElementById('ssNodeTitle');
     const emptyBox = document.getElementById('ssEmpty');
     const foot = box.querySelector('.ssFoot');
     if (tlTitle) tlTitle.hidden = !tl.length;
+    if (axView) axView.hidden = !tl.length;
     if (nodeTitle) nodeTitle.hidden = !recs.length;
     if (emptyBox) emptyBox.hidden = !!(tl.length || recs.length);
     if (foot) foot.style.display = (tl.length || recs.length) ? '' : 'none';
