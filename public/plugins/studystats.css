@@ -32,19 +32,39 @@
 .ssPill{font-size:12px; color:var(--muted); background:var(--bg); border:1px solid var(--border); border-radius:999px; padding:3px 11px; font-variant-numeric:tabular-nums;}
 .ssPill b{color:var(--text);}
 .ssSecTitle{font-size:13.5px; font-weight:700; margin:16px 0 8px; color:var(--muted);}
-/* 时间线纵轨 */
-.ssTl{position:relative; padding-left:4px;}
-.ssTl::before{content:''; position:absolute; left:90px; top:10px; bottom:10px; width:2px; border-radius:2px; background:var(--border);}
-.ssSeg{position:relative; display:flex; gap:10px; align-items:flex-start; background:var(--card); border:1px solid var(--border); border-radius:12px; padding:10px 12px 10px 8px; margin:0 0 8px 0;}
-.ssSegDot{position:absolute; left:84px; top:15px; width:11px; height:11px; border-radius:50%; background:var(--card); border:3px solid var(--muted); z-index:1; box-sizing:border-box;}
-.ssSeg-focus .ssSegDot{border-color:#22c55e;}
-.ssSeg-rest .ssSegDot{border-color:#f59e0b;}
-.ssSeg-away .ssSegDot{border-color:#94a3b8;}
-.ssSegTime{flex:none; width:76px; text-align:right; display:flex; flex-direction:column; line-height:1.5; padding-top:1px;}
-.ssSegTime b{font-size:13px; font-variant-numeric:tabular-nums;}
-.ssSegTime span{font-size:11px; color:var(--muted); font-variant-numeric:tabular-nums;}
-.ssSegBody{flex:1; min-width:0;}
-.ssSegTop{display:flex; align-items:center; gap:8px;}
+/* 当天 24 小时轴：6 条 × 4 小时（桌面左三右三，手机单列） */
+.ssDayAxes{display:grid; grid-template-columns:1fr 1fr; gap:10px 14px; grid-auto-flow:column; grid-template-rows:repeat(3, auto);}
+.ssAxis{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:9px 12px 7px; min-width:0;}
+.ssAxisHead{display:flex; align-items:center; justify-content:space-between; font-size:12px; font-weight:700; color:var(--muted); margin-bottom:2px;}
+.ssAxisTot{color:var(--accent); font-variant-numeric:tabular-nums;}
+.ssAxisTrack{position:relative; height:30px;}
+.ssAxisGrid{position:absolute; inset:0;}
+.ssTick{position:absolute; top:0; bottom:0; width:1px; background:var(--border); opacity:.8;}
+.ssTick i{position:absolute; top:-1px; transform:translateX(-50%); font-style:normal; font-size:10px; color:var(--muted); font-variant-numeric:tabular-nums;}
+.ssTick:first-child i{transform:none;}
+.ssTick:last-child i{transform:translateX(-100%);}
+.ssAxisSegs{position:absolute; inset:0;}
+.ssSegB{position:absolute; top:7px; height:16px; border-radius:5px; cursor:pointer; min-width:2px;}
+.ssSegB.k-focus{background:#22c55e;}
+.ssSegB.k-rest{background:#f59e0b;}
+.ssSegB.k-away{background:#94a3b8;}
+.ssSegB:hover{filter:brightness(1.12);}
+.ssSegDot2{position:absolute; top:10px; width:9px; height:9px; border-radius:50%; transform:translateX(-50%); cursor:pointer;}
+.ssSegDot2.k-focus{background:#22c55e;}
+.ssSegDot2.k-rest{background:#f59e0b;}
+.ssSegDot2.k-away{background:#94a3b8;}
+.ssAxisCaps{position:relative; height:15px;}
+.ssSegCap{position:absolute; top:0; font-size:10.5px; color:var(--muted); white-space:nowrap; font-variant-numeric:tabular-nums;}
+.ssLegend{display:flex; gap:14px; align-items:center; margin-top:10px; font-size:12px; color:var(--muted); grid-column:1 / -1; flex-wrap:wrap;}
+.ssLgDot{display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:4px;}
+.ssLgDot.k-focus{background:#22c55e;}
+.ssLgDot.k-rest{background:#f59e0b;}
+.ssLgDot.k-away{background:#94a3b8;}
+/* 悬停详情卡 */
+.ssTip{position:fixed; z-index:9999; max-width:260px; background:var(--card); border:1px solid var(--border); border-radius:12px; box-shadow:var(--shadow-lg); padding:10px 12px; pointer-events:none;}
+.ssTipTop{display:flex; align-items:center; gap:8px; margin-bottom:4px;}
+.ssTipTime{font-size:13px; font-weight:800; font-variant-numeric:tabular-nums;}
+.ssTipWhat{font-size:12.5px; color:var(--muted); margin-top:2px; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;}
 .ssKind{font-size:11.5px; font-weight:700; border-radius:999px; padding:1px 9px; white-space:nowrap;}
 .k-focus{background:rgba(34,197,94,.13); color:#16a34a;}
 .k-rest{background:rgba(245,158,11,.14); color:#b45309;}
@@ -68,8 +88,6 @@
   .ssCell{min-height:44px;}
   .ssSummary{flex-direction:column;}
   .ssStat{max-width:none;}
-  .ssTl::before{left:72px;}
-  .ssSegDot{left:66px;}
-  .ssSegTime{width:58px;}
+  .ssDayAxes{grid-template-columns:1fr; grid-auto-flow:row; grid-template-rows:none;}
   .ssDayTotal b{font-size:25px;}
 }
