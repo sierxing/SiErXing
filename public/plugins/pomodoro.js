@@ -84,7 +84,7 @@
   /* ---------------- 计时核心 ---------------- */
   let finished = false;   // 本轮是否已结算（防重复触发）
   let autoPaused = false; // 系统自动暂停的（切出教程/久无滚动）：滚动回来可自动继续
-  let autoManaged = false; // 本轮是否纳入自动管理：只在教程页开始的计时才被自动暂停/继续；在别处手动开始的不干扰
+  let runRoute = null; // 本轮跑起来时所在的页面：只有从教程页切走才自动暂停
   let awayMode = false;   // 切出应用后的休息计时中（回来前一直记休息）
   let awaySaved = null;   // 切出时暂存的专注轮次 { remaining }，回来恢复
   let awayInfoModal = false; // 当前弹窗只是“已开始休息”告知，点“知道了”不碰计时
@@ -97,7 +97,7 @@
     S.running = true;
     finished = false;
     autoPaused = false; pauseReason = '';
-    autoManaged = onTutorialRoute();
+    runRoute = location.hash || '#/';
     awayMode = false; awaySaved = null; awayInfoModal = false;
     closeModal();
     stopFlash();
@@ -125,7 +125,7 @@
     S.deadline = Date.now() + S.remaining;
     S.running = true;
     autoPaused = false; pauseReason = '';
-    autoManaged = onTutorialRoute();
+    runRoute = location.hash || '#/';
     save(); render();
   }
   function stop() {
@@ -134,7 +134,7 @@
     S.remaining = phaseLen(S.phase);
     finished = false;
     autoPaused = false; pauseReason = '';
-    autoManaged = false;
+    runRoute = null;
     awayMode = false; awaySaved = null; awayInfoModal = false;
     closeModal();
     stopFlash();
@@ -548,18 +548,27 @@
     } catch (e) {}
   }
   function autoWatch() {
-    if (!S.auto || !S.running || !autoManaged) return;
+    if (!S.auto || !S.running) return;
     if (awayMode) return;   // 切出应用后的休息计时：回来前一直记，不暂停
+    if (document.visibilityState === 'hidden') return;   // 藏起来的标签页不动它，交给 visibility 逻辑
     if (el('pomoModalWrap') && !el('pomoModalWrap').hidden) return;
-    if (!onTutorialRoute()) { autoPause('切出教程页'); return; }
-    if (Date.now() - lastScrollAt > 60000) autoPause('1 分钟没滚动');
+    const cur = location.hash || '#/';
+    if (runRoute == null) runRoute = cur;
+    if (cur !== runRoute) {
+      // 跑着跑着换了页面：只有从教程页切走才暂停（在那读的书，离开=不读了）
+      const leftTut = /^#\/t\/(\d+)$/.test(runRoute || '');
+      runRoute = cur;
+      if (leftTut) { autoPause('切换页面'); return; }
+    }
+    if (onTutorialRoute() && Date.now() - lastScrollAt > 60000) autoPause('1 分钟没滚动');
   }
-  /* 切出应用（标签不可见，如去刷视频）：正在跑的专注、暂停剩的半截，都转成休息一直记，回来自动恢复专注 */
+  /* 切出应用（标签不可见，如去刷视频）：专注转休息一直记，回来自动恢复专注。
+   * 注意：只要标签藏起来就转，不要求计时是在教程页开始的——看不见页面就不算在学。 */
   function convertToAwayRest() {
     if (!S.auto || awayMode) return;
     if (!enabled()) return;
     if (S.running) {
-      if (S.phase !== 'focus' || !autoManaged) return;
+      if (S.phase !== 'focus') return;   // 已经在休息就让它跑着
       flushStats();   // 先把专注零头结算了，再转休息
       awaySaved = { remaining: S.remaining };
     } else {
@@ -595,6 +604,7 @@
     stopFlash();
     save(); render();
     toast('👋 欢迎回来，已恢复专注');
+    runRoute = location.hash || '#/';
   }
   document.addEventListener('visibilitychange', () => {
     try {
@@ -623,7 +633,7 @@
   /* 对外极小接口（测试 / 调试 / 跨插件用） */
   window.Pomodoro = {
     start, pause, resume, stop, setBind,
-    state: () => ({ phase: S.phase, running: S.running, remainMs: remainMs(), focusMin: S.focusMin, breakMin: S.breakMin, doneToday: S.doneToday, auto: S.auto, autoPaused, managed: autoManaged, away: awayMode, bind: { nodeId: S.bindNodeId, title: S.bindTitle, goalId: S.bindGoalId } }),
+    state: () => ({ phase: S.phase, running: S.running, remainMs: remainMs(), focusMin: S.focusMin, breakMin: S.breakMin, doneToday: S.doneToday, auto: S.auto, autoPaused, away: awayMode, bind: { nodeId: S.bindNodeId, title: S.bindTitle, goalId: S.bindGoalId } }),
     _finishNow: () => { if (S.running) { S.deadline = Date.now(); } }
   };
 
