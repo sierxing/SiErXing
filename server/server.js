@@ -1018,11 +1018,30 @@ function nodeSourcesBlock(goal, node, maxLen) {
   return lines.join('\n');
 }
 /* 其它资料的索引（只给标题，避免把全部正文塞进节点级提示词） */
-function sourcesIndexBlock(goal, maxTitles) {
+function sourcesIndexBlock(goal, maxTitles, scopeNote) {
   const all = sourcesOf(goal.id);
   if (!all.length) return '';
-  const lines = ['', '【资料库其它条目（仅索引，未展开正文；如本节点确实需要，可在资料标题里点明）】'];
+  const lines = ['', scopeNote || '【资料库其它条目（仅索引，未展开正文；如本节点确实需要，可在资料标题里点明）】'];
   for (const x of all.slice(0, maxTitles || 20)) lines.push('- [' + x.site + '｜' + x.kind + '] ' + x.title);
+  return lines.join('\n');
+}
+/* 同级其它节点的标题：教程里点名排除，防止把别章节的知识点写进来 */
+function siblingScopeBlock(goal, node) {
+  let sibs = [];
+  try {
+    sibs = db.prepare('SELECT id, title FROM nodes WHERE goal_id = ? AND IFNULL(parent_id, 0) = IFNULL(?, 0) AND id != ? ORDER BY sort_order, id LIMIT 12')
+      .all(goal.id, node.parent_id || 0, node.id);
+  } catch (e) { sibs = []; }
+  sibs = sibs.map(s => String(s.title || '').trim().slice(0, 40)).filter(Boolean);
+  const lines = [];
+  lines.push('');
+  lines.push('【本节范围（必须遵守，否则视为不合格）】');
+  lines.push('1. 只写与上面【教程主题】直接相关的知识点；其它章节的内容一律不写、不展开、不举例——即使下面的背景资料里提到，也不行。');
+  lines.push('2. 可以一句话点名前置知识（如“需要先懂变量”），但不展开讲解。');
+  lines.push('3. 例外：只有【用户的额外要求】明确点名要加别的内容时，才允许超出本节范围。');
+  if (sibs.length) {
+    lines.push('4. 别的章节排除清单（出现以下任一主题的成段讲解即不合格）：' + sibs.map(t => '「' + t + '」').join('、'));
+  }
   return lines.join('\n');
 }
 function sourcesBlock(goal, maxItems, maxLen) {
@@ -1554,6 +1573,7 @@ function buildTutorialEditPrompt(goal, node, tut, feedback, format) {
   lines.push('1. 在**保留原有优质内容**的基础上，按用户意见修改（增删改均可）；不要无故删掉原有章节；');
   lines.push('2. 保持原有格式与结构风格，篇幅可增可减，但要保证「能照着学会」；');
   lines.push('3. 直接输出修改后的完整教程正文（' + (format === 'md' ? 'Markdown' : 'HTML') + '），不要任何解释或前后缀。');
+  lines.push('4. 范围顺手清理：如果正文里混入了与【教程主题】无关的其它章节的成段内容，且用户意见没有要求保留，可顺手删减；不要新增超出主题的新章节。');
   lines.push('');
   lines.push('【原教程正文】');
   lines.push(String(tut.content || '').slice(0, 30000));
@@ -1573,10 +1593,13 @@ function buildTutorialPrompt(goal, node, format, note) {
   if (node.artifact) lines.push('应产出的成果：' + node.artifact);
   if (node.acceptance) lines.push('验收标准：' + node.acceptance);
   if (node.hours) lines.push('预计投入：' + node.hours);
+  lines.push(siblingScopeBlock(goal, node));
   lines.push(digestsBlock(goal));
   lines.push(nodeSourcesBlock(goal, node, 1100));
-  lines.push(sourcesIndexBlock(goal, 12));
+  lines.push(sourcesIndexBlock(goal, 12, '【资料库其它条目（仅索引；与本节无关的一律不读不用，更不要写入教程）】'));
   if (note) { lines.push(''); lines.push('【用户的额外要求（必须满足）】' + note); }
+  lines.push('');
+  lines.push('【范围重申】动笔前先对照排除清单自查：教程里只能出现本节的知识点；其它章节成段出现即不合格，直接删掉重写该部分。');
   lines.push('');
   lines.push('【教程必须包含的结构】');
   lines.push('1. 开头：这份教程能让你掌握什么（能力清单）、需要的前置知识（不会就先补什么）、预计学习时间分配。');
