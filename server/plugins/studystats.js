@@ -94,10 +94,11 @@ function applyReport(bucket, nodeId, sec) {
         node_title = excluded.node_title, goal_title = excluded.goal_title, updated_at = excluded.updated_at`)
       .run(day, goalId, nodeId, nodeTitle, goalTitle, sec, t, t);
   }
-  const col = bucket === 'rest' ? 'rest_sec' : (bucket === 'away' ? 'away_sec' : 'focus_sec');
-  db.prepare(`INSERT INTO study_days (day, focus_sec, rest_sec, away_sec, updated_at) VALUES (?, 0, 0, 0, ?)
-    ON CONFLICT(day) DO UPDATE SET ${col} = ${col} + ?, updated_at = ?`)
-    .run(day, t, sec, t);
+  // 注意：INSERT 分支必须带上本次秒数（首笔无冲突时直接落盘，不能写全 0 丢掉）
+  const f = bucket === 'focus' ? sec : 0, r = bucket === 'rest' ? sec : 0, a = bucket === 'away' ? sec : 0;
+  db.prepare(`INSERT INTO study_days (day, focus_sec, rest_sec, away_sec, updated_at) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(day) DO UPDATE SET focus_sec = focus_sec + excluded.focus_sec, rest_sec = rest_sec + excluded.rest_sec, away_sec = away_sec + excluded.away_sec, updated_at = excluded.updated_at`)
+    .run(day, f, r, a, t);
   // 时间段：同天同类同节点、前后脚（180 秒内）就接到一段里，否则另起一段
   const last = db.prepare('SELECT * FROM study_segments WHERE day = ? AND kind = ? AND node_id = ? ORDER BY id DESC LIMIT 1').get(day, bucket, nodeId);
   const lt = localTime();
