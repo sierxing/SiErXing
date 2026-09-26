@@ -3,10 +3,13 @@
  * 思而行 · 前端扩展组件：学习统计
  * ------------------------------------------------------------------
  * 两部分：
- * 1) 后台记账：番茄钟专注计时开着、且正停在某篇教程（#/t/:id）上时，
- *    每 ~15 秒把流过的秒数记到该节点名下；暂停/切走/关页面不记。
- * 2) 日历页（#/studystats）：月历 + 每天学了多久，点某天看各节点明细。
- * 由 app.js 经路由自动渲染（仅当组件启用…入口层面；页面本身打开即查）。
+ * 1) 后台记账（ mute 静默）：番茄钟计时开着时每 ~15 秒上报一次：
+ *    - 专注 + 本页可见 + 停在教程上 → 记到该节点；绑定了节点则在哪页都记它；
+ *    - 专注 + 本页不可见（切标签/最小化/刷视频）→ 记"暂离应用"
+ *      （网页拿不到别的标签页地址，只能知道切出去了）；
+ *    - 休息计时走字 → 记"休息"。
+ *    暂停/切页/关页面不记；暂停·结束·完成那一刻番茄钟会调 flush() 立刻结算零头。
+ * 2) 日历页（#/studystats）：月历 + 每天专注/休息/暂离，点某天看时间线与各节点明细。
  */
 (function () {
   const { api, esc, toast } = SiErXing;
@@ -19,7 +22,7 @@
   const TICK_MS = 15000, CAP_SEC = 60;
   let lastAt = Date.now();
   const nodeCache = {};   // tid -> node_id（0 表示解析中/无节点）
-  const pending = {};     // tid -> 等节点解析的秒数
+  const pending = {};     // tid -> 等节点解析的秒数（仅专注可见态用）
 
   async function resolveNode(tid) {
     if (nodeCache[tid] != null) return nodeCache[tid];
@@ -28,62 +31,92 @@
       const r = await api('/api/tutorials/' + tid);
       const nid = r && r.node ? Number(r.node.id) : 0;
       nodeCache[tid] = nid;
-      if (nid > 0 && pending[tid] > 0) { const s = pending[tid]; pending[tid] = 0; credit(nid, s); }
+      if (nid > 0 && pending[tid] > 0) { const s = pending[tid]; pending[tid] = 0; report('focus', nid, s); }
     } catch (e) { nodeCache[tid] = 0; }
     return nodeCache[tid];
   }
-  async function credit(nid, sec) {
+  async function report(bucket, nid, sec) {
     sec = Math.round(sec);
-    if (!(nid > 0) || !(sec >= 1)) return null;
+    if (!(sec >= 1)) return null;
     try {
-      return await api('/api/study/credit', {
+      return await api('/api/study/report', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ node_id: nid, seconds: Math.min(sec, 600) })
+        body: JSON.stringify({ bucket, node_id: nid || 0, seconds: Math.min(sec, 600) })
       });
     } catch (e) {
       // 绑定的节点被删了：自动解绑，避免之后的时间全丢黑洞
-      if (/节点不存在/.test(e.message || '') && pomoState() && pomoState().bind && pomoState().bind.nodeId === nid) {
-        try { await window.Pomodoro.setBind(0, true); toast('绑定的节点已不存在，已自动解绑'); } catch (e2) {}
+      if (/节点不存在/.test(e.message || '')) {
+        try {
+          const pst = pomoState();
+          if (pst && pst.bind && pst.bind.nodeId === nid && window.Pomodoro) {
+            await window.Pomodoro.setBind(0, true);
+            toast('绑定的节点已不存在，已自动解绑');
+          }
+        } catch (e2) {}
       }
       return null;
     }
+  }
+  /* 当前上下文节点：绑定优先，否则当前教程（需解析），都没有则 0 */
+  async function contextNode(tid, pst) {
+    if (pst && pst.bind && pst.bind.nodeId > 0) return pst.bind.nodeId;
+    if (tid > 0) return resolveNode(tid);
+    return 0;
   }
   async function tick() {
     const now = Date.now();
     const dt = Math.min((now - lastAt) / 1000, CAP_SEC);
     lastAt = now;
     const st = pomoState();
-    if (!st || !st.running || st.phase !== 'focus') return;
-    // ① 已绑定节点：在哪页都记到它（与番茄钟同步）
-    if (st.bind && st.bind.nodeId > 0) { credit(st.bind.nodeId, dt); return; }
-    // ② 未绑定：看哪篇教程记哪（旧行为）
+    if (!st || !st.running) return;
     const tid = curTid();
+    if (st.phase === 'break') {
+      report('rest', await contextNode(tid, st), dt);
+      return;
+    }
+    if (st.phase !== 'focus') return;
+    if (document.visibilityState !== 'visible') {
+      // 切出应用了：这段时间不算学，记暂离
+      report('away', await contextNode(tid, st), dt);
+      return;
+    }
+    if (st.bind && st.bind.nodeId > 0) { report('focus', st.bind.nodeId, dt); return; }
     if (!(tid > 0)) return;
     const nid = await resolveNode(tid);
-    if (nid > 0) credit(nid, dt);
+    if (nid > 0) report('focus', nid, dt);
     else pending[tid] = (pending[tid] || 0) + dt;
   }
-  /* 番茄钟暂停/结束/完成时调用：把零头立刻记上 */
-  function flush() { try { tick(); } catch (e) {} }
   setInterval(() => {
     try { if (enabled()) tick(); } catch (e) {}
   }, TICK_MS);
   // 切页面：时钟清零（上一页的零头不算到新页面上，丢秒级零头可接受）
   window.addEventListener('hashchange', () => { lastAt = Date.now(); });
-  // 关页面：尽力把最后一段记上（节点已解析才发，避免关页面时再起请求解析）
+  // 关页面：尽力把最后一段记上（只用已解析好的节点，不再起新请求解析）
   window.addEventListener('pagehide', () => {
     try {
-      const st = pomoState(), tid = curTid(), now = Date.now();
+      const st = pomoState();
+      if (!st || !st.running) return;
+      const now = Date.now();
       const dt = Math.min((now - lastAt) / 1000, CAP_SEC);
-      const nid = nodeCache[tid] || 0;
-      if (st && st.running && st.phase === 'focus' && tid > 0 && nid > 0 && dt >= 1) {
-        fetch('/api/study/credit', {
+      if (!(dt >= 1)) return;
+      const tid = curTid();
+      let bucket = null, nid = 0;
+      if (st.phase === 'break') { bucket = 'rest'; nid = (st.bind && st.bind.nodeId) || nodeCache[tid] || 0; }
+      else if (st.phase === 'focus') {
+        if (document.visibilityState !== 'visible') { bucket = 'away'; nid = (st.bind && st.bind.nodeId) || nodeCache[tid] || 0; }
+        else if (st.bind && st.bind.nodeId > 0) { bucket = 'focus'; nid = st.bind.nodeId; }
+        else if (tid > 0 && nodeCache[tid] > 0) { bucket = 'focus'; nid = nodeCache[tid]; }
+      }
+      if (bucket) {
+        fetch('/api/study/report', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ node_id: nid, seconds: Math.round(dt) }), keepalive: true
+          body: JSON.stringify({ bucket, node_id: nid, seconds: Math.round(dt) }), keepalive: true
         }).catch(() => {});
       }
     } catch (e) {}
   });
+  /* 番茄钟暂停/结束/完成时调用：把零头立刻记上 */
+  function flush() { try { tick(); } catch (e) {} }
 
   /* ---------------- 2) 日历页 ---------------- */
   function pad(n) { return String(n).padStart(2, '0'); }
@@ -102,17 +135,18 @@
     if (!h) return m + '分';
     return h + 'h' + (m % 60 ? (m % 60) + 'm' : '');
   }
+  const KIND_TXT = { focus: '📖 学习', rest: '☕ 休息', away: '📵 暂离' };
   let curMonth = localDayStr(new Date()).slice(0, 7);
   let selDay = localDayStr(new Date());
-  let monthData = { days: {}, total_sec: 0, active_days: 0 };
+  let monthData = { days: {}, total_focus: 0, total_rest: 0, total_away: 0, active_days: 0 };
 
   async function renderStatsPage() {
     curMonth = localDayStr(new Date()).slice(0, 7);
     selDay = localDayStr(new Date());
     app.innerHTML = `<div class="page"><div class="pageHead">
-        <a class="back" href="#/">← 返回</a>
+        <button class="back" data-back="#/">← 返回</button>
         <span class="mapTitle">📊 学习统计</span>
-        <span class="chip gray">番茄专注秒数按节点记账</span>
+        <span class="chip gray">专注按节点记 · 切出应用记暂离</span>
         <div class="spacer"></div>
         <button class="btn small" id="ssPrevM">‹ 上月</button>
         <button class="btn small" id="ssToday">本月</button>
@@ -140,7 +174,7 @@
   async function refresh() {
     try {
       monthData = await api('/api/study/month?month=' + encodeURIComponent(curMonth));
-    } catch (e) { monthData = { days: {}, total_sec: 0, active_days: 0 }; }
+    } catch (e) { monthData = { days: {}, total_focus: 0, total_rest: 0, total_away: 0, active_days: 0 }; }
     renderCal();
     await renderDay();
   }
@@ -154,18 +188,22 @@
     for (let i = 0; i < offset; i++) h += '<div class="ssCell empty"></div>';
     for (let d = 1; d <= daysIn; d++) {
       const key = curMonth + '-' + pad(d);
-      const sec = monthData.days[key] || 0;
+      const dd = monthData.days[key] || { f: 0, r: 0, a: 0 };
+      const sec = dd.f || 0;
       const cls = ['ssCell'];
       if (sec > 0) cls.push('has');
       if (key === today) cls.push('today');
       if (key === selDay) cls.push('sel');
       if (key > today) cls.push('future');
-      h += `<button class="${cls.join(' ')}" data-day="${key}" ${key > today ? 'disabled' : ''}><span class="ssD">${d}</span>${sec > 0 ? `<span class="ssT">${fmtShort(sec)}</span>` : ''}</button>`;
+      const tip = `专注 ${fmtDur(dd.f || 0)} · 休息 ${fmtDur(dd.r || 0)} · 暂离 ${fmtDur(dd.a || 0)}`;
+      h += `<button class="${cls.join(' ')}" data-day="${key}" title="${tip}" ${key > today ? 'disabled' : ''}><span class="ssD">${d}</span>${sec > 0 ? `<span class="ssT">${fmtShort(sec)}</span>` : ''}${(dd.r || 0) > 0 ? '<span class="ssR">休</span>' : ''}</button>`;
     }
     h += '</div>';
     document.getElementById('ssCal').innerHTML = h;
     document.getElementById('ssSummary').innerHTML =
-      `<div class="ssStat"><span class="ssNum">${fmtDur(monthData.total_sec)}</span><span class="ssLbl">本月共学</span></div>` +
+      `<div class="ssStat"><span class="ssNum">${fmtDur(monthData.total_focus)}</span><span class="ssLbl">本月专注</span></div>` +
+      `<div class="ssStat"><span class="ssNum">${fmtDur(monthData.total_rest)}</span><span class="ssLbl">本月休息</span></div>` +
+      `<div class="ssStat"><span class="ssNum">${fmtDur(monthData.total_away)}</span><span class="ssLbl">本月暂离</span></div>` +
       `<div class="ssStat"><span class="ssNum">${monthData.active_days}</span><span class="ssLbl">学习天数</span></div>`;
     document.querySelectorAll('#ssCal [data-day]').forEach(b => b.addEventListener('click', () => {
       selDay = b.getAttribute('data-day');
@@ -175,17 +213,40 @@
   }
   async function renderDay() {
     const box = document.getElementById('ssDetail');
+    if (!box) return;
     box.innerHTML = '<p class="muted">加载中…</p>';
     let d;
     try { d = await api('/api/study/day?day=' + encodeURIComponent(selDay)); }
     catch (e) { box.innerHTML = '<p class="muted">加载失败：' + esc(e.message) + '</p>'; return; }
-    const max = Math.max(1, ...d.records.map(r => r.focus_sec));
-    box.innerHTML = `<div class="ssDayHead"><span>📅 ${esc(selDay)}</span><span class="chip">共 ${esc(fmtDur(d.total_sec))}</span><span class="chip gray">${d.records.length} 个节点</span></div>` +
-      (d.records.length ? d.records.map(r =>
+    const t = d.totals || { focus: 0, rest: 0, away: 0 };
+    let h = `<div class="ssDayHead"><span>📅 ${esc(selDay)}</span>` +
+      `<span class="chip">专注 ${esc(fmtDur(t.focus))}</span>` +
+      `<span class="chip gray">休息 ${esc(fmtDur(t.rest))}</span>` +
+      `<span class="chip gray">暂离 ${esc(fmtDur(t.away))}</span></div>`;
+    // 时间线：几点到几点在干什么
+    if ((d.timeline || []).length) {
+      h += '<div class="ssSecTitle">⏱ 当天时间线</div>' + d.timeline.map(s =>
+        `<div class="ssSeg ssSeg-${s.kind}"><span class="ssSegTime">${esc(s.from)}–${esc(s.to)}</span>` +
+        `<span class="ssSegKind">${KIND_TXT[s.kind] || s.kind}</span>` +
+        `<span class="ssSegWhat">${esc(s.node_title || s.goal_title || '')}</span>` +
+        `<span class="ssDur">${esc(fmtDur(s.seconds))}</span></div>`
+      ).join('');
+    }
+    // 按节点
+    if ((d.records || []).length) {
+      const max = Math.max(1, ...d.records.map(r => r.focus_sec));
+      h += '<div class="ssSecTitle">📖 按节点</div>' + d.records.map(r =>
         `<div class="ssRow"><div class="ssRowTop"><span class="ssNode">${esc(r.node_title)}${r.node_gone ? ' <span class="chip gray">节点已删</span>' : ''}</span><span class="ssDur">${esc(fmtDur(r.focus_sec))}</span></div>` +
         `<div class="ssRowSub">${r.goal_title ? `<a href="#/g/${r.goal_id}">${esc(r.goal_title)}</a>` : ''}</div>` +
         `<div class="ssBar"><div class="ssFill" style="width:${Math.round(r.focus_sec / max * 100)}%"></div></div></div>`
-      ).join('') : '<div class="emptyBox" style="margin-top:8px;"><div class="ebText">这天还没记录。开着番茄钟、打开一篇教程专注，时间会自动记到对应节点上。</div></div>');
+      ).join('');
+    }
+    if (!(d.timeline || []).length && !(d.records || []).length) {
+      h += '<div class="emptyBox" style="margin-top:8px;"><div class="ebText">这天还没记录。开着番茄钟、打开一篇教程专注，时间会自动记到对应节点上；切出应用的时间会记为暂离。</div></div>';
+    } else {
+      h += '<div class="ssFoot muted">暂离指本页面不可见的时段（切标签页/最小化/刷视频等），网页拿不到其它标签页地址，只能记到这个粒度。</div>';
+    }
+    box.innerHTML = h;
   }
 
   SiErXing.registerPlugin({

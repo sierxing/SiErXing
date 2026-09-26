@@ -14,7 +14,7 @@
   const LS = 'sierxing-pomodoro';
   const DAY = () => { const d = new Date(); return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate(); };
 
-  const DEF = { focusMin: 25, breakMin: 5, phase: 'focus', running: false, deadline: 0, remaining: 25 * 60000, collapsed: false, right: 18, bottom: 18, doneToday: 0, dayStamp: DAY(), sound: true, notify: true, bindNodeId: 0, bindTitle: '', bindGoalId: 0 };
+  const DEF = { focusMin: 25, breakMin: 5, phase: 'focus', running: false, deadline: 0, remaining: 25 * 60000, collapsed: false, right: 18, bottom: 18, doneToday: 0, dayStamp: DAY(), sound: true, notify: true, bindNodeId: 0, bindTitle: '', bindGoalId: 0, auto: true };
 
   function load() {
     let s = {};
@@ -83,28 +83,46 @@
 
   /* ---------------- 计时核心 ---------------- */
   let finished = false;   // 本轮是否已结算（防重复触发）
+  let manualHold = false; // 用户手动暂停：自动逻辑不再接管，直到手动开始/切页/结束
+  let autoPaused = false; // 系统自动暂停的（切出教程/久无滚动）：滚动回来可自动继续
+  let autoManaged = false; // 本轮是否纳入自动管理：只在教程页开始的计时才被自动暂停/继续；在别处手动开始的不干扰
+  let pauseReason = '';   // 自动暂停原因展示
+  let lastScrollAt = Date.now();
   function start(phase) {
     S.phase = (phase === 'break') ? 'break' : 'focus';
     S.remaining = phaseLen(S.phase);
     S.deadline = Date.now() + S.remaining;
     S.running = true;
     finished = false;
+    manualHold = false; autoPaused = false; pauseReason = '';
+    autoManaged = onTutorialRoute();
     closeModal();
     stopFlash();
     save(); render();
   }
-  function pause() {
+  function pause(manual) {
     if (!S.running) return;
     S.remaining = remainMs();
     S.running = false;
     S.deadline = 0;
+    if (manual) { manualHold = true; autoPaused = false; pauseReason = ''; }
     save(); render();
     flushStats();
+  }
+  /* 系统自动暂停（切出教程页 / 1 分钟没滚动）：不锁死，滚动回来自动继续 */
+  function autoPause(reason) {
+    if (!S.running) return;
+    pause(false);
+    autoPaused = true;
+    pauseReason = reason;
+    save(); render();
   }
   function resume() {
     if (S.running || S.remaining <= 0) return;
     S.deadline = Date.now() + S.remaining;
     S.running = true;
+    manualHold = false; autoPaused = false; pauseReason = '';
+    autoManaged = onTutorialRoute();
     save(); render();
   }
   function stop() {
@@ -112,11 +130,25 @@
     S.deadline = 0;
     S.remaining = phaseLen(S.phase);
     finished = false;
+    manualHold = false; autoPaused = false; pauseReason = '';
+    autoManaged = false;
     closeModal();
     stopFlash();
     save(); render();
     toast('🍅 已结束计时');
     flushStats();
+  }
+  /* 休息结束 → 继续休息：在现有余量上再加一段休息时长，到点再弹窗 */
+  function extendBreak() {
+    if (S.phase !== 'break') return;
+    S.remaining = Math.min(S.remaining + S.breakMin * 60000, 180 * 60000);
+    S.deadline = Date.now() + S.remaining;
+    S.running = true;
+    finished = false;
+    closeModal();
+    stopFlash();
+    save(); render();
+    toast('☕ 继续休息 ' + S.breakMin + ' 分钟');
   }
   /* 把暂停/结束/完成那一刻的零头立刻记上，不用等下一轮心跳 */
   function flushStats() { try { if (window.StudyStats && typeof window.StudyStats.flush === 'function') window.StudyStats.flush(); } catch (e) {} }
@@ -165,13 +197,14 @@
         `<div class="pomoRows"><label>专注 <input id="pomoFocusMin" type="number" min="1" max="180" step="1"> 分钟</label>` +
         `<label>休息 <input id="pomoBreakMin" type="number" min="1" max="180" step="1"> 分钟</label></div>` +
         `<div class="pomoBtns"><button id="pomoMain" class="btn small primary">开始专注</button><button id="pomoStop" class="btn small">结束</button><a id="pomoStats" class="btn small" href="#/studystats" title="学习统计：按天/按节点看学了多久">📊</a></div>` +
+        `<button id="pomoAuto" class="pomoAuto" title="开着时：滚动教程自动开始专注，切出教程/1分钟没滚动自动暂停"></button>` +
         `<div class="pomoHint">时间到会弹窗 + 系统通知 + 提示音，切页面、刷视频也能收到</div>` +
       `</div>` +
       `<div id="pomoModalWrap" class="pomoModalWrap" hidden><div class="pomoModal">` +
         `<div id="pomoModalIcon" class="pomoModalIcon">🍅</div>` +
         `<div id="pomoModalTitle" class="pomoModalTitle"></div>` +
         `<div id="pomoModalDesc" class="pomoModalDesc"></div>` +
-        `<div class="pomoModalBtns"><button id="pomoModalGo" class="btn primary"></button><button id="pomoModalLater" class="btn">稍后</button></div>` +
+        `<div class="pomoModalBtns"><button id="pomoModalGo" class="btn primary"></button><button id="pomoModalMore" class="btn" hidden></button><button id="pomoModalLater" class="btn">稍后</button></div>` +
       `</div></div>` +
       `<div id="pomoPickWrap" class="pomoModalWrap" hidden><div class="pomoModal pomoPick">` +
         `<div class="pomoModalTitle">📌 绑定节点</div>` +
@@ -189,11 +222,13 @@
     el('pomoStop').addEventListener('click', () => stop());
     el('pomoFocusMin').addEventListener('change', onDur);
     el('pomoBreakMin').addEventListener('change', onDur);
+    el('pomoAuto').addEventListener('click', () => { S.auto = !S.auto; save(); render(); toast(S.auto ? '🤖 读教程自动计时：开' : '🤖 读教程自动计时：关'); });
     el('pomoModalLater').addEventListener('click', () => { S.remaining = phaseLen(S.phase); finished = false; closeModal(); stopFlash(); save(); render(); });
     el('pomoModalGo').addEventListener('click', () => {
       const next = modalFor === 'focus' ? 'break' : 'focus';
       start(next);
     });
+    el('pomoModalMore').addEventListener('click', () => extendBreak());
     el('pomoBind').addEventListener('click', async e => {
       if (e.target.closest && e.target.closest('.pomoUnbind')) { await setBind(0); return; }
       openPicker();
@@ -224,11 +259,15 @@
       el('pomoModalTitle').textContent = '专注结束，好好休息一下！';
       el('pomoModalDesc').textContent = `你刚专注了 ${S.focusMin} 分钟。建议起来走走、喝口水。准备好就开始 ${S.breakMin} 分钟休息（手动开始，不会自动计时）。`;
       el('pomoModalGo').textContent = `开始休息（${S.breakMin} 分钟）▶`;
+      el('pomoModalMore').hidden = true;
     } else {
       el('pomoModalIcon').textContent = '☕';
       el('pomoModalTitle').textContent = '休息结束，开工！';
-      el('pomoModalDesc').textContent = `休息了 ${S.breakMin} 分钟。回来继续学 ${S.focusMin} 分钟（手动开始）。`;
+      el('pomoModalDesc').textContent = `休息了 ${S.breakMin} 分钟。回来继续学 ${S.focusMin} 分钟（手动开始），或者再休息一段。`;
       el('pomoModalGo').textContent = `开始专注（${S.focusMin} 分钟）▶`;
+      const more = el('pomoModalMore');
+      more.textContent = `继续休息（${S.breakMin} 分钟）`;
+      more.hidden = false;
     }
     w.hidden = false;
   }
@@ -306,7 +345,7 @@
     } catch (e) { if (!silent) toast(e.message || '绑定失败'); return false; }
   }
   async function onMain() {
-    if (S.running) { pause(); return; }
+    if (S.running) { pause(true); return; }
     // 开始 / 继续都需要用户手势：顺手申请通知权限 + 解锁音频
     try { if ('Notification' in window && Notification.permission === 'default') await Notification.requestPermission(); } catch (e) {}
     try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); if (audioCtx.state === 'suspended') await audioCtx.resume(); } catch (e) {}
@@ -392,8 +431,10 @@
     const st = el('pomoStatus');
     const rec = (S.bindNodeId && S.running && S.phase === 'focus') ? (' · 记到「' + String(S.bindTitle || '').slice(0, 12) + '」') : '';
     if (S.running) st.textContent = (S.phase === 'break' ? '☕ 休息中' : '🎯 专注中') + ' · 今日专注 ' + S.doneToday + ' 次' + rec;
-    else if (ms > 0 && ms < total) st.textContent = '⏸ 已暂停 · 点击继续';
+    else if (ms > 0 && ms < total) st.textContent = '⏸ 已暂停' + (pauseReason ? '（' + pauseReason + '）' : '') + ' · 点击继续';
     else st.textContent = '待开始 · 今日专注 ' + S.doneToday + ' 次';
+    el('pomoAuto').textContent = S.auto ? '🤖 读教程自动计时：开' : '🤖 读教程自动计时：关';
+    el('pomoAuto').classList.toggle('off', !S.auto);
     // 绑定行：记到哪一目了然
     const bd = el('pomoBind');
     if (S.bindNodeId) {
@@ -417,12 +458,64 @@
     if (document.activeElement !== el('pomoBreakMin')) el('pomoBreakMin').value = S.breakMin;
   }
 
+  /* ---------------- 读教程自动计时 ----------------
+   * 教程页上下滚动 = 在学：空闲时自动开始专注（未绑定则顺手绑定当前节点）；
+   * 切出教程页 / 1 分钟没滚动 → 自动暂停（不锁死，回来滚动自动继续）；
+   * 用户手动点的暂停/结束不受干扰（manualHold），切页后解除。 */
+  function onTutorialRoute() { return /^#\/t\/(\d+)$/.test(location.hash || ''); }
+  function tutorialId() { const m = (location.hash || '').match(/^#\/t\/(\d+)$/); return m ? Number(m[1]) : 0; }
+  window.addEventListener('scroll', () => {
+    try {
+      lastScrollAt = Date.now();
+      if (onTutorialRoute()) maybeAutoStart();
+    } catch (e) {}
+  }, { passive: true });
+  window.addEventListener('hashchange', () => {
+    try {
+      lastScrollAt = Date.now();
+      manualHold = false; autoPaused = false; pauseReason = '';
+      if (el('pomoRoot')) render();
+    } catch (e) {}
+  });
+  async function maybeAutoStart() {
+    try {
+      if (!S.auto || manualHold || S.running) return;
+      if (!onTutorialRoute()) return;
+      if (el('pomoModalWrap') && !el('pomoModalWrap').hidden) return;   // 刚播完提醒，等用户选
+      if (!enabled()) return;
+      const total = phaseLen(S.phase);
+      if (autoPaused && S.remaining > 0 && S.remaining < total) { resume(); return; }  // 回来继续
+      if (S.remaining < total) return;   // 手动暂停剩的半截：不动，等用户自己点
+      // 全新一轮：开专注；没绑定就绑当前节点，保证统计同步
+      const tid = tutorialId();
+      if (tid > 0 && !S.bindNodeId) {
+        try {
+          const r = await fetch('/api/tutorials/' + tid).then(x => x.json()).catch(() => null);
+          if (r && r.node && !S.running && !manualHold) {
+            S.bindNodeId = r.node.id; S.bindTitle = r.node.title || ''; S.bindGoalId = r.node.goal_id || 0;
+            save();
+          }
+        } catch (e) {}
+      }
+      if (S.running || manualHold) return;
+      start(S.phase);
+      toast('🍅 检测到阅读，已开始专注' + (S.bindTitle ? '（记到「' + S.bindTitle.slice(0, 16) + '」）' : ''));
+    } catch (e) {}
+  }
+  function autoWatch() {
+    if (!S.auto || !S.running || !autoManaged) return;
+    if (el('pomoModalWrap') && !el('pomoModalWrap').hidden) return;
+    if (!onTutorialRoute()) { autoPause('切出教程页'); return; }
+    if (Date.now() - lastScrollAt > 60000) autoPause('1 分钟没滚动');
+  }
+
   /* 主循环：250ms 刷新；组件被关闭则自我卸载 */
   setInterval(() => {
     try {
       if (!enabled()) { unmount(); return; }
       if (!el('pomoRoot')) mount();
       if (S.dayStamp !== DAY()) { S.dayStamp = DAY(); S.doneToday = 0; save(); }
+      autoWatch();
       if (S.running && remainMs() <= 0) complete();
       else render();
     } catch (e) {}
@@ -431,7 +524,7 @@
   /* 对外极小接口（测试 / 调试 / 跨插件用） */
   window.Pomodoro = {
     start, pause, resume, stop, setBind,
-    state: () => ({ phase: S.phase, running: S.running, remainMs: remainMs(), focusMin: S.focusMin, breakMin: S.breakMin, doneToday: S.doneToday, bind: { nodeId: S.bindNodeId, title: S.bindTitle, goalId: S.bindGoalId } }),
+    state: () => ({ phase: S.phase, running: S.running, remainMs: remainMs(), focusMin: S.focusMin, breakMin: S.breakMin, doneToday: S.doneToday, auto: S.auto, hold: manualHold, autoPaused, managed: autoManaged, bind: { nodeId: S.bindNodeId, title: S.bindTitle, goalId: S.bindGoalId } }),
     _finishNow: () => { if (S.running) { S.deadline = Date.now(); } }
   };
 

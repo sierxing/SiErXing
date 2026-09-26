@@ -212,6 +212,7 @@ async function route() {
   if (window.NodeNotes) { try { window.NodeNotes.unmount(); } catch (e) {} }
   if (window.__tutTocScroll) { try { window.removeEventListener('scroll', window.__tutTocScroll); } catch (e) {} window.__tutTocScroll = null; }
   const r = parseRoute();
+  try { tutProgressFlush(); } catch (e) {}   // 离开教程页先把阅读位置记上（DOM 替换前）
   const backScroll = navTrack();   // 先记滚动（此时还是旧页面），返回导航则带回待恢复位置
   document.body.classList.toggle('mapMode', r.view === 'map');
   try {
@@ -921,26 +922,24 @@ function constraintsList(g) {
 }
 function constraintsCardHTML(g) {
   const list = constraintsList(g);
-  const open = state.showConstraints || list.length > 0;
+  const closed = foldClosed(g.id, 'constraints', list.length > 0 || !!state.showConstraints);
   return `<div class="consCard">
     <div class="consHead">
+      ${foldBtn('constraints', closed)}
       <span>⛓ 规划约束</span><span class="chip gray">${list.length}</span>
       <span class="consHint">这些是硬性要求，AI 在规划 / 拆分 / 教程 / 对话中都会严格遵守</span>
       <div class="spacer"></div>
-      <button class="btn tiny" id="consToggle">${open ? '收起' : '展开'}</button>
     </div>
-    ${open ? `<div class="consBody">
+    <div class="consBody" data-foldbody="constraints"${closed ? ' hidden' : ''}>
       ${list.length ? `<div class="consList">${list.map((c, i) => `<div class="consItem"><span class="consText">${esc(String(c.text))}</span><div class="spacer"></div><button class="btn tiny" data-consedit="${i}">改</button><button class="btn tiny danger" data-consdel="${i}">×</button></div>`).join('')}</div>` : '<div class="muted" style="font-size:12.5px;padding:4px 2px;">还没有约束。例如：只能周末学（每周≤6h）／预算 0 元，只用免费资源／必须用 Python／不要安排视频课／3 个月内必须投递</div>'}
       <div class="consAdd">
         <input type="text" id="consInput" placeholder="添加一条约束，例如：不要安排付费课程">
         <button class="btn small primary" id="consAddBtn">添加约束</button>
       </div>
-    </div>` : ''}
+    </div>
   </div>`;
 }
 function bindConstraints(g) {
-  const tg = document.getElementById('consToggle');
-  if (tg) tg.addEventListener('click', () => { state.showConstraints = !state.showConstraints; renderGoal(); });
   const addBtn = document.getElementById('consAddBtn');
   if (addBtn) addBtn.addEventListener('click', async () => {
     const inp = document.getElementById('consInput');
@@ -948,7 +947,9 @@ function bindConstraints(g) {
     if (!text) return toast('请输入约束内容');
     try {
       const r = await api('/api/goals/' + g.id + '/constraints', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
-      state.goal = r.goal; state.showConstraints = true; renderGoal(); toast('约束已添加，规划会严格遵守');
+      state.goal = r.goal; state.showConstraints = true;
+      try { const fm = cardFoldState(g.id); delete fm.constraints; cardFoldSave(g.id, fm); } catch (e) {}
+      renderGoal(); toast('约束已添加，规划会严格遵守');
     } catch (e) { toast(e.message); }
   });
   const inp = document.getElementById('consInput');
@@ -1388,6 +1389,7 @@ function tutTocBuild(tid) {
   const body = document.querySelector('.tutBody') || document.querySelector('.mdBody');
   if (!body) return;
   const heads = [...body.querySelectorAll('h1,h2,h3,h4')].filter(h => (h.textContent || '').trim());
+  try { window.__tutTotal = heads.length; } catch (e) {}
   if (heads.length < 2) return;   // 章节太少就不显示
   heads.forEach((h, i) => { h.id = 'tutsec-' + i; });
   // 面板只在展开时建；追踪常驻（书签要用）
@@ -1451,6 +1453,7 @@ function tutTocBuild(tid) {
       const items = toc.querySelectorAll('[data-toc]');
       if (items.length) items.forEach(a => a.classList.toggle('active', Number(a.getAttribute('data-toc')) === cur));
       try { window.__tutCur = { idx: cur, title: String((heads[cur] || {}).textContent || '').trim().slice(0, 80) }; } catch (e) {}
+      try { tutProgressSave(tid, false); } catch (e) {}
       const prog = document.getElementById('tutTocProg');
       if (prog) {
         const h = window.scrollY + window.innerHeight;
@@ -1474,6 +1477,53 @@ function tutTocBuild(tid) {
       }, 400);
     }
   } catch (e) {}
+}
+
+
+/* ===== 教程阅读进度：滚动节流 + 切页/关页时上报，供路线图“继续学习”卡片用 ===== */
+let tutProgSent = { tid: 0, idx: -1, at: 0 };
+async function tutProgressSave(tid, force) {
+  tid = Number(tid) || 0;
+  if (!tid) return;
+  const idx = (window.__tutCur && window.__tutCur.idx) || 0;
+  const total = window.__tutTotal || 0;
+  const now = Date.now();
+  const s = tutProgSent;
+  if (!force && s.tid === tid && s.idx === idx && now - s.at < 15000) return;
+  s.tid = tid; s.idx = idx; s.at = now;
+  try {
+    await api('/api/tutorials/' + tid + '/progress', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ section_idx: idx, sections_total: total })
+    });
+  } catch (e) {}
+}
+function tutProgressFlush() {
+  // 离开教程页时把当前位置记上（用 NavHist 找到正被离开的教程）
+  try {
+    const lm = (NavHist.lastHash || '').match(/^#\/t\/(\d+)$/);
+    if (!lm || ('#/t/' + lm[1]) === navCurHash()) return;
+    const tid = Number(lm[1]);
+    const idx = (window.__tutCur && window.__tutCur.idx) || 0;
+    fetch('/api/tutorials/' + tid + '/progress', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ section_idx: idx, sections_total: window.__tutTotal || 0 })
+    }).catch(() => {});
+  } catch (e) {}
+}
+if (!window.__tutProgBound) {
+  window.__tutProgBound = true;
+  window.addEventListener('pagehide', () => {
+    try {
+      const m = (location.hash || '').match(/^#\/t\/(\d+)$/);
+      if (!m || !window.__tutCur) return;
+      fetch('/api/tutorials/' + m[1] + '/progress', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ section_idx: window.__tutCur.idx || 0, sections_total: window.__tutTotal || 0 }),
+        keepalive: true
+      }).catch(() => {});
+    } catch (e) {}
+  });
 }
 
 
@@ -2222,6 +2272,7 @@ function mdToHTML(text) {
 }
 async function renderTutorialPage(tid) {
   app.innerHTML = '<p class="muted">加载教程…</p>';
+  try { window.__tutCur = null; window.__tutTotal = 0; } catch (e) {}
   const r = await api('/api/tutorials/' + tid);
   const t = r.tutorial, node = r.node, goal = r.goal;
   state.tutGoalId = t ? t.goal_id : 0;   // 侧边栏绑定到该目标的会话（刷新也不丢记录）
@@ -3059,15 +3110,19 @@ function sourceItemHTML(s) {
 function srcPanelHTML() {
   const list = state.sources || [];
   const digests = state.digests || [];
+  const gid = (state.goal && state.goal.id) || 0;
+  const srcClosed = foldClosed(gid, 'sources', true);
   let h = `<div class="srcPanel">
     <div class="spHead">
+      ${foldBtn('sources', srcClosed)}
       <span class="spTitle">信息源</span><span class="spCount">${list.length}</span>
       <span class="spHint">大厂 JD · 牛客 · BOSS直聘 · 知乎等真实资料，规划时优先依据</span>
       <div class="spacer"></div>
         <button class="btn small" id="collectBtn">${list.length ? '重新收集' : '收集信息源'}</button>
         <button class="btn small primary" <button class="btn small" id="srcAddBtn" title="粘贴文本、或填写标题与链接，手动添加一条资料（可标为优质信息源）">＋ 添加资料</button>
         <button class="btn small primary" id="digestBtn" title="让 AI 通读全部资料（含你上传的图片资料），提炼成多篇主题汇总，规划时优先依据">🧠 ${digests.length ? '重新提炼' : '信息提炼'}</button>
-      </div>`;
+      </div>
+    <div data-foldbody="sources"${srcClosed ? ' hidden' : ''}>`;
   if (state.collecting) {
       h += `<div class="spProgress"><span class="spinner"></span><span id="spStatus">${esc(state.collectStatus || '正在检索…')}</span><div class="spacer"></div><button class="btn tiny" id="collectStop" title="停止本次收集（已收集到的会保留）">⏹ 停止</button></div>`;
   }
@@ -3104,7 +3159,7 @@ function srcPanelHTML() {
   } else if (!state.collecting) {
     h += '<div class="spEmpty">还没有信息源。建议先「收集信息源」，AI 规划会依据真实 JD 与面经，质量更高。</div>';
   }
-  h += '</div>';
+  h += '</div></div>';
   return h;
 }
 /* 信息提炼：让 AI 通读全部资料（含图片资料）→ 提炼成多篇主题 MD 汇总 → 规划优先依据 */
@@ -3227,6 +3282,7 @@ function viewBarHTML(g) {
   const filters = [['', '全部'], ['todo', '未开始'], ['doing', '进行中'], ['done', '已完成']];
   return `<div class="viewBar">
     <a class="btn primary" href="#/g/${g.id}/map">🗺 打开路径图</a>
+    ${foldBtn('map', foldClosed(g.id, 'map', true))}
     <div class="vbFilters">
       ${filters.map(([v, l]) => `<button class="fchip ${f === v ? 'active' : ''}" data-filter="${v}">${l}</button>`).join('')}
     </div>
@@ -3291,6 +3347,52 @@ function listViewHTML(stages) {
   });
   return h + '</div>';
 }
+/* ============ 路线图卡片折叠（按目标记住展开/折叠，下次还保持） ============ */
+function cardFoldState(gid) { try { return JSON.parse(localStorage.getItem('sierxing-goal-folds-' + gid) || '{}') || {}; } catch (e) { return {}; } }
+function cardFoldSave(gid, map) { try { localStorage.setItem('sierxing-goal-folds-' + gid, JSON.stringify(map || {})); } catch (e) {} }
+/* defaultOpen: 从没动过时的默认状态 */
+function foldClosed(gid, key, defaultOpen) {
+  const v = cardFoldState(gid)[key];
+  return v == null ? !defaultOpen : !!v;
+}
+function foldBtn(key, closed) { return `<button class="btn tiny cardFold" data-fold="${key}" title="折叠/展开">${closed ? '▸' : '▾'}</button>`; }
+document.addEventListener('click', e => {
+  const b = e.target.closest && e.target.closest('[data-fold]');
+  if (!b || !b.getAttribute) return;
+  const key = b.getAttribute('data-fold');
+  const gid = state.goal && state.goal.id;
+  if (!key || !gid) return;
+  const body = document.querySelector(`[data-foldbody="${key}"]`);
+  const willHide = body ? !body.hidden : true;
+  const map = cardFoldState(gid);
+  if (willHide) map[key] = true; else delete map[key];
+  cardFoldSave(gid, map);
+  if (body) body.hidden = willHide;
+  document.querySelectorAll(`[data-fold="${key}"]`).forEach(x => { x.textContent = willHide ? '▸' : '▾'; });
+});
+/* “继续学习”卡片：上次看到的教程 + 看到哪，一键跳回去 */
+async function renderContinueCard(gid) {
+  const box = document.getElementById('continueCard');
+  if (!box) return;
+  if (typeof compOn === 'function' && !compOn('tutorial')) { box.remove(); return; }
+  let d = null;
+  try { d = await api('/api/goals/' + gid + '/last-tutorial'); } catch (e) { box.remove(); return; }
+  const t = d && d.tutorial;
+  if (!t) { box.remove(); return; }
+  const total = Math.max(0, Number(t.sections_total) || 0);
+  const at = total ? Math.min(Number(t.section_idx) + 1, total) : 0;
+  const pct = total ? Math.min(100, Math.round(at / total * 100)) : 0;
+  box.innerHTML = `<div class="continueCard">
+    <div class="ccIcon">📖</div>
+    <div class="ccMain">
+      <div class="ccLabel">继续学习${total ? ` · 看到第 ${at}/${total} 节（${pct}%）` : ''}</div>
+      <div class="ccTitle">${esc(t.title)}</div>
+      ${t.node_title ? `<div class="ccNode">对应任务：${esc(t.node_title)}</div>` : ''}
+      ${total ? `<div class="bar"><div class="barFill" style="width:${pct}%"></div></div>` : ''}
+    </div>
+    <a class="btn primary" href="#/t/${t.id}">继续阅读 →</a>
+  </div>`;
+}
 function renderGoal() {
   const g = state.goal;
   if (!g) { app.innerHTML = '<p class="muted">目标不存在</p>'; return; }
@@ -3316,7 +3418,8 @@ function renderGoal() {
       <button class="btn danger" id="delGoalBtn">删除</button>
     </div>
     <div class="goalHead">
-      <div class="ghTop"><h2 class="ghTitle">${esc(g.title)}</h2><span class="chip ${st[1]}">${st[0]}</span></div>
+      <div class="ghTop"><h2 class="ghTitle">${esc(g.title)}</h2><span class="chip ${st[1]}">${st[0]}</span>${foldBtn('head', foldClosed(g.id, 'head', true))}</div>
+      <div data-foldbody="head"${foldClosed(g.id, 'head', true) ? ' hidden' : ''}>
       ${g.summary ? `<div class="ghSummary">规划思路：${mdOneLine(g.summary)}</div>` : ''}
       <div class="ghMeta">
         ${g.profile ? `<div class="ghItem"><span class="ghLabel">现状</span>${esc(g.profile)}</div>` : ''}
@@ -3326,7 +3429,9 @@ function renderGoal() {
       </div>
       <div class="bar big"><div class="barFill" style="width:${pct}%"></div></div>
       ${g.error ? `<div class="goalError">⚠ ${esc(g.error)}</div>` : ''}
-    </div>`;
+      </div>
+    </div>
+    <div id="continueCard"></div>`;
   html += setupCardHTML();
   html += disabledComponentsHTML();
   html += reportCardHTML();
@@ -3341,7 +3446,7 @@ function renderGoal() {
     html += nextCardHTML(g);
     html += viewBarHTML(g);
     const fStages = filterTree(stages);
-    html += listViewHTML(fStages);
+    html += `<div data-foldbody="map"${foldClosed(g.id, 'map', true) ? ' hidden' : ''}>` + listViewHTML(fStages) + '</div>';
   } else if (!state.planning) {
     html += `<div class="emptyBox" style="margin-top:8px;">
       <div class="ebIcon">🧭</div>
@@ -3355,6 +3460,7 @@ function renderGoal() {
 
   bindReportCard();
   bindTutorialCard();
+  try { renderContinueCard(g.id); } catch (e) {}
   pluginGoButtonsBind();     // 组件入口按钮（每日刷题 / 图片资料…）
   bindConstraints(g);
   const chatBtn = document.getElementById('chatBtn');

@@ -2,10 +2,18 @@
 /**
  * 思而行 · 扩展组件：学习统计
  * ------------------------------------------------------------------
- * 统计每天学了多久、细到每个节点学了多久。
- * 计分方式：番茄钟专注计时开着、且正停在某篇教程上时，
- * 流过的专注秒数就记到该教程对应的节点名下（前端每 ~15 秒上报一次）。
- * 注意：上报接口故意不调 backup()——心跳频率高，全量备份吃不消；
+ * 统计每天学了多久、休息多久、暂离多久，细到每个节点学了多久，
+ * 并记录几点到几点在干什么（时间线）。
+ *
+ * 计分方式：
+ * - 番茄钟专注开着 + 本页面可见 + 停在某篇教程上 → 专注秒数记到该节点；
+ *   若番茄钟绑定了节点，则在哪页都记到绑定节点（与番茄钟同步）。
+ * - 番茄钟专注开着 + 本页面不可见（切标签/最小化/刷视频）→ 记"暂离应用"。
+ *   注意：网页拿不到别的标签页地址，只能知道"切出去了"，不能断定就是 B 站。
+ * - 番茄钟休息计时走字 → 记"休息"。
+ * 前端每 ~15 秒上报一次（POST /api/study/report）。
+ *
+ * 注意：上报接口只做节流备份（5 分钟一次）——心跳频率高，全量备份吃不消；
  * 数据照常进同步快照，随其它数据的同步时机一起上传。
  */
 let db, sendJSON, readBody, backup, nowISO;
@@ -25,13 +33,86 @@ CREATE TABLE IF NOT EXISTS study_records (
   created_at TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (day, node_id)
-);`;
+);
+CREATE TABLE IF NOT EXISTS study_days (
+  day TEXT PRIMARY KEY,
+  focus_sec INTEGER NOT NULL DEFAULT 0,
+  rest_sec INTEGER NOT NULL DEFAULT 0,
+  away_sec INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS study_segments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  day TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'focus',
+  goal_id INTEGER NOT NULL DEFAULT 0,
+  node_id INTEGER NOT NULL DEFAULT 0,
+  node_title TEXT NOT NULL DEFAULT '',
+  goal_title TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL DEFAULT '',
+  ended_at TEXT NOT NULL DEFAULT '',
+  seconds INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_study_segments_day ON study_segments(day);`;
 
-/* 本地日期（YYYY-MM-DD）：跟用户过日子的时区一致，不用 UTC */
+/* 本地日期 / 本地时间（跟用户过日子的时区一致，不用 UTC） */
 function localDay(d) {
   const t = d || new Date();
   const p = n => String(n).padStart(2, '0');
   return t.getFullYear() + '-' + p(t.getMonth() + 1) + '-' + p(t.getDate());
+}
+function localTime(d) {
+  const t = d || new Date();
+  const p = n => String(n).padStart(2, '0');
+  return localDay(t) + ' ' + p(t.getHours()) + ':' + p(t.getMinutes()) + ':' + p(t.getSeconds());
+}
+function shiftTime(secAgo) { return localTime(new Date(Date.now() - Math.max(0, secAgo) * 1000)); }
+
+/* 统一落账：bucket = focus | rest | away */
+function applyReport(bucket, nodeId, sec) {
+  sec = Math.round(sec);
+  if (!(sec >= 1)) return null;
+  sec = Math.min(sec, 600);
+  bucket = (bucket === 'rest' || bucket === 'away') ? bucket : 'focus';
+  nodeId = Number(nodeId) || 0;
+  const day = localDay();
+  const t = nowISO();
+  let nodeTitle = '', goalTitle = '', goalId = 0;
+  if (nodeId > 0) {
+    const n = db.prepare('SELECT id, goal_id, title FROM nodes WHERE id = ?').get(nodeId);
+    if (!n) return { error: '节点不存在' };
+    const g = db.prepare('SELECT id, title FROM goals WHERE id = ?').get(n.goal_id);
+    goalId = n.goal_id;
+    nodeTitle = String(n.title || '').slice(0, 120);
+    goalTitle = g ? String(g.title || '').slice(0, 120) : '';
+  }
+  if (bucket === 'focus' && nodeId > 0) {
+    db.prepare(`INSERT INTO study_records (day, goal_id, node_id, node_title, goal_title, focus_sec, created_at, updated_at)
+      VALUES (?,?,?,?,?,?,?,?)
+      ON CONFLICT(day, node_id) DO UPDATE SET focus_sec = focus_sec + excluded.focus_sec,
+        node_title = excluded.node_title, goal_title = excluded.goal_title, updated_at = excluded.updated_at`)
+      .run(day, goalId, nodeId, nodeTitle, goalTitle, sec, t, t);
+  }
+  const col = bucket === 'rest' ? 'rest_sec' : (bucket === 'away' ? 'away_sec' : 'focus_sec');
+  db.prepare(`INSERT INTO study_days (day, focus_sec, rest_sec, away_sec, updated_at) VALUES (?, 0, 0, 0, ?)
+    ON CONFLICT(day) DO UPDATE SET ${col} = ${col} + ?, updated_at = ?`)
+    .run(day, t, sec, t);
+  // 时间段：同天同类同节点、前后脚（180 秒内）就接到一段里，否则另起一段
+  const last = db.prepare('SELECT * FROM study_segments WHERE day = ? AND kind = ? AND node_id = ? ORDER BY id DESC LIMIT 1').get(day, bucket, nodeId);
+  const lt = localTime();
+  if (last && last.ended_at && (Date.parse(lt.replace(' ', 'T')) - Date.parse(String(last.ended_at).replace(' ', 'T')) <= 180000)) {
+    db.prepare('UPDATE study_segments SET ended_at = ?, seconds = seconds + ?, updated_at = ? WHERE id = ?').run(lt, sec, t, last.id);
+  } else {
+    db.prepare(`INSERT INTO study_segments (day, kind, goal_id, node_id, node_title, goal_title, started_at, ended_at, seconds, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`)
+      .run(day, bucket, goalId, nodeId, nodeTitle || (bucket === 'rest' ? '休息' : (bucket === 'away' ? '暂离应用' : '')), goalTitle, shiftTime(sec), lt, sec, t);
+  }
+  try {
+    const nowMs = Date.now();
+    if (nowMs - lastBackupAt > 5 * 60 * 1000) { lastBackupAt = nowMs; if (typeof backup === 'function') backup(); }
+  } catch (e) {}
+  return { ok: true, day, bucket, credited: sec };
 }
 
 module.exports = {
@@ -39,15 +120,15 @@ module.exports = {
   name: '学习统计',
   icon: '📊',
   category: '其它',
-  desc: '统计每天学了多久、细到每个节点：开着番茄钟专注时，看哪篇教程就把时间记到哪个节点名下；日历页按天查看',
+  desc: '统计每天学/休息/暂离多久、细到每个节点，几点到几点一目了然：开着番茄钟专注时，看哪篇教程就记到哪（可绑定节点全局同步）；切出应用记暂离；日历页按天查看',
   order: 44,
-  version: '1.0.0',
+  version: '1.1.0',
   author: '思而行内置',
   goalToggle: false,          // 非按目标启用：应用级开关
   defaultEnabled: true,
   client: '/plugins/studystats.js',
 
-  /** 建表（宿主启动时调用一次） */
+  /** 建表（宿主启动时调用一次；IF NOT EXISTS，老库直接升级） */
   init(ctx) {
     bind(ctx);
     db.exec(SCHEMA);
@@ -56,77 +137,36 @@ module.exports = {
   /** 目标被删除时清理该目标的学习记录 */
   onGoalDelete(goalId, ctx) {
     ctx.db.prepare('DELETE FROM study_records WHERE goal_id = ?').run(goalId);
+    ctx.db.prepare('DELETE FROM study_segments WHERE goal_id = ?').run(goalId);
   },
 
   api: [
     {
-      /* 心跳记账：{ node_id, seconds } */
+      /* 心跳记账（兼容旧前端）：{ node_id, seconds } → 专注桶 */
       method: 'POST',
       pattern: /^\/api\/study\/credit$/,
       handler: async (req, res, u, ctx) => {
         if (u.pathname !== '/api/study/credit') return false;
         const body = await readBody(req).catch(() => ({}));
         const nodeId = Number(body.node_id) || 0;
-        let sec = Math.round(Number(body.seconds) || 0);
         if (!nodeId) return sendJSON(res, 400, { error: '缺少节点' });
-        if (!(sec >= 1)) return sendJSON(res, 400, { error: '时长无效' });
-        sec = Math.min(sec, 600);
-        const n = db.prepare('SELECT id, goal_id, title FROM nodes WHERE id = ?').get(nodeId);
-        if (!n) return sendJSON(res, 404, { error: '节点不存在' });
-        const g = db.prepare('SELECT id, title FROM goals WHERE id = ?').get(n.goal_id);
-        const day = localDay();
-        const t = nowISO();
-        db.prepare(`INSERT INTO study_records (day, goal_id, node_id, node_title, goal_title, focus_sec, created_at, updated_at)
-          VALUES (?,?,?,?,?,?,?,?)
-          ON CONFLICT(day, node_id) DO UPDATE SET focus_sec = focus_sec + excluded.focus_sec,
-            node_title = excluded.node_title, goal_title = excluded.goal_title, updated_at = excluded.updated_at`)
-          .run(day, n.goal_id, nodeId, String(n.title || '').slice(0, 120), g ? String(g.title || '').slice(0, 120) : '', sec, t, t);
-        // 节流备份：长时间专注时也定期落盘 + 触发同步（5 分钟一次，避免 WAL 只进不出）
-        try {
-          const nowMs = Date.now();
-          if (nowMs - lastBackupAt > 5 * 60 * 1000) { lastBackupAt = nowMs; if (typeof backup === 'function') backup(); }
-        } catch (e) {}
-        return sendJSON(res, 200, { ok: true, day, credited: sec });
+        const r = applyReport('focus', nodeId, Number(body.seconds) || 0);
+        if (!r) return sendJSON(res, 400, { error: '时长无效' });
+        if (r.error) return sendJSON(res, 404, { error: r.error });
+        return sendJSON(res, 200, r);
       }
     },
     {
-      /* 月汇总：?month=YYYY-MM → 每天秒数 + 月总计 */
-      method: 'GET',
-      pattern: /^\/api\/study\/month$/,
+      /* 统一上报：{ bucket: focus|rest|away, node_id, seconds } */
+      method: 'POST',
+      pattern: /^\/api\/study\/report$/,
       handler: async (req, res, u, ctx) => {
-        if (u.pathname !== '/api/study/month') return false;
-        let month = String(u.searchParams.get('month') || '');
-        if (!/^\d{4}-\d{2}$/.test(month)) month = localDay().slice(0, 7);
-        const rows = db.prepare("SELECT day, SUM(focus_sec) AS sec FROM study_records WHERE day LIKE ? GROUP BY day").all(month + '%');
-        const days = {};
-        let total = 0;
-        for (const r of rows) { days[r.day] = r.sec; total += r.sec; }
-        return sendJSON(res, 200, { month, days, total_sec: total, active_days: rows.length });
-      }
-    },
-    {
-      /* 日明细：?day=YYYY-MM-DD → 按节点列出（标题用实时标题，节点删改后也对得上） */
-      method: 'GET',
-      pattern: /^\/api\/study\/day$/,
-      handler: async (req, res, u, ctx) => {
-        if (u.pathname !== '/api/study/day') return false;
-        let day = String(u.searchParams.get('day') || '');
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) day = localDay();
-        const rows = db.prepare('SELECT * FROM study_records WHERE day = ? ORDER BY focus_sec DESC').all(day);
-        const out = rows.map(r => {
-          const n = db.prepare('SELECT id, goal_id, title FROM nodes WHERE id = ?').get(r.node_id);
-          const g = db.prepare('SELECT id, title FROM goals WHERE id = ?').get(r.goal_id);
-          return {
-            node_id: r.node_id,
-            node_title: (n && n.title) || r.node_title || ('节点 ' + r.node_id),
-            node_gone: !n,
-            goal_id: r.goal_id,
-            goal_title: (g && g.title) || r.goal_title || '',
-            focus_sec: r.focus_sec
-          };
-        });
-        const total = out.reduce((a, x) => a + x.focus_sec, 0);
-        return sendJSON(res, 200, { day, records: out, total_sec: total });
+        if (u.pathname !== '/api/study/report') return false;
+        const body = await readBody(req).catch(() => ({}));
+        const r = applyReport(body.bucket, Number(body.node_id) || 0, Number(body.seconds) || 0);
+        if (!r) return sendJSON(res, 400, { error: '时长无效' });
+        if (r.error) return sendJSON(res, 404, { error: r.error });
+        return sendJSON(res, 200, r);
       }
     },
     {
@@ -163,7 +203,67 @@ module.exports = {
       }
     },
     {
-      /* 删一条记录：?day=YYYY-MM-DD&node_id=（记错了可删） */
+      /* 月汇总：?month=YYYY-MM → 每天专注/休息/暂离 + 月总计 */
+      method: 'GET',
+      pattern: /^\/api\/study\/month$/,
+      handler: async (req, res, u, ctx) => {
+        if (u.pathname !== '/api/study/month') return false;
+        let month = String(u.searchParams.get('month') || '');
+        if (!/^\d{4}-\d{2}$/.test(month)) month = localDay().slice(0, 7);
+        const days = {};
+        let tf = 0, tr = 0, ta = 0;
+        for (const r of db.prepare('SELECT day, focus_sec, rest_sec, away_sec FROM study_days WHERE day LIKE ?').all(month + '%')) {
+          days[r.day] = { f: r.focus_sec, r: r.rest_sec, a: r.away_sec };
+          tf += r.focus_sec; tr += r.rest_sec; ta += r.away_sec;
+        }
+        // 老数据只有 study_records：没有 study_days 行的天，用按节点汇总补专注数
+        for (const r of db.prepare('SELECT day, SUM(focus_sec) AS sec FROM study_records GROUP BY day').all()) {
+          if (!days[r.day] && String(r.day).startsWith(month)) { days[r.day] = { f: r.sec, r: 0, a: 0 }; tf += r.sec; }
+        }
+        return sendJSON(res, 200, { month, days, total_focus: tf, total_rest: tr, total_away: ta, active_days: Object.keys(days).length });
+      }
+    },
+    {
+      /* 日明细：?day=YYYY-MM-DD → 总量 + 时间线 + 按节点 */
+      method: 'GET',
+      pattern: /^\/api\/study\/day$/,
+      handler: async (req, res, u, ctx) => {
+        if (u.pathname !== '/api/study/day') return false;
+        let day = String(u.searchParams.get('day') || '');
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) day = localDay();
+        const drow = db.prepare('SELECT * FROM study_days WHERE day = ?').get(day);
+        const rows = db.prepare('SELECT * FROM study_records WHERE day = ? AND node_id > 0 ORDER BY focus_sec DESC').all(day);
+        const out = rows.map(r => {
+          const n = db.prepare('SELECT id, goal_id, title FROM nodes WHERE id = ?').get(r.node_id);
+          const g = db.prepare('SELECT id, title FROM goals WHERE id = ?').get(r.goal_id);
+          return {
+            node_id: r.node_id,
+            node_title: (n && n.title) || r.node_title || ('节点 ' + r.node_id),
+            node_gone: !n,
+            goal_id: r.goal_id,
+            goal_title: (g && g.title) || r.goal_title || '',
+            focus_sec: r.focus_sec
+          };
+        });
+        const sumRec = out.reduce((a, x) => a + x.focus_sec, 0);
+        const totals = drow
+          ? { focus: drow.focus_sec, rest: drow.rest_sec, away: drow.away_sec }
+          : { focus: sumRec, rest: 0, away: 0 };
+        const segs = db.prepare('SELECT kind, node_id, node_title, goal_id, goal_title, started_at, ended_at, seconds FROM study_segments WHERE day = ? ORDER BY started_at, id').all(day);
+        const timeline = segs.map(s => {
+          const hhmm = t => String(t || '').slice(11, 16) || '--:--';
+          return {
+            kind: s.kind, node_id: s.node_id,
+            node_title: s.node_title || (s.kind === 'rest' ? '休息' : (s.kind === 'away' ? '暂离应用' : '')),
+            goal_id: s.goal_id, goal_title: s.goal_title || '',
+            from: hhmm(s.started_at), to: hhmm(s.ended_at), seconds: s.seconds
+          };
+        });
+        return sendJSON(res, 200, { day, totals, records: out, timeline });
+      }
+    },
+    {
+      /* 删一条节点记录：?day=&node_id=（记错了可删） */
       method: 'DELETE',
       pattern: /^\/api\/study\/record$/,
       handler: async (req, res, u, ctx) => {
@@ -172,6 +272,20 @@ module.exports = {
         const nodeId = Number(u.searchParams.get('node_id')) || 0;
         if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !nodeId) return sendJSON(res, 400, { error: '参数无效' });
         db.prepare('DELETE FROM study_records WHERE day = ? AND node_id = ?').run(day, nodeId);
+        return sendJSON(res, 200, { ok: true });
+      }
+    },
+    {
+      /* 清空某天：?day=（重来） */
+      method: 'DELETE',
+      pattern: /^\/api\/study\/day$/,
+      handler: async (req, res, u, ctx) => {
+        if (u.pathname !== '/api/study/day') return false;
+        const day = String(u.searchParams.get('day') || '');
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return sendJSON(res, 400, { error: '参数无效' });
+        db.prepare('DELETE FROM study_records WHERE day = ?').run(day);
+        db.prepare('DELETE FROM study_days WHERE day = ?').run(day);
+        db.prepare('DELETE FROM study_segments WHERE day = ?').run(day);
         return sendJSON(res, 200, { ok: true });
       }
     }

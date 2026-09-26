@@ -21,6 +21,14 @@ CREATE TABLE IF NOT EXISTS tutorial_bookmarks (
   label TEXT NOT NULL DEFAULT '',
   note TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tutorial_progress (
+  tutorial_id INTEGER PRIMARY KEY,
+  goal_id INTEGER NOT NULL DEFAULT 0,
+  node_id INTEGER NOT NULL DEFAULT 0,
+  section_idx INTEGER NOT NULL DEFAULT 0,
+  sections_total INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT ''
 );`;
 
 module.exports = {
@@ -40,9 +48,10 @@ module.exports = {
     db.exec(SCHEMA);
   },
 
-  /** 目标被删除时清理该目标的书签 */
+  /** 目标被删除时清理该目标的书签与阅读进度 */
   onGoalDelete(goalId, ctx) {
     ctx.db.prepare('DELETE FROM tutorial_bookmarks WHERE goal_id = ?').run(goalId);
+    ctx.db.prepare('DELETE FROM tutorial_progress WHERE goal_id = ?').run(goalId);
   },
 
   api: [
@@ -73,6 +82,50 @@ module.exports = {
           .run(tid, tut.goal_id, tut.node_id, idx, sectionTitle, label || sectionTitle, String(body.note || '').trim().slice(0, 300), nowISO());
         backup();
         return sendJSON(res, 200, { ok: true, id: Number(r.lastInsertRowid) });
+      }
+    },
+    {
+      /* 上报阅读进度：{ section_idx, sections_total }（滚动节流 + 切页时前端调用） */
+      method: 'POST',
+      pattern: /^\/api\/tutorials\/(\d+)\/progress$/,
+      handler: async (req, res, u, ctx) => {
+        const m = u.pathname.match(/^\/api\/tutorials\/(\d+)\/progress$/);
+        if (!m) return false;
+        const tid = Number(m[1]);
+        const tut = db.prepare('SELECT id, goal_id, node_id FROM tutorials WHERE id = ?').get(tid);
+        if (!tut) return sendJSON(res, 404, { error: '教程不存在' });
+        const body = await readBody(req).catch(() => ({}));
+        const idx = Math.max(0, Number(body.section_idx) || 0);
+        const total = Math.max(0, Number(body.sections_total) || 0);
+        // 打开教程瞬间会上报 0（人在顶部）：不许把已有的进度倒回去，只刷新时间；
+        // 真正往后读到的位置（idx>0）才覆盖
+        db.prepare(`INSERT INTO tutorial_progress (tutorial_id, goal_id, node_id, section_idx, sections_total, updated_at)
+          VALUES (?,?,?,?,?,?) ON CONFLICT(tutorial_id) DO UPDATE SET
+          section_idx = CASE WHEN excluded.section_idx > 0 THEN excluded.section_idx ELSE section_idx END,
+          sections_total = excluded.sections_total, updated_at = excluded.updated_at`)
+          .run(tid, tut.goal_id, tut.node_id, idx, total, nowISO());
+        return sendJSON(res, 200, { ok: true });
+      }
+    },
+    {
+      /* 本目标上次看到的教程（路线图“继续学习”卡片用） */
+      method: 'GET',
+      pattern: /^\/api\/goals\/(\d+)\/last-tutorial$/,
+      handler: async (req, res, u, ctx) => {
+        const m = u.pathname.match(/^\/api\/goals\/(\d+)\/last-tutorial$/);
+        if (!m) return false;
+        const gid = Number(m[1]);
+        // 取最近几条，顺延到第一篇还存在的教程（刚删掉的教程不挡路）
+        const rows = db.prepare('SELECT * FROM tutorial_progress WHERE goal_id = ? ORDER BY updated_at DESC, tutorial_id DESC LIMIT 5').all(gid);
+        for (const p of rows) {
+          const t = db.prepare('SELECT id, node_id, title, format FROM tutorials WHERE id = ?').get(p.tutorial_id);
+          if (!t) continue;
+          const n = db.prepare('SELECT id, title FROM nodes WHERE id = ?').get(t.node_id);
+          return sendJSON(res, 200, {
+            tutorial: { id: t.id, node_id: t.node_id, title: t.title, node_title: n ? n.title : '', section_idx: p.section_idx, sections_total: p.sections_total, updated_at: p.updated_at }
+          });
+        }
+        return sendJSON(res, 200, { tutorial: null });
       }
     },
     {

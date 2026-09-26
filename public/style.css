@@ -93,6 +93,17 @@ main{padding:26px 0 90px;}
 .title::before{content:""; width:4px; height:17px; background:linear-gradient(180deg,var(--accent),var(--accent-2)); border-radius:3px;}
 .back{color:var(--muted); text-decoration:none; font-size:13px; padding:5px 0;}
 button.back{background:none; border:0; cursor:pointer; font-size:13px;}
+/* 路线图卡片折叠 */
+.cardFold{min-width:26px; text-align:center;}
+/* “继续学习”卡片 */
+.continueCard{display:flex; align-items:center; gap:12px; background:var(--card); border:1px solid var(--accent-border); border-radius:12px; padding:11px 14px; margin:10px 0; box-shadow:var(--shadow-sm);}
+.ccIcon{font-size:26px; flex:none;}
+.ccMain{flex:1; min-width:0;}
+.ccLabel{font-size:12px; color:var(--accent); font-weight:700;}
+.ccTitle{font-size:14.5px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.ccNode{font-size:12px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.continueCard .bar{height:6px; margin-top:6px;}
+.continueCard .btn{flex:none;}
 .back:hover{color:var(--accent);}
 .hint{font-size:12px; color:var(--muted);}
 .muted{color:var(--muted);}
