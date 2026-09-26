@@ -43,9 +43,9 @@
 .ssAxis{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:8px 12px 6px; min-width:0;}
 .ssAxisHead{display:flex; align-items:center; justify-content:space-between; font-size:12px; font-weight:700; color:var(--muted); margin-bottom:2px;}
 .ssAxisTot{color:var(--accent); font-variant-numeric:tabular-nums; white-space:nowrap;}
-.ssAxF{color:var(--accent); font-weight:700;}
-.ssAxR{color:#b45309;}
-.ssAxA{color:var(--muted);}
+.ssAxF{color:#22c55e; font-weight:700;}
+.ssAxR{color:#f59e0b;}
+.ssAxA{color:#94a3b8;}
 .ssAxSep{color:var(--border); margin:0 3px;}
 .ssAxisTrack{position:relative; height:26px;}
 .ssAxisGrid{position:absolute; inset:0;}
