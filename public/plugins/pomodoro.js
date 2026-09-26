@@ -381,11 +381,16 @@
   }
   async function onMain() {
     if (S.running) { pause(); return; }
-    // 开始 / 继续都需要用户手势：顺手申请通知权限 + 解锁音频
-    try { if ('Notification' in window && Notification.permission === 'default') await Notification.requestPermission(); } catch (e) {}
-    try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); if (audioCtx.state === 'suspended') await audioCtx.resume(); } catch (e) {}
+    // 开始 / 继续都需要用户手势：顺手申请通知权限 + 解锁音频（都加超时，防个别环境卡死导致按钮没反应）
+    const timeout = ms => new Promise(r => setTimeout(r, ms));
+    try { if ('Notification' in window && Notification.permission === 'default') await Promise.race([Notification.requestPermission(), timeout(3000)]); } catch (e) {}
+    try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); if (audioCtx.state === 'suspended') await Promise.race([audioCtx.resume(), timeout(3000)]); } catch (e) {}
     if (S.remaining > 0 && S.remaining < phaseLen(S.phase)) resume();
-    else start(S.phase);
+    else {
+      // 在教程页手动开专注：同样先绑定，统计才跟得上
+      if (S.phase === 'focus' && onTutorialRoute()) await autoBindCurrentTutorial();
+      start(S.phase);
+    }
   }
   function onDur() {
     if (S.running) { render(); return; }
@@ -523,6 +528,18 @@
       if (el('pomoRoot')) render();
     } catch (e) {}
   });
+  /* 在教程页开始专注时顺手绑定当前节点（手动点开始也一样），统计才跟得上 */
+  async function autoBindCurrentTutorial() {
+    try {
+      const tid = tutorialId();
+      if (!(tid > 0) || S.bindNodeId || S.running) return;
+      const r = await fetch('/api/tutorials/' + tid).then(x => x.json()).catch(() => null);
+      if (r && r.node && !S.running) {
+        S.bindNodeId = r.node.id; S.bindTitle = r.node.title || ''; S.bindGoalId = r.node.goal_id || 0; S.bindAuto = true;
+        save(); render();
+      }
+    } catch (e) {}
+  }
   async function maybeAutoStart() {
     try {
       if (!S.auto || S.running) return;
@@ -533,16 +550,7 @@
       if (S.phase === 'focus' && S.remaining > 0 && S.remaining < phaseLen('focus')) { resume(); return; }
       // 其他情况一律开新专注：上一轮是休息/休息半截也不沿用，滚动教程=回来学习
       if (S.phase !== 'focus') { S.phase = 'focus'; save(); }
-      const tid = tutorialId();
-      if (tid > 0 && !S.bindNodeId) {
-        try {
-          const r = await fetch('/api/tutorials/' + tid).then(x => x.json()).catch(() => null);
-          if (r && r.node && !S.running) {
-            S.bindNodeId = r.node.id; S.bindTitle = r.node.title || ''; S.bindGoalId = r.node.goal_id || 0; S.bindAuto = true;
-            save();
-          }
-        } catch (e) {}
-      }
+      await autoBindCurrentTutorial();
       if (S.running) return;
       start('focus');
       toast('🍅 检测到阅读，已开始专注' + (S.bindTitle ? '（记到「' + S.bindTitle.slice(0, 16) + '」）' : ''));

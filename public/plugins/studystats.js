@@ -21,6 +21,7 @@
   /* ---------------- 1) 后台记账 ---------------- */
   const TICK_MS = 15000, CAP_SEC = 60;
   let lastAt = Date.now();
+  let lastTickTid = 0;   // 最近一次心跳所在的教程（切页结算零头时用它，不算到新页面上）
   const nodeCache = {};   // tid -> node_id（0 表示解析中/无节点）
   const pending = {};     // tid -> 等节点解析的秒数（仅专注可见态用）
 
@@ -64,33 +65,53 @@
     return 0;
   }
   async function tick() {
-    const now = Date.now();
-    const dt = Math.min((now - lastAt) / 1000, CAP_SEC);
-    lastAt = now;
-    const st = pomoState();
-    if (!st || !st.running) return;
-    const tid = curTid();
-    if (st.phase === 'break') {
-      report('rest', await contextNode(tid, st), dt);
-      return;
+    try {
+      const now = Date.now();
+      const dt = Math.min((now - lastAt) / 1000, CAP_SEC);
+      lastAt = now;
+      const st = pomoState();
+      if (!st || !st.running) return;
+      const tid = curTid();
+      lastTickTid = tid;
+      if (st.phase === 'break') {
+        await report('rest', await contextNode(tid, st), dt);
+        return;
+      }
+      if (st.phase !== 'focus') return;
+      if (document.visibilityState !== 'visible') {
+        // 切出应用了：这段时间不算学，记暂离
+        await report('away', await contextNode(tid, st), dt);
+        return;
+      }
+      if (st.bind && st.bind.nodeId > 0) { await report('focus', st.bind.nodeId, dt); return; }
+      if (!(tid > 0)) return;
+      const nid = await resolveNode(tid);
+      if (nid > 0) await report('focus', nid, dt);
+      else pending[tid] = (pending[tid] || 0) + dt;
+    } finally {
+      // 统计页开着就地刷新，不用手动点
+      try { if ((location.hash || '').startsWith('#/studystats')) await refresh(); } catch (e) {}
     }
-    if (st.phase !== 'focus') return;
-    if (document.visibilityState !== 'visible') {
-      // 切出应用了：这段时间不算学，记暂离
-      report('away', await contextNode(tid, st), dt);
-      return;
-    }
-    if (st.bind && st.bind.nodeId > 0) { report('focus', st.bind.nodeId, dt); return; }
-    if (!(tid > 0)) return;
-    const nid = await resolveNode(tid);
-    if (nid > 0) report('focus', nid, dt);
-    else pending[tid] = (pending[tid] || 0) + dt;
   }
   setInterval(() => {
     try { if (enabled()) tick(); } catch (e) {}
   }, TICK_MS);
-  // 切页面：时钟清零（上一页的零头不算到新页面上，丢秒级零头可接受）
-  window.addEventListener('hashchange', () => { lastAt = Date.now(); });
+  // 切页面：先把上一页的零头记上（再清时钟，不丢十几秒）
+  window.addEventListener('hashchange', () => {
+    try {
+      const now = Date.now();
+      const dt = Math.min((now - lastAt) / 1000, CAP_SEC);
+      lastAt = now;
+      const st = pomoState();
+      if (st && st.running && dt >= 1) {
+        const nid = (st.bind && st.bind.nodeId > 0) ? st.bind.nodeId : (nodeCache[lastTickTid] || 0);
+        const bucket = st.phase === 'break' ? 'rest'
+          : (document.visibilityState !== 'visible' ? 'away'
+          : (nid > 0 ? 'focus' : null));
+        if (bucket && (nid > 0 || bucket !== 'focus')) report(bucket, nid, dt);
+      }
+    } catch (e) {}
+  });
   // 关页面：尽力把最后一段记上（只用已解析好的节点，不再起新请求解析）
   window.addEventListener('pagehide', () => {
     try {
