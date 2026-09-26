@@ -1,4 +1,4 @@
-/* 学习统计（扩展组件）：月历 + 日明细 */
+/* 学习统计（扩展组件）：月历 + 日明细（增量更新，无闪烁） */
 .ssSummary{display:flex; gap:10px; margin:12px 0;}
 .ssStat{flex:1; max-width:220px; background:var(--card); border:1px solid var(--border); border-radius:12px; padding:10px 14px; display:flex; flex-direction:column; gap:2px;}
 .ssNum{font-size:20px; font-weight:800; font-variant-numeric:tabular-nums;}
@@ -16,18 +16,60 @@
 .ssCell:disabled{cursor:default;}
 .ssD{font-weight:700; font-variant-numeric:tabular-nums;}
 .ssT{font-size:11.5px; color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums;}
+.ssR{font-size:10.5px; color:var(--muted);}
+.ssRDot{color:var(--muted); font-weight:400;}
 .ssDetail{margin-top:14px;}
-.ssDayHead{display:flex; align-items:center; gap:8px; font-size:14px; font-weight:700; margin-bottom:8px;}
+/* 当天总览卡 */
+.ssDayHero{background:var(--card); border:1px solid var(--border); border-radius:14px; padding:14px 16px; margin-bottom:4px;}
+.ssDayTop{display:flex; align-items:center; gap:8px;}
+.ssDayDate{font-size:14px; font-weight:700;}
+.ssLive{margin-left:auto; font-size:11.5px; color:#22c55e; font-weight:700; animation:ssPulse 1.6s infinite;}
+@keyframes ssPulse{0%,100%{opacity:1;} 50%{opacity:.3;}}
+.ssDayTotal{display:flex; align-items:baseline; gap:8px; margin-top:6px;}
+.ssDayTotal b{font-size:30px; font-weight:800; font-variant-numeric:tabular-nums; letter-spacing:.5px;}
+.ssDayTotal span{font-size:13px; color:var(--muted);}
+.ssDayPills{display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;}
+.ssPill{font-size:12px; color:var(--muted); background:var(--bg); border:1px solid var(--border); border-radius:999px; padding:3px 11px; font-variant-numeric:tabular-nums;}
+.ssPill b{color:var(--text);}
+.ssSecTitle{font-size:13.5px; font-weight:700; margin:16px 0 8px; color:var(--muted);}
+/* 时间线纵轨 */
+.ssTl{position:relative; padding-left:4px;}
+.ssTl::before{content:''; position:absolute; left:90px; top:10px; bottom:10px; width:2px; border-radius:2px; background:var(--border);}
+.ssSeg{position:relative; display:flex; gap:10px; align-items:flex-start; background:var(--card); border:1px solid var(--border); border-radius:12px; padding:10px 12px 10px 8px; margin:0 0 8px 0;}
+.ssSegDot{position:absolute; left:84px; top:15px; width:11px; height:11px; border-radius:50%; background:var(--card); border:3px solid var(--muted); z-index:1; box-sizing:border-box;}
+.ssSeg-focus .ssSegDot{border-color:#22c55e;}
+.ssSeg-rest .ssSegDot{border-color:#f59e0b;}
+.ssSeg-away .ssSegDot{border-color:#94a3b8;}
+.ssSegTime{flex:none; width:76px; text-align:right; display:flex; flex-direction:column; line-height:1.5; padding-top:1px;}
+.ssSegTime b{font-size:13px; font-variant-numeric:tabular-nums;}
+.ssSegTime span{font-size:11px; color:var(--muted); font-variant-numeric:tabular-nums;}
+.ssSegBody{flex:1; min-width:0;}
+.ssSegTop{display:flex; align-items:center; gap:8px;}
+.ssKind{font-size:11.5px; font-weight:700; border-radius:999px; padding:1px 9px; white-space:nowrap;}
+.k-focus{background:rgba(34,197,94,.13); color:#16a34a;}
+.k-rest{background:rgba(245,158,11,.14); color:#b45309;}
+.k-away{background:rgba(148,163,184,.16); color:#64748b;}
+.ssSegWhat{font-size:12.8px; margin-top:3px; color:var(--text); display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;}
+.ssDur{margin-left:auto; font-weight:800; color:var(--accent); font-variant-numeric:tabular-nums; white-space:nowrap; font-size:13px;}
+/* 按节点 */
 .ssRow{background:var(--card); border:1px solid var(--border); border-radius:10px; padding:9px 12px; margin-bottom:8px;}
 .ssRowTop{display:flex; align-items:center; gap:8px;}
 .ssNode{font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
-.ssDur{margin-left:auto; font-weight:800; color:var(--accent); font-variant-numeric:tabular-nums; white-space:nowrap;}
 .ssRowSub{font-size:12px; color:var(--muted); margin:2px 0 6px;}
 .ssRowSub a{color:var(--accent); text-decoration:none;}
 .ssBar{height:6px; border-radius:4px; background:var(--bg); border:1px solid var(--border); overflow:hidden;}
-.ssFill{height:100%; background:var(--accent); border-radius:4px; transition:width .3s;}
+.ssFill{height:100%; background:var(--accent); border-radius:4px; transition:width .8s ease;}
+/* 新行滑入（只在新增时加一次类） */
+.ssNew{animation:ssSlideIn .45s ease;}
+@keyframes ssSlideIn{from{opacity:0; transform:translateY(-6px);} to{opacity:1; transform:none;}}
+.ssEmpty{margin-top:8px;}
+.ssFoot{margin-top:10px; font-size:12px;}
 @media (max-width:700px){
   .ssCell{min-height:44px;}
   .ssSummary{flex-direction:column;}
   .ssStat{max-width:none;}
+  .ssTl::before{left:72px;}
+  .ssSegDot{left:66px;}
+  .ssSegTime{width:58px;}
+  .ssDayTotal b{font-size:25px;}
 }

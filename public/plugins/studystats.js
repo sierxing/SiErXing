@@ -164,6 +164,7 @@
   async function renderStatsPage() {
     curMonth = localDayStr(new Date()).slice(0, 7);
     selDay = localDayStr(new Date());
+    builtMonth = ''; builtDay = '';   // 页面重建，骨架标记清零
     app.innerHTML = `<div class="page"><div class="pageHead">
         <button class="back" data-back="#/">← 返回</button>
         <span class="mapTitle">📊 学习统计</span>
@@ -192,82 +193,165 @@
     curMonth = t.getFullYear() + '-' + pad(t.getMonth() + 1);
     refresh();
   }
+  let builtMonth = '';
   async function refresh() {
     try {
       monthData = await api('/api/study/month?month=' + encodeURIComponent(curMonth));
     } catch (e) { monthData = { days: {}, total_focus: 0, total_rest: 0, total_away: 0, active_days: 0 }; }
     renderCal();
     await renderDay();
+    updateLive();
+  }
+  function updateLive() {
+    // 计时跑着就亮个“直播”点，让人知道数字会自己动
+    let running = false;
+    try { const p = pomoState(); running = !!(p && p.running); } catch (e) {}
+    document.querySelectorAll('.ssLive').forEach(el => { el.hidden = !running; });
   }
   function renderCal() {
+    const box = document.getElementById('ssCal');
+    if (!box) return;
     const [y, m] = curMonth.split('-').map(Number);
-    const first = new Date(y, m - 1, 1);
-    const offset = (first.getDay() + 6) % 7;   // 周一起
-    const daysIn = new Date(y, m, 0).getDate();
-    const today = localDayStr(new Date());
-    let h = `<div class="ssMonthTitle">${y} 年 ${m} 月</div><div class="ssGrid ssWeek">${['一', '二', '三', '四', '五', '六', '日'].map(w => `<div>${w}</div>`).join('')}</div><div class="ssGrid">`;
-    for (let i = 0; i < offset; i++) h += '<div class="ssCell empty"></div>';
-    for (let d = 1; d <= daysIn; d++) {
-      const key = curMonth + '-' + pad(d);
-      const dd = monthData.days[key] || { f: 0, r: 0, a: 0 };
-      const sec = dd.f || 0;
-      const cls = ['ssCell'];
-      if (sec > 0) cls.push('has');
-      if (key === today) cls.push('today');
-      if (key === selDay) cls.push('sel');
-      if (key > today) cls.push('future');
-      const tip = `专注 ${fmtDur(dd.f || 0)} · 休息 ${fmtDur(dd.r || 0)} · 暂离 ${fmtDur(dd.a || 0)}`;
-      h += `<button class="${cls.join(' ')}" data-day="${key}" title="${tip}" ${key > today ? 'disabled' : ''}><span class="ssD">${d}</span>${sec > 0 ? `<span class="ssT">${fmtShort(sec)}</span>` : ''}${(dd.r || 0) > 0 ? '<span class="ssR">休</span>' : ''}</button>`;
+    if (builtMonth !== curMonth) {
+      // 月份变了才重建骨架；同月只补丁，避免闪烁
+      const first = new Date(y, m - 1, 1);
+      const offset = (first.getDay() + 6) % 7;   // 周一起
+      const daysIn = new Date(y, m, 0).getDate();
+      let h = `<div class="ssMonthTitle">${y} 年 ${m} 月</div><div class="ssGrid ssWeek">${['一', '二', '三', '四', '五', '六', '日'].map(w => `<div>${w}</div>`).join('')}</div><div class="ssGrid">`;
+      for (let i = 0; i < offset; i++) h += '<div class="ssCell empty"></div>';
+      for (let d = 1; d <= daysIn; d++) {
+        const key = curMonth + '-' + pad(d);
+        h += `<button class="ssCell" data-day="${key}"><span class="ssD">${d}</span><span class="ssT" hidden></span></button>`;
+      }
+      h += '</div>';
+      box.innerHTML = h;
+      box.querySelectorAll('[data-day]').forEach(b => b.addEventListener('click', () => {
+        selDay = b.getAttribute('data-day');
+        renderCal();
+        renderDay();
+      }));
+      builtMonth = curMonth;
     }
-    h += '</div>';
-    document.getElementById('ssCal').innerHTML = h;
+    patchCal();
     document.getElementById('ssSummary').innerHTML =
       `<div class="ssStat"><span class="ssNum">${fmtDur(monthData.total_focus)}</span><span class="ssLbl">本月专注</span></div>` +
       `<div class="ssStat"><span class="ssNum">${fmtDur(monthData.total_rest)}</span><span class="ssLbl">本月休息</span></div>` +
       `<div class="ssStat"><span class="ssNum">${fmtDur(monthData.total_away)}</span><span class="ssLbl">本月暂离</span></div>` +
       `<div class="ssStat"><span class="ssNum">${monthData.active_days}</span><span class="ssLbl">学习天数</span></div>`;
-    document.querySelectorAll('#ssCal [data-day]').forEach(b => b.addEventListener('click', () => {
-      selDay = b.getAttribute('data-day');
-      renderCal();
-      renderDay();
-    }));
   }
+  function patchCal() {
+    const today = localDayStr(new Date());
+    document.querySelectorAll('#ssCal [data-day]').forEach(b => {
+      const key = b.getAttribute('data-day');
+      const dd = (monthData.days || {})[key] || { f: 0, r: 0, a: 0 };
+      b.classList.toggle('has', (dd.f || 0) > 0);
+      b.classList.toggle('today', key === today);
+      b.classList.toggle('sel', key === selDay);
+      b.classList.toggle('future', key > today);
+      if (key > today) b.setAttribute('disabled', '');
+      else b.removeAttribute('disabled');
+      b.title = `专注 ${fmtDur(dd.f || 0)} · 休息 ${fmtDur(dd.r || 0)} · 暂离 ${fmtDur(dd.a || 0)}`;
+      const t = b.querySelector('.ssT');
+      if (t) {
+        const showR = (dd.r || 0) > 0, showF = (dd.f || 0) > 0;
+        t.hidden = !(showF || showR);
+        t.innerHTML = (showF ? esc(fmtShort(dd.f)) : '') + (showF && showR ? ' <span class="ssRDot">·</span> ' : '') + (showR ? `<span class="ssR">休${esc(fmtShort(dd.r))}</span>` : '');
+      }
+    });
+  }
+  function weekdayStr(ds) {
+    try {
+      const [y, m, d] = ds.split('-').map(Number);
+      return '周' + ['日', '一', '二', '三', '四', '五', '六'][new Date(y, m - 1, d).getDay()];
+    } catch (e) { return ''; }
+  }
+  function segRowHTML(s) {
+    return `<span class="ssSegDot"></span>` +
+      `<div class="ssSegTime"><b>${esc(s.from)}</b><span>至 ${esc(s.to)}</span></div>` +
+      `<div class="ssSegBody">` +
+      `<div class="ssSegTop"><span class="ssKind k-${esc(s.kind)}">${KIND_TXT[s.kind] || esc(s.kind)}</span><span class="ssDur">${esc(fmtDur(s.seconds))}</span></div>` +
+      `<div class="ssSegWhat">${esc(s.node_title || s.goal_title || '')}</div>` +
+      `</div>`;
+  }
+  function nodeRowHTML(r) {
+    return `<div class="ssRowTop"><span class="ssNode">${esc(r.node_title)}${r.node_gone ? ' <span class="chip gray">节点已删</span>' : ''}</span><span class="ssDur">${esc(fmtDur(r.focus_sec))}</span></div>` +
+      (r.goal_title ? `<div class="ssRowSub"><a href="#/g/${r.goal_id}">${esc(r.goal_title)}</a></div>` : '') +
+      `<div class="ssBar"><div class="ssFill" style="width:0%"></div></div>`;
+  }
+  /* 按 key 对账：已有的就地更新，新来的追加（带滑入动画），没了的移除 */
+  function syncRows(box, items, keyFn, clsFn, buildInner) {
+    const seen = new Set();
+    const have = new Map();
+    box.querySelectorAll(':scope > [data-k]').forEach(el => have.set(el.getAttribute('data-k'), el));
+    for (const it of items) {
+      const k = keyFn(it);
+      seen.add(k);
+      let elx = have.get(k);
+      if (!elx) {
+        elx = document.createElement('div');
+        elx.className = clsFn(it) + ' ssNew';
+        elx.setAttribute('data-k', k);
+        elx.innerHTML = buildInner(it);
+        box.appendChild(elx);
+        setTimeout(() => elx.classList.remove('ssNew'), 600);
+      } else {
+        const fresh = document.createElement('div');
+        fresh.innerHTML = buildInner(it);
+        if (elx.innerHTML !== fresh.innerHTML) elx.innerHTML = fresh.innerHTML;
+      }
+    }
+    have.forEach((elx, k) => { if (!seen.has(k)) elx.remove(); });
+  }
+  let builtDay = '';
   async function renderDay() {
     const box = document.getElementById('ssDetail');
     if (!box) return;
-    box.innerHTML = '<p class="muted">加载中…</p>';
+    if (builtDay !== selDay) box.innerHTML = '<p class="muted">加载中…</p>';
     let d;
     try { d = await api('/api/study/day?day=' + encodeURIComponent(selDay)); }
-    catch (e) { box.innerHTML = '<p class="muted">加载失败：' + esc(e.message) + '</p>'; return; }
+    catch (e) { if (builtDay !== selDay) box.innerHTML = '<p class="muted">加载失败：' + esc(e.message) + '</p>'; return; }
+    if (builtDay !== selDay) {
+      const [yy, mm, dd] = selDay.split('-').map(Number);
+      box.innerHTML =
+        `<div class="ssDayHero" id="ssDayHero"><div class="ssDayTop"><span class="ssDayDate">📅 ${mm}月${dd}日 · ${weekdayStr(selDay)}</span><span class="ssLive" hidden>● 直播</span></div>` +
+        `<div class="ssDayTotal"><b id="ssDayFocus">0秒</b><span>专注</span></div>` +
+        `<div class="ssDayPills"><span class="ssPill">☕ 休息 <b id="ssDayRest">0秒</b></span><span class="ssPill">📵 暂离 <b id="ssDayAway">0秒</b></span></div></div>` +
+        `<div class="ssSecTitle" id="ssTlTitle" hidden>⏱ 当天时间线</div><div class="ssTl" id="ssTl"></div>` +
+        `<div class="ssSecTitle" id="ssNodeTitle" hidden>📖 按节点</div><div id="ssNodeRows"></div>` +
+        `<div class="ssEmpty" id="ssEmpty" hidden><div class="ebText">这天还没记录。开着番茄钟、打开一篇教程专注，时间会自动记到对应节点上；切出应用的时间会记为暂离。</div></div>` +
+        `<div class="ssFoot muted">暂离指本页面不可见的时段（切标签页/最小化/刷视频等），网页拿不到其它标签页地址，只能记到这个粒度。</div>`;
+      builtDay = selDay;
+    }
+    patchDay(box, d);
+    updateLive();
+  }
+  function patchDay(box, d) {
     const t = d.totals || { focus: 0, rest: 0, away: 0 };
-    let h = `<div class="ssDayHead"><span>📅 ${esc(selDay)}</span>` +
-      `<span class="chip">专注 ${esc(fmtDur(t.focus))}</span>` +
-      `<span class="chip gray">休息 ${esc(fmtDur(t.rest))}</span>` +
-      `<span class="chip gray">暂离 ${esc(fmtDur(t.away))}</span></div>`;
-    // 时间线：几点到几点在干什么
-    if ((d.timeline || []).length) {
-      h += '<div class="ssSecTitle">⏱ 当天时间线</div>' + d.timeline.map(s =>
-        `<div class="ssSeg ssSeg-${s.kind}"><span class="ssSegTime">${esc(s.from)}–${esc(s.to)}</span>` +
-        `<span class="ssSegKind">${KIND_TXT[s.kind] || s.kind}</span>` +
-        `<span class="ssSegWhat">${esc(s.node_title || s.goal_title || '')}</span>` +
-        `<span class="ssDur">${esc(fmtDur(s.seconds))}</span></div>`
-      ).join('');
+    const setText = (id, v) => { const elx = document.getElementById(id); if (elx && elx.textContent !== v) elx.textContent = v; };
+    setText('ssDayFocus', fmtDur(t.focus));
+    setText('ssDayRest', fmtDur(t.rest));
+    setText('ssDayAway', fmtDur(t.away));
+    const tl = d.timeline || [], recs = d.records || [];
+    const tlTitle = document.getElementById('ssTlTitle');
+    const nodeTitle = document.getElementById('ssNodeTitle');
+    const emptyBox = document.getElementById('ssEmpty');
+    const foot = box.querySelector('.ssFoot');
+    if (tlTitle) tlTitle.hidden = !tl.length;
+    if (nodeTitle) nodeTitle.hidden = !recs.length;
+    if (emptyBox) emptyBox.hidden = !!(tl.length || recs.length);
+    if (foot) foot.style.display = (tl.length || recs.length) ? '' : 'none';
+    const tlBox = document.getElementById('ssTl');
+    if (tlBox) syncRows(tlBox, tl, s => 'seg' + s.id, s => 'ssSeg ssSeg-' + (s.kind || ''), segRowHTML);
+    const nrBox = document.getElementById('ssNodeRows');
+    if (nrBox) {
+      syncRows(nrBox, recs, r => 'node' + r.node_id, () => 'ssRow', nodeRowHTML);
+      const max = Math.max(1, ...recs.map(r => r.focus_sec));
+      nrBox.querySelectorAll(':scope > [data-k]').forEach(elx => {
+        const r = recs.find(x => 'node' + x.node_id === elx.getAttribute('data-k'));
+        const fill = elx.querySelector('.ssFill');
+        if (r && fill) fill.style.width = Math.round(r.focus_sec / max * 100) + '%';
+      });
     }
-    // 按节点
-    if ((d.records || []).length) {
-      const max = Math.max(1, ...d.records.map(r => r.focus_sec));
-      h += '<div class="ssSecTitle">📖 按节点</div>' + d.records.map(r =>
-        `<div class="ssRow"><div class="ssRowTop"><span class="ssNode">${esc(r.node_title)}${r.node_gone ? ' <span class="chip gray">节点已删</span>' : ''}</span><span class="ssDur">${esc(fmtDur(r.focus_sec))}</span></div>` +
-        `<div class="ssRowSub">${r.goal_title ? `<a href="#/g/${r.goal_id}">${esc(r.goal_title)}</a>` : ''}</div>` +
-        `<div class="ssBar"><div class="ssFill" style="width:${Math.round(r.focus_sec / max * 100)}%"></div></div></div>`
-      ).join('');
-    }
-    if (!(d.timeline || []).length && !(d.records || []).length) {
-      h += '<div class="emptyBox" style="margin-top:8px;"><div class="ebText">这天还没记录。开着番茄钟、打开一篇教程专注，时间会自动记到对应节点上；切出应用的时间会记为暂离。</div></div>';
-    } else {
-      h += '<div class="ssFoot muted">暂离指本页面不可见的时段（切标签页/最小化/刷视频等），网页拿不到其它标签页地址，只能记到这个粒度。</div>';
-    }
-    box.innerHTML = h;
   }
 
   SiErXing.registerPlugin({

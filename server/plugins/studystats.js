@@ -250,10 +250,11 @@ module.exports = {
         const totals = drow
           ? { focus: drow.focus_sec, rest: drow.rest_sec, away: drow.away_sec }
           : { focus: sumRec, rest: 0, away: 0 };
-        const segs = db.prepare('SELECT kind, node_id, node_title, goal_id, goal_title, started_at, ended_at, seconds FROM study_segments WHERE day = ? ORDER BY started_at, id').all(day);
+        const segs = db.prepare('SELECT id, kind, node_id, node_title, goal_id, goal_title, started_at, ended_at, seconds FROM study_segments WHERE day = ? ORDER BY started_at, id').all(day);
         const timeline = segs.map(s => {
           const hhmm = t => String(t || '').slice(11, 16) || '--:--';
           return {
+            id: s.id,
             kind: s.kind, node_id: s.node_id,
             node_title: s.node_title || (s.kind === 'rest' ? '休息' : (s.kind === 'away' ? '暂离应用' : '')),
             goal_id: s.goal_id, goal_title: s.goal_title || '',
