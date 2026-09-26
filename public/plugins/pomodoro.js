@@ -83,7 +83,6 @@
 
   /* ---------------- 计时核心 ---------------- */
   let finished = false;   // 本轮是否已结算（防重复触发）
-  let manualHold = false; // 用户手动暂停：自动逻辑不再接管，直到手动开始/切页/结束
   let autoPaused = false; // 系统自动暂停的（切出教程/久无滚动）：滚动回来可自动继续
   let autoManaged = false; // 本轮是否纳入自动管理：只在教程页开始的计时才被自动暂停/继续；在别处手动开始的不干扰
   let awayMode = false;   // 切出应用后的休息计时中（回来前一直记休息）
@@ -97,19 +96,19 @@
     S.deadline = Date.now() + S.remaining;
     S.running = true;
     finished = false;
-    manualHold = false; autoPaused = false; pauseReason = '';
+    autoPaused = false; pauseReason = '';
     autoManaged = onTutorialRoute();
     awayMode = false; awaySaved = null; awayInfoModal = false;
     closeModal();
     stopFlash();
     save(); render();
   }
-  function pause(manual) {
+  function pause() {
     if (!S.running) return;
     S.remaining = remainMs();
     S.running = false;
     S.deadline = 0;
-    if (manual) { manualHold = true; autoPaused = false; pauseReason = ''; awayMode = false; awaySaved = null; }
+    awayMode = false; awaySaved = null;   // 手动接管：切屏休息模式一并结束
     save(); render();
     flushStats();
   }
@@ -125,7 +124,7 @@
     if (S.running || S.remaining <= 0) return;
     S.deadline = Date.now() + S.remaining;
     S.running = true;
-    manualHold = false; autoPaused = false; pauseReason = '';
+    autoPaused = false; pauseReason = '';
     autoManaged = onTutorialRoute();
     save(); render();
   }
@@ -134,7 +133,7 @@
     S.deadline = 0;
     S.remaining = phaseLen(S.phase);
     finished = false;
-    manualHold = false; autoPaused = false; pauseReason = '';
+    autoPaused = false; pauseReason = '';
     autoManaged = false;
     awayMode = false; awaySaved = null; awayInfoModal = false;
     closeModal();
@@ -380,7 +379,7 @@
     } catch (e) { if (!silent) toast(e.message || '绑定失败'); return false; }
   }
   async function onMain() {
-    if (S.running) { pause(true); return; }
+    if (S.running) { pause(); return; }
     // 开始 / 继续都需要用户手势：顺手申请通知权限 + 解锁音频
     try { if ('Notification' in window && Notification.permission === 'default') await Notification.requestPermission(); } catch (e) {}
     try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); if (audioCtx.state === 'suspended') await audioCtx.resume(); } catch (e) {}
@@ -500,9 +499,9 @@
   }
 
   /* ---------------- 读教程自动计时 ----------------
-   * 教程页上下滚动 = 在学：空闲时自动开始专注（未绑定则顺手绑定当前节点）；
-   * 切出教程页 / 1 分钟没滚动 → 自动暂停（不锁死，回来滚动自动继续）；
-   * 用户手动点的暂停/结束不受干扰（manualHold），切页后解除。 */
+   * 教程页上下滚动 = 在学：暂停的半截直接继续，否则开新专注；
+   * 切出教程页 / 1 分钟没滚动 → 自动暂停，回来滚动自动继续；
+   * 手动点的暂停只是停住这一秒，下一次滚动就继续（想彻底停就点结束或关自动）。 */
   function onTutorialRoute() { return /^#\/t\/(\d+)$/.test(location.hash || ''); }
   function tutorialId() { const m = (location.hash || '').match(/^#\/t\/(\d+)$/); return m ? Number(m[1]) : 0; }
   window.addEventListener('scroll', () => {
@@ -514,7 +513,7 @@
   window.addEventListener('hashchange', () => {
     try {
       lastScrollAt = Date.now();
-      manualHold = false; autoPaused = false; pauseReason = '';
+      autoPaused = false; pauseReason = '';
       // 切到别的教程页：自动绑的旧节点清掉（暂停的半截留着，滚一下就按新节点继续）
       if (onTutorialRoute() && !S.running && S.bindAuto) {
         S.bindNodeId = 0; S.bindTitle = ''; S.bindGoalId = 0; S.bindAuto = false;
@@ -525,26 +524,27 @@
   });
   async function maybeAutoStart() {
     try {
-      if (!S.auto || manualHold || S.running) return;
+      if (!S.auto || S.running) return;
       if (!onTutorialRoute()) return;
       if (el('pomoModalWrap') && !el('pomoModalWrap').hidden) return;   // 刚播完提醒，等用户选
       if (!enabled()) return;
-      const total = phaseLen(S.phase);
-      if (S.remaining > 0 && S.remaining < total) { resume(); return; }  // 半截回来继续（手动暂停的被hold挡在外面）
-      // 全新一轮：开专注；没绑定就绑当前节点，保证统计同步
+      // 专注剩半截：直接继续（暂停就是暂时的，滚动=回来学了）
+      if (S.phase === 'focus' && S.remaining > 0 && S.remaining < phaseLen('focus')) { resume(); return; }
+      // 其他情况一律开新专注：上一轮是休息/休息半截也不沿用，滚动教程=回来学习
+      if (S.phase !== 'focus') { S.phase = 'focus'; save(); }
       const tid = tutorialId();
       if (tid > 0 && !S.bindNodeId) {
         try {
           const r = await fetch('/api/tutorials/' + tid).then(x => x.json()).catch(() => null);
-          if (r && r.node && !S.running && !manualHold) {
+          if (r && r.node && !S.running) {
             S.bindNodeId = r.node.id; S.bindTitle = r.node.title || ''; S.bindGoalId = r.node.goal_id || 0; S.bindAuto = true;
             save();
           }
         } catch (e) {}
       }
-      if (S.running || manualHold) return;
-      start(S.phase);
-      toast('🍅 检测到阅读，已开始' + (S.phase === 'break' ? '休息' : '专注') + (S.bindTitle ? '（记到「' + S.bindTitle.slice(0, 16) + '」）' : ''));
+      if (S.running) return;
+      start('focus');
+      toast('🍅 检测到阅读，已开始专注' + (S.bindTitle ? '（记到「' + S.bindTitle.slice(0, 16) + '」）' : ''));
     } catch (e) {}
   }
   function autoWatch() {
@@ -554,14 +554,22 @@
     if (!onTutorialRoute()) { autoPause('切出教程页'); return; }
     if (Date.now() - lastScrollAt > 60000) autoPause('1 分钟没滚动');
   }
-  /* 切出应用（标签不可见，如去刷视频）：专注转休息一直记，回来自动恢复专注 */
+  /* 切出应用（标签不可见，如去刷视频）：正在跑的专注、暂停剩的半截，都转成休息一直记，回来自动恢复专注 */
   function convertToAwayRest() {
-    if (!S.auto || !S.running || S.phase !== 'focus' || !autoManaged || awayMode) return;
-    flushStats();   // 先把专注零头结算了，再转休息
-    awaySaved = { remaining: S.remaining };
+    if (!S.auto || awayMode) return;
+    if (!enabled()) return;
+    if (S.running) {
+      if (S.phase !== 'focus' || !autoManaged) return;
+      flushStats();   // 先把专注零头结算了，再转休息
+      awaySaved = { remaining: S.remaining };
+    } else {
+      // 暂停在半截：专注半截留档待恢复；休息半截就地继续；空闲不动
+      if (!(S.remaining > 0 && S.remaining < phaseLen(S.phase))) return;
+      if (S.phase === 'focus') awaySaved = { remaining: S.remaining };
+    }
     awayMode = true;
     S.phase = 'break';
-    S.remaining = phaseLen('break');
+    if (!(S.remaining > 0 && S.remaining < phaseLen('break'))) S.remaining = phaseLen('break');
     S.deadline = Date.now() + S.remaining;
     S.running = true;
     finished = false;
@@ -582,7 +590,7 @@
     S.deadline = Date.now() + r;
     S.running = true;
     finished = false;
-    manualHold = false; autoPaused = false; pauseReason = '';
+    autoPaused = false; pauseReason = '';
     closeModal();
     stopFlash();
     save(); render();
@@ -615,7 +623,7 @@
   /* 对外极小接口（测试 / 调试 / 跨插件用） */
   window.Pomodoro = {
     start, pause, resume, stop, setBind,
-    state: () => ({ phase: S.phase, running: S.running, remainMs: remainMs(), focusMin: S.focusMin, breakMin: S.breakMin, doneToday: S.doneToday, auto: S.auto, hold: manualHold, autoPaused, managed: autoManaged, away: awayMode, bind: { nodeId: S.bindNodeId, title: S.bindTitle, goalId: S.bindGoalId } }),
+    state: () => ({ phase: S.phase, running: S.running, remainMs: remainMs(), focusMin: S.focusMin, breakMin: S.breakMin, doneToday: S.doneToday, auto: S.auto, autoPaused, managed: autoManaged, away: awayMode, bind: { nodeId: S.bindNodeId, title: S.bindTitle, goalId: S.bindGoalId } }),
     _finishNow: () => { if (S.running) { S.deadline = Date.now(); } }
   };
 
