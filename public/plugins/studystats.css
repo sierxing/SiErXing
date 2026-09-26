@@ -42,7 +42,11 @@
 .ssCol{flex:1; min-width:0; display:flex; flex-direction:column; gap:10px;}
 .ssAxis{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:8px 12px 6px; min-width:0;}
 .ssAxisHead{display:flex; align-items:center; justify-content:space-between; font-size:12px; font-weight:700; color:var(--muted); margin-bottom:2px;}
-.ssAxisTot{color:var(--accent); font-variant-numeric:tabular-nums;}
+.ssAxisTot{color:var(--accent); font-variant-numeric:tabular-nums; white-space:nowrap;}
+.ssAxF{color:var(--accent); font-weight:700;}
+.ssAxR{color:#b45309;}
+.ssAxA{color:var(--muted);}
+.ssAxSep{color:var(--border); margin:0 3px;}
 .ssAxisTrack{position:relative; height:26px;}
 .ssAxisGrid{position:absolute; inset:0;}
 .ssTick{position:absolute; top:0; bottom:0; width:1px; background:var(--border); opacity:.8;}
@@ -65,6 +69,9 @@
 .ssAxisCaps{position:relative; height:15px;}
 .ssSegCap{position:absolute; top:0; font-size:10.5px; color:var(--muted); white-space:nowrap; font-variant-numeric:tabular-nums;}
 .ssLegend{display:flex; gap:14px; align-items:center; margin-top:10px; font-size:12px; color:var(--muted); flex-wrap:wrap;}
+.ssLg{cursor:pointer; border-radius:999px; padding:2px 8px; margin:-2px -8px; user-select:none;}
+.ssLg:hover{background:var(--accent-soft);}
+.ssLg.off{opacity:.35;}
 .ssLgDot{display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:4px;}
 .ssLgDot.k-focus{background:#22c55e;}
 .ssLgDot.k-rest{background:#f59e0b;}

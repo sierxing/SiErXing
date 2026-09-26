@@ -291,7 +291,27 @@
   }
   function axesView() { try { return localStorage.getItem('sierxing-stats-axes') || 'cols2'; } catch (e) { return 'cols2'; } }
   function setAxesView(v) { try { localStorage.setItem('sierxing-stats-axes', v); } catch (e) {} }
+  function axesView() { try { return localStorage.getItem('sierxing-stats-axes') || 'cols2'; } catch (e) { return 'cols2'; } }
+  function setAxesView(v) { try { localStorage.setItem('sierxing-stats-axes', v); } catch (e) {} }
+  /* 图例过滤：只看某几种状态（记忆选择） */
+  let kindFilter = null;
+  function loadKindFilter() {
+    try {
+      const o = JSON.parse(localStorage.getItem('sierxing-stats-kinds') || 'null');
+      if (o && typeof o === 'object') return { focus: o.focus !== false, rest: o.rest !== false, away: o.away !== false };
+    } catch (e) {}
+    return { focus: true, rest: true, away: true };
+  }
+  kindFilter = loadKindFilter();
+  function saveKindFilter() { try { localStorage.setItem('sierxing-stats-kinds', JSON.stringify(kindFilter)); } catch (e) {} }
+  let lastSegs = [];
+  function paintLegend(box) {
+    box.querySelectorAll('.ssLg[data-kind]').forEach(sp => {
+      sp.classList.toggle('off', !kindFilter[sp.getAttribute('data-kind')]);
+    });
+  }
   function renderAxes(box, segs) {
+    lastSegs = segs;
     if (!box.dataset.built) {
       // 定死两列容器：左 0/4/8、右 12/16/20；单列模式只是竖排，不搬 DOM
       const col = idxs => idxs.map(i => {
@@ -301,27 +321,48 @@
         `<div class="ssAxisSegs" id="ssAxSegs${i}"></div><div class="ssAxisCaps" id="ssAxCaps${i}"></div></div></div>`;
       }).join('');
       box.innerHTML = `<div class="ssDayAxes ${axesView()}" id="ssDayAxes"><div class="ssCol">${col([0, 1, 2])}</div><div class="ssCol">${col([3, 4, 5])}</div></div>` +
-      `<div class="ssLegend"><span><i class="ssLgDot k-focus"></i>专注</span><span><i class="ssLgDot k-rest"></i>休息</span><span><i class="ssLgDot k-away"></i>暂离</span><span class="muted">悬停（触屏点一下）看详情</span></div>`;
+      `<div class="ssLegend"><span class="ssLg" data-kind="focus"><i class="ssLgDot k-focus"></i>专注</span><span class="ssLg" data-kind="rest"><i class="ssLgDot k-rest"></i>休息</span><span class="ssLg" data-kind="away"><i class="ssLgDot k-away"></i>暂离</span><span class="muted">悬停（触屏点一下）看详情</span></div>`;
       box.dataset.built = '1';
+      box.querySelectorAll('.ssLg[data-kind]').forEach(sp => {
+        sp.addEventListener('click', () => {
+          const k = sp.getAttribute('data-kind');
+          kindFilter[k] = !kindFilter[k];
+          // 全关了等于没过滤，直接全开（避免白屏困惑）
+          if (!kindFilter.focus && !kindFilter.rest && !kindFilter.away) kindFilter = { focus: true, rest: true, away: true };
+          saveKindFilter();
+          paintLegend(box);
+          renderAxes(box, lastSegs);
+        });
+      });
       bindAxTip(box);
     } else {
       const w = document.getElementById('ssDayAxes');
       if (w) w.className = 'ssDayAxes ' + axesView();
     }
+    paintLegend(box);
     segById = {};
     AXES.forEach((a, i) => {
       const s0 = a[0] * 60, s1 = a[1] * 60;
-      let tot = 0;
+      let tF = 0, tR = 0, tA = 0;
       const inR = [];
       for (const s of segs) {
+        if (!kindFilter[s.kind]) continue;   // 图例关掉的不画
         const st = segMin(s.from), en = segMin(s.to);
         if (isNaN(st) || isNaN(en) || en <= s0 || st >= s1) continue;
         segById['seg' + s.id] = s;
         inR.push(s);
-        tot += Math.max(0, Math.min(en, s1) - Math.max(st, s0)) * 60;
+        const cut = Math.max(0, Math.min(en, s1) - Math.max(st, s0)) * 60;
+        if (s.kind === 'rest') tR += cut; else if (s.kind === 'away') tA += cut; else tF += cut;
       }
       const totEl = document.getElementById('ssAxTot' + i);
-      if (totEl) totEl.textContent = tot > 0 ? fmtShort(tot) : '';
+      if (totEl) {
+        const parts = [];
+        if (tF > 0) parts.push(`<span class="ssAxF">${esc(fmtShort(tF))}</span>`);
+        if (tR > 0) parts.push(`<span class="ssAxR">休${esc(fmtShort(tR))}</span>`);
+        if (tA > 0) parts.push(`<span class="ssAxA">离${esc(fmtShort(tA))}</span>`);
+        const html = parts.join('<span class="ssAxSep">·</span>');
+        if (totEl.dataset.html !== html) { totEl.dataset.html = html; totEl.innerHTML = html; }
+      }
       const layer = document.getElementById('ssAxSegs' + i);
       const sig = inR.map(s => s.id + ':' + s.seconds).join(',');
       if (layer && layer.dataset.sig !== sig) {
