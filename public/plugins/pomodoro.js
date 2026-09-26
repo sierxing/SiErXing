@@ -87,6 +87,7 @@
   let runRoute = null; // 本轮跑起来时所在的页面：只有从教程页切走才自动暂停
   let awayMode = false;   // 切出应用后的休息计时中（回来前一直记休息）
   let awaySaved = null;   // 切出时暂存的专注轮次 { remaining }，回来恢复
+  let awayStartAt = 0;    // 本次切出休息开始的时间戳，用来算“已休息多久”
   let awayInfoModal = false; // 当前弹窗只是“已开始休息”告知，点“知道了”不碰计时
   let pauseReason = '';   // 自动暂停原因展示
   let lastScrollAt = Date.now();
@@ -98,7 +99,7 @@
     finished = false;
     autoPaused = false; pauseReason = '';
     runRoute = location.hash || '#/';
-    awayMode = false; awaySaved = null; awayInfoModal = false;
+    awayMode = false; awaySaved = null; awayInfoModal = false; awayStartAt = 0;
     closeModal();
     stopFlash();
     save(); render();
@@ -108,7 +109,7 @@
     S.remaining = remainMs();
     S.running = false;
     S.deadline = 0;
-    awayMode = false; awaySaved = null;   // 手动接管：切屏休息模式一并结束
+    awayMode = false; awaySaved = null; awayStartAt = 0;   // 手动接管：切屏休息模式一并结束
     save(); render();
     flushStats();
   }
@@ -135,7 +136,7 @@
     finished = false;
     autoPaused = false; pauseReason = '';
     runRoute = null;
-    awayMode = false; awaySaved = null; awayInfoModal = false;
+    awayMode = false; awaySaved = null; awayInfoModal = false; awayStartAt = 0;
     closeModal();
     stopFlash();
     save(); render();
@@ -159,7 +160,7 @@
   function complete() {
     if (finished) return;
     finished = true;
-    awayMode = false; awayInfoModal = false;
+    awayMode = false; awayInfoModal = false; awayStartAt = 0;
     const was = S.phase;
     S.running = false;
     S.deadline = 0;
@@ -577,6 +578,7 @@
       if (S.phase === 'focus') awaySaved = { remaining: S.remaining };
     }
     awayMode = true;
+    awayStartAt = Date.now();
     S.phase = 'break';
     if (!(S.remaining > 0 && S.remaining < phaseLen('break'))) S.remaining = phaseLen('break');
     S.deadline = Date.now() + S.remaining;
@@ -589,9 +591,30 @@
     showAwayModal();
     render();
   }
+  /* 切出休息中每满一段（休息时长）报一次：告诉已休息多久，没回来就自动续下一段 */
+  function awayCheckpoint() {
+    if (!awayMode || !S.running || S.phase !== 'break') return;
+    const mins = Math.max(1, Math.round((Date.now() - (awayStartAt || Date.now())) / 60000));
+    S.deadline += Math.max(60000, S.breakMin * 60000);   // 按设定 cadence 续（+= 防后台节流漂移）
+    S.remaining = S.deadline - Date.now();
+    save();
+    beep();
+    notify('☕ 还在休息', '已经休息了约 ' + mins + ' 分钟。切回教程页自动恢复专注，再过 ' + S.breakMin + ' 分钟会再提醒。');
+    flashTitle(true);
+    try {
+      const desc = document.getElementById('pomoModalDesc');
+      if (desc && awayInfoModal) desc.textContent = `已经休息了约 ${mins} 分钟。切回教程页自动恢复专注；不回来每 ${S.breakMin} 分钟提醒一次，计时一直在走。`;
+    } catch (e) {}
+    render();
+  }
+  /* 到期统一判定：切出休息走周期提醒，其他走正常结束 */
+  function checkFinish() {
+    if (awayMode && S.phase === 'break') { awayCheckpoint(); return; }
+    complete();
+  }
   function restoreFocus() {
     if (!awayMode) return;
-    awayMode = false; awayInfoModal = false;
+    awayMode = false; awayInfoModal = false; awayStartAt = 0;
     const r = awaySaved && awaySaved.remaining > 0 ? awaySaved.remaining : phaseLen('focus');
     awaySaved = null;
     S.phase = 'focus';
@@ -612,7 +635,8 @@
         convertToAwayRest();
       } else {
         // 回来先追一次结算（后台节流可能延迟了到点判定）
-        if (S.running && remainMs() <= 0) { complete(); return; }
+        if (S.running && remainMs() <= 0) { checkFinish(); return; }
+        if (onTutorialRoute()) lastScrollAt = Date.now();   // 露面了就给 fresh 的 60 秒，别落地秒停
         if (awayMode && S.running && S.phase === 'break' && onTutorialRoute()) restoreFocus();
       }
     } catch (e) {}
@@ -625,7 +649,7 @@
       if (!el('pomoRoot')) mount();
       if (S.dayStamp !== DAY()) { S.dayStamp = DAY(); S.doneToday = 0; save(); }
       autoWatch();
-      if (S.running && remainMs() <= 0) complete();
+      if (S.running && remainMs() <= 0) checkFinish();
       else render();
     } catch (e) {}
   }, 250);
@@ -633,7 +657,7 @@
   /* 对外极小接口（测试 / 调试 / 跨插件用） */
   window.Pomodoro = {
     start, pause, resume, stop, setBind,
-    state: () => ({ phase: S.phase, running: S.running, remainMs: remainMs(), focusMin: S.focusMin, breakMin: S.breakMin, doneToday: S.doneToday, auto: S.auto, autoPaused, away: awayMode, bind: { nodeId: S.bindNodeId, title: S.bindTitle, goalId: S.bindGoalId } }),
+    state: () => ({ phase: S.phase, running: S.running, remainMs: remainMs(), focusMin: S.focusMin, breakMin: S.breakMin, doneToday: S.doneToday, auto: S.auto, autoPaused, away: awayMode, awayMin: awayMode && awayStartAt ? Math.floor((Date.now() - awayStartAt) / 60000) : 0, bind: { nodeId: S.bindNodeId, title: S.bindTitle, goalId: S.bindGoalId } }),
     _finishNow: () => { if (S.running) { S.deadline = Date.now(); } }
   };
 
