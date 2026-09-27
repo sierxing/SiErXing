@@ -51,7 +51,8 @@ fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const db = new DatabaseSync(DB_PATH);
 db.exec(`
-PRAGMA journal_mode = WAL;
+PRAGMA journal_mode = DELETE;
+PRAGMA busy_timeout = 5000;
 CREATE TABLE IF NOT EXISTS goals (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   title TEXT NOT NULL,
@@ -368,21 +369,9 @@ function setSetting(k, v) {
 }
 function backup() {
   try { if (sync) sync.schedulePush('数据变更'); } catch (e) {}
-  // 自检：WAL/SHM 若被外部删掉会导致读写分裂，发现就大声报警（仅 Linux 可见）
+  // 注：数据库用 DELETE journal 模式（单文件，无 WAL 旁文件），
+  // 历史上 WAL 旁文件曾被外部删掉导致读写分裂，已不再用 WAL。
   try {
-    if (process.platform === 'linux') {
-      for (const f of fs.readdirSync('/proc/self/fd')) {
-        let link = '';
-        try { link = fs.readlinkSync('/proc/self/fd/' + f); } catch (e) {}
-        if (link.includes('sierxing.db') && link.includes('(deleted)')) {
-          console.error('[数据安全告警] 数据库 WAL/SHM 被外部删除，读写可能分裂！请勿用 sqlite CLI/DBeaver/python 等外部工具写 data/sierxing.db（只读无妨），重启服务可恢复。(' + link + ')');
-          break;
-        }
-      }
-    }
-  } catch (e) {}
-  try {
-    db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
     fs.copyFileSync(DB_PATH, path.join(BACKUP_DIR, `sierxing-${stamp()}.db`));
     const files = fs.readdirSync(BACKUP_DIR).filter(f => f.startsWith('sierxing-')).sort();
     while (files.length > KEEP_BACKUPS) fs.unlinkSync(path.join(BACKUP_DIR, files.shift()));

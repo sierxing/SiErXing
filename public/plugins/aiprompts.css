@@ -1,0 +1,41 @@
+/* 提示词库（扩展组件）：AI 输入框的 📝 快捷面板 */
+#apBtn{flex:none;}
+.apPicker{
+  position:fixed; z-index:1250; width:min(360px, calc(100vw - 24px)); max-height:min(480px, calc(100vh - 120px));
+  display:flex; flex-direction:column; overflow:hidden;
+  background:var(--card); border:1px solid var(--border); border-radius:13px; box-shadow:var(--shadow-lg);
+  padding:10px 11px; font-size:13px;
+}
+.apTabs{display:flex; align-items:center; gap:4px; padding-bottom:8px; border-bottom:1px solid var(--border); margin-bottom:8px; flex:none;}
+.apTabs [data-tab]{border:none; background:none; cursor:pointer; font-size:13px; padding:4px 10px; border-radius:8px; color:var(--muted);}
+.apTabs [data-tab].active{background:var(--accent-soft); color:var(--accent); font-weight:700;}
+.apX{margin-left:auto; border:none; background:none; cursor:pointer; font-size:16px; color:var(--muted); padding:2px 8px; border-radius:8px;}
+.apX:hover{background:var(--accent-soft); color:var(--text);}
+.apBody{overflow-y:auto; min-height:0;}
+.apBody input[type=text], .apBody input:not([type]), #apQ{
+  width:100%; box-sizing:border-box; padding:6px 9px; margin-bottom:8px;
+  border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px;
+}
+.apCats{display:flex; flex-wrap:wrap; gap:5px; margin-bottom:8px;}
+.apCats button{border:1px solid var(--border); background:var(--bg); color:var(--muted); border-radius:999px; padding:2px 10px; font-size:12px; cursor:pointer;}
+.apCats button.active{border-color:var(--accent-border); color:var(--accent); background:var(--accent-soft); font-weight:700;}
+.apList{display:flex; flex-direction:column; gap:6px;}
+.apItem{display:flex; align-items:center; gap:8px; text-align:left; cursor:pointer; padding:8px 10px; border:1px solid var(--border); border-radius:9px; background:var(--bg); color:var(--text); font-size:13px; width:100%; box-sizing:border-box;}
+.apItem:hover{border-color:var(--accent-border); background:var(--accent-soft);}
+.apItemT{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600;}
+.apItemC{flex:none; font-size:11px; color:var(--muted); background:var(--card); border:1px solid var(--border); border-radius:999px; padding:0 8px;}
+.apRow{display:flex; align-items:center; gap:8px; padding:7px 9px; border:1px solid var(--border); border-radius:9px; background:var(--bg);}
+.apRowMain{flex:1; min-width:0;}
+.apRowT{font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.apRowC{font-size:11px; color:var(--muted);}
+.apRowOps{flex:none; display:flex; gap:3px;}
+.apRowOps button{border:1px solid var(--border); background:var(--card); color:var(--text); border-radius:7px; cursor:pointer; font-size:12px; padding:2px 7px;}
+.apRowOps button:hover:not(:disabled){border-color:var(--accent-border);}
+.apRowOps button:disabled{opacity:.35; cursor:default;}
+.apForm{border:1px dashed var(--border); border-radius:10px; padding:9px; margin-top:8px; display:flex; flex-direction:column; gap:7px;}
+.apFTitle{font-weight:700;}
+.apForm textarea{resize:vertical; min-height:76px; padding:6px 9px; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-family:inherit;}
+.apFOps{display:flex; gap:6px;}
+.apCatsMgr{margin-top:10px; font-size:12.5px;}
+.apCatsMgr summary{cursor:pointer; color:var(--muted); padding:4px 0;}
+.apCatRow{display:flex; align-items:center; gap:8px; padding:5px 2px; border-bottom:1px dashed var(--border);}
