@@ -99,6 +99,7 @@
     finished = false;
     autoPaused = false; pauseReason = '';
     runRoute = location.hash || '#/';
+    lastScrollAt = Date.now();   // 手动点开始也算一次露面，起码给 60 秒宽限
     awayMode = false; awaySaved = null; awayInfoModal = false; awayStartAt = 0;
     closeModal();
     stopFlash();
@@ -127,6 +128,7 @@
     S.running = true;
     autoPaused = false; pauseReason = '';
     runRoute = location.hash || '#/';
+    lastScrollAt = Date.now();   // 手动点继续也算露面，否则会被 idle 规则秒停
     save(); render();
   }
   function stop() {
@@ -150,6 +152,7 @@
     S.deadline = Date.now() + S.remaining;
     S.running = true;
     finished = false;
+    lastScrollAt = Date.now();
     closeModal();
     stopFlash();
     save(); render();
@@ -569,7 +572,8 @@
       runRoute = cur;
       if (leftTut) { autoPause('切换页面'); return; }
     }
-    if (onTutorialRoute() && Date.now() - lastScrollAt > 60000) autoPause('1 分钟没滚动');
+    // 1分钟没滚动只管专注：休息本来就不用动手，不该停
+    if (S.phase === 'focus' && onTutorialRoute() && Date.now() - lastScrollAt > 60000) autoPause('1 分钟没滚动');
   }
   /* 切出应用（标签不可见，如去刷视频）：专注转休息一直记，回来自动恢复专注。
    * 注意：只要标签藏起来就转，不要求计时是在教程页开始的——看不见页面就不算在学。 */
@@ -631,6 +635,7 @@
     S.running = true;
     finished = false;
     autoPaused = false; pauseReason = '';
+    lastScrollAt = Date.now();   // 回来=露面，给 fresh 的 60 秒
     closeModal();
     stopFlash();
     save(); render();
