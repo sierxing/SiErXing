@@ -47,29 +47,26 @@
 .ssAxR{color:#f59e0b;}
 .ssAxA{color:#94a3b8;}
 .ssAxSep{color:var(--border); margin:0 3px;}
-.ssAxisTrack{position:relative; height:26px;}
+.ssAxisTrack{position:relative; height:24px;}
+.ssAxisTrack::before{content:''; position:absolute; left:0; right:0; top:50%; height:2px; transform:translateY(-50%); background:var(--border); border-radius:2px;}
 .ssAxisGrid{position:absolute; inset:0;}
 .ssTick{position:absolute; top:0; bottom:0; width:1px; background:var(--border); opacity:.8;}
 .ssTick i{position:absolute; top:-1px; transform:translateX(-50%); font-style:normal; font-size:10px; color:var(--muted); font-variant-numeric:tabular-nums;}
 .ssTick:first-child i{transform:none;}
 .ssTick:last-child i{transform:translateX(-100%);}
 .ssAxisSegs{position:absolute; inset:0;}
-/* 瘦身视觉 + 透明大热区：看着细，悬停零压力 */
-.ssSegB{position:absolute; top:6px; height:14px; border-radius:7px; cursor:pointer; min-width:2px;}
-.ssSegB::after{content:''; position:absolute; left:-2px; right:-2px; top:-8px; bottom:-8px;}
+/* 线段=细胶囊，点=小圆，都 centered 在同一根线上，一眼区分 */
+.ssSegB{position:absolute; top:50%; height:8px; transform:translateY(-50%); border-radius:4px; cursor:pointer; min-width:3px;}
+.ssSegB::after{content:''; position:absolute; left:-2px; right:-2px; top:-9px; bottom:-9px;}
 .ssSegB.k-focus{background:#22c55e;}
 .ssSegB.k-rest{background:#f59e0b;}
 .ssSegB.k-away{background:#94a3b8;}
 .ssSegB:hover{filter:brightness(1.12);}
-.ssSegDot2{position:absolute; width:6px; height:6px; border-radius:50%; transform:translateX(-50%); cursor:pointer;}
-.ssSegDot2.lane0{top:4px;}
-.ssSegDot2.lane1{top:15px;}
+.ssSegDot2{position:absolute; top:50%; width:7px; height:7px; border-radius:50%; transform:translate(-50%,-50%); cursor:pointer;}
 .ssSegDot2::after{content:''; position:absolute; inset:-10px;}
 .ssSegDot2.k-focus{background:#22c55e;}
 .ssSegDot2.k-rest{background:#f59e0b;}
 .ssSegDot2.k-away{background:#94a3b8;}
-.ssAxisCaps{position:relative; height:15px;}
-.ssSegCap{position:absolute; top:0; font-size:10.5px; color:var(--muted); white-space:nowrap; font-variant-numeric:tabular-nums;}
 .ssLegend{display:flex; gap:14px; align-items:center; margin-top:10px; font-size:12px; color:var(--muted); flex-wrap:wrap;}
 .ssLg{cursor:pointer; border-radius:999px; padding:2px 8px; margin:-2px -8px; user-select:none;}
 .ssLg:hover{background:var(--accent-soft);}

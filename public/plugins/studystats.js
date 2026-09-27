@@ -318,7 +318,7 @@
         const a = AXES[i];
         return `<div class="ssAxis" data-ax="${i}"><div class="ssAxisHead"><span>${pad(a[0])}:00 – ${pad(a[1])}:00</span><span class="ssAxisTot" id="ssAxTot${i}"></span></div>` +
         `<div class="ssAxisTrack"><div class="ssAxisGrid">${[0, 1, 2, 3, 4].map(h => `<span class="ssTick" style="left:${h * 25}%"><i>${pad(a[0] + h)}</i></span>`).join('')}</div>` +
-        `<div class="ssAxisSegs" id="ssAxSegs${i}"></div><div class="ssAxisCaps" id="ssAxCaps${i}"></div></div></div>`;
+        `<div class="ssAxisSegs" id="ssAxSegs${i}"></div></div></div>`;
       }).join('');
       box.innerHTML = `<div class="ssDayAxes ${axesView()}" id="ssDayAxes"><div class="ssCol">${col([0, 1, 2])}</div><div class="ssCol">${col([3, 4, 5])}</div></div>` +
       `<div class="ssLegend"><span class="ssLg" data-kind="focus"><i class="ssLgDot k-focus"></i>专注</span><span class="ssLg" data-kind="rest"><i class="ssLgDot k-rest"></i>休息</span><span class="ssLg" data-kind="away"><i class="ssLgDot k-away"></i>暂离</span><span class="muted">悬停（触屏点一下）看详情</span></div>`;
@@ -368,36 +368,16 @@
       const sig = inR.map(s => s.id + ':' + s.seconds).join(',');
       if (layer && layer.dataset.sig !== sig) {
         layer.dataset.sig = sig;
-        let lastDotX = -99, dotLane = 0;
         layer.innerHTML = inR.map(s => {
-          // 显示分级：专注<5分钟藏，休息/暂离<2分钟藏；5~15分钟(休息暂离2分钟起)只打点，>15分钟画线段
-          const floor = s.kind === 'focus' ? 300 : 120;
-          if (s.seconds < floor) return '';
+          // 显示分级见总数循环（已过滤）；这里点和线段都 centered 在同一根线上
           const st = Math.max(segMin(s.from), s0);
           const l = (st - s0) / AXIS_MIN * 100;
           if (s.seconds <= 900) {
-            // 点太密就上下错开两排，避免摞在一起
-            if (Math.abs(l - lastDotX) < 4) dotLane = 1 - dotLane; else dotLane = 0;
-            lastDotX = l;
-            return `<span class="ssSegDot2 k-${esc(s.kind)} lane${dotLane}" style="left:${l}%" data-seg="seg${s.id}"></span>`;
+            return `<span class="ssSegDot2 k-${esc(s.kind)}" style="left:${l}%" data-seg="seg${s.id}"></span>`;
           }
-          lastDotX = -99;
           const w = Math.max((Math.min(segMin(s.to), s1) - st) / AXIS_MIN * 100, 1.5);
           return `<span class="ssSegB k-${esc(s.kind)}" style="left:${l}%;width:${w}%" data-seg="seg${s.id}"></span>`;
         }).join('');
-      }
-      const caps = document.getElementById('ssAxCaps' + i);
-      if (caps) {
-        let html = '', lastEnd = -99;
-        for (const s of inR) {
-          if (s.seconds < 1200) continue;   // 20 分钟以上才标注头尾时间
-          const st = Math.max(segMin(s.from), s0);
-          if (st < lastEnd) continue;   // 太密就让位，详情走悬停
-          html += `<span class="ssSegCap" style="left:${(st - s0) / AXIS_MIN * 100}%">${esc(s.from)}–${esc(s.to)}</span>`;
-          lastEnd = st + 25;
-        }
-        const csig = sig + '|caps';
-        if (caps.dataset.sig !== csig) { caps.dataset.sig = csig; caps.innerHTML = html; }
       }
     });
   }
@@ -414,14 +394,13 @@
   }
   function bindAxTip(box) {
     const tip = axTipEl();
-    const show = ev => {
-      const b = ev.target && ev.target.closest ? ev.target.closest('[data-seg]') : null;
-      if (!b || !box.contains(b)) { tip.hidden = true; return; }
+    const showFor = (b, ev) => {
       const s = segById[b.getAttribute('data-seg')];
       if (!s) { tip.hidden = true; return; }
-      tip.innerHTML = `<div class="ssTipTop"><span class="ssKind k-${esc(s.kind)}">${KIND_TXT[s.kind] || esc(s.kind)}</span><span class="ssDur">${esc(fmtDur(s.seconds))}</span></div>` +
+      const html = `<div class="ssTipTop"><span class="ssKind k-${esc(s.kind)}">${KIND_TXT[s.kind] || esc(s.kind)}</span><span class="ssDur">${esc(fmtDur(s.seconds))}</span></div>` +
         `<div class="ssTipTime">${esc(s.from)} – ${esc(s.to)} · 持续${esc(fmtDur(s.seconds))}</div>` +
         `<div class="ssTipWhat">${esc(s.node_title || s.goal_title || '')}</div>`;
+      if (tip._html !== html) { tip._html = html; tip.innerHTML = html; }
       tip.hidden = false;
       moveTip(ev);
     };
@@ -436,9 +415,26 @@
       tip.style.left = Math.max(pad2, x) + 'px';
       tip.style.top = Math.max(pad2, y) + 'px';
     };
-    box.addEventListener('mousemove', show);
+    const fromEvent = ev => (ev.target && ev.target.closest ? ev.target.closest('[data-seg]') : null);
+    // mouseover 进入即显示（比 mousemove 可靠，不用蹭位置）
+    box.addEventListener('mouseover', ev => {
+      const b = fromEvent(ev);
+      if (!b || !box.contains(b)) return;
+      showFor(b, ev);
+    });
+    // 移动只跟随，不重渲染内容
+    box.addEventListener('mousemove', ev => { if (!tip.hidden) moveTip(ev); });
+    // 离开当前段才隐藏；直接进另一段由 mouseover 接管（不闪）
+    box.addEventListener('mouseout', ev => {
+      const to = ev.relatedTarget;
+      if (to && to.closest && to.closest('[data-seg]')) return;
+      tip.hidden = true;
+    });
     box.addEventListener('mouseleave', () => { tip.hidden = true; });
-    box.addEventListener('click', show);   // 触屏点一下看
+    box.addEventListener('click', ev => {   // 触屏点一下看
+      const b = fromEvent(ev);
+      if (b && box.contains(b)) showFor(b, ev);
+    });
   }
   function nodeRowHTML(r) {
     return `<div class="ssRowTop"><span class="ssNode">${esc(r.node_title)}${r.node_gone ? ' <span class="chip gray">节点已删</span>' : ''}</span><span class="ssDur">${esc(fmtDur(r.focus_sec))}</span></div>` +
