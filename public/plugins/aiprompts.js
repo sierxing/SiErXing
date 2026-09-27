@@ -23,28 +23,38 @@
   function drawer() { return document.getElementById('aiDrawer'); }
   function ta() { return document.getElementById('adText'); }
 
-  /* 每秒自检：抽屉出现就挂按钮；组件被关就清理 */
+  /* 每秒自检：抽屉出现就挂入口条；组件被关就清理 */
   function ensure() {
     try {
       const on = compOn();
-      const btn = document.getElementById('apBtn');
+      const old = document.getElementById('apBtn');
+      if (old) old.remove();   // 兼容旧版小图标，见到就清掉
+      let bar = document.getElementById('apBar');
       if (!on) {
-        if (btn) btn.remove();
+        if (bar) bar.remove();
         const p = document.getElementById('apPicker');
         if (p) p.remove();
         return;
       }
       const d = drawer(), input = ta();
-      if (!d || !input || btn) return;
-      const b = document.createElement('button');
-      b.id = 'apBtn';
-      b.className = 'adIco';
-      b.title = '提示词库：快捷插入常用提示词';
-      b.textContent = '📝';
-      b.addEventListener('click', ev => { ev.stopPropagation(); togglePicker(); });
-      const send = d.querySelector('#adSend');
-      if (send) send.parentNode.insertBefore(b, send);
-      else input.parentNode.appendChild(b);
+      if (!d || !input) return;
+      if (!bar) {
+        bar = document.createElement('div');
+        bar.id = 'apBar';
+        bar.innerHTML = `<button id="apBarBtn" title="打开提示词库，快捷插入常用提示词">📝 <span>提示词</span><span class="apCount" id="apCount"></span></button>`;
+        const inputBox = d.querySelector('.adInput');
+        if (inputBox) inputBox.parentNode.insertBefore(bar, inputBox);
+        else d.appendChild(bar);
+        bar.querySelector('#apBarBtn').addEventListener('click', ev => { ev.stopPropagation(); togglePicker(); });
+      }
+      refreshCount();
+    } catch (e) {}
+  }
+  async function refreshCount() {
+    try {
+      if (!cache.length) await load();
+      const el = document.getElementById('apCount');
+      if (el) el.textContent = cache.length ? cache.length + '条' : '';
     } catch (e) {}
   }
 
@@ -82,7 +92,7 @@
   function outsideClose(e) {
     const p = document.getElementById('apPicker');
     if (!p) return document.removeEventListener('click', outsideClose, true);
-    if (!p.contains(e.target) && !(e.target.closest && e.target.closest('#apBtn'))) closePicker();
+    if (!p.contains(e.target) && !(e.target.closest && e.target.closest('#apBar'))) closePicker();
   }
   async function togglePicker() {
     if (document.getElementById('apPicker')) { closePicker(); return; }

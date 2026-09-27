@@ -1,5 +1,8 @@
-/* 提示词库（扩展组件）：AI 输入框的 📝 快捷面板 */
-#apBtn{flex:none;}
+/* 提示词库（扩展组件）：AI 输入栏上方的入口条 + 快捷面板 */
+#apBar{display:flex; padding:0 12px 7px; background:var(--card);}
+#apBarBtn{display:inline-flex; align-items:center; gap:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); border-radius:999px; padding:3px 12px; font-size:12.5px; cursor:pointer;}
+#apBarBtn:hover{border-color:var(--accent-border); background:var(--accent-soft);}
+#apBarBtn .apCount{font-size:11px; color:var(--muted);}
 .apPicker{
   position:fixed; z-index:1250; width:min(360px, calc(100vw - 24px)); max-height:min(480px, calc(100vh - 120px));
   display:flex; flex-direction:column; overflow:hidden;
