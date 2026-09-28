@@ -347,7 +347,7 @@
       const inR = [];
       for (const s of segs) {
         if (!kindFilter[s.kind]) continue;   // 图例关掉的不画
-        if (s.seconds < (s.kind === 'focus' ? 300 : 120)) continue;   // 太碎的不画（专注<5分钟，休息/暂离<2分钟），总数也不计入
+        if (s.seconds < (s.kind === 'focus' ? 300 : (s.kind === 'rest' ? 60 : 120))) continue;   // 太碎的不画（专注<5分钟，休息<1分钟，暂离<2分钟），总数也不计入
         const st = segMin(s.from), en = segMin(s.to);
         if (isNaN(st) || isNaN(en) || en <= s0 || st >= s1) continue;
         segById['seg' + s.id] = s;
@@ -368,14 +368,11 @@
       const sig = inR.map(s => s.id + ':' + s.seconds).join(',');
       if (layer && layer.dataset.sig !== sig) {
         layer.dataset.sig = sig;
+        // 全部画线段（长短只差在宽度）：专注≥5分钟、休息≥1分钟、暂离≥2分钟才到这里
         layer.innerHTML = inR.map(s => {
-          // 显示分级见总数循环（已过滤）；这里点和线段都 centered 在同一根线上
           const st = Math.max(segMin(s.from), s0);
           const l = (st - s0) / AXIS_MIN * 100;
-          if (s.seconds <= 900) {
-            return `<span class="ssSegDot2 k-${esc(s.kind)}" style="left:${l}%" data-seg="seg${s.id}"></span>`;
-          }
-          const w = Math.max((Math.min(segMin(s.to), s1) - st) / AXIS_MIN * 100, 1.5);
+          const w = Math.max((Math.min(segMin(s.to), s1) - st) / AXIS_MIN * 100, 1.2);
           return `<span class="ssSegB k-${esc(s.kind)}" style="left:${l}%;width:${w}%" data-seg="seg${s.id}"></span>`;
         }).join('');
       }
