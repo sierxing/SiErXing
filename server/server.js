@@ -3136,6 +3136,8 @@ function redactText(raw) {
     }
     if (method === 'DELETE') {
       db.prepare('DELETE FROM tutorials WHERE id = ?').run(id);
+      try { db.prepare('DELETE FROM tutorial_bookmarks WHERE tutorial_id = ?').run(id); } catch (e) {}
+      try { db.prepare('DELETE FROM tutorial_progress WHERE tutorial_id = ?').run(id); } catch (e) {}
       return sendJSON(res, 200, { ok: true });
     }
   }

@@ -600,10 +600,12 @@ h3.mdH{font-size:17px;} h4.mdH,h5.mdH,h6.mdH{font-size:15px;}
 /* 节点面板教程区 */
 .npTut{padding:10px 14px; border-top:1px solid var(--border);}
 .npTutItem{
-  display:flex; align-items:center; gap:8px; padding:7px 10px; margin-top:6px; border-radius:9px;
+  flex:1; min-width:0; display:flex; align-items:center; gap:8px; padding:7px 10px; border-radius:9px;
   background:var(--soft); border:1px solid var(--border); color:var(--text); text-decoration:none; font-size:13px;
 }
 .npTutItem:hover{border-color:var(--accent-border); background:var(--accent-soft);}
+.npTutRow{display:flex; align-items:center; gap:6px; margin-top:6px;}
+.npTutRow .btn{flex:none;}
 .npTutName{flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
 
 /* ============ 对话改规划 ============ */

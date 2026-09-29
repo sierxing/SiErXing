@@ -757,7 +757,7 @@ function showNodePanel(id, rerender) {
     })()}
     <div class="npTut">
       <div class="npSrcTitle">📘 学习教程（${tuts.length}）</div>
-      ${tuts.length ? tuts.map(t => `<a class="npTutItem" href="#/t/${t.id}"><span class="npTutName">${esc(t.title)}</span><span class="chip gray">${t.format === 'html' ? 'HTML' : 'MD'}</span></a>`).join('') : '<div class="muted" style="font-size:12.5px;">还没有教程：生成一份「掌握该任务知识点」的完整教程</div>'}
+      ${tuts.length ? tuts.map(t => `<div class="npTutRow"><a class="npTutItem" href="#/t/${t.id}"><span class="npTutName">${esc(t.title)}</span><span class="chip gray">${t.format === 'html' ? 'HTML' : 'MD'}</span></a><button class="btn tiny danger" data-tut-del="${t.id}" title="删除这份教程">×</button></div>`).join('') : '<div class="muted" style="font-size:12.5px;">还没有教程：生成一份「掌握该任务知识点」的完整教程</div>'}
       <button class="btn small primary" id="npTutBtn" style="margin-top:8px;">📘 生成完整教程（HTML / Markdown）</button>
       ${(compOn('tutbookmark') && window.TutBookmark) ? window.TutBookmark.nodeImportHTML() : ''}
     </div>
@@ -815,6 +815,19 @@ function showNodePanel(id, rerender) {
   if (window.TutBookmark && compOn('tutbookmark')) window.TutBookmark.bindNodeImport(div, id, (r) => { state.goal = r.goal; showNodePanel(id, rerenderFn); });
   const tutBtn = document.getElementById('npTutBtn');
   if (tutBtn) tutBtn.addEventListener('click', () => { div.remove(); showTutorialDialog(id); });
+  div.querySelectorAll('[data-tut-del]').forEach(b => b.addEventListener('click', async e => {
+    e.preventDefault(); e.stopPropagation();
+    const tid = Number(b.getAttribute('data-tut-del'));
+    const t = (tutorialsOfNode(id) || []).find(x => Number(x.id) === tid);
+    if (!confirm('删除教程「' + String((t && t.title) || tid).slice(0, 40) + '」？删除后不可恢复。')) return;
+    try {
+      await api('/api/tutorials/' + tid, { method: 'DELETE' });
+      await loadGoal(state.goal.id);
+      rerenderFn();
+      showNodePanel(id, rerenderFn);
+      toast('已删除');
+    } catch (err) { toast(err.message); }
+  }));
   const adjBtn = document.getElementById('npAdjustBtn');
   if (adjBtn) adjBtn.addEventListener('click', () => {
     const fb = (document.getElementById('npFeedback').value || '').trim();
