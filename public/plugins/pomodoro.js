@@ -528,6 +528,8 @@
         S.bindNodeId = 0; S.bindTitle = ''; S.bindGoalId = 0; S.bindAuto = false;
         save();
       }
+      // 应用内跳回教程页（visibility 没变化）：切屏休息同样恢复专注
+      if (awayMode && S.running && S.phase === 'break' && onTutorialRoute()) restoreFocus();
       if (el('pomoRoot')) render();
     } catch (e) {}
   });
@@ -583,7 +585,7 @@
     if (S.running) {
       if (S.phase !== 'focus') return;   // 已经在休息就让它跑着
       flushStats();   // 先把专注零头结算了，再转休息
-      awaySaved = { remaining: S.remaining };
+      awaySaved = { remaining: remainMs() };   // 必须用活的值：S.remaining 运行时是旧的
     } else {
       // 暂停在半截：专注半截留档待恢复；休息半截就地继续；空闲不动
       if (!(S.remaining > 0 && S.remaining < phaseLen(S.phase))) return;
