@@ -2968,10 +2968,53 @@ async function startPlanning(id, answers) {
   } else if (r.error || !r.done) {
     toast(r.error || '骨架生成中断，可重试');
     try { await loadGoal(id); } catch (e) {}
+    await planResumeCheck(id);
   } else {
+    state.planResumeInfo = null;
     state.goal = r.data.goal;
     if (r.data.report) state.lastReport = { text: r.data.report, versionId: r.data.versionId, goalId: id };
     toast('骨架已生成，请确认或提意见');
+  }
+  const rr = parseRoute();
+  if (rr.view === 'goal' && rr.id === id) renderGoal();
+  else if (rr.view === 'map' && rr.id === id) renderMapPage();
+}
+async function planResumeCheck(id) {
+  // 出错后查有没有可继续的草稿，有就记下来让界面出按钮
+  try {
+    const dr = await api('/api/goals/' + id + '/plan/draft');
+    if (dr && dr.draft) state.planResumeInfo = Object.assign({ goalId: id }, dr.draft);
+    else if (!state.planResumeInfo || state.planResumeInfo.goalId !== id) state.planResumeInfo = null;
+  } catch (e) {}
+}
+async function startPlanResume(id) {
+  if (state.planning || state.collecting || state.expanding) return;
+  state.planning = true;
+  state.planAbort = new AbortController();
+  state.planProgress = null;
+  state.planStage = 'skeleton';
+  state.planStatus = '正在接着上次的构思继续…';
+  state.planHint = '把上次保留的原始构思整理成标准格式，约需 30-90 秒。';
+  state.showEdit = false;
+  if (!state.goal || state.goal.id !== id) await loadGoal(id);
+  state.goal.status = 'planning';
+  renderGoal();
+  bindPlanningPanel();
+  const r = await streamSSE('/api/goals/' + id + '/plan/resume', {}, d => {
+    if (d.status) { state.planStatus = d.status; const el = document.getElementById('ppStatus'); if (el) el.textContent = d.status; }
+    if (d.progress) { state.planProgress = d.progress; renderPlanLive(); }
+  }, state.planAbort.signal).catch(e => ({ done: true, error: e.message }));
+  clearInterval(planTimer);
+  state.planning = false;
+  if (r.error || !r.done) {
+    toast(r.error || '继续构思中断，可重试');
+    try { await loadGoal(id); } catch (e) {}
+    await planResumeCheck(id);
+  } else {
+    state.planResumeInfo = null;
+    state.goal = r.data.goal;
+    if (r.data.report) state.lastReport = { text: r.data.report, versionId: r.data.versionId, goalId: id };
+    toast('已接着上次的构思生成骨架，请确认或提意见');
   }
   const rr = parseRoute();
   if (rr.view === 'goal' && rr.id === id) renderGoal();
@@ -3442,6 +3485,7 @@ function renderGoal() {
       </div>
       <div class="bar big"><div class="barFill" style="width:${pct}%"></div></div>
       ${g.error ? `<div class="goalError">⚠ ${esc(g.error)}</div>` : ''}
+      ${(g.error && state.planResumeInfo && state.planResumeInfo.goalId === g.id) ? `<div style="margin-top:8px;"><button class="btn small primary" id="planResumeDraftBtn" title="把上次失败保留的原始构思喂回去，让 AI 按正确格式整理，不用从头再想">🧭 继续构思${state.planResumeInfo.rawLen ? `（已保留约 ${(state.planResumeInfo.rawLen / 1000).toFixed(1)}k 字构思${state.planResumeInfo.attempts ? `，第 ${state.planResumeInfo.attempts + 1} 次整理` : ''}）` : ''}</button></div>` : ''}
       </div>
     </div>
     <div id="continueCard"></div>`;
@@ -3483,6 +3527,8 @@ function renderGoal() {
   if (window.Workspace && compOn('workspace')) { try { window.Workspace.bindGoal(g); } catch (e) {} }
   const planBtnEl = document.getElementById('planBtn');
   planBtnEl.addEventListener('click', () => startClarify(g.id));
+  const resumeDraftBtn = document.getElementById('planResumeDraftBtn');
+  if (resumeDraftBtn) resumeDraftBtn.addEventListener('click', () => startPlanResume(g.id));
   const emptyPlan = document.getElementById('emptyPlanBtn');
   if (emptyPlan) emptyPlan.addEventListener('click', () => startClarify(g.id));
   const starBtns = app.querySelectorAll('[data-src-star]');

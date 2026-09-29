@@ -132,6 +132,16 @@ CREATE TABLE IF NOT EXISTS sources (
   published_at TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS plan_drafts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  goal_id INTEGER NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'skeleton',
+  content TEXT NOT NULL DEFAULT '',
+  meta TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(goal_id, kind)
+);
 `);
 ai.init({ getSetting: (k, d) => getSetting(k, d), appDir: APP_DIR });
 function currentModel() { return getSetting('model', '') || ai.config().model || ''; }
@@ -1881,6 +1891,44 @@ async function aiTextProgress(prompt, model, timeoutMs, send, label, signal) {
     clearInterval(hb);
   }
 }
+/* ---------- 规划草稿：骨架失败时保留 AI 的原始构思，支持断点继续 ----------
+   出错（解析失败 / 规范化后无可用阶段）就把原始输出落盘，而不是扔掉；
+   用户点「继续构思」时把原文喂回去，让模型按正确格式整理一遍。 */
+function savePlanDraft(goalId, kind, content, meta) {
+  const t = nowISO();
+  const m = JSON.stringify(Object.assign({ attempts: 0 }, meta || {}));
+  db.prepare(`INSERT INTO plan_drafts (goal_id, kind, content, meta, created_at, updated_at)
+    VALUES (?,?,?,?,?,?) ON CONFLICT(goal_id, kind) DO UPDATE SET content = excluded.content, meta = excluded.meta, updated_at = excluded.updated_at`)
+    .run(goalId, kind || 'skeleton', String(content || '').slice(0, 60000), m, t, t);
+}
+function getPlanDraft(goalId, kind) {
+  try { return db.prepare('SELECT * FROM plan_drafts WHERE goal_id = ? AND kind = ?').get(goalId, kind || 'skeleton') || null; }
+  catch (e) { return null; }
+}
+function clearPlanDraft(goalId, kind) {
+  try { db.prepare('DELETE FROM plan_drafts WHERE goal_id = ? AND kind = ?').run(goalId, kind || 'skeleton'); } catch (e) {}
+}
+function draftInfo(d) {
+  if (!d) return null;
+  let meta = {};
+  try { meta = JSON.parse(d.meta || '{}'); } catch (e) {}
+  return {
+    kind: d.kind, attempts: meta.attempts || 0,
+    rawLen: String(d.content || '').length, updated_at: d.updated_at,
+    preview: String(d.content || '').replace(/\s+/g, ' ').slice(0, 200)
+  };
+}
+function buildSkeletonRepairPrompt(goal, rawText) {
+  const lines = [];
+  lines.push('你是资深职业路径规划师。下面是你刚才为同一目标做的规划构思（思路和内容是好的，但格式不符合要求，不要丢掉任何实质内容）：');
+  lines.push('');
+  lines.push(String(rawText || '').slice(0, 20000));
+  lines.push('');
+  lines.push('【任务】把上面的构思整理成标准 JSON，只输出 JSON 对象，不要任何解释、前后缀或代码块标记：');
+  lines.push('{"stages":[{"title":"阶段名","detail":"60-120字说明","sources":[{"name":"来源","note":"依据要点"}],"goals":[{"title":"小目标名","detail":"60-120字","sources":[{"name":"","note":""}]}]}]}');
+  lines.push('要求：阶段 3-12 个；每个阶段的小目标按知识点数量决定（一般 5-10 个，多的可到 16 个，一个知识点至少一个）；阶段 3-5 条依据、小目标 1-3 条；detail 可精简到 40-80 字。');
+  return lines.join('\n');
+}
 function streamPlan(req, res, goal, answers) {
   // 第一步：只生成骨架（阶段 + 小目标），等待用户确认（会带上澄清问答）
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
@@ -1889,6 +1937,7 @@ function streamPlan(req, res, goal, answers) {
     const sig = clientSignal(req);
   (async () => {
     try {
+      clearPlanDraft(goal.id, 'skeleton');   // 全新规划：旧草稿作废，失败时会写入新的
       const pend = goalPending(goal.id);
       if (answers && pend) appendGoalQa(goal.id, pend.stage, pend.data.questions, answers);
       send({ status: answers ? '正在结合你的补充回答生成路径骨架…' : '正在结合你的回答生成路径骨架…' });
@@ -1914,8 +1963,15 @@ function streamPlan(req, res, goal, answers) {
         }
         if (!skeleton || !Array.isArray(skeleton.stages) || !skeleton.stages.length) {
           console.log('[plan] 重试后仍解析失败，原始输出前 400 字:', String(skeletonText || '').slice(0, 400).replace(/\n/g, ' '));
-          throw new Error('骨架生成失败（模型返回内容不完整），请重试；若反复失败可在设置里换一个模型');
+          savePlanDraft(goal.id, 'skeleton', skeletonText, { attempts: 2, error: 'parse' });
+          throw new Error('骨架生成失败（模型返回内容不完整），原始构思已保留：点「继续构思」接着来，不用从头再想；若反复失败可在设置里换一个模型');
         }
+      }
+      if (!normalizeSkeleton(skeleton.stages).length) {
+        // 能解析、但阶段全被规范化过滤（缺 title/goals）：同样保留原文，可继续
+        savePlanDraft(goal.id, 'skeleton', skeletonText, { attempts: 2, error: 'empty-stages' });
+        console.log('[plan] 阶段被规范化过滤光，原始输出前 400 字:', String(skeletonText || '').slice(0, 400).replace(/\n/g, ' '));
+        throw new Error('AI 的构思不符合格式要求（没有可用阶段），原始构思已保留：点「继续构思」让 AI 按正确格式整理，不用从头再想');
       }
       // 小目标偏少的阶段自动补足（按知识点拆细），保证覆盖度
       skeleton = await expandThinStages(goal, skeleton, model, send, sig);
@@ -1933,7 +1989,52 @@ function streamPlan(req, res, goal, answers) {
         send({ cancelled: true, status: '已停止（可随时继续）', goal: getGoal(goal.id) });
       } else {
         db.prepare('UPDATE goals SET status = ?, error = ?, updated_at = ? WHERE id = ?').run('failed', e.message, nowISO(), goal.id);
-        send({ error: e.message });
+        send({ error: e.message, resume: draftInfo(getPlanDraft(goal.id, 'skeleton')) });
+      }
+    }
+    res.end();
+  })();
+}
+/* 断点继续：把上次失败保留的原始构思喂回去，让模型按正确格式整理，然后走正常保存流程 */
+function streamPlanResume(req, res, goal) {
+  res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
+  const model = currentModel();
+  const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} };
+    const sig = clientSignal(req);
+  (async () => {
+    try {
+      const draft = getPlanDraft(goal.id, 'skeleton');
+      if (!draft || !String(draft.content || '').trim()) throw new Error('没有可继续的构思，请重新规划');
+      let meta = {};
+      try { meta = JSON.parse(draft.meta || '{}'); } catch (e) {}
+      const attempts = (meta.attempts || 0) + 1;
+      send({ status: `正在接着上次的构思继续（第 ${attempts} 次整理，原构思 ${String(draft.content).length} 字已保留）…` });
+      const txt = await aiTextProgress(buildSkeletonRepairPrompt(goal, draft.content), model, 600000, send, '阶段/小目标', sig);
+      const skeleton = extractJSON(txt);
+      if (!skeleton || !normalizeSkeleton(skeleton.stages || []).length) {
+        savePlanDraft(goal.id, 'skeleton', txt, { attempts, error: 'empty-stages' });
+        console.log('[plan-resume] 仍无可用阶段，原始输出前 400 字:', String(txt || '').slice(0, 400).replace(/\n/g, ' '));
+        throw new Error(attempts >= 3
+          ? '多次整理仍无可用阶段：建议换一个模型再试，或点“重新规划”从头来'
+          : '整理后仍无可用阶段（已更新保留的构思）：可再点「继续构思」换种说法重试');
+      }
+      const fixed = Object.assign({}, skeleton, { stages: normalizeSkeleton(skeleton.stages) });
+      const grown = await expandThinStages(goal, fixed, model, send, sig);
+      const vid = beginVersion(goal.id, '继续构思生成骨架');
+      saveSkeleton(goal.id, grown);
+      db.prepare('UPDATE goals SET status = ?, error = ?, updated_at = ? WHERE id = ?').run('review', '', nowISO(), goal.id);
+      const report = await finishVersion(goal, vid, '继续构思生成骨架');
+      backup();
+      clearPlanDraft(goal.id, 'skeleton');
+      send({ done: true, stages: grown.stages.length, goal: getGoal(goal.id), report, versionId: vid });
+    } catch (e) {
+      if (e && e.cancelled) {
+        const cnt = db.prepare('SELECT COUNT(*) AS c FROM nodes WHERE goal_id = ?').get(goal.id).c;
+        db.prepare('UPDATE goals SET status = ?, error = ?, updated_at = ? WHERE id = ?').run(cnt ? 'review' : 'todo', '', nowISO(), goal.id);
+        send({ cancelled: true, status: '已停止（构思还在，可随时继续）', goal: getGoal(goal.id) });
+      } else {
+        db.prepare('UPDATE goals SET status = ?, error = ?, updated_at = ? WHERE id = ?').run('failed', e.message, nowISO(), goal.id);
+        send({ error: e.message, resume: draftInfo(getPlanDraft(goal.id, 'skeleton')) });
       }
     }
     res.end();
@@ -3148,6 +3249,16 @@ function redactText(raw) {
     let answers = null;
     try { const b = await readBody(req); if (b && typeof b.answers === 'object' && b.answers) answers = b.answers; } catch (e) {}
     return streamPlanTasks(req, res, g, answers);
+  }
+  const planResumeMatch = p.match(/^\/api\/goals\/(\d+)\/plan\/resume$/);
+  if (planResumeMatch && method === 'POST') {
+    const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(Number(planResumeMatch[1]));
+    if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+    return streamPlanResume(req, res, g);
+  }
+  const planDraftMatch = p.match(/^\/api\/goals\/(\d+)\/plan\/draft$/);
+  if (planDraftMatch && method === 'GET') {
+    return sendJSON(res, 200, { draft: draftInfo(getPlanDraft(Number(planDraftMatch[1]), 'skeleton')) });
   }
   const planRefineMatch = p.match(/^\/api\/goals\/(\d+)\/plan\/refine$/);
   if (planRefineMatch && method === 'POST') {
