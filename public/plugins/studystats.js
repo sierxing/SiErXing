@@ -536,7 +536,7 @@
       order: 21,
       header: false,            // 不放目标页顶栏，只进左栏「组件」模块
       hash: () => '#/studystats',
-      show: () => true          // 显示与否由组件总开关（compOn）决定
+      show: () => true          // 入口显示由宿主按目标判定；运行时总开关另见 enabled()
     },
     routes: [
       { match: h => h.match(/^#\/studystats$/), render: async () => { await renderStatsPage(); } }

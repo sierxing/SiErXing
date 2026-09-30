@@ -205,6 +205,40 @@ function setComponent(id, enabled) {
   map[id] = !!enabled;
   setSetting('components', JSON.stringify(map));
 }
+/* 可按目标独立管理的组件 id：基础内置组件 + 按目标启用的文件组件（主题/核心/应用级组件保持全局） */
+function manageableCompIds() {
+  const ids = BUILTIN_COMPONENTS.filter(b => b.scope === 'base').map(b => b.id);
+  for (const p of (PLUGINS || [])) {
+    if (p.kind === 'theme' || p.goalToggle === false) continue;
+    if (!ids.includes(p.id)) ids.push(p.id);
+  }
+  return ids;
+}
+/* 组件有效开关（目标之间彻底隔离）：目标显式值 > 全局开关 > 默认值 */
+function globalCompOn(id) {
+  const b = BUILTIN_COMPONENTS.find(x => x.id === id);
+  if (b) return componentOn(id);
+  const p = (PLUGINS || []).find(x => x.id === id);
+  const map = componentSettings();
+  if (map[id] != null) return !!map[id];
+  return !!(p && p.defaultEnabled);
+}
+function goalCompOn(goalId, compId) {
+  if (goalId != null) {
+    try {
+      const g = db.prepare('SELECT plugins FROM goals WHERE id = ?').get(Number(goalId));
+      const obj = safeParse(g && g.plugins) || {};
+      if (obj[compId] != null) return !!obj[compId];
+    } catch (e) {}
+  }
+  return globalCompOn(compId);
+}
+/* 新目标建档时，把当前全局有效值快照为显式值：之后全局再怎么拨，都不会串到已有目标 */
+function snapshotCompSel() {
+  const sel = {};
+  for (const id of manageableCompIds()) sel[id] = globalCompOn(id);
+  return sel;
+}
 /** 启用中的内置组件 id 列表（供前端隐藏界面用） */
 function enabledBuiltins() {
   const out = {};
@@ -282,7 +316,17 @@ function goalPlugins(goal) {
   let obj = {};
   try { obj = JSON.parse(raw) || {}; } catch (e) { obj = {}; }
   const out = {};
-  for (const p of PLUGINS) out[p.id] = obj[p.id] != null ? !!obj[p.id] : !!p.defaultEnabled;
+  for (const id of manageableCompIds()) {
+    if (obj[id] != null) out[id] = !!obj[id];
+    else {
+      const b = BUILTIN_COMPONENTS.find(x => x.id === id);
+      const p = (PLUGINS || []).find(x => x.id === id);
+      const map = componentSettings();
+      out[id] = map[id] != null ? !!map[id] : !!((b && b.defaultEnabled) || (p && p.defaultEnabled));
+    }
+  }
+  // 透传历史遗留的其它键（主题等），不参与按目标管理也不丢数据
+  for (const k of Object.keys(obj)) if (!(k in out)) out[k] = !!obj[k];
   return out;
 }
 function pluginCtx() {
@@ -307,6 +351,8 @@ function pluginCtx() {
   if (!gcols.includes('clarify_stage')) db.exec("ALTER TABLE goals ADD COLUMN clarify_stage TEXT NOT NULL DEFAULT '';");
   if (!gcols.includes('constraints')) db.exec("ALTER TABLE goals ADD COLUMN constraints TEXT NOT NULL DEFAULT '[]';");
   if (!gcols.includes('plugins')) db.exec("ALTER TABLE goals ADD COLUMN plugins TEXT NOT NULL DEFAULT '{}';");
+  if (!gcols.includes('ebook_pref')) db.exec("ALTER TABLE goals ADD COLUMN ebook_pref TEXT NOT NULL DEFAULT '';");
+  if (!gcols.includes('collect_plan')) db.exec("ALTER TABLE goals ADD COLUMN collect_plan TEXT NOT NULL DEFAULT '';");
   if (!gcols.includes('qa')) db.exec("ALTER TABLE goals ADD COLUMN qa TEXT NOT NULL DEFAULT '[]';");
   if (!gcols.includes('ask_round')) db.exec("ALTER TABLE goals ADD COLUMN ask_round INTEGER NOT NULL DEFAULT 0;");
   if (!cols.includes('qa')) db.exec("ALTER TABLE nodes ADD COLUMN qa TEXT NOT NULL DEFAULT '[]';");
@@ -314,6 +360,8 @@ function pluginCtx() {
   if (!cols.includes('qa_pending')) db.exec("ALTER TABLE nodes ADD COLUMN qa_pending TEXT NOT NULL DEFAULT '';");
   const vcols = db.prepare('PRAGMA table_info(goal_versions)').all().map(c => c.name);
   if (!vcols.includes('snapshot_after')) db.exec("ALTER TABLE goal_versions ADD COLUMN snapshot_after TEXT NOT NULL DEFAULT '';");
+  if (!vcols.includes('manual')) db.exec("ALTER TABLE goal_versions ADD COLUMN manual INTEGER NOT NULL DEFAULT 0;");
+  if (!vcols.includes('starred')) db.exec("ALTER TABLE goal_versions ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;");
   const ccols = db.prepare('PRAGMA table_info(chats)').all().map(c => c.name);
   if (!ccols.includes('session_id')) {
     db.exec("ALTER TABLE chats ADD COLUMN session_id INTEGER NOT NULL DEFAULT 0;");
@@ -360,6 +408,25 @@ function reloadPlugins() {
   return FILE_PLUGINS.length;
 }
 reloadPlugins();
+/* 一次性回填：老目标缺的按目标开关 key，按当前有效值补齐（之后全局拨动不再串到已有目标） */
+(function backfillGoalPlugins() {
+  try {
+    const ids = manageableCompIds();
+    if (!ids.length) return;
+    let n = 0;
+    const upd = db.prepare('UPDATE goals SET plugins = ? WHERE id = ?');
+    for (const g of db.prepare('SELECT id, plugins FROM goals').all()) {
+      let obj = {};
+      try { obj = JSON.parse(g.plugins || '{}') || {}; } catch (e) { obj = {}; }
+      let changed = false;
+      for (const id of ids) {
+        if (obj[id] == null) { obj[id] = globalCompOn(id); changed = true; }
+      }
+      if (changed) { upd.run(JSON.stringify(obj), g.id); n++; }
+    }
+    if (n) console.log('[migrate] 已为 ' + n + ' 个老目标补齐按目标组件开关');
+  } catch (e) { console.error('[migrate] 回填目标组件开关失败:', e.message); }
+})();
 function nowISO() { return new Date().toISOString(); }
 function safeParse(s) {
   if (s == null || s === '') return null;
@@ -720,9 +787,282 @@ async function mapLimit(items, limit, fn) {
   return ret;
 }
 async function collectForGoal(goal, onProgress, signal) {
-  return collectSources(goal, collectQueries(goal.title), onProgress, signal);
+  // 有用户确认过的搜集方案就用它；没有则 AI 现场按目标定（求职目标会含 JD/面经，认知学习类则不会）
+  const fresh = db.prepare('SELECT * FROM goals WHERE id = ?').get(goal.id) || goal;
+  let plan = getCollectPlan(fresh);
+  let queries = (plan.queries || []).filter(q => q && q.q && q.on !== false);
+  if (!queries.length && !plan.asked) {
+    onProgress({ status: '正在按目标制定搜集方案…' });
+    try {
+      queries = await recommendCollectPlan(fresh);
+      saveCollectPlan(fresh.id, { asked: true, queries, updatedAt: nowISO() });
+    } catch (e) {
+      console.log('[collect] 方案推荐失败，用默认模板:', e.message);
+      queries = collectQueries(goal.title);
+    }
+  }
+  return collectSources(goal, queries.slice(0, 20).map(q => ({
+    kind: String(q.kind || '资料').slice(0, 10),
+    q: String(q.q || '').slice(0, 120),
+    days: Math.min(730, Math.max(30, Number(q.days) || 365))
+  })), onProgress, signal);
 }
-// 按节点主题搜集（拆分节点时使用，颗粒更聚焦）
+/* 搜集方案：用户说明/选择要搜什么（存目标上，重复搜集沿用，可随时改） */
+function getCollectPlan(goal) {
+  try {
+    const p = JSON.parse((goal && goal.collect_plan) || 'null');
+    if (p && typeof p === 'object' && !Array.isArray(p)) return p;
+  } catch (e) {}
+  return { asked: false, queries: [] };
+}
+function saveCollectPlan(goalId, plan) {
+  db.prepare('UPDATE goals SET collect_plan = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(plan), nowISO(), goalId);
+  backup();
+}
+function buildCollectPlanPrompt(goal) {
+  const L = [];
+  L.push('用户要搜集学习资料，现在请你为这个目标制定一份「搜集方案」：决定去网上搜什么。');
+  L.push(goalHeader(goal));
+  L.push('');
+  L.push('【要求】');
+  L.push('1. 先看目标类型再定搜集方向，千万不要把求职模板硬套到非求职目标上：');
+  L.push('   · 求职/转行类：JD（招聘要求，days=60）、面经（days=365）、学习路线、技能、项目、经验；');
+  L.push('   · 认知/通识/兴趣学习类（如理解经济商业运转）：概念解读、核心理论与模型、经典著作解读/书评、公开课与讲座、行业研报与数据、人物访谈、通俗入门文章；不要搜招聘 JD、面经、岗位职责；');
+  L.push('   · 技能/考证/考研类：考试要求与大纲、真题与经验、学习路线、教材与课程、工具；');
+  L.push('   · 其它类型：按目标自己定贴切的类别。');
+  L.push('2. 10-16 条，每条都是可直接拿去搜的完整 query（带上目标关键词，中文为主；可加 site:限定，如 site:zhihu.com / site:bilibili.com，视频类用 B站/YouTube 文字页能抓到的才算数，抓不到正文的不要）。');
+  L.push('3. kind 是短标签（2-4字，会显示在资料上），days 是时效（招聘 60，知识类 365）。');
+  L.push('4. 只输出一个 JSON 数组：');
+  L.push('[{"kind":"理论","q":"行为经济学 心理账户 前景理论 解读","days":365}]');
+  return L.join('\n');
+}
+async function recommendCollectPlan(goal, timeoutMs) {
+  const txt = await aiText(buildCollectPlanPrompt(goal), currentModel(), timeoutMs || 120000);
+  let arr = extractJSON(txt);
+  if (!Array.isArray(arr)) {
+    const m = String(txt || '').match(/\[[\s\S]*\]/);
+    arr = m ? extractJSON(m[0]) : null;
+  }
+  if (!Array.isArray(arr)) throw new Error('搜集方案生成失败');
+  return arr.filter(x => x && x.q).slice(0, 16).map(x => ({
+    kind: String(x.kind || '资料').slice(0, 10),
+    q: String(x.q).slice(0, 120),
+    days: Math.min(730, Math.max(30, Number(x.days) || 365)),
+    on: true
+  }));
+}
+/* ================= 电子书搜集：公版自动下载 + 待找书单 =================
+ * 只碰完全免费的公版书（Project Gutenberg）。有版权的现代书下不到——
+ * 走「待找书单」入库（含获取指引），用户用「信息源导入」页自行导入。 */
+function getEbookPref(goal) {
+  try {
+    const p = JSON.parse((goal && goal.ebook_pref) || 'null');
+    if (p && typeof p === 'object' && !Array.isArray(p)) return p;
+  } catch (e) {}
+  return { asked: false, want: '', books: [], done: false };
+}
+function saveEbookPref(goalId, pref) {
+  db.prepare('UPDATE goals SET ebook_pref = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(pref), nowISO(), goalId);
+  backup();
+}
+function buildEbookRecommendPrompt(goal) {
+  const L = [];
+  L.push('用户立了一个学习目标，现在要为他/她列一份入门书单（书将作为学习信息源）。');
+  L.push(goalHeader(goal));
+  L.push('');
+  L.push('【要求】');
+  L.push('1. 6-8 本：从经典/入门到进阶排序，兼顾理论框架与实践；中文书优先（注明），实在没有再给英文经典。');
+  L.push('2. 每本一句话推荐理由（40 字内，说清这本书解决什么认知问题）。');
+  L.push('3. public_domain 字段：这本书是否很可能是公版书（作者去世超过 50 年的老经典，如亚当·斯密《国富论》填 true；现代书一律 false，不要猜）。');
+  L.push('4. where 字段：这本书最靠谱的 1-2 个获取渠道（20 字内，如：微信读书有售 / 图书馆可借 / 京东购买 / 公版可直下；不知道就写"图书馆、微信读书搜书名"）。');
+  L.push('5. en 字段：这本书的英文原名（只给外国书，且你确定知道原名才填，如 Wealth of Nations；中文原创书留空。用于去公版书库按原名兜底找）。');
+  L.push('6. 只输出一个 JSON 数组：');
+  L.push('[{"title":"书名","author":"作者（不详留空）","pitch":"一句话推荐理由","public_domain":false,"where":"微信读书有售","en":""}]');
+  return L.join('\n');
+}
+async function recommendEbooks(goal, timeoutMs) {
+  const txt = await aiText(buildEbookRecommendPrompt(goal), currentModel(), timeoutMs || 120000);
+  let arr = extractJSON(txt);
+  if (!Array.isArray(arr)) {
+    const m = String(txt || '').match(/\[[\s\S]*\]/);
+    arr = m ? extractJSON(m[0]) : null;
+  }
+  if (!Array.isArray(arr)) throw new Error('书单生成失败');
+  return arr.filter(x => x && x.title).slice(0, 8).map(x => ({
+    title: String(x.title).slice(0, 80), author: String(x.author || '').slice(0, 40),
+    pitch: String(x.pitch || '').slice(0, 80), public_domain: !!x.public_domain,
+    where: String(x.where || '').slice(0, 40), en: String(x.en || '').slice(0, 80), status: 'pending'
+  }));
+}
+async function gFetch(url, ms, asText) {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), ms);
+  try {
+    const r = await fetch(url, { signal: c.signal, headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SiErXing-ebook/1.0)' } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return asText ? await r.text() : Buffer.from(await r.arrayBuffer());
+  } finally { clearTimeout(t); }
+}
+function normTitle(s) {
+  return String(s || '').toLowerCase()
+    .replace(/[《》「」『』()（）\[\]【】:：·—–-]/g, ' ')
+    .replace(/(全译本|译本|插图版|珍藏版|经典版|畅销|修订版|第[一二三四五\d]+版)/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+}
+async function findGutenbergBook(title, author) {
+  const queries = author ? [`${title} ${author}`, title] : [title];
+  const cands = new Map();
+  for (const q of queries.slice(0, 2)) {
+    let html = '';
+    try { html = await gFetch('https://www.gutenberg.org/ebooks/search/?query=' + encodeURIComponent(q), 25000, true); }
+    catch (e) { continue; }
+    const ids = [...html.matchAll(/\/ebooks\/(\d+)/g)].map(m => m[1]);
+    const titles = [...html.matchAll(/<span class="title">([^<]{1,120})<\/span>/g)].map(m => m[1]);
+    ids.forEach((id, i) => { if (!cands.has(id)) cands.set(id, titles[i] || ''); });
+    if (cands.size >= 5) break;
+  }
+  if (!cands.size) return null;
+  const want = normTitle(title).replace(/ /g, '');
+  const wantTokens = new Set(normTitle(title).split(' ').filter(x => x.length >= 2));
+  const au = String(author || '').replace(/·.*/g, '').trim().toLowerCase();
+  let best = null, bestScore = 0;
+  for (const [id, t] of cands) {
+    const got = normTitle(t).replace(/ /g, '');
+    let score = 0;
+    if (got && want && (got.includes(want) || want.includes(got))) score += 3;
+    else {
+      let hit = 0;
+      for (const w of wantTokens) if (w && got.includes(w.replace(/ /g, ''))) hit++;
+      score += hit / Math.max(1, wantTokens.size);
+    }
+    if (au && t.toLowerCase().includes(au.slice(0, 12))) score += 1;
+    if (score > bestScore) { bestScore = score; best = { id, title: t }; }
+  }
+  return bestScore >= 1 ? best : null;
+}
+async function downloadGutenberg(id, title) {
+  const urls = [
+    `https://www.gutenberg.org/cache/epub/${id}/pg${id}.txt`,
+    `https://www.gutenberg.org/files/${id}/${id}-0.txt`,
+    `https://www.gutenberg.org/ebooks/${id}.epub.images`
+  ];
+  let lastErr = null;
+  for (const u of urls) {
+    try {
+      const buf = await gFetch(u, 60000, false);
+      if (!buf || buf.length < 500) { lastErr = new Error('文件太小，可能没下到'); continue; }
+      const ext = u.endsWith('.epub.images') ? 'epub' : 'txt';
+      const safe = String(title || ('gutenberg-' + id)).replace(/[\\/:*?"<>|]/g, '').slice(0, 40) || ('gutenberg-' + id);
+      return { buf, filename: `${safe}-gutenberg-${id}.${ext}` };
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error('下载失败');
+}
+function writeWantedList(goalId, books) {
+  db.prepare("DELETE FROM sources WHERE goal_id = ? AND site = '待找书单'").run(goalId);
+  const list = (books || []).filter(b => b && b.title);
+  if (!list.length) { backup(); return; }
+  const lines = list.map(b => {
+    const base = `《${b.title}》${b.author ? '（' + b.author + '）' : ''}`;
+    const why = b.pitch ? '——' + b.pitch : '';
+    const src = b.where ? b.where : '图书馆、微信读书搜书名';
+    const how = b.status === 'failed'
+      ? `公版渠道没下到（${String(b.error || '网络问题').slice(0, 60)}），请自行找书`
+      : '无公开免费版，请通过正版渠道获取';
+    return `· ${base}${why}\n  去哪找：${src}\n  ${how}，找到后在「信息源导入」页拖进来，规划会自动参考。`;
+  });
+  const t = nowISO();
+  db.prepare('INSERT INTO sources (goal_id,title,url,site,kind,snippet,content,published_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+    .run(goalId, `待找书单（${list.length} 本）`, '', '待找书单', '书籍',
+      list.map(b => `《${b.title}》`).join('、').slice(0, 300),
+      '以下书建议作为本目标的信息源（搜集时没找到公开免费版，请自行找书导入）：\n\n' + lines.join('\n\n'), '', t);
+  db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(t, goalId);
+  backup();
+}
+/* 搜集期的电子书阶段：公版自动下载入库 + 其余写待找书单。返回 {ok, missing, failed, listed, skipped} */
+async function fetchEbooksForGoal(goal, send, signal) {
+  const fresh = db.prepare('SELECT * FROM goals WHERE id = ?').get(goal.id) || goal;
+  const pref = getEbookPref(fresh);
+  const checkStop = () => { if (signal && signal.aborted) { const e = new Error('已停止'); e.cancelled = true; throw e; } };
+  if (!pref.asked || pref.want === 'no' || pref.want === '') return { skipped: true };
+  let books = (pref.books || []).filter(b => b && b.title && b.status === 'pending');
+  if (!books.length && !pref.done) {
+    // 问卷里没写具体书：AI 现场按目标推荐
+    send({ status: '正在按目标推荐入门书单…' });
+    try {
+      const rec = await recommendEbooks(fresh);
+      books = rec;
+      pref.books = (pref.books || []).concat(books);
+      saveEbookPref(fresh.id, pref);
+    } catch (e) {
+      console.log('[ebooks] 推荐书单失败:', e.message);
+      return { skipped: true, note: '书单推荐失败' };
+    }
+  }
+  books = books.slice(0, 5);
+  // 本批内按书名去重
+  {
+    const seenT = new Set();
+    books = books.filter(b => {
+      const k = String(b.title || '').toLowerCase().replace(/\s+/g, ' ');
+      if (seenT.has(k)) return false;
+      seenT.add(k);
+      return true;
+    });
+  }
+  if (!books.length) return { skipped: true, already: true };
+  if (pref.want === 'list') {
+    writeWantedList(fresh.id, books.map(b => ({ ...b, status: 'listed' })));
+    for (const b of books) b.status = 'done';
+    pref.done = !(pref.books || []).some(b => b && b.status === 'pending');
+    saveEbookPref(fresh.id, pref);
+    send({ status: `已生成待找书单（${books.length} 本），请自行找书后在「信息源导入」页拖进来` });
+    return { listed: books.length };
+  }
+  // auto：公版渠道逐本下载入库（最多 2 本并发）
+  let ok = 0;
+  const missing = [], failed = [];
+  // 已入库的不重复下载（问卷重跑导致重复推荐时直接跳过）
+  let haveTitles = [];
+  try { haveTitles = db.prepare("SELECT title FROM sources WHERE goal_id = ? AND kind = '书籍'").all(fresh.id).map(r => String(r.title || '')); } catch (e) {}
+  const normT = s => String(s || '').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '');
+  await mapLimit(books, 2, async b => {
+    checkStop();
+    const key = normT(b.title).slice(0, 12);
+    if (key && haveTitles.some(t => normT(t).includes(key))) {
+      b.status = 'done'; ok++;
+      send({ status: `《${b.title}》已在库，跳过 ✓` });
+      return;
+    }
+    send({ status: `找书《${b.title}》（公版渠道）…` });
+    try {
+      let hit = await findGutenbergBook(b.title, b.author);
+      if (!hit && b.en) {
+        send({ status: `《${b.title}》中文没找到，试英文原名《${String(b.en).slice(0, 30)}》…` });
+        hit = await findGutenbergBook(b.en, b.author);
+      }
+      if (!hit) { b.status = 'missing'; missing.push(b); return; }
+      checkStop();
+      send({ status: `下载《${b.title}》…` });
+      const { buf, filename } = await downloadGutenberg(hit.id, b.title);
+      const info = await require('./plugins/jdfile.js').ingestEbookBuffer(
+        { id: fresh.id }, buf, filename, '公版书：用户在搜集前确认需要',
+        st => send({ status: `《${b.title}》${st}` }), 0,
+        `Project Gutenberg 公版（ebook #${hit.id}）`);
+      b.status = 'done'; b.gid = hit.id; ok++;
+      send({ status: `《${b.title}》已入库 ✓（${info.title.slice(0, 30)}）` });
+    } catch (e) {
+      console.log('[ebooks] 下载/入库失败', b.title, e.message);
+      b.status = 'failed'; b.error = String(e.message || '').slice(0, 120); failed.push(b);
+      send({ status: `《${b.title}》没下到：${String(e.message || '').slice(0, 60)}` });
+    }
+  });
+  writeWantedList(fresh.id, missing.concat(failed));
+  pref.done = !(pref.books || []).some(b => b && b.status === 'pending');
+  saveEbookPref(fresh.id, pref);
+  return { ok, missing: missing.length, failed: failed.length };
+}
+// 按节点主题搜集（拆分节点时使用，颗粒更聚焦；类别保持通用，不限定求职站点）
 const nodeQueries = title => {
   const k = searchKeyword(title);
   return [
@@ -730,8 +1070,7 @@ const nodeQueries = title => {
     { kind: '学习路线', q: `${k} 学习路线 知识要点`, days: 365 },
     { kind: '项目', q: `${k} 练习案例 项目实战`, days: 365 },
     { kind: '经验', q: `${k} 经验 踩坑 注意`, days: 365 },
-    { kind: '资源', q: `${k} 推荐资料 工具`, days: 365 },
-    { kind: 'JD', q: `${k} 岗位要求`, days: 60 }
+    { kind: '资源', q: `${k} 推荐资料 工具`, days: 365 }
   ];
 };
 async function collectSources(goal, queries, onProgress, signal) {
@@ -763,31 +1102,66 @@ async function collectSources(goal, queries, onProgress, signal) {
   }
   const PRIORITY = ['nowcoder.com', 'zhipin.com', 'zhihu.com', 'juejin.cn', 'github.com', 'csdn.net', 'lagou.com', 'liepin.com', 'shixiseng.com', '51job.com'];
   const prio = h => { const i = PRIORITY.findIndex(d => h.endsWith(d)); return i < 0 ? 99 : i; };
+  // 已知类别沿用配额；AI 新定的类别默认每类 14 条、总量不超 160（老求职模板行为不变）
   const KIND_QUOTA = { 'JD': 32, '面经': 26, '学习路线': 26, '技能': 16, '项目': 16, '资源': 12, '经验': 16 };
+  const quotaOf = k => KIND_QUOTA[k] || 14;
   const picked = [];
-  for (const kind in KIND_QUOTA) {
+  let totalPicked = 0;
+  for (const kind of [...new Set(all.map(s => s.kind))]) {
     const arr = all.filter(s => s.kind === kind).sort((a, b) => prio(a.host) - prio(b.host));
     const siteCount = {};
     let taken = 0;
     for (const s of arr) {
+      if (totalPicked >= 160) break;
       siteCount[s.site] = (siteCount[s.site] || 0) + 1;
       if (siteCount[s.site] > 8) continue; // 同类内单站点最多 8 条，保证多样性
       picked.push(s);
       taken++;
-      if (taken >= KIND_QUOTA[kind]) break;
+      totalPicked++;
+      if (taken >= quotaOf(kind)) break;
     }
+    if (totalPicked >= 160) break;
   }
   // 累积式采集：保留已有来源，仅追加新来源（按 URL 去重），并清理超期数据
   const existingUrls = new Set(db.prepare('SELECT url FROM sources WHERE goal_id = ?').all(goal.id).map(r => r.url));
   const seenFinal = new Set();
   const now = Date.now();
-  let fetched = 0, saved = 0, ads = 0, skipped = 0;
+  let fetched = 0, saved = 0, ads = 0, skipped = 0, pdfSaved = 0;
+  const MAX_PDF = 4;   // 每次搜集最多全文入库 4 个 PDF（公开报告/论文/讲义），控制耗时
+  // 已入库的报告/书籍标题（归一化前缀）：同一文档换个 URL 不重复下
+  let haveDocTitles = [];
+  try {
+    haveDocTitles = db.prepare("SELECT title FROM sources WHERE goal_id = ? AND kind IN ('书籍','报告')").all(goal.id)
+      .map(r => String(r.title || '').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '').slice(0, 16)).filter(Boolean);
+  } catch (e) {}
+  const docSeen = t => { const k = String(t || '').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '').slice(0, 16); return k && haveDocTitles.some(h => h.includes(k) || k.includes(h)); };
+  const docMark = t => { const k = String(t || '').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '').slice(0, 16); if (k) haveDocTitles.push(k); };
   await mapLimit(picked, 4, async s => {
     checkStop();
     fetched++;
     if (fetched % 8 === 0) onProgress({ status: `抓取正文 ${fetched}/${picked.length}（新增 ${saved} 条，排除广告 ${ads} 条，跳过已有 ${skipped} 条）` });
     if (existingUrls.has(s.url)) { skipped++; return; }
+    // PDF 直下全文入库：公开报告 / 工作论文 / 讲义（合法公开的才下得到，付费墙/盗版站会直接失败跳过）
+    if (/\.pdf($|[?#])/i.test(s.url) && pdfSaved < MAX_PDF && !docSeen(s.title)) {
+      try {
+        const buf = await gFetch(s.url, 25000, false);
+        if (buf && buf.length > 500 && buf.length <= 12 * 1024 * 1024) {
+          const base = (() => { try { return decodeURIComponent(s.url.split('?')[0].split('/').pop() || ''); } catch (e) { return ''; } })();
+          const fname = (base && /\.pdf$/i.test(base) ? base : (String(s.title || 'report').replace(/[\\/:*?"<>|]/g, '').slice(0, 40) + '.pdf'));
+          const info = await require('./plugins/jdfile.js').ingestEbookBuffer(
+            { id: goal.id }, buf, fname, '搜集时发现的公开 PDF 全文',
+            st => onProgress({ status: `📄 ${st}` }), 0,
+            '公开 PDF（' + siteLabel(siteOf(s.url) || '') + '）', '报告', { rejectGarbled: true });
+          seenFinal.add(s.url);
+          docMark(info.title); docMark(s.title);
+          saved++; pdfSaved++;
+          onProgress({ status: `📄 PDF 全文已入库：《${String(s.title).slice(0, 30)}》` });
+          return;
+        }
+      } catch (e) { console.log('[collect] PDF 入库失败，回退普通抓取:', s.url.slice(0, 80), e.message); }
+    }
     const page = await fetchPage(s.url, 3500);
+    if (!page.text && /\.pdf($|[?#])/i.test(s.url)) { skipped++; return; }   // PDF 解析失败就不存空条目
     const finalUrl = page.url || s.url;
     const host = siteOf(finalUrl) || s.host;
     if (seenFinal.has(finalUrl) || existingUrls.has(finalUrl)) { skipped++; return; }
@@ -844,16 +1218,16 @@ function digestsOf(goalId) {
   return db.prepare('SELECT * FROM source_digests WHERE goal_id = ? ORDER BY id').all(goalId);
 }
 function sourcesOf(goalId) {
-  // 用户自己提供的图片资料（JD / 大纲 / 笔记…）排在最前，其次才是检索到的网络信息源
-  return db.prepare("SELECT * FROM sources WHERE goal_id = ? ORDER BY quality DESC, CASE WHEN site = '用户提供的图片' OR kind = 'JD' THEN 0 ELSE 1 END, id").all(goalId);
+  // 用户自己提供的资料（图片 / 电子书…）排在最前，其次才是检索到的网络信息源
+  return db.prepare("SELECT * FROM sources WHERE goal_id = ? ORDER BY quality DESC, CASE WHEN site = '用户提供的图片' OR site = '用户提供的电子书' OR site = '待找书单' OR kind = 'JD' THEN 0 ELSE 1 END, id").all(goalId);
 }
 
 /* ===== AI 规划 ===== */
 /* ---------- 资料提炼：把全部资料分批喂给 AI，再汇总成多篇主题 MD ---------- */
 function digestBatches(goal) {
   const all = sourcesOf(goal.id);
-  const own = all.filter(x => x.site === '用户提供的图片' || x.site === '导入的资料');
-  const net = all.filter(x => !(x.site === '用户提供的图片' || x.site === '导入的资料'));
+  const own = all.filter(x => x.site === '用户提供的图片' || x.site === '用户提供的电子书' || x.site === '待找书单' || x.site === '导入的资料');
+  const net = all.filter(x => !(x.site === '用户提供的图片' || x.site === '用户提供的电子书' || x.site === '待找书单' || x.site === '导入的资料'));
   // 用户自己提供的资料全文（最多 4000 字/条）；网络资料 900 字/条
   const ownCap = 6000, netCap = 3000;   // 用户提供的资料几乎读全文；网络资料 3000 字（覆盖绝大多数）
   const starred = all.filter(x => Number(x.quality) === 1);
@@ -918,8 +1292,8 @@ function digestSynthesisPrompt(parts, meta) {
 function buildLibraryMarkdown(goal) {
   const digests = digestsOf(goal.id);
   const all = sourcesOf(goal.id);
-  const own = all.filter(x => x.site === '用户提供的图片' || x.site === '导入的资料');
-  const net = all.filter(x => !(x.site === '用户提供的图片' || x.site === '导入的资料'));
+  const own = all.filter(x => x.site === '用户提供的图片' || x.site === '用户提供的电子书' || x.site === '待找书单' || x.site === '导入的资料');
+  const net = all.filter(x => !(x.site === '用户提供的图片' || x.site === '用户提供的电子书' || x.site === '待找书单' || x.site === '导入的资料'));
   const L = [];
   L.push('# 资源库：' + goal.title);
   L.push('');
@@ -950,7 +1324,7 @@ function buildLibraryMarkdown(goal) {
       if (x.published_at) meta.push('时间：' + x.published_at);
       if (meta.length) { L.push('*' + meta.join('　·　') + '*'); L.push(''); }
       const full = cleanText(x.content || x.snippet || '（无正文）');
-      const cap = (x.site === '用户提供的图片' || x.site === '导入的资料') ? 20000 : 4000;
+      const cap = (x.site === '用户提供的图片' || x.site === '用户提供的电子书' || x.site === '导入的资料') ? 20000 : 4000;
       L.push(full.slice(0, cap) + (full.length > cap ? `\n\n> （本条共 ${full.length} 字，此处截取前 ${cap} 字）` : ''));
       L.push('');
       L.push('---');
@@ -1119,6 +1493,7 @@ function buildClarifyPrompt(goal) {
   lines.push('  4. 时间与节奏：每周可投入小时数、可学习的时间段、单次可专注时长、期限是否硬性、能接受的总周期；');
   lines.push('  5. 偏好与资源：学习方式偏好（视频/文档/项目驱动）、是否接受付费课程、英语阅读能力、是否有可用的设备/环境；');
   lines.push('  6. 风险与心态：最容易放弃的环节、过往失败的学习经历、最担心的事、需要什么样的反馈与督促。');
+  lines.push('  7. 电子书需求（必出 2 题，id 固定为 q_ebook_want / q_ebook_books）：先问搜集信息源时要不要顺带找电子书（single，3 个选项，v 固定为 auto/list/no：auto=公版书自动下载入库，list=只要书单自己找，no=不需要），再问想看的具体书名或方向（text，placeholder 给例子，找不到就留空、规划时会按目标推荐）。');
   lines.push('  另外：必须有一题专门问「有没有必须遵守的硬性约束」（如只能周末学、预算上限、必须用某语言/工具、不能熬夜、期限不能变等），以便用户把约束写清楚。');
   lines.push('');
   lines.push('【题目类型】');
@@ -1267,7 +1642,7 @@ function constraintsOf(goal) {
   return (Array.isArray(list) ? list : []).map(c => (typeof c === 'string' ? { text: c } : c)).filter(c => c && String(c.text || '').trim());
 }
 function constraintsBlock(goal) {
-  if (!componentOn('constraints')) return '';
+  if (!goalCompOn(goal && goal.id, 'constraints')) return '';
   const list = constraintsOf(goal);
   if (!list.length) return '';
   const lines = ['', '【用户设置的硬性约束（最高优先级，必须严格遵守；与常规做法冲突时以约束为准）】'];
@@ -1668,7 +2043,7 @@ function buildRefineNodePrompt(goal, node, kids, feedback) {
 }
 /* ===== 版本快照与对比 ===== */
 function beginVersion(goalId, reason) {
-  if (!componentOn('versions')) return 0;
+  if (!goalCompOn(goalId, 'versions')) return 0;
   const nodes = db.prepare('SELECT * FROM nodes WHERE goal_id = ? ORDER BY level, sort_order, id').all(goalId);
   if (!nodes.length) return 0;
   const res = db.prepare('INSERT INTO goal_versions (goal_id, reason, snapshot, summary, created_at) VALUES (?,?,?,?,?)')
@@ -1726,7 +2101,7 @@ function buildReportPrompt(goal, reason, diff) {
   return lines.join('\n');
 }
 async function finishVersion(goal, vid, reason, useAI = true) {
-  if (!vid || !componentOn('versions')) return '';
+  if (!vid || !goalCompOn(goal && goal.id, 'versions')) return '';
   const v = db.prepare('SELECT * FROM goal_versions WHERE id = ?').get(vid);
   if (!v) return '';
   const oldNodes = safeParse(v.snapshot) || [];
@@ -1795,7 +2170,8 @@ function saveSkeleton(goalId, plan) {
   for (const id of old) db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
   try { db.prepare('DELETE FROM node_workspaces WHERE goal_id = ?').run(goalId); } catch (e) {}
   const summary = String(plan.summary || '').slice(0, 800);
-  db.prepare('UPDATE goals SET summary = ?, status = ?, error = ?, updated_at = ? WHERE id = ?').run(summary, 'planning', '', nowISO(), goalId);
+  // 骨架已定：旧问卷作废（clarify 答案保留在 clarify_answers 里），避免目标页 sticky 显示过期问卷
+  db.prepare("UPDATE goals SET summary = ?, status = ?, error = ?, clarify = '', clarify_stage = '', updated_at = ? WHERE id = ?").run(summary, 'planning', '', nowISO(), goalId);
   const stageIds = [];
   stages.forEach((st, si) => {
     insertNode(goalId, null, 0, st.title, st.detail || '', st.sources, si);
@@ -1840,6 +2216,13 @@ function streamClarify(req, res, goal) {
       const txt = await aiTextProgress(buildClarifyPrompt(goal), model, 300000, send, '问题', sig);
       const data = extractJSON(txt);
       if (!data || !Array.isArray(data.questions) || !data.questions.length) throw new Error('澄清问题生成失败，请重试');
+      // 电子书需求题是搜集前的必问：AI 漏掉就补固定版（id 固定，前端/答案解析都认这两个 id）
+      if (!data.questions.some(q => q && /ebook/i.test(String(q.id || '') + String(q.title || '')))) {
+        data.questions.push(
+          { id: 'q_ebook_want', section: '偏好与资源', type: 'single', title: '搜集信息源时，要不要顺带找电子书？', desc: '公版书可自动下载入库', options: [{ v: 'auto', label: '要，公版书自动下载入库' }, { v: 'list', label: '只要书单，我自己找书导入' }, { v: 'no', label: '不需要' }] },
+          { id: 'q_ebook_books', section: '偏好与资源', type: 'text', title: '想看的具体书名 / 方向（可选，找不到就留空）', desc: '留空则 AI 按目标推荐', placeholder: '例如：国富论；曼昆《经济学原理》；行为经济学入门' }
+        );
+      }
       db.prepare('UPDATE goals SET clarify = ?, clarify_stage = ?, status = ?, error = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(data), 'clarify', 'clarify', '', nowISO(), goal.id);
       backup();
       send({ done: true, clarify: data, goal: getGoal(goal.id) });
@@ -2572,27 +2955,42 @@ async function handleAPI(req, res, u) {
 
   if (p === '/api/health' && method === 'GET') return sendJSON(res, 200, { ok: true, app: APP_NAME });
 
-  /* ===== 组件能力开关：关闭的组件，其接口一律拒绝 =====
+  /* ===== 组件能力开关：关闭的组件，其接口一律拒绝（按目标判定，目标之间不串） =====
      注意：/api/components/*（组件管理接口）永远放行，否则会把自己锁死。 */
   if (!p.startsWith('/api/components')) {
-    const HINT = '（左侧栏 → 🧩 组件 里可开启）';
+    const HINT = '（在该目标页点 🧩 组件 可单独开启，不影响别的目标）';
+    const gidOf = () => {
+      let m = p.match(/^\/api\/goals\/(\d+)/);
+      if (m) return Number(m[1]);
+      try {
+        m = p.match(/^\/api\/versions\/(\d+)/);
+        if (m) { const v = db.prepare('SELECT goal_id FROM goal_versions WHERE id = ?').get(Number(m[1])); if (v) return v.goal_id; }
+        m = p.match(/^\/api\/chat-sessions\/(\d+)/);
+        if (m) { const s = db.prepare('SELECT goal_id FROM chat_sessions WHERE id = ?').get(Number(m[1])); if (s) return s.goal_id; }
+        m = p.match(/^\/api\/nodes\/(\d+)\/tutorial$/);
+        if (m) { const n = db.prepare('SELECT goal_id FROM nodes WHERE id = ?').get(Number(m[1])); if (n) return n.goal_id; }
+        m = p.match(/^\/api\/tutorials\/(\d+)/);
+        if (m) { const t = db.prepare('SELECT goal_id FROM tutorials WHERE id = ?').get(Number(m[1])); if (t) return t.goal_id; }
+      } catch (e) {}
+      return null;
+    };
     if ((p.startsWith('/api/goals/') && p.endsWith('/versions')) || p.startsWith('/api/versions/')) {
-      if (!componentOn('versions')) return sendJSON(res, 403, { error: '「版本对比与汇报」组件已关闭' + HINT });
+      if (!goalCompOn(gidOf(), 'versions')) return sendJSON(res, 403, { error: '「版本对比与汇报」组件已关闭' + HINT });
     }
     if (p.startsWith('/api/chat-sessions') || p.endsWith('/chat-sessions') || p.endsWith('/chats') || (p.startsWith('/api/goals/') && p.endsWith('/chat'))) {
-      if (!componentOn('chat')) return sendJSON(res, 403, { error: '「对话改规划」组件已关闭' + HINT });
+      if (!goalCompOn(gidOf(), 'chat')) return sendJSON(res, 403, { error: '「对话改规划」组件已关闭' + HINT });
     }
     if (/^\/api\/nodes\/\d+\/tutorial$/.test(p) || p.startsWith('/api/tutorials/')) {
-      if (!componentOn('tutorial')) return sendJSON(res, 403, { error: '「学习教程」组件已关闭' + HINT });
+      if (!goalCompOn(gidOf(), 'tutorial')) return sendJSON(res, 403, { error: '「学习教程」组件已关闭' + HINT });
     }
     if (/^\/api\/goals\/\d+\/plan\/clarify$/.test(p) || p.startsWith('/api/goals/') && p.endsWith('/clarify/drill') || p.startsWith('/api/goals/') && p.endsWith('/clarify/note')) {
-      if (!componentOn('clarify')) return sendJSON(res, 403, { error: '「规划前问卷」组件已关闭' + HINT });
+      if (!goalCompOn(gidOf(), 'clarify')) return sendJSON(res, 403, { error: '「规划前问卷」组件已关闭' + HINT });
     }
     if (p.endsWith('/constraints') || /\/constraints\/\d+$/.test(p)) {
-      if (!componentOn('constraints')) return sendJSON(res, 403, { error: '「规划约束」组件已关闭' + HINT });
+      if (!goalCompOn(gidOf(), 'constraints')) return sendJSON(res, 403, { error: '「规划约束」组件已关闭' + HINT });
     }
     if (p.endsWith('/collect')) {
-      if (!componentOn('sources')) return sendJSON(res, 403, { error: '「信息源检索」组件已关闭' + HINT });
+      if (!goalCompOn(gidOf(), 'sources')) return sendJSON(res, 403, { error: '「信息源检索」组件已关闭' + HINT });
     }
   }
 
@@ -2608,8 +3006,11 @@ async function handleAPI(req, res, u) {
     const t = nowISO();
     let pluginSel = '{}';
     try {
-      const sel = {};
-      for (const pl of PLUGINS) sel[pl.id] = body.plugins && body.plugins[pl.id] != null ? !!body.plugins[pl.id] : !!pl.defaultEnabled;
+      const sel = snapshotCompSel();
+      for (const pl of PLUGINS) {
+        if (body.plugins && body.plugins[pl.id] != null) sel[pl.id] = !!body.plugins[pl.id];
+        else if (!(pl.id in sel)) sel[pl.id] = !!pl.defaultEnabled;
+      }
       pluginSel = JSON.stringify(sel);
     } catch (e) {}
     db.prepare('INSERT INTO goals (title, profile, materials, weekly_hours, deadline, status, plugins, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)')
@@ -2661,13 +3062,32 @@ async function handleAPI(req, res, u) {
     const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(id);
     if (!g) return sendJSON(res, 404, { error: '目标不存在' });
     res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache' });
+    const tk = tasks.begin({ type: 'collect', title: '搜集信息源：' + String(g.title || '').slice(0, 30), goalId: id, nodeId: 0, note: '' });
     const sig = tk.signal;   // 只有主动取消才中断；切换/关闭页面不影响后台继续
+    const tkSend = s => { try { res.write(`data: ${JSON.stringify(s)}\n\n`); } catch (e) {} if (s && s.status) tk.progress(undefined, s.status); };
     (async () => {
       try {
-        const r = await collectForGoal(g, s => { try { res.write(`data: ${JSON.stringify(s)}\n\n`); } catch (e) {} }, sig);
+        let ebSummary = '';
+        try {
+          const eb = await fetchEbooksForGoal(g, tkSend, sig);
+          if (eb && !eb.skipped) {
+            const parts = [];
+            if (eb.ok) parts.push(`电子书入库 ${eb.ok} 本`);
+            if (eb.listed) parts.push(`待找书单 ${eb.listed} 本`);
+            if (eb.missing) parts.push(`${eb.missing} 本没找到公开免费版`);
+            if (eb.failed) parts.push(`${eb.failed} 本下载失败`);
+            if (parts.length) ebSummary = '📚 ' + parts.join('，');
+          }
+        } catch (e) {
+          if (e && e.cancelled) throw e;
+          tkSend({ status: '电子书阶段跳过：' + e.message });
+        }
+        const r = await collectForGoal(g, tkSend, sig);
         const list = sourcesOf(id);
-        try { res.write(`data: ${JSON.stringify({ done: true, count: r.saved, blocked: r.blocked, sources: list })}\n\n`); } catch (e) {}
+        try { res.write(`data: ${JSON.stringify({ done: true, count: r.saved, blocked: r.blocked, sources: list, ebooks: ebSummary })}\n\n`); } catch (e) {}
+        tk.done({ ok: true });
       } catch (e) {
+        tk.fail(e);
         if (e && e.cancelled) {
           try { res.write(`data: ${JSON.stringify({ cancelled: true, status: '已停止收集', sources: sourcesOf(id) })}\n\n`); } catch (e2) {}
         } else {
@@ -2839,7 +3259,7 @@ function redactText(raw) {
       })),
       sources: (inc.sources ? sources : []).map(x => {
         // 用户自己提供的资料里可能含个人隐私（简历/截图文字）：也一并脱敏；网络资料原样保留
-        const own = x.site === '用户提供的图片' || x.site === '导入的资料' || x.site === '手动添加' || x.site === '对话添加';
+        const own = x.site === '用户提供的图片' || x.site === '用户提供的电子书' || x.site === '待找书单' || x.site === '导入的资料' || x.site === '手动添加' || x.site === '对话添加';
         return {
           title: R(x.title), url: x.url, site: x.site, kind: x.kind,
           snippet: own ? R(x.snippet) : x.snippet,
@@ -2862,11 +3282,11 @@ function redactText(raw) {
     if (!body || body.format !== 'sierxing-share') return sendJSON(res, 400, { error: '不是有效的分享文件（需要 *.share.json）' });
     const gg = body.goal || {};
     const t = nowISO();
-    const gr = db.prepare('INSERT INTO goals (title, profile, weekly_hours, deadline, materials, summary, constraints, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+    const gr = db.prepare('INSERT INTO goals (title, profile, weekly_hours, deadline, materials, summary, constraints, status, plugins, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
       .run(String(gg.title || '来自分享的目标').slice(0, 200), String(gg.profile || '').slice(0, 4000),
         String(gg.weekly_hours || '').slice(0, 50), String(gg.deadline || '').slice(0, 50),
         String(gg.materials || '').slice(0, 8000), String(gg.summary || '').slice(0, 800),
-        JSON.stringify(Array.isArray(gg.constraints) ? gg.constraints.slice(0, 30) : []), 'review', t, t);
+        JSON.stringify(Array.isArray(gg.constraints) ? gg.constraints.slice(0, 30) : []), 'review', JSON.stringify(snapshotCompSel()), t, t);
     const gid = Number(gr.lastInsertRowid);
     // 节点（按层级顺序插入，维护旧 id → 新 id 映射）
     const idMap = new Map();
@@ -2939,7 +3359,41 @@ function redactText(raw) {
   const sourceDelMatch = p.match(/^\/api\/sources\/(\d+)$/);
   if (sourceDelMatch && method === 'DELETE') {
     db.prepare('DELETE FROM sources WHERE id = ?').run(Number(sourceDelMatch[1]));
+    backup();
     return sendJSON(res, 200, { ok: true });
+  }
+  const srcBatchMatch = p.match(/^\/api\/goals\/(\d+)\/sources\/batch-delete$/);
+  if (srcBatchMatch && method === 'POST') {
+    const gid = Number(srcBatchMatch[1]);
+    const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(gid);
+    if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+    const body = await readBody(req).catch(() => ({}));
+    const ids = (Array.isArray(body.ids) ? body.ids : []).map(Number).filter(Boolean).slice(0, 2000);
+    if (!ids.length) return sendJSON(res, 400, { error: '没有选中的资料' });
+    const del = db.prepare('DELETE FROM sources WHERE id = ? AND goal_id = ?');
+    let n = 0;
+    for (const id of new Set(ids)) { try { n += del.run(id, gid).changes; } catch (e) {} }
+    db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), gid);
+    backup();
+    return sendJSON(res, 200, { ok: true, deleted: n, sources: sourcesOf(gid) });
+  }
+  const srcClearMatch = p.match(/^\/api\/goals\/(\d+)\/sources\/clear$/);
+  if (srcClearMatch && method === 'POST') {
+    const gid = Number(srcClearMatch[1]);
+    const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(gid);
+    if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+    const nSrc = db.prepare('SELECT COUNT(*) AS n FROM sources WHERE goal_id = ?').get(gid).n;
+    const files = db.prepare('SELECT file FROM jd_images WHERE goal_id = ?').all(gid);
+    db.prepare('DELETE FROM sources WHERE goal_id = ?').run(gid);
+    db.prepare('DELETE FROM jd_images WHERE goal_id = ?').run(gid);
+    let nFile = 0;
+    for (const f of files) {
+      if (!f.file) continue;
+      try { fs.unlinkSync(path.join(UPLOAD_DIR, f.file)); nFile++; } catch (e) {}
+    }
+    db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), gid);
+    backup();
+    return sendJSON(res, 200, { ok: true, deletedSources: nSrc, deletedFiles: nFile, sources: [] });
   }
 
   const expandMatch = p.match(/^\/api\/nodes\/(\d+)\/expand$/);
@@ -2995,8 +3449,13 @@ function redactText(raw) {
           send({ done: true, added, refined: true, goal: getGoal(goal.id), report, versionId: vid });
         } else {
           // 无意见：先搜集资料，再生成细分（回答追问后的续跑不再重复搜集）
-          if (!answers && componentOn('sources')) {
+          if (!answers && goalCompOn(goal.id, 'sources')) {
             const before = db.prepare('SELECT COUNT(*) AS n FROM sources WHERE goal_id = ?').get(goal.id).n;
+            try {
+              await fetchEbooksForGoal(goal, s => send(s), null);
+            } catch (e) {
+              send({ status: '电子书阶段跳过：' + e.message });
+            }
             await collectSources(goal, nodeQueries(n.title), s => send(s));
             const after = db.prepare('SELECT COUNT(*) AS n FROM sources WHERE goal_id = ?').get(goal.id).n;
             send({ status: `信息源新增 ${after - before} 条（共 ${after} 条），开始制定拆分计划…`, sources: sourcesOf(goal.id) });
@@ -3232,7 +3691,7 @@ function redactText(raw) {
       const t = db.prepare('SELECT * FROM tutorials WHERE id = ?').get(id);
       if (!t) return sendJSON(res, 404, { error: '教程不存在' });
       const node = db.prepare('SELECT id, title, level FROM nodes WHERE id = ?').get(t.node_id);
-      const goal = db.prepare('SELECT id, title FROM goals WHERE id = ?').get(t.goal_id);
+      const goal = db.prepare('SELECT id, title, plugins FROM goals WHERE id = ?').get(t.goal_id);
       return sendJSON(res, 200, { tutorial: t, node, goal });
     }
     if (method === 'DELETE') {
@@ -3301,6 +3760,32 @@ function redactText(raw) {
     db.prepare('UPDATE goals SET clarify = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(data), nowISO(), gid);
     return sendJSON(res, 200, { ok: true, clarify: data });
   }
+/* 问卷答案 → 电子书偏好：认 id/标题里带 ebook 的题；兼容 AI 自造的选项值 */
+function extractEbookPrefFromAnswers(answers) {
+  if (!answers || typeof answers !== 'object' || Array.isArray(answers)) return null;
+  let want = '', booksRaw = '';
+  for (const k of Object.keys(answers)) {
+    if (!/ebook/i.test(k)) continue;
+    const v = answers[k];
+    const s = Array.isArray(v) ? String(v[0] || '') : String((v && v.picked) || v || '');
+    if (/want/i.test(k)) {
+      if (/^(no|n)$/i.test(s.trim()) || /不|否|无|不要/i.test(s)) want = 'no';
+      else if (/^auto$/i.test(s.trim()) || /^(yes|y)$/i.test(s.trim()) || /自动|下载|想要|需要/i.test(s)) want = 'auto';
+      else if (/^list$/i.test(s.trim()) || /书单|自己|我找/i.test(s)) want = 'list';
+      else if (s.trim()) want = 'list';
+    } else if (/book/i.test(k)) {
+      booksRaw = Array.isArray(v) ? v.join('\n') : s;
+    }
+  }
+  if (!want) return null;
+  const books = String(booksRaw || '').split(/[\n,，、；;]+/).map(x => x.trim()).filter(Boolean).slice(0, 10).map(t => {
+    let title = t, author = '';
+    const m = t.match(/^(.*?)[《〈](.+?)[》〉]\s*$/);
+    if (m) { author = m[1].trim().slice(0, 40); title = m[2].trim(); }
+    return { title: title.slice(0, 80), author, pitch: '', public_domain: false, where: '', en: '', status: 'pending' };
+  });
+  return { asked: true, want, books, done: false };
+}
   const planMatch = p.match(/^\/api\/goals\/(\d+)\/plan$/);
   if (planMatch && method === 'POST') {
     const id = Number(planMatch[1]);
@@ -3309,6 +3794,8 @@ function redactText(raw) {
     let answers = null;
     try { const b = await readBody(req); if (b && typeof b.answers === 'object') answers = b.answers; } catch (e) {}
     if (answers) db.prepare('UPDATE goals SET clarify_answers = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(answers), nowISO(), id);
+    const ebPref = extractEbookPrefFromAnswers(answers);
+    if (ebPref) saveEbookPref(id, ebPref);
     return streamPlan(req, res, g, answers);
   }
 
@@ -3680,6 +4167,69 @@ function redactText(raw) {
     const n = reloadPlugins();
     return sendJSON(res, 200, { ok: true, loaded: n });
   }
+  /* 电子书偏好：搜集前 AI 问用户要不要书，需要哪些（问卷答案 / 手动搜集前弹窗都会写到这里） */
+  const ebPrefMatch = p.match(/^\/api\/goals\/(\d+)\/ebooks\/pref$/);
+  if (ebPrefMatch) {
+    const gid = Number(ebPrefMatch[1]);
+    const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(gid);
+    if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+    if (method === 'GET') return sendJSON(res, 200, { pref: getEbookPref(g) });
+    if (method === 'POST') {
+      const body = await readBody(req);
+      const want = ['auto', 'list', 'no'].includes(body.want) ? body.want : 'no';
+      const raw = Array.isArray(body.books) ? body.books : [];
+      const books = raw.map(b => {
+        if (typeof b === 'string') return { title: b.slice(0, 80), author: '', pitch: '', public_domain: false, where: '', en: '' };
+        return { title: String((b && b.title) || '').slice(0, 80), author: String((b && b.author) || '').slice(0, 40), pitch: String((b && b.pitch) || '').slice(0, 80), public_domain: !!((b && b.public_domain)), where: String((b && b.where) || '').slice(0, 40), en: String((b && b.en) || '').slice(0, 80) };
+      }).filter(b => b.title).slice(0, 10).map(b => ({ ...b, status: 'pending' }));
+      const pref = { asked: true, want, books, done: false };
+      saveEbookPref(gid, pref);
+      return sendJSON(res, 200, { ok: true, pref });
+    }
+  }
+  const ebRecMatch = p.match(/^\/api\/goals\/(\d+)\/ebooks\/recommend$/);
+  if (ebRecMatch && method === 'POST') {
+    const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(Number(ebRecMatch[1]));
+    if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+    try {
+      const books = await recommendEbooks(g);
+      return sendJSON(res, 200, { books });
+    } catch (e) {
+      return sendJSON(res, 200, { books: [], error: e.message });
+    }
+  }
+  /* 搜集方案：用户说明/选择搜什么（存目标上，重复搜集沿用） */
+  const cpMatch = p.match(/^\/api\/goals\/(\d+)\/collect-plan$/);
+  if (cpMatch) {
+    const gid = Number(cpMatch[1]);
+    const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(gid);
+    if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+    if (method === 'GET') return sendJSON(res, 200, { plan: getCollectPlan(g) });
+    if (method === 'POST') {
+      const body = await readBody(req);
+      const raw = Array.isArray(body.queries) ? body.queries : [];
+      const queries = raw.map(q => ({
+        kind: String((q && q.kind) || '资料').slice(0, 10),
+        q: String((q && q.q) || '').slice(0, 120),
+        days: Math.min(730, Math.max(30, Number((q && q.days)) || 365)),
+        on: (q && q.on) !== false
+      })).filter(q => q.q).slice(0, 20);
+      const plan = { asked: true, queries, updatedAt: nowISO() };
+      saveCollectPlan(gid, plan);
+      return sendJSON(res, 200, { ok: true, plan });
+    }
+  }
+  const cpRecMatch = p.match(/^\/api\/goals\/(\d+)\/collect-plan\/recommend$/);
+  if (cpRecMatch && method === 'POST') {
+    const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(Number(cpRecMatch[1]));
+    if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+    try {
+      const queries = await recommendCollectPlan(g);
+      return sendJSON(res, 200, { queries });
+    } catch (e) {
+      return sendJSON(res, 200, { queries: [], error: e.message });
+    }
+  }
   const goalPluginsMatch = p.match(/^\/api\/goals\/(\d+)\/plugins$/);
   if (goalPluginsMatch) {
     const gid = Number(goalPluginsMatch[1]);
@@ -3691,7 +4241,9 @@ function redactText(raw) {
     if (method === 'POST') {
       const body = await readBody(req);
       const pid = String(body.plugin_id || '');
-      if (!PLUGINS.some(x => x.id === pid)) return sendJSON(res, 404, { error: '插件不存在' });
+      const isCore = BUILTIN_COMPONENTS.some(x => x.id === pid && x.scope === 'core');
+      const manageable = manageableCompIds().includes(pid) || PLUGINS.some(x => x.id === pid);
+      if (isCore || !manageable) return sendJSON(res, 404, { error: '插件不存在或不可按目标管理' });
       const cur = safeParse(g.plugins) || {};
       cur[pid] = !!body.enabled;
       db.prepare('UPDATE goals SET plugins = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(cur), nowISO(), gid);
@@ -3738,8 +4290,8 @@ function redactText(raw) {
     backup();
     db.exec('DELETE FROM nodes; DELETE FROM sources; DELETE FROM goals; DELETE FROM goal_versions; DELETE FROM tutorials; DELETE FROM chats; DELETE FROM chat_sessions;');
     for (const pl of PLUGINS) { try { if (typeof pl.clearAll === 'function') pl.clearAll(pluginCtx()); } catch (e) {} }
-    const insG = db.prepare('INSERT INTO goals (id,title,profile,materials,weekly_hours,deadline,status,error,summary,constraints,plugins,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)');
-    for (const g of goals) insG.run(g.id != null ? Number(g.id) : null, g.title || '', g.profile || '', g.materials || '', g.weekly_hours || '', g.deadline || '', g.status || 'draft', g.error || '', g.summary || '', typeof g.constraints === 'string' ? g.constraints : JSON.stringify(g.constraints || []), typeof g.plugins === 'string' ? g.plugins : JSON.stringify(g.plugins || {}), g.created_at || nowISO(), g.updated_at || nowISO());
+    const insG = db.prepare('INSERT INTO goals (id,title,profile,materials,weekly_hours,deadline,status,error,summary,constraints,plugins,ebook_pref,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    for (const g of goals) insG.run(g.id != null ? Number(g.id) : null, g.title || '', g.profile || '', g.materials || '', g.weekly_hours || '', g.deadline || '', g.status || 'draft', g.error || '', g.summary || '', typeof g.constraints === 'string' ? g.constraints : JSON.stringify(g.constraints || []), typeof g.plugins === 'string' ? g.plugins : JSON.stringify(g.plugins || {}), typeof g.ebook_pref === 'string' ? g.ebook_pref : JSON.stringify(g.ebook_pref || {}), g.created_at || nowISO(), g.updated_at || nowISO());
     const insN = db.prepare('INSERT INTO nodes (id,goal_id,parent_id,level,title,detail,artifact,acceptance,hours,sources,status,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
     for (const n of (Array.isArray(body.nodes) ? body.nodes : [])) insN.run(n.id != null ? Number(n.id) : null, Number(n.goal_id), n.parent_id ? Number(n.parent_id) : null, Number(n.level || 0), n.title || '', n.detail || '', n.artifact || '', n.acceptance || '', n.hours || '', typeof n.sources === 'string' ? n.sources : JSON.stringify(n.sources || []), n.status || 'todo', Number(n.sort_order || 0), n.created_at || nowISO(), n.updated_at || nowISO());
     const insT = db.prepare('INSERT INTO tutorials (id,goal_id,node_id,title,format,content,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)');
@@ -3754,8 +4306,62 @@ function redactText(raw) {
 
   const versionsMatch = p.match(/^\/api\/goals\/(\d+)\/versions$/);
   if (versionsMatch && method === 'GET') {
-    const rows = db.prepare('SELECT id, goal_id, reason, summary, created_at FROM goal_versions WHERE goal_id = ? ORDER BY id DESC LIMIT 30').all(Number(versionsMatch[1]));
+    const rows = db.prepare('SELECT id, goal_id, reason, summary, manual, starred, created_at FROM goal_versions WHERE goal_id = ? ORDER BY starred DESC, id DESC LIMIT 60').all(Number(versionsMatch[1]));
     return sendJSON(res, 200, { versions: rows });
+  }
+  if (versionsMatch && method === 'POST') {
+    // 手动保存当前方案（命名存档，随时恢复）
+    const gid = Number(versionsMatch[1]);
+    const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(gid);
+    if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+    const body = await readBody(req).catch(() => ({}));
+    const name = String(body.name || '').trim().slice(0, 40) || '手动存档';
+    const nodes = db.prepare('SELECT * FROM nodes WHERE goal_id = ? ORDER BY level, sort_order, id').all(gid);
+    if (!nodes.length) return sendJSON(res, 400, { error: '当前还没有路径可存' });
+    const r = db.prepare('INSERT INTO goal_versions (goal_id, reason, snapshot, summary, manual, created_at) VALUES (?,?,?,?,?,?)')
+      .run(gid, name, JSON.stringify(nodes), '', 1, nowISO());
+    backup();
+    const rows = db.prepare('SELECT id, goal_id, reason, summary, manual, starred, created_at FROM goal_versions WHERE goal_id = ? ORDER BY starred DESC, id DESC LIMIT 60').all(gid);
+    return sendJSON(res, 200, { ok: true, id: Number(r.lastInsertRowid), versions: rows });
+  }
+  const verStarMatch = p.match(/^\/api\/versions\/(\d+)\/star$/);
+  if (verStarMatch && method === 'POST') {
+    const v = db.prepare('SELECT * FROM goal_versions WHERE id = ?').get(Number(verStarMatch[1]));
+    if (!v) return sendJSON(res, 404, { error: '版本不存在' });
+    const body = await readBody(req).catch(() => ({}));
+    const on = body.starred != null ? !!body.starred : !v.starred;
+    db.prepare('UPDATE goal_versions SET starred = ? WHERE id = ?').run(on ? 1 : 0, v.id);
+    backup();
+    return sendJSON(res, 200, { ok: true, starred: on });
+  }
+  const verRestoreMatch = p.match(/^\/api\/versions\/(\d+)\/restore$/);
+  if (verRestoreMatch && method === 'POST') {
+    // 恢复到指定版本：先自动存档当前（可再 undo），再整体替换节点（含进度状态）
+    const v = db.prepare('SELECT * FROM goal_versions WHERE id = ?').get(Number(verRestoreMatch[1]));
+    if (!v) return sendJSON(res, 404, { error: '版本不存在' });
+    const snap = safeParse(v.snapshot) || [];
+    if (!snap.length) return sendJSON(res, 400, { error: '这个版本是空快照，无法恢复' });
+    const gid = v.goal_id;
+    const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(gid);
+    if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+    beginVersion(gid, '恢复版本前自动存档');
+    db.prepare('DELETE FROM nodes WHERE goal_id = ?').run(gid);
+    try { db.prepare('DELETE FROM node_workspaces WHERE goal_id = ?').run(gid); } catch (e) {}
+    const sorted = snap.slice().sort((a, b) => ((a.level || 0) - (b.level || 0)) || ((a.sort_order || 0) - (b.sort_order || 0)) || ((a.id || 0) - (b.id || 0)));
+    const idMap = new Map();
+    const t = nowISO();
+    for (const n of sorted) {
+      const newParent = n.parent_id ? (idMap.get(n.parent_id) || null) : null;
+      insertNode(gid, newParent, n.level || 0, n.title, n.detail, safeParse(n.sources) || [], n.sort_order || 0,
+        { artifact: n.artifact, acceptance: n.acceptance, hours: n.hours });
+      const nid = db.prepare('SELECT last_insert_rowid() AS id').get().id;
+      idMap.set(n.id, nid);
+      if (n.status && n.status !== 'todo') db.prepare('UPDATE nodes SET status = ? WHERE id = ?').run(n.status, nid);
+    }
+    const cnt = db.prepare('SELECT COUNT(*) AS c FROM nodes WHERE goal_id = ?').get(gid).c;
+    db.prepare('UPDATE goals SET status = ?, error = ?, updated_at = ? WHERE id = ?').run(cnt ? 'planned' : 'draft', '', t, gid);
+    backup();
+    return sendJSON(res, 200, { ok: true, goal: getGoal(gid) });
   }
   const versionMatch = p.match(/^\/api\/versions\/(\d+)$/);
   if (versionMatch && method === 'GET') {
@@ -3832,7 +4438,7 @@ function serveUpload(req, res, p) {
   fs.readFile(file, (err, buf) => {
     if (err) { res.writeHead(404); res.end('not found'); return; }
     const ext = path.extname(file).toLowerCase();
-    const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' }[ext] || 'application/octet-stream';
+    const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.pdf': 'application/pdf', '.txt': 'text/plain; charset=utf-8', '.md': 'text/markdown; charset=utf-8', '.epub': 'application/epub+zip', '.mobi': 'application/x-mobipocket-ebook', '.azw': 'application/x-mobipocket-ebook', '.azw3': 'application/x-mobipocket-ebook' }[ext] || 'application/octet-stream';
     res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'no-cache' });
     res.end(buf);
   });

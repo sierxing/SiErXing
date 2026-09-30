@@ -202,6 +202,66 @@ button.back{background:none; border:0; cursor:pointer; font-size:13px;}
 .siTitle:hover{color:var(--accent);}
 .siDel{flex:0 0 auto;}
 .siBody{font-size:12px; color:var(--muted); line-height:1.65; margin-top:6px; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;}
+.siCheck{flex:0 0 auto; width:15px; height:15px; accent-color:var(--accent); cursor:pointer;}
+.srcItem.selected{border-color:var(--accent); background:var(--accent-soft);}
+.spListBar{display:flex; align-items:center; gap:10px; margin:10px 0 2px; font-size:12.5px;}
+.spSelAll{display:flex; align-items:center; gap:6px; cursor:pointer; color:var(--muted);}
+.spSelAll input{width:15px; height:15px; accent-color:var(--accent); cursor:pointer;}
+
+/* ============ 大弹窗（搜集设置等复杂表单，节点面板规格） ============ */
+.bigDialog{position:fixed; z-index:400; left:50%; top:50%; transform:translate(-50%,-50%);
+  width:min(920px,94vw); max-height:88vh; display:flex; flex-direction:column; overflow:hidden;
+  background:var(--card); border:1.5px solid var(--border); border-radius:var(--r-lg);
+  box-shadow:0 24px 70px rgba(10,8,25,.32); animation:ctxIn .14s ease;}
+.bigDialog .tdHead{flex:none;}
+.bigDialog .tdBody{flex:1 1 auto; min-height:0; overflow-y:auto; overscroll-behavior:contain; padding:16px 20px;}
+.bigDialog .bdTitle{line-height:1.4;}
+.bigDialog .bdSub{font-size:12px; font-weight:400; color:var(--muted); margin-top:2px;}
+.csSec{background:var(--bg); border:1px solid var(--border); border-radius:12px; padding:14px 16px; margin-bottom:14px;}
+.csSec:last-of-type{margin-bottom:0;}
+.csSecHead{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:10px;}
+.csSecT{font-weight:700; font-size:14px;}
+.csSecD{font-size:12px; color:var(--muted);}
+.csSecHead .spacer{flex:1;}
+.csSecHead .btn.tiny{margin-left:0;}
+.csSec .btn.tiny + .btn.tiny{margin-left:6px;}
+.csQList{display:flex; flex-direction:column; gap:8px; margin-bottom:10px;}
+.csQ{display:flex; align-items:center; gap:10px; background:var(--card); border:1px solid var(--border); border-radius:10px; padding:8px 12px; transition:.15s;}
+.csQ:hover{border-color:var(--accent-border);}
+.csQ input[type=checkbox]{width:16px; height:16px; flex:none; accent-color:var(--accent); cursor:pointer;}
+.csQ .chip{flex:none;}
+.csQ:has(input[type=checkbox]:not(:checked)){opacity:.62;}
+.cpQText{flex:1; min-width:0; border:1px solid transparent; border-radius:8px; padding:6px 9px; font-family:inherit; font-size:13px; background:transparent; color:var(--text);}
+.cpQText:hover{border-color:var(--border);}
+.cpQText:focus{outline:none; border-color:var(--accent); background:var(--bg);}
+.csSec textarea{width:100%; border:1.5px solid var(--border); border-radius:10px; padding:8px 11px; font-family:inherit; font-size:13px; background:var(--card); color:var(--text); resize:vertical;}
+.csWarn{font-size:12.5px; color:var(--text); background:rgba(217,119,6,.09); border:1px solid rgba(217,119,6,.32); border-radius:10px; padding:9px 12px; margin-bottom:10px;}
+.ebModes{display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:12px;}
+@media (max-width:640px){.ebModes{grid-template-columns:1fr;}}
+.ebMode{cursor:pointer;}
+.ebModeIn{display:flex; flex-direction:column; gap:3px; background:var(--card); border:1.5px solid var(--border); border-radius:10px; padding:10px 12px; font-size:13px; transition:.15s; height:100%;}
+.ebModeIn b{font-size:13.5px;}
+.ebModeIn span:last-child{font-size:12px; color:var(--muted);}
+.ebMode:hover .ebModeIn{border-color:var(--accent-border);}
+.ebMode:has(input:checked) .ebModeIn{border-color:var(--accent); background:var(--accent-soft);}
+.ebBooks{display:flex; flex-direction:column; gap:8px; margin-bottom:10px;}
+.ebBook{display:flex; gap:12px; align-items:flex-start; background:var(--card); border:1px solid var(--border); border-radius:10px; padding:10px 12px; cursor:pointer; transition:.15s; font-size:13px;}
+.ebBook:hover{border-color:var(--accent-border);}
+.ebBook:has(input:not(:checked)){opacity:.6;}
+.ebBook input{margin-top:3px; width:16px; height:16px; flex:none; accent-color:var(--accent); cursor:pointer;}
+.ebCover{font-size:30px; line-height:1.2; flex:none;}
+.ebInfo{display:flex; flex-direction:column; gap:3px; min-width:0;}
+.ebInfo b{font-size:13.5px;}
+.ebInfo .muted{font-weight:400;}
+.ebPitch{font-size:12.5px; color:var(--text); line-height:1.6;}
+.ebWhere{display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:12px;}
+.csFoot{flex:none; display:flex; gap:10px; padding:12px 20px 14px; background:var(--card); border-top:1px solid var(--border); border-radius:0 0 var(--r-lg) var(--r-lg);}
+@media (max-width:760px){.bigDialog{width:96vw; max-height:92vh;}}
+
+.adjOutline{display:flex; flex-direction:column; gap:6px; margin:10px 0 4px; max-height:220px; overflow:auto; background:var(--bg); border:1px solid var(--border); border-radius:10px; padding:10px 12px;}
+.adjStage{font-size:13px; line-height:1.7;}
+.adjStage b{margin-right:8px;}
+.adjStage .muted{font-weight:400;}
 
 /* ============ 思维导图（路径可视化） ============ */
 .mtree{
@@ -352,10 +412,12 @@ button.back{background:none; border:0; cursor:pointer; font-size:13px;}
 /* ============ 清单视图 ============ */
 .taskListView{display:flex; flex-direction:column; gap:16px;}
 .tlStage{background:var(--card); border:1px solid var(--border); border-radius:var(--r-lg); padding:14px 16px; box-shadow:var(--shadow-sm);}
-.tlStageHead{display:flex; align-items:center; gap:10px; padding-bottom:10px; border-bottom:1px solid var(--border);}
+.tlStageHead{display:flex; align-items:center; gap:10px; padding-bottom:10px; border-bottom:1px solid var(--border); cursor:pointer; border-radius:8px;}
+.tlStageHead:hover .tlStageTitle{color:var(--accent);}
 .tlStageTitle{font-size:14px; font-weight:700; flex:1;}
 .tlSub{margin-top:12px;}
-.tlSubHead{display:flex; align-items:center; gap:9px; margin-bottom:7px;}
+.tlSubHead{display:flex; align-items:center; gap:9px; margin-bottom:7px; cursor:pointer; border-radius:8px;}
+.tlSubHead:hover .tlSubTitle{color:var(--accent);}
 .tlSubTitle{font-size:12.5px; font-weight:600; color:var(--muted); flex:1;}
 .tlTask{
   display:flex; align-items:center; gap:10px; padding:8px 12px; border:1px solid var(--border);
@@ -505,13 +567,20 @@ body.mapMode{overflow:hidden;}
   background:var(--card); border:1.5px solid var(--border); border-radius:16px;
   box-shadow:0 10px 40px rgba(0,0,0,.18); z-index:60; display:flex; flex-direction:column; overflow:hidden;
 }
-.vpHead{display:flex; align-items:center; gap:8px; padding:12px 15px; font-weight:700; border-bottom:1px solid var(--border);}
+.vpHead{display:flex; align-items:center; gap:8px; padding:12px 15px; font-weight:700; border-bottom:1px solid var(--border); flex:none;}
 .vpHead .spacer{flex:1;}
+.vpBody{overflow-y:auto; min-height:0; overscroll-behavior:contain;}
+.vpFoot{flex:none; padding:10px 15px; border-top:1px solid var(--border);}
 .vpItem{padding:11px 15px; border-bottom:1px solid var(--border);}
 .vpItem:last-child{border-bottom:none;}
 .vpTop{display:flex; align-items:center; gap:8px;}
+.vpStar{border:none; background:none; font-size:16px; cursor:pointer; padding:0 2px; color:var(--muted); line-height:1;}
+.vpStar.on{color:#f1c40f;}
 .vpSummary{margin-top:6px; font-size:12.5px; line-height:1.6; color:var(--text);}
-.vpOps{margin-top:8px;}
+.vpOps{margin-top:8px; display:flex; gap:8px;}
+.vpGrid{display:flex; flex-direction:column; gap:12px;}
+.vpGrid .vpItem{border:1px solid var(--border); border-radius:12px; background:var(--card); padding:13px 16px;}
+.vpGrid .vpItem:last-child{border-bottom:1px solid var(--border);}
 
 /* ============ 学习教程 ============ */
 .tutDialog{
@@ -637,7 +706,7 @@ h3.mdH{font-size:17px;} h4.mdH,h5.mdH,h6.mdH{font-size:15px;}
 .chRow textarea{flex:1; min-height:52px; max-height:160px; resize:vertical; border:1.5px solid var(--border); border-radius:12px; padding:10px 12px; font-family:inherit; font-size:13.5px; background:var(--bg); color:var(--text);}
 .chRow textarea:focus{outline:none; border-color:var(--accent);}
 
-/* ============ JD 图片资料 ============ */
+/* ============ 信息源导入 ============ */
 .jdPage{max-width:900px; margin:0 auto; padding:16px 20px 60px;}
 .jdHead{display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:12px;}
 .jdHead .spacer{flex:1;}
@@ -649,11 +718,30 @@ h3.mdH{font-size:17px;} h4.mdH,h5.mdH,h6.mdH{font-size:15px;}
 .jpIcon{font-size:30px;} .jpTitle{font-weight:700; font-size:15px; margin:8px 0 6px;}
 .jpText{font-size:13px; color:var(--muted);} .jpFile{color:var(--accent); text-decoration:underline; cursor:pointer;}
 .jpNote{font-size:12px; color:var(--muted); margin-top:8px;}
+#jdPaste .jpText{display:flex; gap:10px; justify-content:center; align-items:center; flex-wrap:wrap;}
 .jpBusy{margin-top:12px; font-size:13px; font-weight:600; color:var(--accent);}
 .jdList{margin-top:18px; display:flex; flex-direction:column; gap:14px;}
 .jdCard{display:flex; gap:14px; background:var(--card); border:1.5px solid var(--border); border-radius:var(--r-lg); padding:14px; box-shadow:var(--shadow-sm);}
 .jdThumb{flex:none; width:120px; height:150px; border-radius:10px; overflow:hidden; border:1px solid var(--border); background:var(--soft);}
 .jdThumb img{width:100%; height:100%; object-fit:cover; display:block;}
+.jdThumb.jdFile{display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; text-decoration:none;}
+.jdFileIcon{font-size:44px; line-height:1;}
+.jdFileExt{font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.5px;}
+/* 批量导入任务列表（复用 eb* 命名） */
+.ebBar{display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:16px; font-size:13px; background:var(--card); border:1.5px solid var(--border); border-radius:var(--r-lg); padding:10px 14px;}
+.ebBar .spacer{flex:1;}
+.ebList{margin-top:12px; display:flex; flex-direction:column; gap:8px;}
+.ebRow{display:flex; gap:10px; align-items:flex-start; background:var(--card); border:1px solid var(--border); border-radius:10px; padding:9px 12px;}
+.ebFileIcon{font-size:20px; line-height:1.4;}
+.ebMain{flex:1; min-width:0;}
+.ebName{font-size:13px; font-weight:600; word-break:break-all;}
+.ebName .muted{font-weight:400;}
+.ebStatus{font-size:12.5px; margin-top:3px; color:var(--muted); line-height:1.7;}
+.ebSt.ok{color:var(--ok, #16a34a); font-weight:600;}
+.ebSt.fail{color:var(--danger, #dc2626);}
+.ebSt.dup{color:var(--muted);}
+.ebSt.up,.ebSt.work{color:var(--accent); font-weight:600;}
+.ebSt .spinner{display:inline-block; width:12px; height:12px; vertical-align:-1px;}
 .jdMain{flex:1; min-width:0;}
 .jdTop{display:flex; align-items:center; gap:8px;}
 .jdTop .spacer{flex:1;}

@@ -125,7 +125,7 @@ module.exports = {
   order: 44,
   version: '1.1.0',
   author: '思而行内置',
-  goalToggle: false,          // 非按目标启用：应用级开关
+  goalToggle: true,           // 按目标启用：各目标独立开关，互不干扰
   defaultEnabled: true,
   client: '/plugins/studystats.js',
 

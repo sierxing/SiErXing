@@ -79,6 +79,8 @@ function parseRoute() {
   if (h.startsWith('#/settings')) return { view: 'settings' };
   if (h.startsWith('#/components')) return { view: 'components' };
   if (h.startsWith('#/library')) return { view: 'library' };
+  const vm = h.match(/^#\/g\/(\d+)\/versions$/);
+  if (vm) return { view: 'versions', id: Number(vm[1]) };
   // 插件页面路由（由前端插件声明）
   const pr = window.SiErXing ? SiErXing.matchRoute(h) : null;
   if (pr) return { view: 'plugin', pluginId: pr.plugin.id, route: pr.route, match: pr.match };
@@ -229,6 +231,7 @@ async function route() {
     else if (r.view === 'settings') { setHeader(r); await renderSettings(); }
     else if (r.view === 'guide') { setHeader(r); await renderHome(); showGuide(r.step - 1); }
     else if (r.view === 'components') { setHeader(r); await renderComponentsPage(); }
+    else if (r.view === 'versions') { await loadGoal(r.id); setHeader(r); await renderVersionsPage(r.id); }
     else if (r.view === 'library') { setHeader(r); await renderLibraryPage(); }
     else if (r.view === 'map') { await loadGoal(r.id); setHeader(r); renderMapPage(); }
     else if (r.view === 'diff') { await loadGoal(r.id); setHeader(r); await renderDiffPage(r.vid); }
@@ -282,8 +285,7 @@ async function renderHome() {
       <button class="btn primary" id="newBtn">＋ 新建目标</button>
       <label class="btn" title="导入别人分享的 *.share.json（含规划与资料库）">⬆ 导入分享<input type="file" id="shareImportFile" accept=".json,application/json" hidden></label>
     </div>
-    ${setupCardHTML()}
-    ${disabledComponentsHTML()}`;
+    ${setupCardHTML()}`;
   if (state.showNew) html += newGoalHTML();
   if (!goals.length && !state.showNew) {
     html += `<div class="emptyBox">
@@ -301,7 +303,7 @@ async function renderHome() {
       const st = { draft: ['待规划', 'warn'], planning: ['规划中', ''], planned: ['已规划', 'ok'], failed: ['规划失败', 'danger'] }[g.status] || ['未知', 'gray'];
       const updated = g.updated_at ? String(g.updated_at).slice(0, 10) : '';
       html += `<div class="goalCard" data-go="#/g/${g.id}">
-        <div class="gcHead"><span class="gcTitle">${esc(g.title)}</span><span class="chip ${st[1]}">${st[0]}</span></div>
+        <div class="gcHead"><span class="gcTitle">${esc(g.title)}</span><span class="chip ${st[1]}">${st[0]}</span><div class="spacer"></div><button class="btn tiny gcComps" data-gc-comps="${g.id}" title="管理本目标的组件（只改这个目标）">🧩</button></div>
         ${g.summary ? `<div class="gcSummary">${mdOneLine(g.summary)}</div>` : '<div class="gcSummary muted">尚未生成规划</div>'}
         ${g.next_task ? `<div class="gcNext">▸ 下一步：${esc(g.next_task)}</div>` : ''}
         <div class="gcProgress">
@@ -320,6 +322,13 @@ async function renderHome() {
   }
   html += '</div>';
   app.innerHTML = html;
+  // 主页各目标卡片：🧩 只管自己这个目标的组件
+  app.querySelectorAll('[data-gc-comps]').forEach(b => b.addEventListener('click', e => {
+    e.stopPropagation(); e.preventDefault();
+    const gid = Number(b.getAttribute('data-gc-comps'));
+    if (document.getElementById('goalPluginMenu')) document.querySelectorAll('#goalPluginMenu').forEach(x => x.remove());
+    else showGoalPluginsMenu(gid, b);
+  }));
 
   const gb = document.getElementById('guideBtn');
   if (gb) gb.addEventListener('click', () => showGuide(0));
@@ -464,8 +473,8 @@ function subgoalNodeHTML(g) {
   const p = subtreeProgress(g);
   const srcN = (g.sourcesArr || []).length;
   return `<div class="mtitem" data-id="${g.id}">
-    <div class="mtnode mtsub ${open ? 'open' : ''}" data-node-id="${g.id}" data-toggle="${key}" title="点击展开/收起 · 右键打开菜单">
-      <span class="arrow">${open ? '▾' : '▸'}</span>
+    <div class="mtnode mtsub ${open ? 'open' : ''}" data-node-id="${g.id}" data-detail="${g.id}" title="点击查看详情 · 右键打开菜单">
+      <span class="arrow" data-childtoggle="${key}" title="${open ? '收起' : '展开'}子节点">${open ? '▾' : '▸'}</span>
       <span class="mtTitle">${esc(g.title)}</span>
       <span class="mtProg">${p.done}/${p.total}</span>
       ${srcN ? `<span class="srcBadge" data-detail="${g.id}" title="查看信息源">📎${srcN}</span>` : ''}
@@ -487,7 +496,8 @@ function stageNodeHTML(st, si, activeStageId) {
   const p = subtreeProgress(st);
   const srcN = (st.sourcesArr || []).length;
   return `<div class="mtitem" data-id="${st.id}">
-    <div class="mtnode mtstage ${open ? 'open' : ''}" data-node-id="${st.id}" data-toggle="${key}" title="点击展开/收起 · 右键打开菜单">
+    <div class="mtnode mtstage ${open ? 'open' : ''}" data-node-id="${st.id}" data-detail="${st.id}" title="点击查看详情 · 右键打开菜单">
+      <span class="arrow" data-childtoggle="${key}" title="${open ? '收起' : '展开'}子节点">${open ? '▾' : '▸'}</span>
       <span class="stageIdx">${String(si + 1).padStart(2, '0')}</span>
       <span class="mtTitle">${esc(st.title)}</span>
       <span class="mtProg">${p.done}/${p.total}</span>
@@ -623,6 +633,13 @@ function bindMapTools() {
   if (mv) mv.addEventListener('click', () => showVersionsPanel(state.goal.id));
   const mc = document.getElementById('mapChatBtn');
   if (mc) mc.addEventListener('click', () => aiToggle(true));
+  const mp = document.getElementById('mapPlanBtn');
+  if (mp) mp.addEventListener('click', () => {
+    const g = state.goal;
+    if ((g.nodes || []).length && !confirm('重新规划会清空现有路径（含任务进度）后从头生成。\n\n只想微调阶段/小目标？用下面的「调整规划骨架」，不用推倒重来。\n\n确定要全部推倒重来吗？')) return;
+    startClarify(g.id);
+  });
+  bindPlanPanel();
   bindReportCard();
   bindTutorialCard();
 }
@@ -656,8 +673,9 @@ function renderMapPage() {
       <button class="btn small" id="zoomFit" title="适应屏幕">适应</button>
       <button class="btn small" id="foldAll">全部折叠</button>
       <button class="btn small" id="expandAll">全部展开</button>
-      ${compOn('chat') ? '<button class="btn small" id="mapChatBtn">💬 AI 助手</button>' : ''}
-      ${compOn('versions') ? '<button class="btn small" id="mapVerBtn">📜 版本对比</button>' : ''}
+      ${goalCompOn(state.goal, 'chat') ? '<button class="btn small" id="mapChatBtn">💬 AI 助手</button>' : ''}
+      ${goalCompOn(state.goal, 'versions') ? '<button class="btn small" id="mapVerBtn">📜 版本对比</button>' : ''}
+      <button class="btn small" id="mapPlanBtn" title="重新规划（会清空现有路径，请三思；微调骨架用下面的调整面板）">🧭 重新规划</button>
     </div>
     ${reportCardHTML()}
     ${tutorialCardHTML()}
@@ -759,7 +777,7 @@ function showNodePanel(id, rerender) {
       <div class="npSrcTitle">📘 学习教程（${tuts.length}）</div>
       ${tuts.length ? tuts.map(t => `<div class="npTutRow"><a class="npTutItem" href="#/t/${t.id}"><span class="npTutName">${esc(t.title)}</span><span class="chip gray">${t.format === 'html' ? 'HTML' : 'MD'}</span></a><button class="btn tiny danger" data-tut-del="${t.id}" title="删除这份教程">×</button></div>`).join('') : '<div class="muted" style="font-size:12.5px;">还没有教程：生成一份「掌握该任务知识点」的完整教程</div>'}
       <button class="btn small primary" id="npTutBtn" style="margin-top:8px;">📘 生成完整教程（HTML / Markdown）</button>
-      ${(compOn('tutbookmark') && window.TutBookmark) ? window.TutBookmark.nodeImportHTML() : ''}
+      ${(goalCompOn(goalCtx(), 'tutbookmark') && window.TutBookmark) ? window.TutBookmark.nodeImportHTML() : ''}
     </div>
     <div class="npAdjust">
       <div class="npSrcTitle">💬 对当前划分有意见？直接告诉 AI，它会按你的意见调整</div>
@@ -812,7 +830,7 @@ function showNodePanel(id, rerender) {
     saveNodeSources(list);
   });
   document.getElementById('npClose').addEventListener('click', closePanel);
-  if (window.TutBookmark && compOn('tutbookmark')) window.TutBookmark.bindNodeImport(div, id, (r) => { state.goal = r.goal; showNodePanel(id, rerenderFn); });
+  if (window.TutBookmark && goalCompOn(goalCtx(), 'tutbookmark')) window.TutBookmark.bindNodeImport(div, id, (r) => { state.goal = r.goal; showNodePanel(id, rerenderFn); });
   const tutBtn = document.getElementById('npTutBtn');
   if (tutBtn) tutBtn.addEventListener('click', () => { div.remove(); showTutorialDialog(id); });
   div.querySelectorAll('[data-tut-del]').forEach(b => b.addEventListener('click', async e => {
@@ -1722,7 +1740,7 @@ function aiEnsureDOM() {
   });
 }
 function aiToggle(open) {
-  if (open && typeof compOn === 'function' && !compOn('chat')) { toast('「AI 助手」组件已关闭：左侧栏 → 🧩 组件 可开启'); return; }
+  if (open && !goalCompOn(goalCtx(), 'chat')) { toast('「AI 助手」组件在本目标已关闭：目标页 🧩 可单独开启'); return; }
   aiEnsureDOM();
   state.aiOpen = open;
   try { localStorage.setItem('sierxing-ai-open', open ? '1' : '0'); } catch (e) {}
@@ -2130,7 +2148,7 @@ function showTutorialDialog(nodeId) {
   div.querySelector('#tdX').addEventListener('click', close);
 }
 async function startTutorial(nodeId, format, note) {
-  if (typeof compOn === 'function' && !compOn('tutorial')) { toast('「学习教程」组件已关闭：左侧栏 → 🧩 组件 可开启'); return; }
+  if (!goalCompOn(goalCtx(), 'tutorial')) { toast('「学习教程」组件在本目标已关闭：目标页 🧩 可单独开启'); return; }
   if (state.tutoring || state.planning || state.collecting || state.expanding) return;
   state.tutoring = true;
   state.tutStatus = '正在撰写教程（' + (format === 'html' ? 'HTML' : 'Markdown') + '）…';
@@ -2289,6 +2307,7 @@ async function renderTutorialPage(tid) {
   const r = await api('/api/tutorials/' + tid);
   const t = r.tutorial, node = r.node, goal = r.goal;
   state.tutGoalId = t ? t.goal_id : 0;   // 侧边栏绑定到该目标的会话（刷新也不丢记录）
+  state.tutGoal = goal || null;          // 教程语境目标：组件开关按它判定，不串到别的目标
   state.tutUpdatedAt = t ? (t.updated_at || '') : '';   // 任务轮询用它判断内容是否真变了
   const isHtml = t.format === 'html';
   const sizeK = Math.max(1, Math.round((t.content || '').length / 1000));
@@ -2297,10 +2316,10 @@ async function renderTutorialPage(tid) {
       <button class="back" data-back="#/g/${t.goal_id}">← 返回目标</button>
       <button class="btn small" id="tutEditBtn" title="在右侧对话栏里说你想怎么改，AI 会按意见修改（保留原有内容，只改需要改的地方）">💬 让 AI 修改</button>
       <button class="btn small" id="tutTocBtn" title="显示 / 隐藏左侧目录">📑 目录</button>
-      ${(compOn('notes') && window.NodeNotes) ? `<button class="btn small" id="tutNoteBtn" title="展开 / 收起右侧笔记栏">🗒 笔记</button>` : ''}
-      ${(compOn('tutbookmark') && window.TutBookmark) ? `<button class="btn small" id="tutBmBtn" title="随时标记阅读位置（不用翻到底部）">🔖 标签</button>` : ''}
-      ${(compOn('workspace') && window.Workspace) ? `<button class="btn small primary" id="tutCodeBtn" title="为当前节点建好代码目录并用 VSCode 打开，边看教程边写代码（子目录嵌在父目录下，无需手动管理）">💻 写代码</button>` : ''}
-      ${(compOn('workspace') && window.Workspace) ? `<button class="btn small" id="tutPackBtn" title="把整个目标的代码目录一键打包成 zip 下载">📦 打包</button>` : ''}
+      ${(goalCompOn(goal, 'notes') && window.NodeNotes) ? `<button class="btn small" id="tutNoteBtn" title="展开 / 收起右侧笔记栏">🗒 笔记</button>` : ''}
+      ${(goalCompOn(goal, 'tutbookmark') && window.TutBookmark) ? `<button class="btn small" id="tutBmBtn" title="随时标记阅读位置（不用翻到底部）">🔖 标签</button>` : ''}
+      ${(goalCompOn(goal, 'workspace') && window.Workspace) ? `<button class="btn small primary" id="tutCodeBtn" title="为当前节点建好代码目录并用 VSCode 打开，边看教程边写代码（子目录嵌在父目录下，无需手动管理）">💻 写代码</button>` : ''}
+      ${(goalCompOn(goal, 'workspace') && window.Workspace) ? `<button class="btn small" id="tutPackBtn" title="把整个目标的代码目录一键打包成 zip 下载">📦 打包</button>` : ''}
       <button class="btn small" id="tutManualBtn" title="直接手动编辑并保存（Markdown / HTML 都可以）">✎ 手动编辑</button>
       <button class="btn small primary" id="tutSaveBtn" hidden>💾 保存</button>
       <button class="btn small" id="tutCancelBtn" hidden>取消</button>
@@ -2311,7 +2330,7 @@ async function renderTutorialPage(tid) {
       <button class="btn small" id="tutDl">下载</button>
       <button class="btn small danger" id="tutDel">删除</button>
     </div>
-    <div class="tutMeta">${node ? '对应任务：' + esc(node.title) : ''}${goal ? '　·　所属目标：' + esc(goal.title) : ''}　·　生成于 ${esc(fmtDate(t.created_at))}${(compOn('workspace') && window.Workspace) ? '　·　<span class="wsHint" id="wsHint"></span>' : ''}</div>
+    <div class="tutMeta">${node ? '对应任务：' + esc(node.title) : ''}${goal ? '　·　所属目标：' + esc(goal.title) : ''}　·　生成于 ${esc(fmtDate(t.created_at))}${(goalCompOn(goal, 'workspace') && window.Workspace) ? '　·　<span class="wsHint" id="wsHint"></span>' : ''}</div>
     ${isHtml
       ? `<iframe class="tutFrame" id="tutFrame" sandbox="allow-same-origin allow-popups"></iframe>`
       : `<div class="tutBody mdBody">${mdToHTML(t.content)}</div>`}
@@ -2320,7 +2339,7 @@ async function renderTutorialPage(tid) {
   if (isHtml) document.getElementById('tutFrame').setAttribute('srcdoc', tutThemedHTML(t.content));
   setTimeout(() => { try { tutTocBuild(tid); } catch (e) {} }, 200);   // 侧边目录大纲
   const tutNoteBtn = document.getElementById('tutNoteBtn');
-  if (tutNoteBtn && window.NodeNotes && compOn('notes')) {
+  if (tutNoteBtn && window.NodeNotes && goalCompOn(goal, 'notes')) {
     const nid = node ? node.id : 0;
     tutNoteBtn.addEventListener('click', () => window.NodeNotes.toggle(tid, nid, node ? node.title : ''));
     if (nid) window.NodeNotes.mount(tid, nid, node.title);
@@ -2333,12 +2352,12 @@ async function renderTutorialPage(tid) {
     } catch (e) {}
     try { tutTocBuild(tid); } catch (e) {}
   });
-  if (window.TutBookmark && compOn('tutbookmark')) {
+  if (window.TutBookmark && goalCompOn(goal, 'tutbookmark')) {
     window.TutBookmark.badge(tid);
     const tbb = document.getElementById('tutBmBtn');
     if (tbb) tbb.addEventListener('click', () => window.TutBookmark.toggle(tid));
   }
-  if (window.Workspace && compOn('workspace')) {
+  if (window.Workspace && goalCompOn(goal, 'workspace')) {
     try { window.Workspace.bindTutorial(tid, node, goal); } catch (e) {}
   }
   document.getElementById('tutDl').addEventListener('click', () => {
@@ -2385,25 +2404,99 @@ async function renderDiffPage(vid) {
   app.innerHTML = html;
 }
 async function showVersionsPanel(goalId) {
-  if (typeof compOn === 'function' && !compOn('versions')) { toast('「版本对比与汇报」组件已关闭：左侧栏 → 🧩 组件 可开启'); return; }
+  if (!goalCompOn(goalCtx(), 'versions')) { toast('「版本对比与汇报」组件在本目标已关闭：目标页 🧩 可单独开启'); return; }
   const { versions } = await api('/api/goals/' + goalId + '/versions');
   const old = document.getElementById('versionsPanel');
   if (old) old.remove();
   const div = document.createElement('div');
   div.id = 'versionsPanel';
   div.className = 'versionsPanel';
-  let h = `<div class="vpHead"><span>📜 版本历史</span><div class="spacer"></div><button class="btn tiny" id="vpClose">×</button></div>`;
-  if (!versions.length) h += '<div class="empty">还没有版本记录。每次规划/调整/拆分后会自动生成版本。</div>';
-  for (const v of versions) {
-    h += `<div class="vpItem">
-      <div class="vpTop"><span class="chip gray">${esc(v.reason || '变更')}</span><span class="hint">${fmtDate(v.created_at)}</span></div>
-      ${v.summary ? `<div class="vpSummary">${mdOneLine(v.summary)}</div>` : '<div class="vpSummary muted">（无汇报）</div>'}
-      <div class="vpOps"><a class="btn small" href="#/g/${goalId}/diff/${v.id}">查看对比图</a></div>
-    </div>`;
+  let h = `<div class="vpHead"><span>📜 版本历史</span><div class="spacer"></div><button class="btn tiny primary" id="vpSave">📌 保存当前方案</button><button class="btn tiny" id="vpClose">×</button></div>`;
+  h += `<div class="vpBody">`;
+  if (!versions.length) h += '<div class="empty">还没有版本记录。每次规划/调整/拆分后会自动生成版本，也可以点右上「📌 保存当前方案」手动存一版。</div>';
+  for (const v of versions.slice(0, 8)) {
+    h += versionItemHTML(v, goalId);
   }
+  h += `</div>`;
+  h += `<div class="vpFoot"><a class="btn small" href="#/g/${goalId}/versions">📂 打开版本管理页（全部 · 可收藏）</a></div>`;
   div.innerHTML = h;
   document.body.appendChild(div);
   document.getElementById('vpClose').addEventListener('click', () => div.remove());
+  bindVersionItems(div, goalId, () => showVersionsPanel(goalId));
+}
+/* 版本条目（面板与管理页共用） */
+function versionItemHTML(v, goalId) {
+  return `<div class="vpItem" data-vid="${v.id}">
+    <div class="vpTop"><button class="vpStar ${Number(v.starred) ? 'on' : ''}" data-vp-star="${v.id}" title="${Number(v.starred) ? '已收藏（再点取消）' : '收藏这一版，方便找回'}">${Number(v.starred) ? '★' : '☆'}</button>${Number(v.manual) ? '<span class="chip ok">📌 手动保存</span>' : ''}<span class="chip gray">${esc(v.reason || '变更')}</span><span class="hint">${fmtDate(v.created_at)}</span></div>
+    ${v.summary ? `<div class="vpSummary">${mdOneLine(v.summary)}</div>` : '<div class="vpSummary muted">（无汇报）</div>'}
+    <div class="vpOps"><a class="btn small" href="#/g/${goalId}/diff/${v.id}">查看对比图</a><button class="btn small danger" data-vp-restore="${v.id}" title="先自动存档当前，再整体回到这一版（含任务进度状态）">恢复到此版</button></div>
+  </div>`;
+}
+/* 版本条目按钮绑定（面板/管理页共用；after 为操作成功后的刷新回调） */
+function bindVersionItems(root, goalId, after) {
+  const rerun = after || (() => {});
+  const sv = root.querySelector('#vpSave');
+  if (sv) sv.addEventListener('click', async () => {
+    const name = (prompt('给这版方案起个名（例如：偏实战版 / 保守版）：', '') || '').trim();
+    if (!name) return;
+    sv.disabled = true;
+    try {
+      await api('/api/goals/' + goalId + '/versions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+      toast('已保存方案「' + name + '」，重新规划弄丢了也能找回来');
+      rerun();
+    } catch (e) { toast(e.message); sv.disabled = false; }
+  });
+  root.querySelectorAll('[data-vp-star]').forEach(b => b.addEventListener('click', async e => {
+    e.stopPropagation();
+    const vid = b.getAttribute('data-vp-star');
+    const on = !b.classList.contains('on');
+    try {
+      await api('/api/versions/' + vid + '/star', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ starred: on }) });
+      toast(on ? '已收藏' : '已取消收藏');
+      rerun();
+    } catch (err) { toast(err.message); }
+  }));
+  root.querySelectorAll('[data-vp-restore]').forEach(b => b.addEventListener('click', async () => {
+    const vid = b.getAttribute('data-vp-restore');
+    if (!confirm('恢复到这一版？\n\n当前方案会先自动存档（还可再 undo），然后节点（含任务进度状态）整体替换。\n教程按原节点关联，恢复后旧教程可能对不上新节点 id。')) return;
+    b.disabled = true;
+    try {
+      const r = await api('/api/versions/' + vid + '/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      state.goal = r.goal;
+      try { await loadGoal(goalId); } catch (e) {}
+      const pnl = document.getElementById('versionsPanel');
+      if (pnl) pnl.remove();
+      rerenderCurrent();
+      renderRail();
+      toast('已恢复到该版本');
+    } catch (e) { toast(e.message); b.disabled = false; }
+  }));
+}
+/* 版本管理独立页：全部版本 + 筛选（收藏/手动保存） */
+async function renderVersionsPage(gid) {
+  const g = state.goal;
+  app.innerHTML = '<p class="muted">加载版本历史…</p>';
+  const { versions } = await api('/api/goals/' + gid + '/versions');
+  const f = state.verFilter || 'all';
+  const counts = { all: versions.length, star: versions.filter(v => Number(v.starred)).length, manual: versions.filter(v => Number(v.manual)).length };
+  const list = versions.filter(v => f === 'star' ? Number(v.starred) : f === 'manual' ? Number(v.manual) : true);
+  app.innerHTML = `<div class="page"><div class="pageHead">
+      <button class="back js-back" data-back="#/g/${gid}">← 返回目标</button>
+      <h2 class="title" style="margin-left:10px;">📜 版本管理</h2>
+      <span class="chip gray">${esc((g && g.title) || '')}</span>
+      <div class="spacer"></div>
+      <button class="btn small primary" id="vpSave">📌 保存当前方案</button>
+    </div>
+    <div class="sec"><div class="ppCats" id="verFilter">
+      <button type="button" class="ppCat ${f === 'all' ? 'active' : ''}" data-vf="all">全部（${counts.all}）</button>
+      <button type="button" class="ppCat ${f === 'star' ? 'active' : ''}" data-vf="star">⭐ 已收藏（${counts.star}）</button>
+      <button type="button" class="ppCat ${f === 'manual' ? 'active' : ''}" data-vf="manual">📌 手动保存（${counts.manual}）</button>
+    </div>
+    <p class="hint">每次规划/调整/拆分自动存档；看中的版本点 ☆ 收藏；恢复前会自动存档当前，可再 undo。</p></div>
+    <div class="sec"><div class="vpGrid">${list.length ? list.map(v => versionItemHTML(v, gid)).join('') : '<div class="muted">这里还没有版本。</div>'}</div></div>
+  </div>`;
+  app.querySelectorAll('#verFilter [data-vf]').forEach(b => b.addEventListener('click', () => { state.verFilter = b.getAttribute('data-vf'); renderVersionsPage(gid); }));
+  bindVersionItems(app, gid, () => renderVersionsPage(gid));
 }
 function rerenderCurrent() {
   const r = parseRoute();
@@ -2835,6 +2928,9 @@ function planPanelHTML() {
       </div>
     </div>`;
   }
+  if (g.status === 'planned' && (state.goal.nodes || []).length) {
+    return adjustPanelHTML(g);
+  }
   if (g.status === 'planning') {
     return `<div class="planPanel">
       <div class="ppHead"><span>⏸</span><span>上次细化任务中断</span><div class="spacer"></div>
@@ -2842,6 +2938,27 @@ function planPanelHTML() {
     </div>`;
   }
   return '';
+}
+/* 已有规划后的骨架调整：看大纲 → 写意见 → AI 按意见重排（回到待确认） */
+function adjustPanelHTML(g) {
+  const nodes = g.nodes || [];
+  const stages = nodes.filter(n => n.level === 0);
+  const outline = stages.map(s => {
+    const subs = nodes.filter(n => n.parent_id === s.id).map(x => x.title);
+    const subTxt = subs.length ? `（${subs.join(' / ')}）` : '（暂无小目标）';
+    return `<div class="adjStage"><b>${esc(s.title)}</b><span class="muted">${esc(subTxt.slice(0, 140))}${subTxt.length > 140 ? '…' : ''}</span></div>`;
+  }).join('') || '<div class="muted">暂无阶段</div>';
+  return `<div class="planPanel adjust">
+    <div class="ppHead">${foldBtn('adjust', foldClosed(g.id, 'adjust', true))}<span>🧭</span><span>调整规划骨架（当前 ${stages.length} 个阶段）</span></div>
+    <div data-foldbody="adjust"${foldClosed(g.id, 'adjust', true) ? ' hidden' : ''}>
+    <div class="adjOutline">${outline}</div>
+    <p class="hint" style="margin:8px 0 10px;">告诉 AI 怎么改：增删阶段/小目标、调顺序、跳过已掌握的……会重新生成骨架并回到待确认（已细化的子任务将按新骨架重排）。不想推倒重来就用这个；要点「重新规划」会清空现有路径，请三思。</p>
+    <div class="field"><textarea id="planFeedback" placeholder="例如：第二阶段太长，拆成两个 / 加一个「行为经济学」阶段 / 先学微观再学宏观…"></textarea></div>
+    <div class="toolbarRow">
+      <button class="btn primary" id="planAdjustBtn">按我的意见调整骨架</button>
+    </div>
+    </div>
+  </div>`;
 }
 function bindPlanPanel() {
   bindQuizFeedback(document);
@@ -2914,14 +3031,14 @@ async function streamSSE(url, body, onEvent, signal) {
 async function startClarify(id) {
   if (state.planning || state.collecting || state.expanding) return;
   if (!(await ensureAIConfigured())) return;
-  if (typeof compOn === 'function' && !compOn('clarify')) { return startPlanning(id, null); }
+  if (!goalCompOn(goalCtx(), 'clarify')) { return startPlanning(id, null); }
   state.planning = true;
   state.planAbort = new AbortController();
   state.planStatus = 'AI 正在分析你的情况，准备澄清问题…';
   state.planHint = 'AI 会先问几个问题（选择/简答），充分了解你的情况后再制定规划。';
   state.showEdit = false;
   if (!state.goal || state.goal.id !== id) await loadGoal(id);
-  renderGoal();
+  rerenderCurrent();
   bindPlanningPanel();
   const r = await streamSSE('/api/goals/' + id + '/plan/clarify', {}, d => {
     if (d.status) { state.planStatus = d.status; const el = document.getElementById('ppStatus'); if (el) el.textContent = d.status; }
@@ -2951,7 +3068,7 @@ async function startPlanning(id, answers) {
   state.showEdit = false;
   if (!state.goal || state.goal.id !== id) await loadGoal(id);
   state.goal.status = 'planning';
-  renderGoal();
+  rerenderCurrent();
   bindPlanningPanel();
   let asked = null;
   const r = await streamSSE('/api/goals/' + id + '/plan', answers ? { answers } : {}, d => {
@@ -2998,7 +3115,7 @@ async function startPlanResume(id) {
   state.showEdit = false;
   if (!state.goal || state.goal.id !== id) await loadGoal(id);
   state.goal.status = 'planning';
-  renderGoal();
+  rerenderCurrent();
   bindPlanningPanel();
   const r = await streamSSE('/api/goals/' + id + '/plan/resume', {}, d => {
     if (d.status) { state.planStatus = d.status; const el = document.getElementById('ppStatus'); if (el) el.textContent = d.status; }
@@ -3028,7 +3145,7 @@ async function startPlanTasks(id, answers) {
   state.planStage = 'tasks';
   state.planStatus = '开始逐阶段细化任务…';
   state.planHint = '按阶段逐个生成，中途可关闭页面，回来点「继续细化任务」接着跑。';
-  renderGoal();
+  rerenderCurrent();
   bindPlanningPanel();
   let asked = null;
   const r = await streamSSE('/api/goals/' + id + '/plan/tasks', answers ? { answers } : {}, d => {
@@ -3064,7 +3181,7 @@ async function startPlanRefine(id, feedback, answers) {
   state.planProgress = null;
   state.planStatus = '正在根据你的意见调整骨架…';
   state.planHint = '调整后仍需你确认才会细化任务。';
-  renderGoal();
+  rerenderCurrent();
   bindPlanningPanel();
   let asked = null;
   const r = await streamSSE('/api/goals/' + id + '/plan/refine', answers ? { feedback, answers } : { feedback }, d => {
@@ -3150,8 +3267,10 @@ async function startExpand(id, feedback, answers) {
 function sourceItemHTML(s) {
   const body = String(s.content || s.snippet || '').trim();
   const star = Number(s.quality) === 1;
+  const sel = state.srcSel && state.srcSel.gid === ((state.goal || {}).id || 0) && state.srcSel.ids.has(String(s.id));
   return `<div class="srcItem ${star ? 'isStar' : ''}">
     <div class="siHead">
+      <input type="checkbox" class="siCheck" data-src-check="${s.id}" ${sel ? 'checked' : ''} title="选中（可批量删除）">
       <button class="siStar ${star ? 'on' : ''}" data-src-star="${s.id}" title="${star ? '已标注为优质信息源（规划会优先参考）' : '标注为优质信息源（规划会优先参考）'}">${star ? '★' : '☆'}</button>
       <span class="chip gray">${esc(s.site || '未知来源')}</span>
       <span class="chip">${esc(s.kind || '资料')}</span>
@@ -3172,11 +3291,14 @@ function srcPanelHTML() {
     <div class="spHead">
       ${foldBtn('sources', srcClosed)}
       <span class="spTitle">信息源</span><span class="spCount">${list.length}</span>
-      <span class="spHint">大厂 JD · 牛客 · BOSS直聘 · 知乎等真实资料，规划时优先依据</span>
+      <span class="spHint">按你的搜集方案找真实资料，规划时优先依据</span>
       <div class="spacer"></div>
         <button class="btn small" id="collectBtn">${list.length ? '重新收集' : '收集信息源'}</button>
+        <button class="btn small" id="collectPlanBtn" title="说明/选择这次搜什么：AI 按目标推荐搜集方案，可逐条勾选、改写、加自己的">⚙ 搜集方案</button>
+        <span class="muted" id="cpSummary" style="font-size:12px;">${esc(collectPlanSummary())}</span>
         <button class="btn small primary" <button class="btn small" id="srcAddBtn" title="粘贴文本、或填写标题与链接，手动添加一条资料（可标为优质信息源）">＋ 添加资料</button>
         <button class="btn small primary" id="digestBtn" title="让 AI 通读全部资料（含你上传的图片资料），提炼成多篇主题汇总，规划时优先依据">🧠 ${digests.length ? '重新提炼' : '信息提炼'}</button>
+        ${list.length ? `<button class="btn small danger" id="srcClearBtn" title="删除本目标全部信息源（含已导入的图片/电子书原件），不可恢复">🗑 清空</button>` : ''}
       </div>
     <div data-foldbody="sources"${srcClosed ? ' hidden' : ''}>`;
   if (state.collecting) {
@@ -3211,7 +3333,13 @@ function srcPanelHTML() {
         + `</div>`;
     }
   if (list.length) {
-    h += `<details class="spDetails"><summary>查看来源列表（${list.length} 条）</summary><div class="spList">${list.map(sourceItemHTML).join('')}</div></details>`;
+    const gid2 = (state.goal && state.goal.id) || 0;
+    const selIds = state.srcSel && state.srcSel.gid === gid2 ? state.srcSel.ids : new Set();
+    const selN = list.filter(s => selIds.has(String(s.id))).length;
+    h += `<details class="spDetails" id="spDetails"${state.srcListOpen ? ' open' : ''}><summary>查看来源列表（${list.length} 条）</summary>
+      <div class="spListBar"><label class="spSelAll"><input type="checkbox" id="srcSelAll" ${selN && selN === list.length ? 'checked' : ''}> 全选</label>
+      ${selN ? `<button class="btn tiny danger" id="srcDelSel">删除选中（${selN}）</button>` : '<span class="muted" style="font-size:12px;">勾选可批量删除；每条右侧 × 可单独删除</span>'}
+      </div><div class="spList">${list.map(sourceItemHTML).join('')}</div></details>`;
   } else if (!state.collecting) {
     h += '<div class="spEmpty">还没有信息源。建议先「收集信息源」，AI 规划会依据真实 JD 与面经，质量更高。</div>';
   }
@@ -3266,8 +3394,9 @@ async function startDigest(id) {
   }
 }
 async function startCollect(id) {
-  if (typeof compOn === 'function' && !compOn('sources')) { toast('「信息源检索」组件已关闭：左侧栏 → 🧩 组件 可开启'); return; }
+  if (!goalCompOn(goalCtx(), 'sources')) { toast('「信息源检索」组件在本目标已关闭：目标页 🧩 可单独开启'); return; }
   if (state.collecting) return;
+  if (!(await ensureCollectSetup(id))) return;   // 搜集前确认搜什么+要不要电子书（取消则不搜集）
   state.collecting = true;
   state.collectStatus = '正在检索…';
   renderGoal();
@@ -3295,7 +3424,7 @@ async function startCollect(id) {
           const el = document.getElementById('spStatus');
           if (el) el.textContent = d.status;
         }
-        if (d.done) { done = true; state.sources = d.sources || []; toast('信息源收集完成：' + d.count + ' 条' + (d.blocked ? '（百度限流，本次用备用搜索，可稍后重新收集以获取更多）' : '')); }
+        if (d.done) { done = true; state.sources = d.sources || []; toast('信息源收集完成：' + d.count + ' 条' + (d.ebooks ? '；' + d.ebooks : '') + (d.blocked ? '（百度限流，本次用备用搜索，可稍后重新收集以获取更多）' : '')); }
         if (d.error) { done = true; toast(d.error); }
       }
     }
@@ -3312,6 +3441,146 @@ async function startCollect(id) {
       startPlanning(id);
     }
   }
+}
+/* 搜集前问电子书：没问过就让 AI 推荐书单，用户勾选+自填，然后再搜集 */
+/* 当前搜集方案一句话摘要（面板上可见，不用点开也知道会搜什么） */
+function collectPlanSummary() {
+  try {
+    const p = JSON.parse((state.goal && state.goal.collect_plan) || 'null');
+    const qs = (p && p.queries || []).filter(q => q && q.q && q.on !== false);
+    if (!qs.length) return '';
+    const kinds = [...new Set(qs.map(q => q.kind || '资料'))].slice(0, 5).join('/');
+    return `当前方案 ${qs.length} 条（${kinds}）`;
+  } catch (e) { return ''; }
+}
+async function ensureCollectSetup(id, editOnly) {
+  let plan = null, pref = null;
+  try {
+    const [a, b] = await Promise.all([
+      api('/api/goals/' + id + '/collect-plan').catch(() => ({})),
+      api('/api/goals/' + id + '/ebooks/pref').catch(() => ({}))
+    ]);
+    plan = a.plan || null; pref = b.pref || null;
+  } catch (e) { return true; }
+  if (!editOnly && plan && plan.asked && pref && pref.asked) return true;
+  toast('AI 正在按目标制定搜集方案…');
+  let queries = (plan && plan.queries) || [];
+  let books = [];
+  try {
+    const rs = await Promise.all([
+      (plan && plan.asked) ? {} : api('/api/goals/' + id + '/collect-plan/recommend', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(e => ({})),
+      (pref && pref.asked) ? {} : api('/api/goals/' + id + '/ebooks/recommend', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(e => ({}))
+    ]);
+    if (!(plan && plan.asked)) {
+      queries = rs[0].queries || [];
+      if (rs[0].error && !queries.length) toast('搜集方案推荐失败：' + rs[0].error + '（可用默认模板或手动填写）');
+      if (!queries.length) queries = [];
+    }
+    if (!(pref && pref.asked)) {
+      books = rs[1].books || [];
+      if (rs[1].error && !books.length) toast('书单推荐失败：' + rs[1].error + '（可手动填写）');
+    }
+  } catch (e) { toast('推荐失败，可手动填写：' + e.message); }
+  return showCollectSetupDialog(id, { queries, books, pref, editOnly: !!editOnly });
+}
+function showCollectSetupDialog(gid, opts) {
+  const { queries, books, pref, editOnly } = opts;
+  const prefAsked = !!(pref && pref.asked);
+  const savedWant = (pref && pref.want) || 'auto';
+  return new Promise(resolve => {
+    document.querySelectorAll('#collectSetupDlg').forEach(x => x.remove());
+    const m = document.createElement('div');
+    m.id = 'collectSetupDlg';
+    m.className = 'bigDialog';
+    m.innerHTML = `<div class="tdHead"><span>🔍</span><div class="bdTitle"><div>搜集设置：这次搜什么${prefAsked ? '' : '、要不要电子书'}？</div><div class="bdSub">方案存到本目标上，重复搜集沿用，可随时回来改</div></div><button class="btn tiny" id="csX">×</button></div>
+    <div class="tdBody">
+      <div class="csSec">
+        <div class="csSecHead"><span class="csSecT">📡 查什么</span><span class="csSecD">AI 按目标推荐，可取消勾选、直接改写、下方自加</span><div class="spacer"></div>
+          <button class="btn tiny" id="csAll">全选</button><button class="btn tiny" id="csNone">全不选</button></div>
+        <div class="csQList" id="csQList"></div>
+        <textarea id="csCustom" rows="2" placeholder="自己加搜集方向（每行一条）：例如&#10;央行货币政策解读"></textarea>
+      </div>
+      <div class="csSec">
+        <div class="csSecHead"><span class="csSecT">📚 电子书</span><span class="csSecD">公版老经典自动下载入库，有版权书进待找书单</span></div>
+        <div class="ebModes">
+          <label class="ebMode"><input type="radio" name="ebWant" value="auto" hidden ${savedWant !== 'list' && savedWant !== 'no' ? 'checked' : ''}><span class="ebModeIn"><b>⬇ 自动下载</b><span>公版书入库，找不到的记待找书单</span></span></label>
+          <label class="ebMode"><input type="radio" name="ebWant" value="list" hidden ${savedWant === 'list' ? 'checked' : ''}><span class="ebModeIn"><b>📋 只要书单</b><span>我自己找书导入</span></span></label>
+          <label class="ebMode"><input type="radio" name="ebWant" value="no" hidden ${savedWant === 'no' ? 'checked' : ''}><span class="ebModeIn"><b>🚫 不需要</b><span>这次不搞电子书</span></span></label>
+        </div>
+        <div class="ebBooks" id="ebBooks"></div>
+        <textarea id="ebCustom" rows="2" placeholder="自己加书（每行一本，可写《书名》作者）：例如&#10;曼昆《经济学原理》"></textarea>
+      </div>
+    </div>
+    <div class="csFoot">
+      <button class="btn primary" id="csOk">${editOnly ? '保存方案' : '保存并开始搜集'}</button>
+      ${editOnly ? '' : '<button class="btn" id="csSkip">跳过，直接搜集</button>'}
+      <button class="btn" id="csCancel">取消</button>
+    </div>`;
+    const qList = m.querySelector('#csQList');
+    const paintQueries = qs => {
+      qList.innerHTML = qs.length ? qs.map((q, i) => `<div class="csQ">
+          <input type="checkbox" data-cpq="${i}" ${q.on !== false && q.q ? 'checked' : ''}>
+          <span class="chip">${esc(q.kind || '资料')}</span>
+          <input class="cpQText" data-cpqtext="${i}" value="${esc(q.q || '')}" maxlength="120" placeholder="写一条完整可搜的问题/方向"></div>`).join('')
+        : `<div class="csWarn">这次没推荐出来（AI 开小差了），可以点 <button class="btn tiny" id="csRetry">重新推荐</button>，或直接在下面写搜集方向。</div>`;
+      const rt = m.querySelector('#csRetry');
+      if (rt) rt.addEventListener('click', async () => {
+        rt.disabled = true; rt.textContent = '推荐中…';
+        try {
+          const rr = await api('/api/goals/' + gid + '/collect-plan/recommend', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+          if (rr.queries && rr.queries.length) { queries = rr.queries; paintQueries(queries); }
+          else { rt.disabled = false; rt.textContent = '重新推荐'; toast((rr && rr.error) || '还是没推荐出来，手动写两条也行'); }
+        } catch (e) { rt.disabled = false; rt.textContent = '重新推荐'; toast(e.message); }
+      });
+    };
+    let liveQueries = queries && queries.length ? queries : [{ kind: '资料', q: '', days: 365, on: false }, { kind: '资料', q: '', days: 365, on: false }];
+    paintQueries(liveQueries);
+    const ebBox = m.querySelector('#ebBooks');
+    ebBox.innerHTML = books.length ? books.map((b, i) => `<label class="ebBook"><input type="checkbox" data-ebbook="${i}" checked>
+        <span class="ebCover">📖</span>
+        <span class="ebInfo"><b>《${esc(b.title)}》${b.author ? `<span class="muted">　${esc(b.author)}</span>` : ''}</b>
+        ${b.pitch ? `<span class="ebPitch">${esc(b.pitch)}</span>` : ''}
+        <span class="ebWhere">${b.public_domain ? '<span class="chip ok">公版可直下</span>' : ''}${b.where ? `<span class="muted">去哪找：${esc(b.where)}</span>` : ''}</span></span></label>`).join('')
+      : '<div class="muted">这次没推荐出来，直接在下面写书名也行。</div>';
+    document.body.appendChild(m);
+    const close = v => { m.remove(); resolve(v); };
+    m.querySelector('#csX').addEventListener('click', () => close(editOnly ? true : false));
+    m.querySelector('#csCancel').addEventListener('click', () => close(editOnly ? true : false));
+    const all = m.querySelector('#csAll'), none = m.querySelector('#csNone');
+    if (all) all.addEventListener('click', () => m.querySelectorAll('[data-cpq]').forEach(x => { x.checked = true; }));
+    if (none) none.addEventListener('click', () => m.querySelectorAll('[data-cpq]').forEach(x => { x.checked = false; }));
+    const skip = m.querySelector('#csSkip');
+    if (skip) skip.addEventListener('click', async () => {
+      try {
+        await api('/api/goals/' + gid + '/collect-plan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queries: liveQueries }) });
+        await api('/api/goals/' + gid + '/ebooks/pref', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ want: 'no', books: [] }) });
+      } catch (e) {}
+      close(true);
+    });
+    m.querySelector('#csOk').addEventListener('click', async () => {
+      const qs = Array.from(m.querySelectorAll('[data-cpq]')).map(x => {
+        const i = Number(x.getAttribute('data-cpq'));
+        const t = m.querySelector(`[data-cpqtext="${i}"]`);
+        return { kind: (liveQueries[i] && liveQueries[i].kind) || '资料', q: (t && t.value.trim()) || '', days: (liveQueries[i] && liveQueries[i].days) || 365, on: x.checked };
+      }).filter(x => x.q);
+      const custom = (m.querySelector('#csCustom').value || '').split(/[\n,，、；;]+/).map(x => x.trim()).filter(Boolean)
+        .map(q => ({ kind: '资料', q: q.slice(0, 120), days: 365, on: true }));
+      const wantEl = m.querySelector('input[name=ebWant]:checked');
+      const want = wantEl ? wantEl.value : null;
+      const picked = want == null ? null : Array.from(m.querySelectorAll('[data-ebbook]:checked')).map(x => books[Number(x.getAttribute('data-ebbook'))]).filter(Boolean);
+      const ecustom = want == null ? null : (m.querySelector('#ebCustom').value || '').split(/[\n,，、；;]+/).map(x => x.trim()).filter(Boolean)
+        .map(t => { const mm = t.match(/^(.*?)[《〈](.+?)[》〉]\s*$/); return mm ? { title: mm[2].trim(), author: mm[1].trim() } : { title: t }; });
+      const btn = m.querySelector('#csOk');
+      btn.disabled = true; btn.textContent = '保存中…';
+      try {
+        await api('/api/goals/' + gid + '/collect-plan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queries: qs.concat(custom) }) });
+        if (want != null) {
+          await api('/api/goals/' + gid + '/ebooks/pref', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ want, books: picked.concat(ecustom) }) });
+        }
+        close(true);
+      } catch (e) { toast(e.message); btn.disabled = false; btn.textContent = editOnly ? '保存方案' : '保存并开始搜集'; }
+    });
+  });
 }
 function nextCardHTML(g) {
   if (!g.tasks_total) return '';
@@ -3383,23 +3652,28 @@ function listTaskHTML(t) {
 }
 function listViewHTML(stages) {
   if (!stages.length) return '<div class="empty">没有匹配的任务</div>';
+  const gid = (state.goal && state.goal.id) || 0;
   let h = '<div class="taskListView">';
   stages.forEach((st, si) => {
     const p = subtreeProgress(st);
+    const sKey = 'tl-s' + st.id, sClosed = foldClosed(gid, sKey, true);
     h += `<div class="tlStage">
-      <div class="tlStageHead">
+      <div class="tlStageHead" data-node-id="${st.id}" data-detail="${st.id}" title="点击查看详情">
+        ${foldBtn(sKey, sClosed)}
         <span class="stageIdx">${String(si + 1).padStart(2, '0')}</span>
         <span class="tlStageTitle">${esc(st.title)}</span>
         <span class="mtProg">${p.done}/${p.total}</span>
-      </div>`;
+      </div>
+      <div data-foldbody="${sKey}"${sClosed ? ' hidden' : ''}>`;
     for (const g of st.children) {
       const gp = subtreeProgress(g);
+      const gKey = 'tl-g' + g.id, gClosed = foldClosed(gid, gKey, true);
       h += `<div class="tlSub">
-        <div class="tlSubHead"><span class="tlSubTitle">${esc(g.title)}</span><span class="mtProg">${gp.done}/${gp.total}</span></div>
-        ${g.children.map(listTaskHTML).join('')}
+        <div class="tlSubHead" data-node-id="${g.id}" data-detail="${g.id}" title="点击查看详情">${foldBtn(gKey, gClosed)}<span class="tlSubTitle">${esc(g.title)}</span><span class="mtProg">${gp.done}/${gp.total}</span></div>
+        <div data-foldbody="${gKey}"${gClosed ? ' hidden' : ''}>${g.children.map(listTaskHTML).join('')}</div>
       </div>`;
     }
-    h += '</div>';
+    h += '</div></div>';
   });
   return h + '</div>';
 }
@@ -3430,7 +3704,7 @@ document.addEventListener('click', e => {
 async function renderContinueCard(gid) {
   const box = document.getElementById('continueCard');
   if (!box) return;
-  if (typeof compOn === 'function' && !compOn('tutorial')) { box.remove(); return; }
+  if (!goalCompOn(goalCtx(), 'tutorial')) { box.remove(); return; }
   let d = null;
   try { d = await api('/api/goals/' + gid + '/last-tutorial'); } catch (e) { box.remove(); return; }
   const t = d && d.tutorial;
@@ -3465,11 +3739,11 @@ function renderGoal() {
       <div class="spacer"></div>
       <button class="btn" id="editGoalBtn">编辑目标</button>
       <button class="btn" id="shareGoalBtn" title="把这份规划与资料库打包分享给别人（对方可一键导入）。默认隐去学校/公司/姓名/联系方式等隐私">🔗 分享</button>
-      ${compOn('workspace') ? '<button class="btn" id="wsPackBtn" title="把整个目标的代码目录一键打包成 zip 下载（一个节点对应一个文件夹，子目录嵌在父目录下）">📦 打包代码</button>' : ''}
-      ${compOn('chat') ? '<button class="btn" id="chatBtn">💬 AI 助手</button>' : ''}
+      ${goalCompOn(g, 'workspace') ? '<button class="btn" id="wsPackBtn" title="把整个目标的代码目录一键打包成 zip 下载（一个节点对应一个文件夹，子目录嵌在父目录下）">📦 打包代码</button>' : ''}
+      ${goalCompOn(g, 'chat') ? '<button class="btn" id="chatBtn">💬 AI 助手</button>' : ''}
       ${pluginButtonsHTML(g)}
       ${goalPluginsHTML(g)}
-      ${g.nodes.length && compOn('versions') ? '<button class="btn" id="verBtn">📜 版本对比</button>' : ''}
+      ${g.nodes.length && goalCompOn(g, 'versions') ? '<button class="btn" id="verBtn">📜 版本对比</button>' : ''}
       <button class="btn primary" id="planBtn">${g.nodes.length ? '重新规划（AI 先澄清）' : '开始 AI 规划（AI 先澄清）'}</button>
       <button class="btn danger" id="delGoalBtn">删除</button>
     </div>
@@ -3490,11 +3764,10 @@ function renderGoal() {
     </div>
     <div id="continueCard"></div>`;
   html += setupCardHTML();
-  html += disabledComponentsHTML();
   html += reportCardHTML();
-  if (compOn('tutorial')) html += tutorialCardHTML();
-  if (compOn('constraints')) html += constraintsCardHTML(g);
-  if (compOn('sources')) html += srcPanelHTML();
+  if (goalCompOn(g, 'tutorial')) html += tutorialCardHTML();
+  if (goalCompOn(g, 'constraints')) html += constraintsCardHTML(g);
+  if (goalCompOn(g, 'sources')) html += srcPanelHTML();
   html += expandPanelHTML();
   html += tutProgressHTML();
   html += planPanelHTML();
@@ -3524,9 +3797,12 @@ function renderGoal() {
   if (chatBtn) chatBtn.addEventListener('click', () => aiToggle(true));
   const verBtn = document.getElementById('verBtn');
   if (verBtn) verBtn.addEventListener('click', () => showVersionsPanel(g.id));
-  if (window.Workspace && compOn('workspace')) { try { window.Workspace.bindGoal(g); } catch (e) {} }
+  if (window.Workspace && goalCompOn(g, 'workspace')) { try { window.Workspace.bindGoal(g); } catch (e) {} }
   const planBtnEl = document.getElementById('planBtn');
-  planBtnEl.addEventListener('click', () => startClarify(g.id));
+  planBtnEl.addEventListener('click', () => {
+    if ((g.nodes || []).length && !confirm('重新规划会清空现有路径（含任务进度）后从头生成。\n\n只想微调阶段/小目标？用下面的「调整规划骨架」，不用推倒重来。\n\n确定要全部推倒重来吗？')) return;
+    startClarify(g.id);
+  });
   const resumeDraftBtn = document.getElementById('planResumeDraftBtn');
   if (resumeDraftBtn) resumeDraftBtn.addEventListener('click', () => startPlanResume(g.id));
   const emptyPlan = document.getElementById('emptyPlanBtn');
@@ -3575,6 +3851,10 @@ function renderGoal() {
   });
   const cb = document.getElementById('collectBtn');
   if (cb) cb.addEventListener('click', () => startCollect(g.id));
+  const cpb = document.getElementById('collectPlanBtn');
+  if (cpb) cpb.addEventListener('click', async () => {
+    if (await ensureCollectSetup(g.id, true)) toast('搜集方案已保存，下次搜集生效');
+  });
   const cs = document.getElementById('collectStop');
   if (cs) cs.addEventListener('click', () => { if (state.collectAbort) state.collectAbort.abort(); });
   const db2 = document.getElementById('digestBtn');
@@ -3620,10 +3900,85 @@ function renderGoal() {
     try {
       await api('/api/sources/' + sid, { method: 'DELETE' });
       state.sources = state.sources.filter(s => String(s.id) !== String(sid));
+      state.srcListOpen = true;
       renderGoal();
       toast('已删除该来源');
     } catch (err) { toast(err.message); }
   }));
+  /* 执行页清单的行点击由共用的 bindTreeEvents 处理（含按钮守卫），这里不再重复绑定 */
+  const gid0 = (state.goal && state.goal.id) || 0;
+  const srcSelSet = () => {
+    if (!state.srcSel || state.srcSel.gid !== gid0) state.srcSel = { gid: gid0, ids: new Set() };
+    return state.srcSel.ids;
+  };
+  const refreshSrcBar = () => {
+    const ids = srcSelSet();
+    const bar = document.querySelector('.spListBar');
+    if (bar) {
+      const n = (state.sources || []).filter(s => ids.has(String(s.id))).length;
+      const all = document.getElementById('srcSelAll');
+      if (all) { all.checked = n > 0 && n === (state.sources || []).length; }
+      let del = document.getElementById('srcDelSel');
+      if (n > 0 && !del) {
+        bar.insertAdjacentHTML('beforeend', `<button class="btn tiny danger" id="srcDelSel">删除选中（${n}）</button>`);
+        del = document.getElementById('srcDelSel');
+        if (del) del.addEventListener('click', delSelected);
+      } else if (n > 0 && del) {
+        del.textContent = `删除选中（${n}）`;
+      } else if (n === 0 && del) {
+        del.remove();
+      }
+    }
+  };
+  const delSelected = async () => {
+    const ids = Array.from(srcSelSet());
+    if (!ids.length) return;
+    if (!confirm(`删除选中的 ${ids.length} 条信息源？不可恢复。`)) return;
+    try {
+      const r = await api('/api/goals/' + gid0 + '/sources/batch-delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) });
+      state.sources = r.sources || [];
+      state.srcSel = { gid: gid0, ids: new Set() };
+      state.srcListOpen = true;
+      renderGoal();
+      toast(`已删除 ${r.deleted} 条`);
+    } catch (err) { toast(err.message); }
+  };
+  app.querySelectorAll('.siCheck').forEach(box => box.addEventListener('change', () => {
+    const ids = srcSelSet();
+    const sid = String(box.getAttribute('data-src-check'));
+    if (box.checked) ids.add(sid); else ids.delete(sid);
+    box.closest('.srcItem').classList.toggle('selected', box.checked);
+    refreshSrcBar();
+  }));
+  const selAll = document.getElementById('srcSelAll');
+  if (selAll) selAll.addEventListener('change', () => {
+    const ids = srcSelSet();
+    app.querySelectorAll('.siCheck').forEach(box => {
+      box.checked = selAll.checked;
+      const sid = String(box.getAttribute('data-src-check'));
+      if (selAll.checked) ids.add(sid); else ids.delete(sid);
+      box.closest('.srcItem').classList.toggle('selected', selAll.checked);
+    });
+    refreshSrcBar();
+  });
+  const det = document.getElementById('spDetails');
+  if (det) det.addEventListener('toggle', () => { state.srcListOpen = det.open; });
+  const clearBtn = document.getElementById('srcClearBtn');
+  if (clearBtn) clearBtn.addEventListener('click', async () => {
+    const nS = (state.sources || []).length;
+    if (!nS) return;
+    if (!confirm(`确定清空本目标全部 ${nS} 条信息源？\n\n已导入的图片 / 电子书原件也会一并删除，不可恢复。\n（如需恢复，可从 data/backups 里找自动备份）`)) return;
+    clearBtn.disabled = true;
+    try {
+      const r = await api('/api/goals/' + gid0 + '/sources/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      state.sources = [];
+      state.srcSel = { gid: gid0, ids: new Set() };
+      try { const jr = await api('/api/goals/' + gid0 + '/jd-images'); state.jdImages = jr.images || []; } catch (e) {}
+      try { await loadGoal(gid0); } catch (e) {}
+      renderGoal();
+      toast(`已清空：信息源 ${r.deletedSources} 条${r.deletedFiles ? '、原件 ' + r.deletedFiles + ' 个' : ''}`);
+    } catch (err) { toast(err.message); clearBtn.disabled = false; }
+  });
   document.getElementById('delGoalBtn').addEventListener('click', async () => {
     if (!confirm('删除这个目标和它的全部路径？')) return;
     try { await api('/api/goals/' + g.id, { method: 'DELETE' }); toast('已删除'); go('#/'); } catch (e) { toast(e.message); }
@@ -3669,6 +4024,8 @@ function bindTreeEvents(rerender) {
     const open = branch.style.display === 'none';
     branch.style.display = open ? 'flex' : 'none';
     el.textContent = open ? '▾' : '▸';
+    const nd = item ? item.querySelector(':scope > .mtnode') : null;
+    if (nd) nd.classList.toggle('open', open);
     state.expanded[key] = open;
     drawMapLines();
   }));
@@ -3690,7 +4047,8 @@ function bindTreeEvents(rerender) {
     state.expanded[key] = open;
     drawMapLines();
   }));
-  app.querySelectorAll('[data-detail]').forEach(el => el.addEventListener('click', () => {
+  app.querySelectorAll('[data-detail]').forEach(el => el.addEventListener('click', e => {
+    if (e.target.closest('button') || e.target.closest('[data-cycle]') || e.target.closest('.nodeOps')) return;
     showNodePanel(Number(el.getAttribute('data-detail')), rerender);
   }));
   app.querySelectorAll('[data-cycle]').forEach(btn => btn.addEventListener('click', async e => {
@@ -4094,6 +4452,20 @@ function compOn(id) {
   if (!state.components) return true;
   return state.components[id] !== false;
 }
+/* 当前语境目标：教程页用教程所属目标（state.tutGoal），其它用 state.goal */
+function goalCtx() {
+  try {
+    if (parseRoute().view === 'tutorial' && state.tutGoal && state.tutGoal.id) return state.tutGoal;
+  } catch (e) {}
+  return state.goal;
+}
+/* 按目标的组件开关（目标之间彻底隔离）：目标显式值 > 全局开关 > 默认值 */
+function goalCompOn(goal, id) {
+  let obj = null;
+  try { obj = JSON.parse((goal && goal.plugins) || '{}'); } catch (e) {}
+  if (obj && obj[id] != null) return !!obj[id];
+  return compOn(id);
+}
 function applyComponentStyles(styles) {
   const want = new Set(styles || []);
   // 移除不再需要的
@@ -4239,10 +4611,25 @@ async function renderLibraryPage() {
 async function renderComponentsPage() {
   const scrollY = window.scrollY || 0;          // 记住滚动位置，重渲染后恢复
   app.innerHTML = '<p class="muted">加载组件…</p>';
-  const [r, catsRes] = await Promise.all([
+  const [r, catsRes, goalsRes] = await Promise.all([
     api('/api/components'),
-    api('/api/component-categories').catch(() => ({ categories: [], used: {}, map: {} }))
+    api('/api/component-categories').catch(() => ({ categories: [], used: {}, map: {} })),
+    api('/api/goals').catch(() => ({ goals: [] }))
   ]);
+  const scopeGoals = (goalsRes.goals || []).map(g => ({ id: g.id, title: g.title }));
+  if (!state.compScope) state.compScope = 'global';
+  const scope = state.compScope;
+  const scopeGid = String(scope).startsWith('goal:') ? Number(String(scope).slice(5)) : 0;
+  const scopeGoal = scopeGoals.find(g => g.id === scopeGid) || null;
+  if (scopeGid && !scopeGoal) state.compScope = 'global';
+  // 目标范围内的各组件开关（只读本目标、不写别处）
+  let scopeEnabled = null, scopeConfig = null;
+  if (scopeGoal) {
+    try {
+      const pr = await api('/api/goals/' + scopeGoal.id + '/plugins');
+      scopeEnabled = pr.enabled || {}; scopeConfig = pr.config || {};
+    } catch (e) { scopeEnabled = {}; scopeConfig = {}; }
+  }
   state.components = r.enabled || {};
   state.componentList = r.components || [];
   state.componentPins = r.pins || state.componentPins || [];
@@ -4276,7 +4663,7 @@ const card = (c) => `<div class="cmpCard ${c.scope === 'core' ? 'isCore' : ''}">
         ${c.scope === 'core' ? '<span class="chip gray">核心 · 不可关闭</span>' : ''}
         ${c.kind === 'theme' ? '<span class="chip gray">主题皮肤</span>' : ''}
         ${c.builtin ? '' : '<span class="chip">第三方组件</span>'}
-        ${c.goalToggle && c.scope !== 'core' ? '<span class="chip gray" title="可在新建目标时勾选、也可在目标页开关">按目标启用</span>' : ''}
+        ${c.goalToggle && c.scope !== 'core' ? '<span class="chip gray" title="可在新建目标时勾选；各目标也可单独开关、互不干扰">按目标启用</span>' : ''}
         ${c.version ? `<span class="cmpVer">v${esc(c.version)}</span>` : ''}
         ${c.author ? `<span class="cmpAuthor">by ${esc(c.author)}</span>` : ''}
       </div>
@@ -4302,7 +4689,7 @@ const modHint = (k, list) => {
   if (k === '核心组件') hints.push('应用的基础能力，无法关闭。');
   if (list.some(c => c.kind === 'theme')) hints.push('主题组件通过覆盖设计变量换肤（同时只生效一个）；开启即立即应用，关掉则回到默认外观。');
   if (list.some(c => !c.builtin)) hints.push('独立文件组件，可以导出分享给别人，也可以卸载。带「按目标启用」的组件可在新建目标时勾选。');
-  if (!hints.length) hints.push('默认全部开启；不需要的功能可以关掉，界面入口与接口会一并隐藏。');
+  if (!hints.length) hints.push('全局开关 = 新目标的默认值；已在目标里单独设置过的，以目标自己的设置为准、互不干扰。');
   return `<p class="hint" style="margin:0 0 8px;">${hints.join('')}</p>`;
 };
   let html = `<div class="page">
@@ -4314,6 +4701,27 @@ const modHint = (k, list) => {
       <button class="btn small" id="cmpReload">↻ 重新加载</button>
       <label class="btn small primary">⬆ 导入组件（可多选）<input type="file" id="cmpImport" accept=".json,application/json" multiple hidden></label>
     </div>
+    <div class="sec">
+      <div class="secTitle">管理范围</div>
+      <div class="ppCats" id="cmpScopeBar">
+        <button type="button" class="ppCat ${scope === 'global' ? 'active' : ''}" data-scope="global">🌍 全局默认</button>
+        ${scopeGoals.map(g => `<button type="button" class="ppCat ${scope === 'goal:' + g.id ? 'active' : ''}" data-scope="goal:${g.id}">🎯 ${esc(g.title)}</button>`).join('')}
+      </div>
+      <p class="hint" style="margin:8px 0 0;">${scopeGoal
+        ? `正在管理「${esc(scopeGoal.title)}」：这里的开关只改这个目标，别的目标不受影响。`
+        : '全局开关 = 新目标的默认值，也管应用级组件（番茄钟浮窗、笔记面板等）；已经单独设置过的目标不受影响。'}</p>
+    </div>
+    ${scopeGoal ? `<div class="sec"><div class="secTitle">🎯 ${esc(scopeGoal.title)} 的组件（只改本目标）</div>
+      <div class="cmpGrid">${goalManageableEntries({ id: scopeGoal.id, plugins: JSON.stringify(scopeConfig || {}) }).map(e => {
+        const on = SiErXing.pluginEnabled({ id: scopeGoal.id, plugins: JSON.stringify(scopeConfig || {}) }, e.id);
+        return `<div class="cmpCard"><div class="cmpCardTop">
+          <span class="cmpIcon">${e.icon || '🧩'}</span>
+          <div class="cmpName">${esc(e.name)}${e.desc ? `<div class="cmpDesc" style="margin-top:4px;">${esc(e.desc)}</div>` : ''}</div>
+          <div class="cmpOps"><label class="cmpSwitch" title="只改本目标">
+            <input type="checkbox" data-gcmp="${esc(e.id)}" ${on ? 'checked' : ''}><span class="cmpSlider"></span>
+          </label></div>
+        </div></div>`; }).join('')}</div>
+    </div>` : ''}
     <div class="sec">
       <div class="secTitle">分类管理</div>
       <p class="hint" style="margin:0 0 10px;">分类用于整理组件，也可以在「新建目标」时<b>按分类批量选择</b>组件。可以新建/重命名/删除分类，并把任意组件移动到别的分类。</p>
@@ -4336,6 +4744,25 @@ const modHint = (k, list) => {
     </div>
   </div>`;
   app.innerHTML = html;
+
+  /* ---- 管理范围切换 ---- */
+  app.querySelectorAll('#cmpScopeBar [data-scope]').forEach(b => b.addEventListener('click', async () => {
+    state.compScope = b.getAttribute('data-scope');
+    await renderComponentsPage();
+  }));
+  /* ---- 目标范围内的开关：只写本目标 ---- */
+  app.querySelectorAll('[data-gcmp]').forEach(inp => inp.addEventListener('change', async () => {
+    const pid = inp.getAttribute('data-gcmp');
+    const gid = scopeGoal ? scopeGoal.id : 0;
+    if (!gid) return;
+    try {
+      await api('/api/goals/' + gid + '/plugins', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ plugin_id: pid, enabled: inp.checked }) });
+      toast(inp.checked ? '已为本目标启用（别的不受影响）' : '已为本目标关闭（别的不受影响）');
+      if (state.goal && state.goal.id === gid) { try { await loadGoal(gid); } catch (e) {} }
+      await renderComponentsPage();
+      renderRail();
+    } catch (e) { toast(e.message); inp.checked = !inp.checked; }
+  }));
 
   /* ---- 分类管理 ---- */
   const catsInfo = state.componentCats || { categories: [], used: {} };
@@ -4990,16 +5417,6 @@ async function renderSettings() {
     e.target.value = '';
   });
 }
-function disabledComponentsHTML() {
-  if (!state.componentList || !state.components) return '';
-  const off = (state.componentList || []).filter(c => c.scope === 'base' && state.components[c.id] === false);
-  if (!off.length) return '';
-  return `<div class="offBar">
-    <span>⚠ 已关闭的组件：${off.map(c => c.icon + ' ' + esc(c.name)).join(' · ')}</span>
-    <div class="spacer"></div>
-    <a class="btn tiny" href="#/components">去开启</a>
-  </div>`;
-}
 function showImportDialog(parsed) {
   const cats = ((state.componentCats || {}).categories) || [];
   const installed = new Set(((state.componentList || []).filter(c => !c.builtin)).map(c => c.id));
@@ -5101,21 +5518,43 @@ function pluginButtonsHTML(goal) {
   if (!window.SiErXing) return '';
   return SiErXing.goalEntries(goal)
     .filter(e => e.header !== false)
-    .filter(e => compOn(e.id))
+    .filter(e => goalCompOn(goal, e.id))
     .map(e => `<button class="btn" data-plugin-go="${esc(e.hash(goal.id))}">${e.icon} ${esc(e.label)}</button>`).join('');
 }
-/* 目标页：按目标开关组件（之前只有接口没有入口） */
+/* 目标页：按目标开关组件（只改本目标，其它目标不受影响） */
 function goalPluginsHTML(g) {
   if (!window.SiErXing) return '';
-  const list = (SiErXing.serverPlugins() || []).filter(p => p.goalToggle);
-  if (!list.length) return '';
-  return `<button class="btn" id="goalPluginsBtn" title="为本目标开关扩展组件">🧩 组件</button>`;
+  return `<button class="btn" id="goalPluginsBtn" title="为本目标开关组件（只改本目标）">🧩 组件</button>`;
+}
+function goalManageableEntries(pg) {
+  const out = [];
+  const seen = new Set();
+  // 有独立入口的组件（目标页按钮 / 左栏）
+  for (const e of (SiErXing.goalEntries(pg) || [])) {
+    if (seen.has(e.id)) continue;
+    seen.add(e.id);
+    out.push({ id: e.id, name: e.label || e.id, icon: e.icon || '🧩' });
+  }
+  // 基础内置组件（问卷/约束/检索/版本/助手/教程：目标页对应卡片与按钮）
+  for (const c of (state.componentList || [])) {
+    if (c.scope !== 'base' || seen.has(c.id)) continue;
+    seen.add(c.id);
+    out.push({ id: c.id, name: c.name || c.id, icon: c.icon || '🧩' });
+  }
+  const orderOf = id => {
+    const c = (state.componentList || []).find(x => x.id === id);
+    return c && c.order != null ? c.order : 100;
+  };
+  out.sort((a, b) => orderOf(a.id) - orderOf(b.id));
+  const metaOf = id => ((SiErXing.serverPlugins() || []).find(p => p.id === id) || {});
+  return out.map(e => ({ ...e, desc: metaOf(e.id).desc || '' }));
 }
 async function showGoalPluginsMenu(gid, anchor) {
   document.querySelectorAll('#goalPluginMenu').forEach(x => x.remove());
-  let enabled = {};
-  try { const r = await api('/api/goals/' + gid + '/plugins'); enabled = r.enabled || {}; } catch (e) { toast(e.message); return; }
-  const list = (SiErXing.serverPlugins() || []).filter(p => p.goalToggle);
+  let pg = { id: gid, plugins: '{}' };
+  try { const r = await api('/api/goals/' + gid + '/plugins'); pg = { id: gid, plugins: JSON.stringify((r && r.config) || {}) }; }
+  catch (e) { toast(e.message); return; }
+  const list = goalManageableEntries(pg);
   const m = document.createElement('div');
   m.id = 'goalPluginMenu';
   m.className = 'ctxMenu';
@@ -5123,13 +5562,13 @@ async function showGoalPluginsMenu(gid, anchor) {
   m.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 270)) + 'px';
   m.style.top = (r.bottom + 6) + 'px';
   m.style.width = '260px';
-  m.innerHTML = `<div class="ctxTitle">本目标的扩展组件</div>` + list.map(p => {
-    const off = !compOn(p.id);
+  m.innerHTML = `<div class="ctxTitle">本目标的组件（只改本目标）</div>` + list.map(p => {
+    const on = SiErXing.pluginEnabled(pg, p.id);
     return `
-    <label class="gpRow${off ? ' off' : ''}">
+    <label class="gpRow${on ? '' : ' off'}">
       <span class="rciIcon">${p.icon || '🧩'}</span>
-      <span class="gpName">${esc(p.name || p.id)}${off ? '<span class="gpDesc">全局已关闭，去组件页开启</span>' : (p.desc ? `<span class="gpDesc">${esc(p.desc)}</span>` : '')}</span>
-      <span class="cmpSwitch"><input type="checkbox" data-gp="${esc(p.id)}" ${enabled[p.id] ? 'checked' : ''} ${off ? 'disabled' : ''}><span class="cmpSlider"></span></span>
+      <span class="gpName">${esc(p.name || p.id)}${p.desc ? `<span class="gpDesc">${esc(p.desc)}</span>` : ''}</span>
+      <span class="cmpSwitch"><input type="checkbox" data-gp="${esc(p.id)}" ${on ? 'checked' : ''}><span class="cmpSlider"></span></span>
     </label>`; }).join('');
   document.body.appendChild(m);
   m.querySelectorAll('[data-gp]').forEach(inp => inp.addEventListener('change', async () => {
@@ -5283,23 +5722,37 @@ function railCompItemHTML(e, pinned, active) {
       ${pinned ? '<span class="rciPin">⭐</span>' : ''}
     </a>`;
 }
+/* 左栏组件模块的目标语境：只在有明确目标的页面显示该目标的组件。
+   主页/设置/组件管理等无目标页面不猜（避免沿用上一个目标导致串台）；
+   教程页用教程所属目标（state.tutGoal）。 */
+function railGoal() {
+  const r = parseRoute();
+  if (r.view === 'tutorial') return (state.tutGoal && state.tutGoal.id) ? state.tutGoal : null;
+  if (r.view === 'goal' || r.view === 'map' || r.view === 'plugin') {
+    const m = (location.hash || '').match(/^#\/g\/(\d+)/);
+    const g = state.goal;
+    if (g && m && Number(m[1]) === g.id) return g;
+    return null;
+  }
+  return null;
+}
 function railCompsHTML() {
   const r = parseRoute();
-  const g = state.goal;
+  const g = railGoal();
   // 左栏只放「扩展组件」：内置基础功能组件（问卷/约束/图片资料…）的入口在目标页里，不在这里重复
   const metaOf = id => (SiErXing.serverPlugins() || []).find(x => x.id === id) || {};
   let entries = ((window.SiErXing && g) ? SiErXing.goalEntries(g) : [])
     .filter(e => { const m = metaOf(e.id); return !(m.builtin && m.scope === 'base'); });
-  // 与组件管理同步：全局开关关闭的组件不在侧边栏显示
-  entries = entries.filter(e => compOn(e.id));
+  // 按目标开关过滤：只显示本目标开启的（目标之间不串）
+  entries = entries.filter(e => goalCompOn(g, e.id));
   // 教程书签没有独立页面（住在每篇教程里）：作为普通条目进入分组，和其他组件一样显示图标+全名
-  const bmOn = compOn('tutbookmark') && !!window.TutBookmark;
+  const bmOn = !!g && goalCompOn(g, 'tutbookmark') && !!window.TutBookmark;
   if (bmOn) {
     const bmMeta = metaOf('tutbookmark');
     entries.unshift({ id: 'tutbookmark', label: '教程书签', icon: bmMeta.icon || '🔖', category: bmMeta.category || '其它', bm: true });
   }
   if (!entries.length) {
-    return `<button class="railItem railCompToggle" id="railCompToggle" title="本目标还没有扩展组件">
+    return `<button class="railItem railCompToggle" id="railCompToggle" title="${g ? '本目标还没有扩展组件' : '进入某个目标后，这里显示该目标的组件'}">
         <span class="railIcon">📦</span><span class="railLabel">组件</span>
       </button>`;
   }
@@ -5389,7 +5842,7 @@ function bindRailComps() {
     e.preventDefault();
     const id = el.getAttribute('data-rail-comp');
     const pinned = (state.componentPins || []).includes(id);
-    const label = (SiErXing.goalEntries(state.goal).find(x => x.id === id) || {}).label || id;
+    const label = (SiErXing.goalEntries(railGoal()).find(x => x.id === id) || {}).label || id;
     document.querySelectorAll('.ctxMenu').forEach(x => x.remove());
     const m = document.createElement('div');
     m.id = 'ctxMenu';

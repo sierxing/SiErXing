@@ -1,11 +1,12 @@
 /**
- * 思而行 · 插件：图片资料（JD / 大纲 / 教材截图 → 资料源）
+ * 思而行 · 插件：信息源导入（图片 / 电子书 → 资料源）
  * ------------------------------------------------------------------
- * 能力：粘贴/拖拽/选择图片 → 视觉模型提炼结构化信息 → 自动写入资料源，
+ * 能力：截图粘贴 / 批量多选 / 整个文件夹 → 图片走视觉模型提炼、
+ *       电子书本地解析后走文本模型提炼 → 自动写入资料源，
  *       优先参与规划决策（资料源按 kind='JD' 排序靠前）。
- * 说明：演示了「视觉模型 + SSE 进度 + 资料源写入」的插件写法。
  */
 'use strict';
+const { parseEbook, MAX_FILE } = require('./lib/ebook-parse');
 let db, nowISO, safeParse, sendJSON, readBody, getSetting, setSetting, backup, log;
 let fs, path, os, spawn, APP_DIR, DATA_DIR, UPLOAD_DIR, PUBLIC_DIR;
 let getGoal, sourcesOf, aiText, aiTextFiles, currentModel, currentVisionModel, tasks;
@@ -32,12 +33,12 @@ CREATE TABLE IF NOT EXISTS jd_images (
 
 module.exports = {
   id: 'jdfile',
-  name: '图片资料',
+  name: '信息源导入',
   category: '基础功能组件',
   scope: 'base',        // 与问卷/约束等一样，属于内置基础功能组件（不是扩展组件）
   builtin: true,        // 随应用分发：不显示"第三方组件"标签，也不提供卸载
-  icon: '📷',
-  desc: '粘贴 JD / 大纲 / 教材截图，视觉模型提炼成结构化资料源，辅助规划决策',
+  icon: '📥',
+  desc: '向信息源导入资料：截图粘贴/批量多选/整个文件夹（图片走视觉模型识别，txt/pdf/epub/mobi 本地解析后提炼），自动入库并优先参与规划',
   order: 30,
   goalToggle: true,
   defaultEnabled: true,
@@ -79,8 +80,14 @@ module.exports = {
       const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(row.goal_id);
       if (!g) return sendJSON(res, 404, { error: '目标不存在' });
       const fpath = path.join(UPLOAD_DIR, row.file);
-      if (!row.file || !fs.existsSync(fpath)) return sendJSON(res, 404, { error: '原图已不在，请重新粘贴上传' });
+      if (!row.file || !fs.existsSync(fpath)) return sendJSON(res, 404, { error: '原文件已不在，请重新上传' });
       const reuseSourceId = row.source_id || 0;   // 重试后原地更新同一条资料源，避免重复入库
+      // 电子书走文本重解析 + 文本模型重提炼；图片走视觉模型
+      if (isEbookRow(row)) {
+        try { db.prepare('DELETE FROM jd_images WHERE id = ?').run(row.id); } catch (e) {}
+        const buf = fs.readFileSync(fpath);
+        return streamEbook(req, res, g, buf, row.file, '', reuseSourceId);
+      }
       try { db.prepare('DELETE FROM jd_images WHERE id = ?').run(row.id); } catch (e) {}
       const buf = fs.readFileSync(fpath);
       const dataUrl = 'data:' + (row.mime || 'image/png') + ';base64,' + buf.toString('base64');
@@ -100,6 +107,29 @@ module.exports = {
           const dataUrl = String(body.dataUrl || '');
           if (!dataUrl) return sendJSON(res, 400, { error: '没有收到图片' });
           return streamJDImage(req, res, g, dataUrl, String(body.note || '').trim().slice(0, 300));
+        }
+    }
+  },
+  {
+    // 电子书导入：txt / md / pdf / epub / mobi（本地解析 → 文本模型提炼 → 资料源）
+    method: 'POST',
+    pattern: /^\/api\/goals\/(\d+)\/ebook$/,
+    handler: async (req, res, u, ctx) => {
+      const p = u.pathname, method = req.method;
+        const ebAddMatch = p.match(/^\/api\/goals\/(\d+)\/ebook$/);
+        if (ebAddMatch && method === 'POST') {
+          const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(Number(ebAddMatch[1]));
+          if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+          const body = await readBody(req);
+          const filename = String(body.filename || '').slice(0, 120);
+          const dataUrl = String(body.dataUrl || body.dataBase64 || '');
+          if (!dataUrl) return sendJSON(res, 400, { error: '没有收到文件' });
+          const b64 = dataUrl.includes('base64,') ? dataUrl.slice(dataUrl.indexOf('base64,') + 7) : dataUrl;
+          let buf = null;
+          try { buf = Buffer.from(b64, 'base64'); } catch (e) { buf = null; }
+          if (!buf || !buf.length) return sendJSON(res, 400, { error: '文件内容为空' });
+          if (buf.length > MAX_FILE) return sendJSON(res, 400, { error: '文件过大（请控制在 12MB 以内；大部头可拆分章节导入）' });
+          return streamEbook(req, res, g, buf, filename, String(body.note || '').trim().slice(0, 300));
         }
     }
   },
@@ -133,11 +163,12 @@ module.exports = {
         if (!src) continue;
         out.sources.push({
           title: src.title, kind: src.kind, site: src.site, snippet: src.snippet,
-          content: src.content, published_at: src.published_at, extracted: img.extracted || '', image: img.file
+          content: src.content, published_at: src.published_at, extracted: img.extracted || '', image: img.file,
+          file: img.file, fileKind: isEbookRow(img) ? 'ebook' : 'image'
         });
       }
       out.count = out.sources.length;
-      const fname = encodeURIComponent('图片资料-' + String(g.title).replace(/[\\/:*?"<>|]/g, '').slice(0, 20) + '.sources.json');
+      const fname = encodeURIComponent('信息源-' + String(g.title).replace(/[\\/:*?"<>|]/g, '').slice(0, 20) + '.sources.json');
       res.writeHead(200, {
         'Content-Type': 'application/json; charset=utf-8',
         'Content-Disposition': "attachment; filename=\"sources.json\"; filename*=UTF-8''" + fname
@@ -283,6 +314,8 @@ function hasExtract(data) {
   }
   return false;
 }
+/* 结构化提炼的输出契约（图片 / 电子书共用，改一处即可） */
+const EXTRACT_SCHEMA = '{"type":"JD / 大纲 / 教材 / 笔记 / 表格 / 书籍 / 文章 / 其他","title":"一句话标题（如：字节跳动 Agent 实习 JD、机器学习课程大纲）","source":"来源机构/公司/学校/作者，没有就留空","location":"","salary":"","summary":"3 句以内总结","points":["关键要点"],"sections":["结构化条目（章节/职责/要求等，按原结构）"],"keywords":["关键词"],"hard_conditions":["硬性条件 / 门槛 / 前置知识"],"priority":["对目标最关键的前 3-5 项"],"actions":["据此应该做什么"],"raw_text":"尽可能完整的原文文本"}';
 function buildImagePrompt(note) {
   const lines = [];
   lines.push('这是一张（或几张）与用户目标相关的图片资料，可能是：招聘 JD、课程大纲、教材/笔记、文章或表格截图、思维导图、代码截图等。');
@@ -297,9 +330,59 @@ function buildImagePrompt(note) {
   lines.push('   · 其他：关键事实、数据、结论。');
   lines.push('3. 判断这份资料对「用户目标」最关键的内容（按重要性排序），供规划参考。');
   lines.push('4. 只输出一个 JSON 对象：');
-  lines.push('{"type":"JD / 大纲 / 教材 / 笔记 / 表格 / 文章 / 其他","title":"一句话标题（如：字节跳动 Agent 实习 JD、机器学习课程大纲）","source":"来源机构/公司/学校/作者，没有就留空","location":"","salary":"","summary":"3 句以内总结","points":["关键要点"],"sections":["结构化条目（章节/职责/要求等，按原结构）"],"keywords":["关键词"],"hard_conditions":["硬性条件 / 门槛 / 前置知识"],"priority":["对目标最关键的前 3-5 项"],"actions":["据此应该做什么"],"raw_text":"尽可能完整的原文文本"}');
+  lines.push(EXTRACT_SCHEMA);
   if (note) { lines.push(''); lines.push('【用户备注】' + note); }
   return lines.join('\n');
+}
+/* ---------- 电子书（txt / pdf / epub / mobi）：本地解析 + 文本模型提炼 ---------- */
+const EBOOK_EXTS = ['txt', 'md', 'markdown', 'text', 'log', 'pdf', 'epub', 'mobi', 'azw', 'azw3'];
+const EBOOK_MIMES = {
+  txt: 'text/plain', md: 'text/markdown', markdown: 'text/markdown', text: 'text/plain', log: 'text/plain',
+  pdf: 'application/pdf', epub: 'application/epub+zip',
+  mobi: 'application/x-mobipocket-ebook', azw: 'application/x-mobipocket-ebook', azw3: 'application/x-mobipocket-ebook'
+};
+function ebookExtOf(filename) {
+  const m = String(filename || '').toLowerCase().match(/\.([a-z0-9]+)$/);
+  return m ? m[1] : '';
+}
+function isEbookRow(row) {
+  if (!row) return false;
+  if (row.mime && !String(row.mime).startsWith('image/')) return true;
+  return EBOOK_EXTS.includes(ebookExtOf(row.file));
+}
+function safeEbookName(goalId, filename) {
+  const ext = ebookExtOf(filename) || 'txt';
+  const base = String(filename || '').split(/[\\/]/).pop().replace(/\.[a-z0-9]+$/i, '').replace(/[\\/:*?"<>|]/g, '').slice(0, 40) || 'ebook';
+  return `eb-${goalId}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}-${base}.${ext}`;
+}
+/* 电子书提炼提示词：正文只喂前 2 万字（超长截断已注记），输出契约与图片共用 */
+const EBOOK_PROMPT_CAP = 20000;
+function buildEbookPrompt(parsed, filename, note) {
+  const L = [];
+  L.push('这是一本用户导入的电子书（已在本地解析成纯文本），请把它提炼成结构化资料，作为目标规划的参考。');
+  L.push('【书籍信息】');
+  L.push('文件名：' + String(filename || '').slice(0, 100));
+  if (parsed.title) L.push('书名：' + String(parsed.title).slice(0, 100));
+  if (parsed.author) L.push('作者：' + String(parsed.author).slice(0, 100));
+  L.push('格式：' + (parsed.meta && parsed.meta.kind ? parsed.meta.kind : ebookExtOf(filename)));
+  L.push('正文字数：约 ' + parsed.text.length + ' 字' + (parsed.meta && parsed.meta.truncated ? '（超长，只取了前 12 万字）' : ''));
+  if (parsed.meta && Array.isArray(parsed.meta.chapters) && parsed.meta.chapters.length) {
+    L.push('章节目录：\n' + parsed.meta.chapters.slice(0, 60).map((c, i) => `第${i + 1}章 ${c}`.slice(0, 80)).join('\n'));
+  }
+  if (parsed.warnings && parsed.warnings.length) L.push('解析注记：' + parsed.warnings.join('；'));
+  L.push('');
+  L.push('【提取要求】');
+  L.push('1. 按书籍提炼：核心主题、章节知识结构、关键概念与结论、可直接用的方法/清单；不要逐句复述。');
+  L.push('2. type 字段请填「书籍」；source 填作者或出版社（没有就留空）；title 用书名（一句话概括）。');
+  L.push('3. 只输出一个 JSON 对象：');
+  L.push(EXTRACT_SCHEMA);
+  if (note) { L.push(''); L.push('【用户备注】' + note); }
+  L.push('');
+  const body = parsed.text.length > EBOOK_PROMPT_CAP
+    ? parsed.text.slice(0, EBOOK_PROMPT_CAP) + `\n（正文共约 ${parsed.text.length} 字，此处只给出前 ${EBOOK_PROMPT_CAP} 字，请据此提炼）`
+    : parsed.text;
+  L.push('【正文开始】\n' + body + '\n【正文结束】');
+  return L.join('\n');
 }
 function imageToText(data) {
   // 注意顺序：规划最关心的字段（硬性条件 / 最关键内容 / 建议行动）放最前面，
@@ -406,3 +489,111 @@ function streamJDImage(req, res, goal, dataUrl, note, reuseSourceId) {
     res.end();
   })();
 }
+/* 电子书 → 资料源：本地解析（不经过视觉模型）→ 文本模型提炼 → 写入资料源。
+ * 解析失败是确定性失败（格式不对/扫描版/加密），直接报错不落库；AI 阶段失败才落 failed 行。 */
+/* 电子书入库核心（上传 / 自动下载共用，无 SSE）：本地解析 → AI 提炼 → 写入资料源。
+ * 成功返回 { sourceId, title, notice, file }；解析失败等确定性错误直接 throw（由调用方决定落不落库）。 */
+async function ingestEbookBuffer(goal, buf, filename, note, onStatus, reuseSourceId, origin, kindOverride, opts) {
+  const ext = ebookExtOf(filename);
+  if (!EBOOK_EXTS.includes(ext)) throw new Error('格式不支持：目前支持 .txt / .md / .pdf / .epub / .mobi（' + (ext ? '.' + ext + ' 不在其中' : '没有扩展名') + '）');
+  const parsed = parseEbook(buf, filename);   // 确定性失败直接抛
+  if (opts && opts.rejectGarbled && parsed.meta && parsed.meta.garbled) {
+    throw new Error('PDF 文字层乱码（内嵌字体缺编码表），无法提炼：建议截图走图片识别');
+  }
+  const mime = EBOOK_MIMES[parsed.meta.kind] || EBOOK_MIMES[ext] || 'application/octet-stream';
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+  const fname = safeEbookName(goal.id, filename);
+  fs.writeFileSync(path.join(UPLOAD_DIR, fname), buf);
+  const warnTxt = (parsed.warnings && parsed.warnings.length) ? '（' + parsed.warnings.join('；') + '）' : '';
+  if (onStatus) onStatus(`解析成功：约 ${parsed.text.length} 字${warnTxt}，AI 正在提炼…`);
+  const model = currentModel();
+  let txt = await aiText(buildEbookPrompt(parsed, filename, note), model, 300000);
+  let data = extractJSON(txt);
+  let notice = (parsed.warnings && parsed.warnings.length) ? parsed.warnings.join('；') : '';
+  if (!hasExtract(data)) {
+    console.log('[jdfile] 电子书提炼失败，原始输出前 500 字:', String(txt || '').slice(0, 500).replace(/\n/g, ' '));
+    if (onStatus) onStatus('第一次没解析成功，正在重新整理…');
+    try {
+      txt = await aiText(buildEbookPrompt(parsed, filename, note) + '\n\n【重要】上一次的输出不是合法 JSON。请严格只输出一个 JSON 对象：不要解释文字、不要前后缀、不要多个对象，字符串内不要出现未转义的换行。', model, 300000);
+      data = extractJSON(txt);
+    } catch (e) {
+      console.log('[jdfile] 电子书重试失败:', e.message);
+    }
+  }
+  if (!hasExtract(data)) {
+    const raw = String(txt || '').trim();
+    console.log('[jdfile] 电子书重试后仍未解析。原始输出前 500 字:', raw.slice(0, 500).replace(/\n/g, ' '));
+    if (raw.length < 40) {
+      const err = new Error('AI 没能提炼出内容：请确认「设置」里的文本模型可用，或稍后点「重试识别」。原文已保存在上传文件里。');
+      err.savedFile = fname;
+      throw err;
+    }
+    data = { type: '书籍', title: (parsed.title || String(filename || '').split(/[\\/]/).pop() || '电子书').slice(0, 60), source: parsed.author || '', summary: '', raw_text: raw.slice(0, 4000) };
+    notice = (notice ? notice + '；' : '') + '结构化提炼没成功，已按原文导入资料库（可重试）';
+  }
+  const t = nowISO();
+  const from = data.source || parsed.author || '';
+  const kindName = kindOverride || '书籍';
+  const title = (kindName === '书籍' ? '书籍：' : kindName + '：') + String(data.title || parsed.title || filename || '电子书').slice(0, 60) + (from ? '（' + String(from).slice(0, 30) + '）' : '');
+  data._ebook = {
+    filename: String(filename || '').slice(0, 100), kind: parsed.meta.kind,
+    chars: parsed.text.length, truncated: !!parsed.meta.truncated,
+    chapters: Array.isArray(parsed.meta.chapters) ? parsed.meta.chapters.slice(0, 60) : [],
+    author: parsed.author || '', file: fname,
+    origin: origin || ''
+  };
+  const content = imageToText(data);
+  const snippet = String(data.summary || '').slice(0, 300);
+  let sourceId = 0;
+  if (reuseSourceId) {
+    const old = db.prepare('SELECT id FROM sources WHERE id = ? AND goal_id = ?').get(reuseSourceId, goal.id);
+    if (old) {
+      db.prepare('UPDATE sources SET title=?, site=?, kind=?, snippet=?, content=?, created_at=? WHERE id=?')
+        .run(title, '用户提供的电子书', kindName, snippet, content, t, old.id);
+      sourceId = old.id;
+    }
+  }
+  if (!sourceId) {
+    const sr = db.prepare('INSERT INTO sources (goal_id,title,url,site,kind,snippet,content,published_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+      .run(goal.id, title, '', '用户提供的电子书', kindName, snippet, content, '', t);
+    sourceId = Number(sr.lastInsertRowid);
+  }
+  db.prepare('INSERT INTO jd_images (goal_id,file,mime,size,title,extracted,status,error,source_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+    .run(goal.id, fname, mime, buf.length, title, JSON.stringify(data), 'done', '', sourceId, t);
+  db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(t, goal.id);
+  backup();
+  return { sourceId, title, notice, file: fname, extracted: data };
+}
+function streamEbook(req, res, goal, buf, filename, note, reuseSourceId) {
+  res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
+  const tk = (typeof tasks !== 'undefined' && tasks) ? tasks.begin({ type: 'image', title: '提炼电子书：' + String(filename || '').slice(0, 20), goalId: goal.id, nodeId: 0, note: note || '' }) : null;
+  const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} if (tk && obj && obj.status) tk.progress(undefined, obj.status); };
+  (async () => {
+    let info = null;
+    try {
+      send({ status: '正在本地解析电子书…' });
+      info = await ingestEbookBuffer(goal, buf, filename, note,
+        st => send({ status: st }), reuseSourceId, '');
+      const jr = db.prepare('SELECT id FROM jd_images WHERE goal_id = ? AND file = ?').get(goal.id, info.file);
+      send({ done: true, notice: info.notice, jd: { id: jr ? jr.id : 0, file: info.file, title: info.title, source_id: info.sourceId }, extracted: info.extracted, goal: getGoal(goal.id), sources: sourcesOf(goal.id) });
+    } catch (e) {
+      if (/格式不支持|文件过大|是空的|文件头不对|不是有效|结构异常|头损坏|没提取到文字|加密|不受支持/.test(e.message)) {
+        // 确定性失败（解析层）：不落库，前端直接 toast 原因
+        if (tk) tk.fail(e);
+        send({ error: e.message });
+        res.end();
+        return;
+      }
+      try {
+        db.prepare('INSERT INTO jd_images (goal_id,file,mime,size,title,extracted,status,error,source_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+          .run(goal.id, (info && info.file) || e.savedFile || '', '', buf ? buf.length : 0, '未识别：' + String(filename || '').slice(0, 40), '', 'failed', e.message, 0, nowISO());
+      } catch (e2) {}
+      send({ error: e.message });
+    }
+    if (tk) tk.done({ ok: true });
+    res.end();
+  })();
+}
+
+/* 供服务端搜集流程复用：不经过 SSE，直接入库 */
+module.exports.ingestEbookBuffer = ingestEbookBuffer;
