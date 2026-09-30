@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 rem 思而行 · Windows 启动脚本
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 where node >nul 2>nul
 if errorlevel 1 (

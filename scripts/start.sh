@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 思而行 · Linux / macOS 启动脚本
 set -e
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 if ! command -v node >/dev/null 2>&1; then
   echo "[错误] 未找到 Node.js。请先安装 Node.js 22.5 以上版本：https://nodejs.org"

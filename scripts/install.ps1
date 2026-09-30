@@ -1,9 +1,9 @@
 ﻿# ============================================================
 #  思而行 SiErXing · Windows 一键安装
 #  用法：
-#    install.bat                      # 默认：当前目录（若已是项目目录）或 %USERPROFILE%\SiErXing
-#    install.bat D:\SiErXing          # 指定安装目录（任意盘符）
-#    install.bat D:\Apps\SiErXing -Port 3222 -NoAutostart
+#    scripts\install.bat                  # 默认：项目目录（当前目录或其上一级）或 %USERPROFILE%\SiErXing
+#    scripts\install.bat D:\SiErXing      # 指定安装目录（任意盘符）
+#    scripts\install.bat D:\Apps\SiErXing -Port 3222 -NoAutostart
 #  说明：只写用户目录，不需要管理员权限；已安装过会自动更新。
 # ============================================================
 param(
@@ -41,17 +41,20 @@ Ok "Node.js $nodeVer"
 
 # ---------- 2. 确定安装目录 ----------
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+if (-not (Test-Path (Join-Path $here 'server\server.js')) -and (Test-Path (Join-Path $here '..\server\server.js'))) {
+  $here = Split-Path -Parent $here   # 脚本在 scripts\ 下，项目根是上一级
+}
 $inProject = Test-Path (Join-Path $here 'server\server.js')
 
 if (-not $Dir -or $Dir.Trim() -eq '') {
   if ($inProject) {
     $Dir = $here
     Say "当前目录即项目目录：$Dir"
-    Say "如需装到其它盘/目录：install.bat D:\SiErXing（或 install.bat E:\Apps\SiErXing）"
+    Say "如需装到其它盘/目录：scripts\install.bat D:\SiErXing（或 scripts\install.bat E:\Apps\SiErXing）"
   } else {
     $Dir = Join-Path $env:USERPROFILE 'SiErXing'
     Say "未检测到项目文件，将下载到默认目录：$Dir"
-    Say "如需装到其它盘/目录：install.bat D:\SiErXing"
+    Say "如需装到其它盘/目录：scripts\install.bat D:\SiErXing"
   }
 }
 $Dir = $Dir.TrimEnd('\')

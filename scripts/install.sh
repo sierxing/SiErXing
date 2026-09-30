@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ============================================================
-#  思而行 SiErXing · 一键安装脚本（Linux / macOS）
+#  思而行 SiErXing · 一键安装脚本（Linux / macOS，位于 scripts/ 目录）
 #  用法：
-#    1) 已下载本项目：  ./install.sh
+#    1) 已下载本项目：  ./scripts/install.sh（或进 scripts 目录后 ./install.sh）
 #    2) 全新安装（一条命令）：
-#       git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git ~/SiErXing && bash ~/SiErXing/install.sh
+#       git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git ~/SiErXing && bash ~/SiErXing/scripts/install.sh
 #  可选环境变量：
 #    SIERXING_DIR=<安装目录>      默认 ~/SiErXing
 #    SIERXING_PORT=<端口>         默认 3213
@@ -37,6 +37,9 @@ ok "Node.js ${NODE_VER}"
 
 # ---------- 2. 定位 / 获取项目 ----------
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ ! -f "${SRC_DIR}/server/server.js" ] && [ -f "${SRC_DIR}/../server/server.js" ]; then
+  SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"   # 脚本在 scripts/ 下，项目根是上一级
+fi
 if [ -f "${SRC_DIR}/server/server.js" ]; then
   APP_DIR="$SRC_DIR"
   ok "使用当前目录：${APP_DIR}"
@@ -78,7 +81,7 @@ if curl -s --max-time 1 "${URL}/api/health" >/dev/null 2>&1; then
   ok "服务已在运行：${URL}"
 else
   say "正在启动服务…"
-  ( cd "$APP_DIR" && PORT="$PORT" nohup ./start.sh > "$HOME/.sierxing.log" 2>&1 & ) || true
+  ( cd "$APP_DIR" && PORT="$PORT" nohup ./scripts/start.sh > "$HOME/.sierxing.log" 2>&1 & ) || true
   for i in $(seq 1 20); do
     sleep 1
     curl -s --max-time 1 "${URL}/api/health" >/dev/null 2>&1 && break

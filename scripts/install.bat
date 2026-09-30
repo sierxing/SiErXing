@@ -2,11 +2,11 @@
 chcp 65001 >nul
 setlocal EnableExtensions EnableDelayedExpansion
 rem ============================================================
-rem   SiErXing - Windows installer wrapper
-rem   Usage:
-rem     install.bat                  install in place (or %USERPROFILE%\SiErXing)
-rem     install.bat D:\SiErXing      choose install directory
-rem     install.bat D:\Apps\SiErXing -Port 3222 -NoAutostart
+rem   SiErXing - Windows installer wrapper (lives in scripts\)
+rem   Usage (run from project root or scripts dir):
+rem     scripts\install.bat                  install in place (or %USERPROFILE%\SiErXing)
+rem     scripts\install.bat D:\SiErXing      choose install directory
+rem     scripts\install.bat D:\Apps\SiErXing -Port 3222 -NoAutostart
 rem   Notes: only writes user folders, no admin rights needed.
 rem ============================================================
 
@@ -27,7 +27,9 @@ goto parse
 
 if "%TARGET%"=="" set "TARGET=%HERE:~0,-1%"
 if not exist "%TARGET%\server\server.js" (
-  if exist "%HERE%server\server.js" ( set "TARGET=%HERE:~0,-1%" )
+  if exist "%HERE%server\server.js" ( set "TARGET=%HERE:~0,-1%" ) else (
+    for %%p in ("%HERE%..") do if exist "%%~fp\server\server.js" set "TARGET=%%~fp"
+  )
 )
 
 echo.

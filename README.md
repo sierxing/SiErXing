@@ -22,25 +22,25 @@
 ### ① 一条命令安装（Linux / macOS）
 
 ```bash
-git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git ~/SiErXing && bash ~/SiErXing/install.sh
+git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git ~/SiErXing && bash ~/SiErXing/scripts/install.sh
 ```
 
 **Windows**（PowerShell，**整行复制**）：
 
 ```powershell
-git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git "$env:USERPROFILE\SiErXing"; & "$env:USERPROFILE\SiErXing\install.bat"
+git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git "$env:USERPROFILE\SiErXing"; & "$env:USERPROFILE\SiErXing\scripts\install.bat"
 ```
 
 想装到**其它盘/目录**（把 `D:\SiErXing` 换成你要的路径，整行复制）：
 
 ```powershell
-$d="D:\SiErXing"; git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git $d; & "$d\install.bat"
+$d="D:\SiErXing"; git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git $d; & "$d\scripts\install.bat"
 ```
 
-> 已经下载/解压了 ZIP？直接在该目录运行 `install.bat` 即可；也可以 `install.bat D:\SiErXing` 指定安装目录（会复制过去）。
+> 已经下载/解压了 ZIP？直接在该目录运行 `scripts\install.bat` 即可；也可以 `scripts\install.bat D:\SiErXing` 指定安装目录（会复制过去）。
 > 安装脚本会**自动定位真实的桌面目录**（兼容 OneDrive 重定向），桌面图标一定能出现；终端命令 `sierxing` 装在 `%LOCALAPPDATA%\SiErXing`。
 
-> 没有 git？打开 <https://atomgit.com/sierxing/SiErXing> 下载 ZIP → 解压 → 运行 `install.sh`（macOS/Linux）或 `install.bat`（Windows）。
+> 没有 git？打开 <https://atomgit.com/sierxing/SiErXing> 下载 ZIP → 解压 → 运行 `scripts/install.sh`（macOS/Linux）或 `scripts\install.bat`（Windows）。
 > 只需要 **Node.js ≥ 22.5**（推荐 24 LTS），**不需要 npm install**（零第三方依赖）。
 
 安装脚本会自动：检查 Node → 启动服务 → **创建桌面图标** → **创建终端命令 `sierxing`** → 询问**开机自启** → 打开浏览器。
@@ -54,7 +54,7 @@ $d="D:\SiErXing"; git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git 
 1. 检查 Node.js 版本是否 ≥ 22.5；不足则告诉我如何安装（推荐 Node 24 LTS）。
 2. 克隆并安装：
    git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git ~/SiErXing
-   bash ~/SiErXing/install.sh        # Windows 用 install.bat
+   bash ~/SiErXing/scripts/install.sh  # Windows 用 scripts\install.bat
    （脚本会启动服务、创建桌面图标与终端命令 sierxing，并询问是否开机自启）
 3. 验证服务：curl http://localhost:3213/api/health 应返回 {"ok":true}；若端口被占用，改用 PORT=其他端口 启动。
 4. 按我的意愿处理开机自启（开/关都行）：
@@ -316,11 +316,11 @@ $d="D:\SiErXing"; git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git 
 
 | 使用方式 | 操作 |
 | --- | --- |
-| 一键安装 | 见文首：`git clone … && bash install.sh`（Windows：`install.bat [安装目录]`，可指定任意盘） |
+| 一键安装 | 见文首：`git clone … && bash scripts/install.sh`（Windows：`scripts\install.bat [安装目录]`，可指定任意盘） |
 | 桌面图标 | 安装后双击「思而行」→ 自动启动服务并打开浏览器 |
 | 终端命令 | 安装后输入 `sierxing`（已在运行时直接打开浏览器） |
 | 开机自启 | 安装时选择，或随时在 **设置 → 服务与启动** 里开关 |
-| 手动启动 | `./start.sh`（Windows：`start.bat`）或 `npm start` |
+| 手动启动 | `./scripts/start.sh`（Windows：`scripts\start.bat`）或 `npm start` |
 
 > 所有安装动作只写入当前用户目录（`~/.local/bin`、桌面、`~/.config/systemd/user` 等），**不需要管理员权限**。
 
@@ -341,9 +341,9 @@ cd SiErXing        # 进入项目目录（下载/解压后的目录名）
 
 - Linux / macOS：
   ```bash
-  ./start.sh
+  ./scripts/start.sh
   ```
-- Windows：双击 `start.bat`
+- Windows：双击 `scripts\start.bat`
 - 或使用 npm：
   ```bash
   npm start            # Node 23.4+
@@ -507,11 +507,12 @@ SiErXing/                     # 项目根目录（目录名用英文，产品名
 ├── examples/          # 示例组件包（可在「组件」页导入体验）
 ├── .env.example       # 环境变量示例
 ├── package.json
-├── start.sh           # Linux / macOS 启动脚本（一键安装后桌面图标/终端命令调用它）
-├── start.bat          # Windows 启动脚本
-├── install.sh         # ★ 一键安装（Linux/macOS）：桌面图标 + 终端命令 + 开机自启
-├── install.bat        # ★ 一键安装（Windows，可传安装目录：install.bat D:\SiErXing）
-├── install.ps1        #   Windows 安装逻辑（桌面图标 / 终端命令 / 开机自启）
+├── scripts/           # 安装与启动脚本（不在根目录堆着）
+│   ├── start.sh       # Linux / macOS 启动脚本（一键安装后桌面图标/终端命令调用它）
+│   ├── start.bat      # Windows 启动脚本
+│   ├── install.sh     # ★ 一键安装（Linux/macOS）：桌面图标 + 终端命令 + 开机自启
+│   ├── install.bat    # ★ 一键安装（Windows，可传安装目录：scripts\install.bat D:\SiErXing）
+│   └── install.ps1    #   Windows 安装逻辑（桌面图标 / 终端命令 / 开机自启）
 ├── docs/screenshots/  # 界面截图（README 用）
 ├── LICENSE            # MIT 许可证（请保留版权与署名）
 └── README.md
@@ -525,7 +526,7 @@ SiErXing/                     # 项目根目录（目录名用英文，产品名
 不需要。默认走 OpenAI 兼容接口，只填地址 + 密钥 + 模型即可。opencode 只是可选项。
 
 **Q：启动报错 `当前 Node.js 不支持内置 SQLite`？**
-Node 版本太低。请升级到 Node 24 LTS，或用 Node 22.5~23.3 加 `--experimental-sqlite` 启动（`npm run start:sqlite` / `./start.sh` 会自动判断）。
+Node 版本太低。请升级到 Node 24 LTS，或用 Node 22.5~23.3 加 `--experimental-sqlite` 启动（`npm run start:sqlite` / `./scripts/start.sh` 会自动判断）。
 
 **Q：提示 `未配置 AI 接口地址` / `未配置模型名`？**
 去「设置」填写，或设置 `SIERXING_API_BASE` / `SIERXING_MODEL` 环境变量。
@@ -540,7 +541,7 @@ Base URL 通常需要以 `/v1` 结尾（例如 `https://api.deepseek.com/v1`）�
 长任务（细化任务、教程）耗时较长。可在设置里把超时调到 600000（10 分钟）；也可以换更快的模型。
 
 **Q：端口被占用？**
-`PORT=3214 ./start.sh` 换端口即可。
+`PORT=3214 ./scripts/start.sh` 换端口即可。
 
 **Q：项目里的 `.opencode/` 目录是什么？可以删吗？**
 它是**你选择 opencode CLI 作为 AI 接入方式时自动生成**的配置（定义了一个禁用所有工具的 `NoTools` 代理，让模型只输出文本、更快也更安全）。用 OpenAI 兼容接口时不会生成它，删掉也没关系——下次用到 opencode 时会自动重建；如果你自己写了同路径的配置，程序不会覆盖。
