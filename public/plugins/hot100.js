@@ -340,7 +340,7 @@ function showRecordForm(pid) {
       label: '每日刷题',
       icon: '🧩',
       order: 20,
-      header: false,          // 不放目标页顶栏，统一从左栏「组件」模块进入
+      header: true,           // 进目标页顶栏的标签栏（收藏栏）
       hash: gid => '#/g/' + gid + '/hot100',
       show: goal => SiErXing.pluginEnabled(goal, 'hot100')
     },

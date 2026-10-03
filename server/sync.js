@@ -22,7 +22,8 @@ const { spawn } = require('node:child_process');
 // 参与同步的表（顺序无关，导入时先清空再写入）
 const SYNC_TABLES = [
   'goals', 'nodes', 'sources', 'tutorials', 'tutorial_bookmarks', 'tutorial_progress', 'node_notes', 'node_workspaces', 'goal_versions', 'study_records', 'study_days', 'study_segments', 'ai_prompts',
-  'chat_sessions', 'chats', 'problems', 'practice_records', 'daily_plans', 'jd_images'
+  'chat_sessions', 'chats', 'problems', 'practice_records', 'daily_plans', 'jd_images',
+  'quiz_outlines', 'quiz_sessions', 'quiz_records'
 ];
 // 不参与同步的列：题面正文与代码模板体积大，且每台设备用本机 LeetCode 登录态自己抓即可；
 // 多设备之间互相覆盖反而会看到别人的缓存（导入时保留本机已有值）

@@ -534,7 +534,7 @@
       label: '学习统计',
       icon: '📊',
       order: 21,
-      header: false,            // 不放目标页顶栏，只进左栏「组件」模块
+      header: true,             // 进目标页顶栏的标签栏（收藏栏）
       hash: () => '#/studystats',
       show: () => true          // 入口显示由宿主按目标判定；运行时总开关另见 enabled()
     },

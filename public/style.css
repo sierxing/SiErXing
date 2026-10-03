@@ -125,6 +125,30 @@ button.back{background:none; border:0; cursor:pointer; font-size:13px;}
 .grid2{display:grid; grid-template-columns:1fr 1fr; gap:13px;}
 .toolbarRow{display:flex; gap:9px; margin-top:8px;}
 .sec{margin-bottom:20px; max-width:560px;}
+/* 宽版页面（组件管理）：解除 560px 限制，分类左右并排，不再一竖排 */
+.page.wide{max-width:1280px;}
+.cmpPage .sec{max-width:none;}
+/* 组件页要更宽，否则分类里的卡片一行放不下几张、右侧空一大片。
+   用 :has() 只对本页放宽，不影响其它页面的 1080px。 */
+body:has(.cmpPage) .wrap{max-width:1460px;}
+/* 分类从上到下（不做左右分栏，否则组件少的分类会留大片空白），
+   分类内部的卡片用自适应网格左右排布 */
+.cmpCols{display:block;}
+.cmpPage .cmpGrid{grid-template-columns:repeat(auto-fill,minmax(258px,1fr)); gap:9px;}
+/* 选了某个目标时，全局设置整块折叠并标注作用域，避免误改成"影响所有目标" */
+.cmpGlobalFold{
+  border:1px solid var(--border); border-radius:12px; padding:12px 16px; margin-bottom:20px;
+  background:var(--soft);
+}
+.cmpGlobalFold > summary{
+  cursor:pointer; font-size:13.5px; font-weight:600; color:var(--text);
+  list-style:none; display:flex; align-items:center; gap:8px;
+}
+.cmpGlobalFold > summary::-webkit-details-marker{display:none;}
+.cmpGlobalFold > summary::before{content:'▸'; color:var(--muted); font-size:11px; transition:.15s;}
+.cmpGlobalFold[open] > summary::before{transform:rotate(90deg);}
+.cmpGlobalFold > summary b{color:var(--danger);}
+.cmpGlobalFold[open] > summary{margin-bottom:16px;}
 @media (max-width:700px){ .grid2{grid-template-columns:1fr;} }
 .newForm{background:var(--card); border:1.5px solid var(--accent-border); border-radius:var(--r-lg); padding:20px; margin-bottom:20px; box-shadow:var(--shadow);}
 
@@ -263,6 +287,54 @@ button.back{background:none; border:0; cursor:pointer; font-size:13px;}
 .adjStage b{margin-right:8px;}
 .adjStage .muted{font-weight:400;}
 
+/* 收藏栏（教程页 / 路线图页共用）：钉选功能键常驻第二行 */
+.tutFavBar{display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+  background:var(--soft); border:1px solid var(--border); border-radius:10px;
+  padding:7px 10px; margin:0 0 10px;}
+/* 路线图页：顶栏 + 收藏栏整体吸顶，滚动时始终可见 */
+.goalSticky{position:sticky; top:0; z-index:30; background:var(--bg); padding-top:2px;}
+.goalSticky .pageHead{margin-bottom:8px;}
+.goalBar{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:10px;}
+.tutFavBar[hidden]{display:none;}
+.btn.small.barFolder{background:var(--accent-soft); border-color:var(--accent-border);}
+/* 横向拖拽：抓起来半透明 + 抓手光标 */
+.tutFavBar [data-tbtn], .tutFavBar .barFolder{cursor:grab;}
+.tutFavBar.dragging [data-tbtn], .tutFavBar.dragging .barFolder{cursor:grabbing;}
+.tutDragSrc{opacity:.35;}
+.barFolder.dropOn, .tutFavBar.dropOn{outline:2px dashed var(--accent); outline-offset:2px;}
+/* 插入位置指示线：告诉用户"松手会放这儿" */
+.barDropMark{
+  display:block; width:3px; align-self:stretch; min-height:22px; margin:0 -5px;
+  border-radius:2px; background:var(--accent); pointer-events:none;
+  box-shadow:0 0 0 1px var(--accent-soft);
+}
+/* 收藏夹面板（文件夹内排序 / 移出） */
+.barFolderPanel{
+  position:fixed; z-index:400; width:340px; max-width:calc(100vw - 24px);
+  background:var(--card); border:1.5px solid var(--border); border-radius:var(--r-lg);
+  box-shadow:var(--shadow-lg); animation:ctxIn .14s ease;
+}
+.tfpList{display:flex; flex-direction:column; gap:6px; max-height:46vh; overflow-y:auto;}
+.tfpRow{
+  display:flex; align-items:center; gap:7px; font-size:13px; padding:7px 9px;
+  border:1px solid var(--border); border-radius:10px; background:var(--bg); cursor:pointer;
+}
+.tfpRow:hover{border-color:var(--accent-border);}
+.tfpRow.dropOn{outline:2px dashed var(--accent); outline-offset:1px;}
+.tfpGrip{cursor:grab; color:var(--muted); font-size:14px; line-height:1;}
+.tfpName{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.tdCode{margin-top:10px; border:1px solid var(--border); border-radius:10px; background:var(--bg);}
+.tdCode > summary{cursor:pointer; padding:9px 12px; font-size:13px; font-weight:600;}
+.tdCodeBody{padding:0 12px 12px; display:flex; flex-direction:column; gap:8px;}
+.tdCodeBody input#tdCodeSearch{border:1.5px solid var(--border); border-radius:9px; padding:7px 10px; font-family:inherit; font-size:13px; background:var(--card); color:var(--text);}
+.tdCodeHint{font-size:12px;}
+.tdCodeList{display:flex; flex-direction:column; gap:4px; max-height:220px; overflow:auto; border:1px solid var(--border); border-radius:9px; padding:8px; background:var(--card);}
+.tdCodeItem{display:flex; align-items:center; gap:8px; font-size:12.5px; cursor:pointer; padding:3px 4px; border-radius:6px;}
+.tdCodeItem:hover{background:var(--accent-soft);}
+.tdCodeItem input{flex:none; width:15px; height:15px; accent-color:var(--accent);}
+.tdCodeName{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:ui-monospace,Menlo,Consolas,monospace;}
+.tdCodeSel{font-size:12.5px;}
+
 /* ============ 思维导图（路径可视化） ============ */
 .mtree{
   position:relative; display:flex; align-items:center; overflow:auto;   /* 根节点相对整棵树垂直居中 → 展开时上下对称 */
@@ -304,6 +376,9 @@ button.back{background:none; border:0; cursor:pointer; font-size:13px;}
 .mttask.done{opacity:.68; background:var(--soft);}
 .mttask.done .mtTaskTitle{text-decoration:line-through; color:var(--muted);}
 .mttask.doing{border-color:rgba(217,119,6,.4); background:rgba(217,119,6,.05);}
+.mtsub.done, .mtstage.done{opacity:.68;}
+.mtsub.done .mtTitle, .mtstage.done .mtTitle{text-decoration:line-through; color:var(--muted);}
+.mtsub.doing, .mtstage.doing{border-color:rgba(217,119,6,.4);}
 .mtTitle{max-width:230px; line-height:1.45; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;}
 .mtTaskTitle{max-width:215px; line-height:1.45; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;}
 .mtProg{font-size:10.5px; color:var(--muted); flex:0 0 auto; font-variant-numeric:tabular-nums;}
@@ -418,6 +493,9 @@ button.back{background:none; border:0; cursor:pointer; font-size:13px;}
 .tlSub{margin-top:12px;}
 .tlSubHead{display:flex; align-items:center; gap:9px; margin-bottom:7px; cursor:pointer; border-radius:8px;}
 .tlSubHead:hover .tlSubTitle{color:var(--accent);}
+.tlStageHead.done .tlStageTitle, .tlSubHead.done .tlSubTitle{text-decoration:line-through; color:var(--muted);}
+.tlStageHead.done, .tlSubHead.done{opacity:.66;}
+.tlStageHead.doing .tlStageTitle, .tlSubHead.doing .tlSubTitle{color:rgba(217,119,6,.9);}
 .tlSubTitle{font-size:12.5px; font-weight:600; color:var(--muted); flex:1;}
 .tlTask{
   display:flex; align-items:center; gap:10px; padding:8px 12px; border:1px solid var(--border);
@@ -481,6 +559,11 @@ body.mapMode{overflow:hidden;}
   color:var(--text); padding:8px 10px; border-radius:8px; font-size:13px;
   cursor:pointer; font-family:inherit; transition:.12s;
 }
+.ctxMenu a.moreLink{
+  display:flex; align-items:center; gap:8px; text-decoration:none;
+  color:var(--text); padding:8px 10px; border-radius:8px; font-size:13px;
+}
+.ctxMenu a.moreLink:hover{background:var(--accent-soft); color:var(--accent);}
 .ctxMenu button:hover{background:var(--accent-soft); color:var(--accent);}
 .ctxMenu button.danger:hover{background:rgba(224,36,36,.08); color:var(--danger);}
 .ctxMenu .ctxSep{height:1px; background:var(--border); margin:4px 6px;}
@@ -596,9 +679,9 @@ body.mapMode{overflow:hidden;}
 .tutCard .rcHead span:nth-child(2){color:var(--ok);}
 
 .tutPage{max-width:1000px; margin:0 auto; padding:16px 20px 60px;}
+.tutSticky{position:sticky; top:0; z-index:30; background:var(--bg); padding-bottom:2px;}
 .tutHead{
   display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:6px;
-  position:sticky; top:0; z-index:30;                 /* 阅读时顶栏保持可见 */
   background:var(--bg); padding:10px 0; border-bottom:1px solid var(--border);
 }
 .tutHead .back{white-space:nowrap;}
@@ -617,7 +700,6 @@ body.mapMode{overflow:hidden;}
 .tutTocItem.lv3{padding-left:16px; font-size:11.8px; color:var(--muted);}
 .tutTocItem.lv4{padding-left:26px; font-size:11.5px; color:var(--muted);}
 .tutTocProg{font-size:11px; color:var(--muted); margin-top:8px; border-top:1px dashed var(--border); padding-top:6px;}
-body.railWide .tutToc{ left:248px; }
 @media (max-width:1420px){ .tutToc{display:none;} }
 .tutHead .spacer{flex:1;}
 .tutMeta{font-size:12.5px; color:var(--muted); margin-bottom:14px;}
@@ -1446,48 +1528,6 @@ body{padding-left:78px;}
 .gdCompIcon{font-size:14px;}
 .gdCompName{flex:1;}
 
-/* ============ 左栏：可展开的组件模块（分组 / 常用置顶 / 拖拽） ============ */
-.rail.wide{width:236px;}
-body.railWide{padding-left:236px;}
-body.railWide .mapPage{left:236px;}
-.rail.wide .railLabel{display:inline;}
-.rail.wide .railItem{width:100%; flex-direction:row; justify-content:flex-start; gap:10px; padding:9px 12px; border-radius:10px;}
-.rail.wide .railItem .railIcon{width:20px; text-align:center;}
-.rail.wide .railItem .railLabel{font-size:13px; font-weight:600;}
-.rail.wide .railLogo{justify-content:flex-start; padding-left:14px;}
-.railCaret{margin-left:auto; font-size:11px; color:var(--muted); line-height:1;}
-/* 折叠（窄栏）时隐藏箭头，避免被挤到第二行形成空行 */
-.rail:not(.wide) .railCaret{display:none;}
-.rail:not(.wide) .railCompToggle{position:relative;}
-.rail:not(.wide) .railCompToggle::after{
-  content:''; position:absolute; right:9px; bottom:9px; width:6px; height:6px;
-  border-right:1.6px solid var(--muted); border-bottom:1.6px solid var(--muted);
-  transform:rotate(-45deg); opacity:.75; transition:.15s;
-}
-.rail:not(.wide) .railCompToggle.open::after{transform:rotate(45deg); bottom:6px;}
-.railCompToggle.open{background:var(--soft); color:var(--text);}
-.railComps{width:100%; padding:2px 6px 6px; overflow-y:auto; flex:1; min-height:0;}
-.railGroup{margin-top:8px;}
-.railGroupHead{font-size:10.5px; font-weight:700; color:var(--muted); padding:3px 8px; letter-spacing:.03em;}
-.rgHint{font-weight:400; opacity:.75;}
-.railGroupBody{display:flex; flex-direction:column; gap:1px; border-radius:10px;}
-.railGroupBody.dropOn{background:var(--accent-soft); outline:1.5px dashed var(--accent-border);}
-.railCompItem{
-  display:flex; align-items:center; gap:8px; padding:6px 9px; border-radius:9px;
-  text-decoration:none; color:var(--text); font-size:12.8px; cursor:grab; transition:.12s;
-}
-.railCompItem:hover{background:var(--soft);}
-.railCompItem.active{background:var(--accent-soft); color:var(--accent); font-weight:600;}
-.railCompItem.pinned{background:rgba(241,196,15,.08);}
-.railCompItem.pinned:hover{background:rgba(241,196,15,.16);}
-.railCompItem.dragging{opacity:.45;}
-.railCompItem.dropOn{box-shadow:inset 0 2px 0 0 var(--accent);}
-.rciIcon{font-size:13px; flex:none;}
-.rciName{flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
-.rciPin{font-size:10px;}
-.railEmpty{font-size:11.5px; color:var(--muted); padding:6px 9px; line-height:1.6;}
-.railCtx{width:210px;}
-.cmpPin{font-size:13px; padding:2px 7px;}
 
 /* ============ 更新提示条 / 更新进度 / 设置页版本区 ============ */
 .updBanner{
@@ -1722,7 +1762,6 @@ body.railWide .mapPage{left:236px;}
 .cmpCard .cmpCatRow{display:flex; align-items:center; gap:8px;}
 .cmpCardOps{display:flex; gap:8px;}
 /* 侧边栏书签入口是 button，用链接一致的外观 */
-button.railCompItem{background:none; border:0; font:inherit; color:inherit; width:100%; text-align:left; cursor:pointer;}
 /* 目标页：按目标开关组件 */
 .gpRow{display:flex; align-items:center; gap:9px; padding:8px 10px; border-radius:9px; cursor:pointer; font-size:12.8px;}
 .gpRow:hover{background:var(--soft);}
@@ -1740,5 +1779,4 @@ button.railCompItem{background:none; border:0; font:inherit; color:inherit; widt
   box-shadow:var(--shadow-sm);
 }
 .tutTocTab:hover{color:var(--accent); border-color:var(--accent-border);}
-body.railWide .tutTocTab{left:248px;}
 @media (max-width:1420px){ .tutTocTab{display:none;} }

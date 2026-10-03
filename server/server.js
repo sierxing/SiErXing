@@ -18,12 +18,39 @@ const createService = require('./service');
 const createSync = require('./sync');
 const createUpdate = require('./update');
 const createTasks = require('./tasks');
+const { readCodeFiles, buildCodeBlock } = require('./code-read');
 
 const APP_DIR = path.resolve(__dirname, '..');
+/* 前端资源版本戳：启动时对 public 下的 js/css 求哈希，发版后浏览器必取新文件。
+   用内容哈希而不用时间戳：只改后端重启时不打扰前端，避免误报“有新版”。 */
 const DATA_DIR = path.join(APP_DIR, 'data');
 const BACKUP_DIR = path.join(DATA_DIR, 'backups');
 const DB_PATH = path.join(DATA_DIR, 'sierxing.db');
 const PUBLIC_DIR = path.join(APP_DIR, 'public');
+/* 前端资源版本戳：启动时对 public 下的 js/css 求内容哈希，发版后浏览器必取新文件。
+   用内容哈希而不用时间戳：只改后端重启时不打扰前端。必须在 PUBLIC_DIR 之后定义，
+   否则会撞 TDZ、哈希恒为空串的 sha256（e3b0c442…），版本戳形同虚设。 */
+const ASSET_V = (() => {
+  try {
+    const crypto = require('node:crypto');
+    const h = crypto.createHash('sha256');
+    const files = ['index.html', 'app.js', 'sdk.js', 'style.css'];
+    try {
+      for (const f of fs.readdirSync(path.join(PUBLIC_DIR, 'plugins'))) {
+        if (/\.js$|\.css$/.test(f)) files.push('plugins/' + f);
+      }
+    } catch (e) {}
+    let n = 0;
+    for (const f of files) {
+      try { h.update(fs.readFileSync(path.join(PUBLIC_DIR, f))); n++; } catch (e) {}
+    }
+    if (!n) throw new Error('没有读到任何前端文件，版本戳不可信');
+    return h.digest('hex').slice(0, 12);
+  } catch (e) {
+    console.warn('[asset] 版本戳计算失败，回退到时间戳：', (e && e.message) || e);
+    return String(Date.now());
+  }
+})();
 
 /* 读取项目根目录的 .env（可选，便于自部署；不会覆盖已存在的环境变量） */
 (function loadEnvFile() {
@@ -353,6 +380,8 @@ function pluginCtx() {
   if (!gcols.includes('plugins')) db.exec("ALTER TABLE goals ADD COLUMN plugins TEXT NOT NULL DEFAULT '{}';");
   if (!gcols.includes('ebook_pref')) db.exec("ALTER TABLE goals ADD COLUMN ebook_pref TEXT NOT NULL DEFAULT '';");
   if (!gcols.includes('collect_plan')) db.exec("ALTER TABLE goals ADD COLUMN collect_plan TEXT NOT NULL DEFAULT '';");
+  const tcols = db.prepare('PRAGMA table_info(tutorials)').all().map(c => c.name);
+  if (!tcols.includes('code_files')) db.exec("ALTER TABLE tutorials ADD COLUMN code_files TEXT NOT NULL DEFAULT '[]';");
   if (!gcols.includes('qa')) db.exec("ALTER TABLE goals ADD COLUMN qa TEXT NOT NULL DEFAULT '[]';");
   if (!gcols.includes('ask_round')) db.exec("ALTER TABLE goals ADD COLUMN ask_round INTEGER NOT NULL DEFAULT 0;");
   if (!cols.includes('qa')) db.exec("ALTER TABLE nodes ADD COLUMN qa TEXT NOT NULL DEFAULT '[]';");
@@ -1944,7 +1973,7 @@ function buildExpandPrompt(goal, node, sources) {
   return lines.join('\n');
 }
 /* 按用户意见修改已有教程 */
-function buildTutorialEditPrompt(goal, node, tut, feedback, format) {
+function buildTutorialEditPrompt(goal, node, tut, feedback, format, codeBlock) {
   const lines = [];
   lines.push('你是耐心、严谨的技术导师。用户对**已生成的教程**提出了修改意见，请按要求改好它。');
   lines.push('');
@@ -1964,9 +1993,10 @@ function buildTutorialEditPrompt(goal, node, tut, feedback, format) {
   lines.push('');
   lines.push('【原教程正文】');
   lines.push(String(tut.content || '').slice(0, 30000));
+  if (codeBlock) { lines.push(''); lines.push(codeBlock); }
   return lines.join('\n');
 }
-function buildTutorialPrompt(goal, node, format, note) {
+function buildTutorialPrompt(goal, node, format, note, codeBlock) {
   const levelName = { 0: '阶段', 1: '小目标', 2: '任务', 3: '子任务', 4: '步骤', 5: '步骤' }[node.level] || '任务';
   const lines = [];
   lines.push('你是耐心、严谨的技术导师。请为用户写一份「完整学习教程」，目标是让用户**真正掌握**这个任务背后的知识点与技能，而不是草草把任务做完。');
@@ -1984,6 +2014,7 @@ function buildTutorialPrompt(goal, node, format, note) {
   lines.push(digestsBlock(goal));
   lines.push(nodeSourcesBlock(goal, node, 1100));
   lines.push(sourcesIndexBlock(goal, 12, '【资料库其它条目（仅索引；与本节无关的一律不读不用，更不要写入教程）】'));
+  if (codeBlock) { lines.push(''); lines.push(codeBlock); }
   if (note) { lines.push(''); lines.push('【用户的额外要求（必须满足）】' + note); }
   lines.push('');
   lines.push('【范围重申】动笔前先对照排除清单自查：教程里只能出现本节的知识点；其它章节成段出现即不合格，直接删掉重写该部分。');
@@ -2919,7 +2950,7 @@ function cleanTutorialText(txt, format) {
   }
   return s.trim();
 }
-function streamTutorial(req, res, node, format, note) {
+function streamTutorial(req, res, node, format, note, codeFiles) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   const model = currentModel();
   const tk = tasks.begin({ type: 'tutorial', title: '生成教程：' + (node ? node.title : ''), goalId: node ? node.goal_id : 0, nodeId: node ? node.id : 0, note: note || '' });
@@ -2928,14 +2959,24 @@ function streamTutorial(req, res, node, format, note) {
     try {
       const goal = db.prepare('SELECT * FROM goals WHERE id = ?').get(node.goal_id);
       if (!goal) throw new Error('目标不存在');
+      // 结合源码：只读项目根下白名单文件（code-read 强制过滤），失败不阻断
+      let codeBlock = '', codeList = [];
+      try {
+        const files = readCodeFiles(APP_DIR, codeFiles);
+        if (files.length) {
+          codeBlock = buildCodeBlock(files);
+          codeList = files.map(f => f.path);
+          send({ status: `已载入 ${files.length} 个源码文件作为讲解依据…` });
+        }
+      } catch (e) { console.log('[tutorial] 源码载入失败:', e.message); }
       send({ status: `正在撰写「${String(node.title).slice(0, 18)}」的${format === 'html' ? ' HTML ' : ' Markdown '}教程（讲原理、分步实践、练习与自测，约需 1-3 分钟）…` });
-      let txt = await aiText(buildTutorialPrompt(goal, node, format, note), model, 600000);
+      let txt = await aiText(buildTutorialPrompt(goal, node, format, note, codeBlock), model, 600000);
       txt = cleanTutorialText(txt, format);
       if (!txt || txt.length < 200) throw new Error('教程生成失败（内容过短），请重试');
       const t = nowISO();
       const title = String(node.title).trim().slice(0, 120);
-      const r = db.prepare('INSERT INTO tutorials (goal_id, node_id, title, format, content, created_at, updated_at) VALUES (?,?,?,?,?,?,?)')
-        .run(goal.id, node.id, title, format, txt, t, t);
+      const r = db.prepare('INSERT INTO tutorials (goal_id, node_id, title, format, content, code_files, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)')
+        .run(goal.id, node.id, title, format, txt, JSON.stringify(codeList), t, t);
       const tid = Number(r.lastInsertRowid);
       db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(t, goal.id);
       backup();
@@ -3599,9 +3640,14 @@ function redactText(raw) {
   if (tutGenMatch && method === 'POST') {
     const n = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(tutGenMatch[1]));
     if (!n) return sendJSON(res, 404, { error: '节点不存在' });
-    let format = 'md', note = '';
-    try { const b = await readBody(req); format = b.format === 'html' ? 'html' : 'md'; note = String(b.note || '').trim().slice(0, 500); } catch (e) {}
-    return streamTutorial(req, res, n, format, note);
+    let format = 'md', note = '', codeFiles = [];
+    try {
+      const b = await readBody(req);
+      format = b.format === 'html' ? 'html' : 'md';
+      note = String(b.note || '').trim().slice(0, 500);
+      if (Array.isArray(b.codeFiles)) codeFiles = b.codeFiles.map(x => String(x || '').slice(0, 160)).filter(Boolean).slice(0, 12);
+    } catch (e) {}
+    return streamTutorial(req, res, n, format, note, codeFiles);
   }
   const tutEditMatch = p.match(/^\/api\/tutorials\/(\d+)\/edit$/);
   if (tutEditMatch && method === 'POST') {
@@ -3624,7 +3670,15 @@ function redactText(raw) {
       type: 'tutorial', title: '修改教程：' + String(tut.title || '').slice(0, 30), goalId: tut.goal_id, nodeId: tut.node_id, note: feedback,
       run: async ({ progress, signal }) => {
         progress(5, '正在按你的意见修改教程…');
-        const txt = await ai.text({ prompt: buildTutorialEditPrompt(goal, node, tut, feedback, tut.format), model: currentModel(), timeoutMs: 600000, signal });
+        let editCodeBlock = '';
+        try {
+          const stored = JSON.parse((tut && tut.code_files) || '[]');
+          if (Array.isArray(stored) && stored.length) {
+            const files = readCodeFiles(APP_DIR, stored);
+            if (files.length) editCodeBlock = buildCodeBlock(files);
+          }
+        } catch (e) { console.log('[tutorial] 修改时源码载入失败:', e.message); }
+        const txt = await ai.text({ prompt: buildTutorialEditPrompt(goal, node, tut, feedback, tut.format, editCodeBlock), model: currentModel(), timeoutMs: 600000, signal });
         progress(80, '正在保存新版本…');
         let out = String(txt || '').trim();
         out = out.replace(/^```(?:markdown|md|html)?\s*/i, '').replace(/```\s*$/, '');
@@ -4294,8 +4348,8 @@ function extractEbookPrefFromAnswers(answers) {
     for (const g of goals) insG.run(g.id != null ? Number(g.id) : null, g.title || '', g.profile || '', g.materials || '', g.weekly_hours || '', g.deadline || '', g.status || 'draft', g.error || '', g.summary || '', typeof g.constraints === 'string' ? g.constraints : JSON.stringify(g.constraints || []), typeof g.plugins === 'string' ? g.plugins : JSON.stringify(g.plugins || {}), typeof g.ebook_pref === 'string' ? g.ebook_pref : JSON.stringify(g.ebook_pref || {}), g.created_at || nowISO(), g.updated_at || nowISO());
     const insN = db.prepare('INSERT INTO nodes (id,goal_id,parent_id,level,title,detail,artifact,acceptance,hours,sources,status,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
     for (const n of (Array.isArray(body.nodes) ? body.nodes : [])) insN.run(n.id != null ? Number(n.id) : null, Number(n.goal_id), n.parent_id ? Number(n.parent_id) : null, Number(n.level || 0), n.title || '', n.detail || '', n.artifact || '', n.acceptance || '', n.hours || '', typeof n.sources === 'string' ? n.sources : JSON.stringify(n.sources || []), n.status || 'todo', Number(n.sort_order || 0), n.created_at || nowISO(), n.updated_at || nowISO());
-    const insT = db.prepare('INSERT INTO tutorials (id,goal_id,node_id,title,format,content,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)');
-    for (const t of (Array.isArray(body.tutorials) ? body.tutorials : [])) insT.run(t.id != null ? Number(t.id) : null, Number(t.goal_id), Number(t.node_id), t.title || '', t.format || 'md', t.content || '', t.created_at || nowISO(), t.updated_at || nowISO());
+    const insT = db.prepare('INSERT INTO tutorials (id,goal_id,node_id,title,format,content,code_files,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)');
+    for (const t of (Array.isArray(body.tutorials) ? body.tutorials : [])) insT.run(t.id != null ? Number(t.id) : null, Number(t.goal_id), Number(t.node_id), t.title || '', t.format || 'md', t.content || '', typeof t.code_files === 'string' ? t.code_files : JSON.stringify(t.code_files || []), t.created_at || nowISO(), t.updated_at || nowISO());
     const insS = db.prepare('INSERT INTO sources (id,goal_id,title,url,site,kind,snippet,content,created_at) VALUES (?,?,?,?,?,?,?,?,?)');
     for (const s of (Array.isArray(body.sources) ? body.sources : [])) insS.run(s.id != null ? Number(s.id) : null, Number(s.goal_id), s.title || '', s.url || '', s.site || '', s.kind || '', s.snippet || '', s.content || '', s.created_at || nowISO());
     for (const pl of PLUGINS) {
@@ -4451,8 +4505,18 @@ function serveStatic(req, res, p) {
     if (err) { res.writeHead(404); res.end('not found'); return; }
     const ext = path.extname(file).toLowerCase();
     const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' }[ext] || 'application/octet-stream';
+    let out = buf;
+    if (rel === 'index.html') {
+      // 入口页注入版本戳：发版/重启后前端必加载最新 js/css，不再被缓存坑
+      let html = buf.toString('utf8');
+      html = html.replace('<meta charset="UTF-8">', '<meta charset="UTF-8">\n<meta name="asset-v" content="' + ASSET_V + '">');
+      html = html.replace('href="/style.css"', 'href="/style.css?v=' + ASSET_V + '"');
+      html = html.replace('src="/sdk.js"', 'src="/sdk.js?v=' + ASSET_V + '"');
+      html = html.replace('src="/app.js"', 'src="/app.js?v=' + ASSET_V + '"');
+      out = Buffer.from(html);
+    }
     res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'no-cache' });
-    res.end(buf);
+    res.end(out);
   });
 }
 

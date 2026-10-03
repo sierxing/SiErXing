@@ -136,6 +136,62 @@ document.addEventListener('click', e => {
   e.preventDefault();
   goBack(b.getAttribute('data-back'));
 });
+/* “⋯ 更多”溢出菜单（顶栏按钮再多也不挤）：打开时定位到按钮下方，点选项直达/转发，点别处关闭 */
+/* pt：可选的鼠标位置 {x,y}，右键菜单用它定位（否则按 anchor 元素定位）。
+   注意 anchor 可能是 hidden 元素，getBoundingClientRect() 全为 0，菜单会跑到页面左上角——
+   所以先判零宽高，再退回到 pt / 视口中心。 */
+function openMoreMenu(anchor, items, pt) {
+  document.querySelectorAll('.moreMenu').forEach(x => x.remove());
+  const m = document.createElement('div');
+  m.className = 'ctxMenu moreMenu';
+  const r = (anchor && anchor.getBoundingClientRect) ? anchor.getBoundingClientRect() : null;
+  const usable = r && (r.width || r.height) && (r.left || r.top);
+  let x = pt && typeof pt.x === 'number' ? pt.x : (usable ? r.left : Math.round(window.innerWidth / 2));
+  let y = pt && typeof pt.y === 'number' ? pt.y : (usable ? r.bottom + 6 : Math.round(window.innerHeight / 3));
+  m.style.width = '250px';
+  // 先量高度再夹位置，避免菜单超出下边缘
+  m.style.left = '0px';
+  m.style.top = '0px';
+  m.style.visibility = 'hidden';
+  m.innerHTML = items.map((it, i) => it.href
+    ? `<a class="moreLink" href="${esc(it.href)}"><span>${esc(it.icon || '')}</span> ${esc(it.label)}</a>`
+    : it.cmd
+    ? `<button data-cmd="${esc(it.cmd)}"><span>${esc(it.icon || '')}</span> ${esc(it.label)}</button>`
+    : `<button data-fw="${esc(it.target)}"><span>${esc(it.icon || '')}</span> ${esc(it.label)}</button>`).join('');
+  document.body.appendChild(m);
+  const mw = m.offsetWidth || 250, mh = m.offsetHeight || 120;
+  m.style.left = Math.max(8, Math.min(x, window.innerWidth - mw - 8)) + 'px';
+  m.style.top = Math.max(8, Math.min(y, window.innerHeight - mh - 8)) + 'px';
+  m.style.visibility = '';
+  m.querySelectorAll('a.moreLink').forEach(a => a.addEventListener('click', () => m.remove()));
+  m.querySelectorAll('[data-fw]').forEach(x => x.addEventListener('click', () => {
+    const t = document.getElementById(x.getAttribute('data-fw'));
+    m.remove();
+    if (t) t.click();
+  }));
+  return m;
+}
+document.addEventListener('click', e => {
+  if (e.target.closest && e.target.closest('.moreMenu')) return;
+  // 豁免所有"点开式"按钮：组件入口的 ⋯，以及各条收藏栏自己的 ⋯（data-morebtn-of）
+  if (e.target.closest && (e.target.closest('[data-morebtn]') || e.target.closest('[data-morebtn-of]'))) return;
+  document.querySelectorAll('.moreMenu').forEach(x => x.remove());
+});
+/* 目标页 ⋯ 按钮：展开溢出的组件入口 */
+document.addEventListener('click', e => {
+  const t = e.target.closest && e.target.closest('[data-morebtn]');
+  if (!t) return;
+  const wasOpen = !!document.querySelector('.moreMenu');
+  document.querySelectorAll('.moreMenu').forEach(x => x.remove());
+  if (wasOpen) return;
+  if (t.getAttribute('data-morebtn') !== 'morePlugins') return;
+  const gid = Number(t.getAttribute('data-gid'));
+  const g = (state.goal && state.goal.id === gid) ? state.goal : null;
+  if (!g) return;
+  const { overflow } = pluginEntriesVisible(g);
+  if (!overflow.length) return;
+  openMoreMenu(t, overflow.map(x => ({ icon: x.icon, label: x.label, href: x.hash(g.id) })));
+});
 /* 进入组件管理页的入口在左侧栏中渲染 */
 (function initAI() {
   let savedW = 0, savedH = 0;
@@ -472,8 +528,9 @@ function subgoalNodeHTML(g) {
   const open = nodeOpen(key, false);
   const p = subtreeProgress(g);
   const srcN = (g.sourcesArr || []).length;
+  const sst = ST_LABEL[g.status] ? g.status : 'todo';
   return `<div class="mtitem" data-id="${g.id}">
-    <div class="mtnode mtsub ${open ? 'open' : ''}" data-node-id="${g.id}" data-detail="${g.id}" title="点击查看详情 · 右键打开菜单">
+    <div class="mtnode mtsub ${sst} ${open ? 'open' : ''}" data-node-id="${g.id}" data-detail="${g.id}" title="点击查看详情 · 右键打开菜单">
       <span class="arrow" data-childtoggle="${key}" title="${open ? '收起' : '展开'}子节点">${open ? '▾' : '▸'}</span>
       <span class="mtTitle">${esc(g.title)}</span>
       <span class="mtProg">${p.done}/${p.total}</span>
@@ -495,8 +552,9 @@ function stageNodeHTML(st, si, activeStageId) {
   const open = nodeOpen(key, st.id === activeStageId);
   const p = subtreeProgress(st);
   const srcN = (st.sourcesArr || []).length;
+  const sst = ST_LABEL[st.status] ? st.status : 'todo';
   return `<div class="mtitem" data-id="${st.id}">
-    <div class="mtnode mtstage ${open ? 'open' : ''}" data-node-id="${st.id}" data-detail="${st.id}" title="点击查看详情 · 右键打开菜单">
+    <div class="mtnode mtstage ${sst} ${open ? 'open' : ''}" data-node-id="${st.id}" data-detail="${st.id}" title="点击查看详情 · 右键打开菜单">
       <span class="arrow" data-childtoggle="${key}" title="${open ? '收起' : '展开'}子节点">${open ? '▾' : '▸'}</span>
       <span class="stageIdx">${String(si + 1).padStart(2, '0')}</span>
       <span class="mtTitle">${esc(st.title)}</span>
@@ -2135,6 +2193,15 @@ function showTutorialDialog(nodeId) {
     <div class="tdBody">
       <p class="hint" style="margin:2px 0 10px;">教程以「真正掌握知识点」为目标：讲原理 → 分步实践（含自检与排错）→ 练习 → 掌握自测清单。生成约需 1-3 分钟。</p>
       <div class="field"><textarea id="tdNote" placeholder="补充要求（可选）：例如 我完全零基础请讲慢一点 / 多给可复制的代码 / 侧重面试常问点…"></textarea></div>
+      <details class="tdCode" id="tdCodeBox">
+        <summary>📂 结合项目源码讲解（可选，只读；data/.env/.git 等不会列出）</summary>
+        <div class="tdCodeBody">
+          <input id="tdCodeSearch" placeholder="🔍 筛选文件（敲文件名关键字）" autocomplete="off">
+          <div class="tdCodeHint muted">勾选后教程会对照真实代码讲（类名/调用链要对得上）。单文件最多 24KB，共最多 60KB。</div>
+          <div class="tdCodeList" id="tdCodeList"><span class="muted">展开后加载…</span></div>
+          <div class="tdCodeSel muted" id="tdCodeSel"></div>
+        </div>
+      </details>
       <div class="toolbarRow" style="margin-top:10px;">
         <button class="btn primary" id="tdHtml">生成 HTML 图文教程</button>
         <button class="btn" id="tdMd">生成 Markdown 教程</button>
@@ -2143,18 +2210,46 @@ function showTutorialDialog(nodeId) {
   document.body.appendChild(div);
   const close = () => div.remove();
   const note = () => (document.getElementById('tdNote').value || '').trim();
-  div.querySelector('#tdHtml').addEventListener('click', () => { const v = note(); close(); startTutorial(nodeId, 'html', v); });
-  div.querySelector('#tdMd').addEventListener('click', () => { const v = note(); close(); startTutorial(nodeId, 'md', v); });
+  const codeFiles = () => Array.from(div.querySelectorAll('[data-codefile]:checked')).map(x => x.getAttribute('data-codefile'));
+  // 源码清单懒加载 + 本地筛选（只进过一次网络）
+  let codeLoaded = false;
+  const codeBox = div.querySelector('#tdCodeBox');
+  const paintCodeList = files => {
+    const q = ((div.querySelector('#tdCodeSearch') || {}).value || '').trim().toLowerCase();
+    const show = files.filter(f => !q || f.path.toLowerCase().includes(q)).slice(0, 300);
+    const fmtKB = n => n > 1048576 ? (n / 1048576).toFixed(1) + 'MB' : Math.max(1, Math.round(n / 1024)) + 'KB';
+    div.querySelector('#tdCodeList').innerHTML = show.length ? show.map(f =>
+      `<label class="tdCodeItem"><input type="checkbox" data-codefile="${esc(f.path)}"><span class="tdCodeName">${esc(f.path)}</span><span class="muted">${fmtKB(f.size)}</span></label>`
+    ).join('') : '<span class="muted">没有匹配的文件，换个关键字试试。</span>';
+    div.querySelectorAll('[data-codefile]').forEach(c => c.addEventListener('change', () => {
+      const n = codeFiles().length;
+      div.querySelector('#tdCodeSel').textContent = n ? `已选 ${n} 个文件` : '';
+    }));
+  };
+  codeBox.addEventListener('toggle', async () => {
+    if (!codeBox.open || codeLoaded) return;
+    codeLoaded = true;
+    const box = div.querySelector('#tdCodeList');
+    try {
+      const r = await api('/api/code/files');
+      state.tdCodeFiles = r.files || [];
+      paintCodeList(state.tdCodeFiles);
+    } catch (e) { box.innerHTML = '<span class="muted">清单加载失败：' + esc(e.message) + '</span>'; }
+  });
+  const codeSearch = div.querySelector('#tdCodeSearch');
+  if (codeSearch) codeSearch.addEventListener('input', () => paintCodeList(state.tdCodeFiles || []));
+  div.querySelector('#tdHtml').addEventListener('click', () => { const v = note(), cf = codeFiles(); close(); startTutorial(nodeId, 'html', v, cf); });
+  div.querySelector('#tdMd').addEventListener('click', () => { const v = note(), cf = codeFiles(); close(); startTutorial(nodeId, 'md', v, cf); });
   div.querySelector('#tdX').addEventListener('click', close);
 }
-async function startTutorial(nodeId, format, note) {
+async function startTutorial(nodeId, format, note, codeFiles) {
   if (!goalCompOn(goalCtx(), 'tutorial')) { toast('「学习教程」组件在本目标已关闭：目标页 🧩 可单独开启'); return; }
   if (state.tutoring || state.planning || state.collecting || state.expanding) return;
   state.tutoring = true;
   state.tutStatus = '正在撰写教程（' + (format === 'html' ? 'HTML' : 'Markdown') + '）…';
   rerenderCurrent();
   try {
-    const resp = await fetch('/api/nodes/' + nodeId + '/tutorial', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ format, note: note || '' }) });
+    const resp = await fetch('/api/nodes/' + nodeId + '/tutorial', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ format, note: note || '', codeFiles: codeFiles || [] }) });
     if (!resp.ok || !resp.body) throw new Error('无法连接教程服务');
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
@@ -2301,6 +2396,696 @@ function mdToHTML(text) {
   }
   return html;
 }
+/* 顶栏收藏栏（教程页 / 路线图页共用一套实现）：钉选 + 收藏夹 + 横向拖拽排序，其余收进 ⋯
+   每条栏按 ns（命名空间）分开存，互不干扰：
+     ns='tut'  → 教程页，键 sierxing-tutbar-v5
+     ns='goal' → 路线图（目标）页，键 sierxing-goalbar-v1
+   数据结构：
+     seen    顶栏出现过的按钮 id。按钮受组件开关控制，可能这次不渲染；记下来才不会丢。
+     off     用户明确"取消钉选"的按钮 id（收进 ⋯）
+     order   栏内横向顺序，元素是 'b:按钮id'（散着的按钮）或 'f:收藏夹id'
+              —— 按钮和文件夹共用一个序列，所以两者能互相穿插排序
+     folders [{ id, name, buttons: [按钮id…] }]，buttons 的顺序即文件夹内顺序
+   所有 [data-tbtn] 按钮始终留在 DOM 里（收进 ⋯ / 进文件夹的只是 display:none），
+   否则 ⋯ 菜单点它会 getElementById 落空、点了没反应。 */
+const BAR_NS = {
+  tut:  { key: 'sierxing-tutbar-v5',  old: 'sierxing-tutbar-v4', bar: 'tutFavBar',  more: 'tutMoreBtn' },
+  goal: { key: 'sierxing-goalbar-v1', old: '',                  bar: 'goalFavBar', more: 'goalMoreBtn' },
+};
+let BAR_DRAG = null;        // 当前拖的东西：{k:'b'|'f', id, ns}
+let BAR_DROP_MARK = null;   // 横向排序的插入位置指示线
+function barNs(ns) { return BAR_NS[ns] || BAR_NS.tut; }
+
+function barStrs(a) { return (Array.isArray(a) ? a : []).filter(x => typeof x === 'string'); }
+function barTok(k, id) { return k + ':' + id; }
+function barFolderOf(st, btnId) { return (st.folders || []).find(f => (f.buttons || []).includes(btnId)) || null; }
+
+function barState(ns) {
+  const cfg = barNs(ns);
+  const norm = v => {
+    if (!v || typeof v !== 'object') return null;
+    return {
+      seen: barStrs(v.seen),
+      off: barStrs(v.off),
+      order: barStrs(v.order),
+      folders: (Array.isArray(v.folders) ? v.folders : []).filter(f => f && typeof f.id === 'string')
+        .map(f => ({ id: f.id, name: String(f.name || '收藏夹').slice(0, 20), buttons: barStrs(f.buttons) }))
+    };
+  };
+  try { const v = norm(JSON.parse(localStorage.getItem(cfg.key) || 'null')); if (v) return v; } catch (e) {}
+  // 迁移旧版（pinned + folders，没有 order / off）
+  if (!cfg.old) return null;
+  try {
+    const raw = JSON.parse(localStorage.getItem(cfg.old) || 'null');
+    const v = norm(raw);
+    if (v) {
+      const pinned = barStrs(raw && raw.pinned);
+      if (!v.seen.length) v.seen = pinned.slice();
+      if (!v.order.length) {
+        pinned.forEach(id => { if (!barFolderOf(v, id)) v.order.push(barTok('b', id)); });
+        v.folders.forEach(f => v.order.push(barTok('f', f.id)));
+      }
+      return v;
+    }
+  } catch (e) {}
+  return null;
+}
+function barSave(st, ns) {
+  try {
+    localStorage.setItem(barNs(ns).key, JSON.stringify({
+      seen: st.seen || [], off: st.off || [], order: st.order || [], folders: st.folders || []
+    }));
+  } catch (e) {}
+}
+/* 归一化 order：去重、丢掉已删文件夹/已进文件夹的按钮、补上本页新出现的按钮 */
+function barNorm(st, ids) {
+  st.folders = st.folders || [];
+  const fids = new Set(st.folders.map(f => f.id));
+  const inFolder = new Set();
+  st.folders.forEach(f => (f.buttons || []).forEach(id => inFolder.add(id)));
+  const seenT = new Set();
+  st.order = barStrs(st.order).filter(t => {
+    const i = t.indexOf(':');
+    if (i < 1 || seenT.has(t)) return false;
+    const k = t.slice(0, i), id = t.slice(i + 1);
+    if (!id) return false;
+    if (k === 'f') return fids.has(id);
+    if (k === 'b') return !st.off.includes(id) && !inFolder.has(id);
+    return false;
+    // 注意：组件关掉时按钮没渲染，它的 b: token 仍然保留，切回对应目标就回到原位
+  });
+  st.order.forEach(t => seenT.add(t));
+  for (const id of ids) {
+    if (st.seen.includes(id)) continue;
+    st.seen.push(id);
+    const t = barTok('b', id);
+    if (!st.off.includes(id) && !inFolder.has(id) && !seenT.has(t)) { st.order.push(t); seenT.add(t); }
+  }
+  return st;
+}
+/* 横向排序：把 token 移到第 idx 位（idx 是"剔除自己之后"的可视项序号） */
+function barOrderMove(order, tok, idx) {
+  const at = order.indexOf(tok);
+  if (at >= 0) order.splice(at, 1);
+  order.splice(Math.max(0, Math.min(idx, order.length)), 0, tok);
+}
+function barVisibleItems(bar) {
+  return Array.from(bar.children).filter(el => {
+    if (!el.getAttribute) return false;
+    if (el.getAttribute('data-folder')) return true;
+    if (el.hasAttribute('data-tbtn')) return el.style.display !== 'none';
+    return false;
+  });
+}
+function barDropMarkShow(bar, idx) {
+  if (!BAR_DROP_MARK) { BAR_DROP_MARK = document.createElement('span'); BAR_DROP_MARK.className = 'barDropMark'; }
+  const items = barVisibleItems(bar);
+  const ref = items[idx] || bar.querySelector('#tutMoreBtn');
+  if (ref && ref.parentElement === bar && BAR_DROP_MARK.nextSibling !== ref) bar.insertBefore(BAR_DROP_MARK, ref);
+}
+function barDropMarkHide() {
+  if (BAR_DROP_MARK && BAR_DROP_MARK.parentElement) BAR_DROP_MARK.remove();
+}
+/* 鼠标 x 落在第几个可视项之前（跳过自己） */
+function barDropIndex(bar, x, skipEl) {
+  const items = barVisibleItems(bar).filter(el => el !== skipEl);
+  for (let i = 0; i < items.length; i++) {
+    const r = items[i].getBoundingClientRect();
+    if (x < r.left + r.width / 2) return i;
+  }
+  return items.length;
+}
+function barFolderChip(f) {
+  const chip = document.createElement('button');
+  chip.className = 'btn small barFolder';
+  chip.textContent = `📁 ${f.name} (${f.buttons.length})`;
+  chip.setAttribute('data-folder', f.id);
+  chip.draggable = true;
+  chip.title = '点开可上下排序 / 移出按钮；可横向拖动换位置；右键重命名或删除';
+  return chip;
+}
+/* 把 [data-tbtn] 按钮按用户排布渲染进收藏栏。scope 限定只认这条栏自己的按钮
+   （教程页和目标页的按钮 id 不同，但都叫 data-tbtn，必须按所在栏区分）。 */
+function applyBarOverflow(ns) {
+  const cfg = barNs(ns);
+  const bar = document.getElementById(cfg.bar);
+  const more = document.getElementById(cfg.more);
+  if (!more || !bar) return;
+  const btns = Array.from(bar.parentElement.querySelectorAll('[data-tbtn]')).filter(b => !b.hidden);
+  const ids = btns.map(b => b.id);
+  const st0 = barState(ns);
+  // 首次使用：默认全部摆出来，用户自己整理
+  const st = st0 || { seen: ids.slice(), off: [], order: ids.map(id => barTok('b', id)), folders: [] };
+  barNorm(st, ids);
+  const byId = {};
+  btns.forEach(b => { byId[b.id] = b; });
+  // 重绘会替换掉所有子节点，正在拖拽的元素可能因此脱离文档、收不到 dragend。
+  // 先把拖拽态清干净，避免虚线框/插入线残留。
+  if (BAR_DRAG) { BAR_DRAG = null; barDropMarkHide(); }
+  bar.classList.remove('dragging', 'dropOn');
+  bar.innerHTML = '';
+  const placed = new Set();
+  st.order.forEach(t => {
+    const i = t.indexOf(':');
+    if (i < 1) return;
+    const k = t.slice(0, i), id = t.slice(i + 1);
+    if (k === 'b') {
+      const b = byId[id];
+      if (!b) return;
+      placed.add(id);
+      b.style.display = '';
+      b.draggable = true;
+      b.dataset.barRole = 'loose';
+      bar.appendChild(b);
+    } else if (k === 'f') {
+      const f = st.folders.find(x => x.id === id);
+      if (!f) return;
+      bar.appendChild(barFolderChip(f));
+    }
+  });
+  bar.appendChild(more);
+  // 其余按钮（收进 ⋯ 的、归入文件夹的）必须留在 DOM 里，只是隐藏
+  btns.forEach(b => {
+    if (placed.has(b.id)) return;
+    b.style.display = 'none';
+    b.draggable = true;
+    b.dataset.barRole = 'rest';
+    bar.appendChild(b);
+  });
+  const rest = ids.filter(id => !placed.has(id) && !barFolderOf(st, id));
+  bar.hidden = !(placed.size || st.folders.length || rest.length);
+  if (!rest.length) { more.hidden = true; }
+  else { more.hidden = false; more.textContent = `⋯ (${rest.length})`; }
+  more.onclick = () => {
+    if (document.querySelector('.moreMenu')) { document.querySelectorAll('.moreMenu').forEach(x => x.remove()); return; }
+    const items = rest.map(id => ({ icon: '', label: byId[id].textContent.trim(), target: id }));
+    if (st.folders.length) for (const f of st.folders) items.push({ icon: '📂', label: `打开「${f.name}」`, cmd: ns + ':folder-open:' + f.id });
+    items.push({ icon: '📌', label: '全部钉回收藏栏', cmd: ns + ':pin-all' });
+    items.push({ icon: '⚙', label: '自定义工具栏…', cmd: ns + ':customize' });
+    void openMoreMenu(more, items);
+  };
+  bindBarDnD(bar, ns);
+  barSave(st, ns);
+}
+/* 收藏栏拖拽：按钮/文件夹横向排序、按钮拖进文件夹、拖出文件夹。
+   注意：事件只在同一个 bar 元素上绑定一次，且每次都从 localStorage 重新读状态——
+   否则每次重绘叠加一批监听器，旧闭包里的过期 st 会把收藏夹等数据覆盖掉。 */
+function bindBarDnD(bar, ns) {
+  const nsc = ns || 'tut';
+  if (bar.dataset.barBound === '1') return;
+  bar.dataset.barBound = '1';
+  // 事件发生时才读最新状态，避免闭包持有过期对象
+  const cur = () => barState(nsc) || { seen: [], off: [], order: [], folders: [] };
+  const commit = st => { barSave(st, nsc); applyBarOverflow(nsc); };
+  const elOf = d => {
+    if (!d) return null;
+    if (d.k === 'f') return bar.querySelector('[data-folder="' + d.id + '"]');
+    return Array.from(bar.querySelectorAll('[data-tbtn]')).find(b => b.id === d.id) || null;
+  };
+  const mark = (el, on) => el.classList.toggle('barDragSrc', !!on);
+  const startDrag = (e, d, el) => {
+    BAR_DRAG = d;
+    try { e.dataTransfer.setData('text/plain', JSON.stringify(d)); } catch (err) {}
+    e.dataTransfer.effectAllowed = 'move';
+    mark(el, true);
+    bar.classList.add('dragging');
+  };
+  const endDrag = () => {
+    BAR_DRAG = null;
+    bar.classList.remove('dragging');
+    // 注意：querySelectorAll 匹配不到 bar 自己，虚线框要单独清
+    bar.classList.remove('dropOn');
+    bar.querySelectorAll('.barDragSrc').forEach(x => x.classList.remove('barDragSrc'));
+    bar.querySelectorAll('.dropOn').forEach(x => x.classList.remove('dropOn'));
+    barDropMarkHide();
+  };
+  // 兜底：拖拽源若在拖动途中被重绘替换掉，dragend 不会再冒泡到 bar，
+  // 状态就会永久卡住。所以在 document 上兜一层，任何情况下都收尾。
+  document.addEventListener('dragend', e => {
+    if (!BAR_DRAG) return;
+    if (bar.contains(e.target)) return;   // bar 自己的 dragend 已经处理过
+    endDrag();
+  });
+  document.addEventListener('drop', e => {
+    if (BAR_DRAG && !bar.contains(e.target)) endDrag();
+  });
+  // 拖动中途按 Esc / 窗口失焦，也可能收不到 dragend
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && BAR_DRAG) endDrag(); }, true);
+  window.addEventListener('blur', () => { if (BAR_DRAG) endDrag(); });
+  bar.addEventListener('dragstart', e => {
+    const b = e.target.closest && e.target.closest('[data-tbtn]');
+    if (b) return startDrag(e, { k: 'b', id: b.id, ns: nsc }, b);
+    const chip = e.target.closest && e.target.closest('[data-folder]');
+    if (chip) return startDrag(e, { k: 'f', id: chip.getAttribute('data-folder'), ns: nsc }, chip);
+  });
+  bar.addEventListener('dragend', endDrag);
+  bar.addEventListener('dragover', e => {
+    if (!BAR_DRAG || BAR_DRAG.ns !== nsc) return;
+    e.preventDefault();
+    const chip = e.target.closest && e.target.closest('[data-folder]');
+    if (chip && BAR_DRAG.k === 'b') {
+      // 悬在文件夹上 = 收进去：高亮 chip，不画插入线
+      bar.classList.remove('dropOn');
+      bar.querySelectorAll('[data-folder]').forEach(x => { if (x !== chip) x.classList.remove('dropOn'); });
+      chip.classList.add('dropOn');
+      barDropMarkHide();
+      return;
+    }
+    bar.classList.add('dropOn');
+    bar.querySelectorAll('[data-folder].dropOn').forEach(x => x.classList.remove('dropOn'));
+    barDropMarkShow(bar, barDropIndex(bar, e.clientX, elOf(BAR_DRAG)));
+  });
+  bar.addEventListener('dragleave', e => {
+    // relatedTarget 是"移动到哪"：为空或不在 bar 内，才算真正拖出了收藏栏。
+    // 用 e.target 判是错的——从按钮上拖出去时 target 是那个按钮，永远不等于 bar。
+    const to = e.relatedTarget;
+    if (to && bar.contains(to)) return;
+    bar.classList.remove('dropOn');
+    bar.querySelectorAll('[data-folder].dropOn').forEach(x => x.classList.remove('dropOn'));
+    barDropMarkHide();
+  });
+  bar.addEventListener('drop', e => {
+    e.preventDefault();
+    const d = (BAR_DRAG && BAR_DRAG.ns === nsc) ? BAR_DRAG : null;
+    const chip = e.target.closest && e.target.closest('[data-folder]');
+    const idx = barDropIndex(bar, e.clientX, elOf(d));
+    endDrag();
+    if (!d) return;
+    const st = cur();
+    const liveIds = Array.from(bar.parentElement.querySelectorAll('[data-tbtn]')).filter(b => !b.hidden).map(b => b.id);
+    if (chip && d.k === 'b') {
+      // 落在文件夹上 = 收进去
+      const f = st.folders.find(x => x.id === chip.getAttribute('data-folder'));
+      if (!f) return;
+      for (const g of st.folders) g.buttons = g.buttons.filter(x => x !== d.id);
+      st.order = st.order.filter(t => t !== barTok('b', d.id));
+      st.off = st.off.filter(x => x !== d.id);
+      if (!st.seen.includes(d.id)) st.seen.push(d.id);
+      if (!f.buttons.includes(d.id)) f.buttons.push(d.id);
+      commit(st);
+      toast(`已收到收藏夹「${f.name}」`);
+      return;
+    }
+    if (d.k === 'f') {
+      barOrderMove(st.order, barTok('f', d.id), idx);
+      commit(st);
+      return;
+    }
+    // 按钮落到栏上：从文件夹/⋯ 里拿出来，按落点排序
+    const f = barFolderOf(st, d.id);
+    if (f) f.buttons = f.buttons.filter(x => x !== d.id);
+    st.off = st.off.filter(x => x !== d.id);
+    if (!st.seen.includes(d.id)) st.seen.push(d.id);
+    barNorm(st, liveIds);
+    barOrderMove(st.order, barTok('b', d.id), idx);
+    commit(st);
+    if (f) toast(`「${f.name}」里的按钮已移回收藏栏`);
+  });
+  bar.addEventListener('click', e => {
+    const chip = e.target.closest && e.target.closest('[data-folder]');
+    if (!chip) return;
+    e.stopPropagation();
+    if (document.querySelector('.moreMenu')) { document.querySelectorAll('.moreMenu').forEach(x => x.remove()); return; }
+    openBarFolderPanel(chip.getAttribute('data-folder'), nsc);
+  });
+  bar.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    const chip = e.target.closest && e.target.closest('[data-folder]');
+    const btn = e.target.closest && e.target.closest('[data-tbtn]');
+    document.querySelectorAll('.moreMenu').forEach(x => x.remove());
+    const pt = { x: e.clientX, y: e.clientY };
+    const anchor = chip || btn || bar.querySelector('[data-morebtn-of="' + nsc + '"]') || bar;
+    const st = cur();
+    if (chip) {
+      const f = st.folders.find(x => x.id === chip.getAttribute('data-folder'));
+      if (!f) return;
+      void openMoreMenu(anchor, [
+        { icon: '📂', label: `打开「${f.name}」（排序 / 移出）`, cmd: nsc + ':folder-open:' + f.id },
+        { icon: '✎', label: '重命名', cmd: nsc + ':folder-rename:' + f.id },
+        { icon: '🗑', label: '删除收藏夹（按钮回到栏上）', cmd: nsc + ':folder-del:' + f.id },
+      ], pt);
+      return;
+    }
+    if (btn) {
+      const items = [];
+      if (btn.style.display === 'none') items.push({ icon: '📌', label: '钉回收藏栏', cmd: nsc + ':btn-pin:' + btn.id });
+      else items.push({ icon: '➖', label: '取消钉选（收进 ⋯）', cmd: nsc + ':btn-unpin:' + btn.id });
+      for (const f of st.folders) items.push({ icon: '📁', label: `收到「${f.name}」`, cmd: nsc + ':btn-tofolder:' + f.id + ':' + btn.id });
+      void openMoreMenu(anchor, items, pt);
+      return;
+    }
+    void openMoreMenu(anchor, [{ icon: '📁', label: '新建收藏夹…', cmd: nsc + ':folder-new' }], pt);
+  });
+}
+/* 兜底：任何一次点击都清掉可能残留的拖拽高亮（虚线框 / 插入线 / 半透明源）。
+   浏览器在某些拖拽取消路径下不会派发 dragend，残留的虚线框会一直挂着。 */
+document.addEventListener('pointerdown', () => {
+  const bars = Object.values(BAR_NS).map(c => document.getElementById(c.bar)).filter(Boolean);
+  const dirty = !!BAR_DRAG || bars.some(b => b.classList.contains('dragging') || b.classList.contains('dropOn')
+    || b.querySelector('.barDropMark') || b.querySelector('.dropOn'))
+    || !!document.querySelector('#barFolderDlg .dropOn');
+  if (!dirty) return;
+  BAR_DRAG = null;
+  bars.forEach(b => {
+    b.classList.remove('dragging', 'dropOn');
+    b.querySelectorAll('.barDragSrc, .dropOn').forEach(x => x.classList.remove('barDragSrc', 'dropOn'));
+  });
+  document.querySelectorAll('#barFolderDlg .barDragSrc, #barFolderDlg .dropOn').forEach(x => x.classList.remove('barDragSrc', 'dropOn'));
+  barDropMarkHide();
+}, true);
+/* 文件夹面板：内部上下排序 + 移出收藏夹（按钮可直接点，也可拖回收藏栏） */
+function openBarFolderPanel(fid, ns) {
+  const nsc = ns || 'tut';
+  document.querySelectorAll('#barFolderDlg').forEach(x => x.remove());
+  const st = barState(nsc);
+  const f = st && (st.folders || []).find(x => x.id === fid);
+  if (!f) return toast('收藏夹不存在');
+  const labels = {};
+  const cfg = barNs(nsc);
+  const scope = document.getElementById(cfg.bar);
+  (scope && scope.parentElement ? scope.parentElement : document).querySelectorAll('[data-tbtn]')
+    .forEach(b => { labels[b.id] = b.textContent.trim(); });
+  document.querySelectorAll('[data-tbtn]').forEach(b => { if (!labels[b.id]) labels[b.id] = b.textContent.trim(); });
+  const m = document.createElement('div');
+  m.id = 'barFolderDlg';
+  m.dataset.barNs = nsc;
+  m.className = 'barFolderPanel';
+  const commit = () => {
+    barSave(st, nsc);
+    applyBarOverflow(nsc);
+    paint();
+  };
+  const paint = () => {
+    m.querySelector('#tfpList').innerHTML = (f.buttons || []).map((id, i) =>
+      `<div class="tfpRow" draggable="true" data-tfpid="${esc(id)}"><span class="tfpGrip" title="拖动排序">⠿</span>
+       <span class="tfpName">${esc(labels[id] || id)}</span>
+       <button class="btn tiny" data-tfp-up="${i}" ${i === 0 ? 'disabled' : ''} title="上移">↑</button>
+       <button class="btn tiny" data-tfp-down="${i}" ${i === f.buttons.length - 1 ? 'disabled' : ''} title="下移">↓</button>
+       <button class="btn tiny" data-tfp-out="${esc(id)}" title="移出收藏夹，回到收藏栏">↩ 移出</button></div>`).join('')
+      || '<p class="hint" style="margin:2px 0;">空文件夹 —— 把收藏栏上的按钮拖进来。</p>';
+    m.querySelectorAll('[data-tfp-up]').forEach(b => b.addEventListener('click', ev => {
+      ev.stopPropagation();
+      const i = Number(b.getAttribute('data-tfp-up'));
+      [f.buttons[i - 1], f.buttons[i]] = [f.buttons[i], f.buttons[i - 1]];
+      commit();
+    }));
+    m.querySelectorAll('[data-tfp-down]').forEach(b => b.addEventListener('click', ev => {
+      ev.stopPropagation();
+      const i = Number(b.getAttribute('data-tfp-down'));
+      [f.buttons[i + 1], f.buttons[i]] = [f.buttons[i], f.buttons[i + 1]];
+      commit();
+    }));
+    m.querySelectorAll('[data-tfp-out]').forEach(b => b.addEventListener('click', ev => {
+      ev.stopPropagation();
+      const id = b.getAttribute('data-tfp-out');
+      f.buttons = f.buttons.filter(x => x !== id);
+      st.off = st.off.filter(x => x !== id);
+      if (!st.order.includes(barTok('b', id))) st.order.push(barTok('b', id));
+      commit();
+      toast(`「${labels[id] || id}」已移回收藏栏`);
+    }));
+    // 面板内横向拖动排序
+    let from = -1;
+    m.querySelectorAll('.tfpRow').forEach(row => {
+      row.addEventListener('dragstart', e => {
+        from = Array.prototype.indexOf.call(m.querySelectorAll('.tfpRow'), row);
+        row.classList.add('barDragSrc');
+        try { e.dataTransfer.setData('text/plain', 'tfp'); } catch (err) {}
+        e.dataTransfer.effectAllowed = 'move';
+      });
+      row.addEventListener('dragend', () => {
+        row.classList.remove('barDragSrc');
+        m.querySelectorAll('.dropOn').forEach(x => x.classList.remove('dropOn'));
+        from = -1;
+      });
+      row.addEventListener('dragover', e => {
+        e.preventDefault();
+        m.querySelectorAll('.dropOn').forEach(x => { if (x !== row) x.classList.remove('dropOn'); });
+        row.classList.add('dropOn');
+      });
+      // relatedTarget 才是"从哪来"；只判 e.target 会漏掉从行内子元素离开的情况
+      row.addEventListener('dragleave', e => { if (!row.contains(e.relatedTarget)) row.classList.remove('dropOn'); });
+      row.addEventListener('drop', e => {
+        e.preventDefault(); e.stopPropagation();
+        row.classList.remove('dropOn');
+        if (from < 0) return;
+        const to = Array.prototype.indexOf.call(m.querySelectorAll('.tfpRow'), row);
+        if (to < 0 || to === from) return;
+        const id = f.buttons.splice(from, 1)[0];
+        f.buttons.splice(to, 0, id);
+        commit();
+      });
+    });
+  };
+  m.innerHTML = `<div class="tdHead"><span>📁 ${esc(f.name)}</span><span class="muted" style="font-weight:400">${f.buttons.length} 个</span>
+    <button class="btn tiny" id="tfpRename">重命名</button><button class="btn tiny" id="tfpX">×</button></div>
+    <div class="tdBody"><p class="hint" style="margin-top:0;">↑↓ 或直接拖动排序；「移出」把按钮放回收藏栏（也可直接把收藏栏按钮拖回这里）。</p>
+    <div class="tfpList" id="tfpList"></div></div>`;
+  document.body.appendChild(m);
+  const close = () => m.remove();
+  m.querySelector('#tfpX').addEventListener('click', close);
+  m.querySelector('#tfpRename').addEventListener('click', () => {
+    const name = (prompt('重命名收藏夹：', f.name) || '').trim().slice(0, 20);
+    if (!name) return;
+    f.name = name;
+    commit();
+  });
+  m.addEventListener('click', e => {
+    const row = e.target.closest && e.target.closest('.tfpRow');
+    if (!row || e.target.closest('button')) return;
+    const id = row.getAttribute('data-tfpid');
+    const t = document.getElementById(id);
+    close();
+    if (t) t.click();
+  });
+  const away = ev => {
+    if (m.contains(ev.target)) return;
+    if (ev.target.closest && ev.target.closest('[data-folder]')) return;
+    close();
+    document.removeEventListener('click', away, true);
+  };
+  paint();
+  // 定位到文件夹 chip 附近
+  const chip = document.querySelector('[data-folder="' + fid + '"]');
+  if (chip) {
+    const r = chip.getBoundingClientRect();
+    if (r.width || r.height) {
+      m.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 356)) + 'px';
+      m.style.top = Math.max(8, Math.min(r.bottom + 6, window.innerHeight - m.offsetHeight - 12)) + 'px';
+    }
+  }
+  setTimeout(() => document.addEventListener('click', away, true), 0);
+}
+/* 收藏夹 / 按钮命令分发 */
+document.addEventListener('click', e => {
+  const c = e.target.closest && e.target.closest('[data-cmd]');
+  if (!c) return;
+  let cmd = c.getAttribute('data-cmd');
+  const closeMenus = () => document.querySelectorAll('.moreMenu').forEach(x => x.remove());
+  // 命令统一带命名空间前缀 "<ns>:<动作>"，两条栏共用一套分发
+  let ns = 'tut';
+  const sep = cmd.indexOf(':');
+  if (sep > 0 && BAR_NS[cmd.slice(0, sep)]) { ns = cmd.slice(0, sep); cmd = cmd.slice(sep + 1); }
+  if (cmd === 'customize') { closeMenus(); openBarEditor(ns); return; }
+  const st = barState(ns) || { seen: [], off: [], order: [], folders: [] };
+  const save = () => { barSave(st, ns); applyBarOverflow(ns); };
+  if (cmd === 'folder-new') {
+    const name = (prompt('收藏夹名字：', '') || '').trim().slice(0, 20);
+    closeMenus();
+    if (!name) return;
+    st.folders.push({ id: 'f' + Date.now().toString(36), name, buttons: [] });
+    st.order.push(barTok('f', st.folders[st.folders.length - 1].id));
+    save();
+    return;
+  }
+  if (cmd === 'pin-all') {
+    closeMenus();
+    st.off = [];
+    save();
+    toast('已把全部按钮钉回收藏栏');
+    return;
+  }
+  let m = cmd.match(/^folder-open:(.+)$/);
+  if (m) {
+    closeMenus();
+    openBarFolderPanel(m[1], ns);
+    return;
+  }
+  m = cmd.match(/^folder-rename:(.+)$/);
+  if (m) {
+    const f = st.folders.find(x => x.id === m[1]);
+    closeMenus();
+    if (!f) return;
+    const name = (prompt('重命名收藏夹：', f.name) || '').trim().slice(0, 20);
+    if (!name) return;
+    f.name = name;
+    save();
+    return;
+  }
+  m = cmd.match(/^folder-del:(.+)$/);
+  if (m) {
+    const f = st.folders.find(x => x.id === m[1]);
+    closeMenus();
+    if (!f) return;
+    if (!confirm(`删除收藏夹「${f.name}」？里面的按钮会回到收藏栏上。`)) return;
+    for (const id of (f.buttons || [])) if (!st.order.includes(barTok('b', id))) st.order.push(barTok('b', id));
+    st.folders = st.folders.filter(x => x.id !== f.id);
+    save();
+    return;
+  }
+  m = cmd.match(/^btn-unpin:(.+)$/);
+  if (m) {
+    closeMenus();
+    st.order = st.order.filter(t => t !== barTok('b', m[1]));
+    st.off.push(m[1]);
+    save();
+    return;
+  }
+  m = cmd.match(/^btn-pin:(.+)$/);
+  if (m) {
+    closeMenus();
+    st.off = st.off.filter(x => x !== m[1]);
+    if (!st.seen.includes(m[1])) st.seen.push(m[1]);
+    if (!st.order.includes(barTok('b', m[1]))) st.order.push(barTok('b', m[1]));
+    save();
+    return;
+  }
+  m = cmd.match(/^btn-tofolder:(.+):(.+)$/);
+  if (m) {
+    const f = st.folders.find(x => x.id === m[1]);
+    closeMenus();
+    if (!f) return;
+    if (f.buttons.includes(m[2])) return;
+    for (const g of st.folders) g.buttons = g.buttons.filter(x => x !== m[2]);
+    st.order = st.order.filter(t => t !== barTok('b', m[2]));
+    st.off = st.off.filter(x => x !== m[2]);
+    if (!st.seen.includes(m[2])) st.seen.push(m[2]);
+    f.buttons.push(m[2]);
+    save();
+    toast(`已收到收藏夹「${f.name}」`);
+  }
+});
+/* 收藏栏编辑器：勾选钉选 + 上下排序 + 收藏夹管理 */
+function openBarEditor(ns) {
+  const nsc = ns || 'tut';
+  document.querySelectorAll('#barBarDlg').forEach(x => x.remove());
+  const cfg = barNs(nsc);
+  const scope = document.getElementById(cfg.bar);
+  const btns = Array.from((scope && scope.parentElement ? scope.parentElement : document).querySelectorAll('[data-tbtn]')).filter(b => !b.hidden);
+  const ids = btns.map(b => b.id);
+  const labels = {};
+  btns.forEach(b => { labels[b.id] = b.textContent.trim(); });
+  const st = barState(nsc) || { seen: ids.slice(), off: [], order: ids.map(id => barTok('b', id)), folders: [] };
+  barNorm(st, ids);
+  const folderOf = id => barFolderOf(st, id);
+  // 只在"散着的按钮"之间排序：文件夹 token 原样保留
+  const looseOf = order => order.filter(t => t.startsWith('b:') && !folderOf(t.slice(2)));
+  const m = document.createElement('div');
+  m.id = 'barBarDlg';
+  m.dataset.barNs = nsc;
+  m.className = 'tutDialog';
+  const commit = (repaint = true) => {
+    barSave(st, nsc);
+    applyBarOverflow(nsc);
+    if (repaint) paint();
+  };
+  const swapLoose = (a, b) => {
+    const loose = looseOf(st.order);
+    const ta = st.order[st.order.indexOf(a)], tb = st.order[st.order.indexOf(b)];
+    const ia = st.order.indexOf(a), ib = st.order.indexOf(b);
+    st.order[ia] = tb;
+    st.order[ib] = ta;
+    void loose;
+  };
+  const paint = () => {
+    const loose = looseOf(st.order);
+    const inBar = loose.map(t => t.slice(2));
+    m.querySelector('#barBarList').innerHTML = loose.map((t, i) => {
+      const id = t.slice(2);
+      return `<div class="impItem"><input type="checkbox" data-bar-pick="${esc(id)}" checked>
+       <b>${esc(labels[id] || id)}</b><span class="muted">#${i + 1}</span>
+       <span style="flex:1"></span>
+       <button class="btn tiny" data-bar-up="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
+       <button class="btn tiny" data-bar-down="${i}" ${i === loose.length - 1 ? 'disabled' : ''}>↓</button>
+       <button class="btn tiny danger" data-bar-del="${esc(id)}" title="取消钉选，收进 ⋯">×</button></div>`; }).join('')
+      + ids.filter(id => !inBar.includes(id) && !folderOf(id)).map(id =>
+      `<div class="impItem"><input type="checkbox" data-bar-pick="${esc(id)}">
+       <b>${esc(labels[id] || id)}</b><span class="muted">在 ⋯ 里</span>
+       <span style="flex:1"></span>
+       ${(st.folders || []).map(f => `<button class="btn tiny" data-bar-tof="${esc(f.id)}:${esc(id)}" title="收到「${esc(f.name)}」">📁 ${esc(f.name)}</button>`).join('')}
+      </div>`).join('');
+    m.querySelector('#barFolderList').innerHTML = (st.folders || []).map(f =>
+      `<div class="impItem"><span>📁</span><b>${esc(f.name)}</b>
+       <span class="muted">${f.buttons.length} 个：${esc(f.buttons.map(id => labels[id] || id).join('、') || '空')}</span>
+       <span style="flex:1"></span>
+       <button class="btn tiny" data-fdl-open="${esc(f.id)}">打开</button>
+       <button class="btn tiny" data-fdl-rename="${esc(f.id)}">重命名</button>
+       <button class="btn tiny danger" data-fdl-del="${esc(f.id)}">删除</button></div>`).join('')
+      || '<p class="hint" style="margin:0;">还没有收藏夹。在收藏栏上右键即可新建。</p>';
+    m.querySelectorAll('[data-bar-up]').forEach(b => b.addEventListener('click', () => {
+      const i = Number(b.getAttribute('data-bar-up'));
+      swapLoose(loose[i - 1], loose[i]);
+      commit();
+    }));
+    m.querySelectorAll('[data-bar-down]').forEach(b => b.addEventListener('click', () => {
+      const i = Number(b.getAttribute('data-bar-down'));
+      swapLoose(loose[i], loose[i + 1]);
+      commit();
+    }));
+    m.querySelectorAll('[data-bar-del]').forEach(b => b.addEventListener('click', () => {
+      const id = b.getAttribute('data-bar-del');
+      st.order = st.order.filter(t => t !== barTok('b', id));
+      if (!st.off.includes(id)) st.off.push(id);
+      commit();
+    }));
+    m.querySelectorAll('[data-bar-pick]').forEach(c => c.addEventListener('change', () => {
+      const id = c.getAttribute('data-bar-pick');
+      if (c.checked) {
+        st.off = st.off.filter(x => x !== id);
+        if (!st.order.includes(barTok('b', id))) st.order.push(barTok('b', id));
+      } else {
+        st.order = st.order.filter(t => t !== barTok('b', id));
+        if (!st.off.includes(id)) st.off.push(id);
+      }
+      commit();
+    }));
+    m.querySelectorAll('[data-bar-tof]').forEach(b => b.addEventListener('click', () => {
+      const [fid, bid] = b.getAttribute('data-bar-tof').split(':');
+      const f = st.folders.find(x => x.id === fid);
+      if (!f) return;
+      st.order = st.order.filter(t => t !== barTok('b', bid));
+      st.off = st.off.filter(x => x !== bid);
+      if (!f.buttons.includes(bid)) f.buttons.push(bid);
+      commit();
+    }));
+    m.querySelectorAll('[data-fdl-open]').forEach(b => b.addEventListener('click', () => openBarFolderPanel(b.getAttribute('data-fdl-open'), nsc)));
+    m.querySelectorAll('[data-fdl-rename]').forEach(b => b.addEventListener('click', () => {
+      const f = st.folders.find(x => x.id === b.getAttribute('data-fdl-rename'));
+      if (!f) return;
+      const name = (prompt('重命名收藏夹：', f.name) || '').trim().slice(0, 20);
+      if (!name) return;
+      f.name = name;
+      commit();
+    }));
+    m.querySelectorAll('[data-fdl-del]').forEach(b => b.addEventListener('click', () => {
+      const f = st.folders.find(x => x.id === b.getAttribute('data-fdl-del'));
+      if (!f) return;
+      if (!confirm(`删除收藏夹「${f.name}」？里面的按钮会回到收藏栏上。`)) return;
+      for (const id of (f.buttons || [])) if (!st.order.includes(barTok('b', id))) st.order.push(barTok('b', id));
+      st.folders = st.folders.filter(x => x.id !== f.id);
+      commit();
+    }));
+  };
+  m.innerHTML = `<div class="tdHead"><span>⭐</span><span>自定义工具栏</span><button class="btn tiny" id="bbdX">×</button></div>
+    <div class="tdBody"><p class="hint" style="margin-top:0;">勾选=钉到收藏栏，↑↓ 调顺序（收藏栏上直接横向拖动也一样）；文件夹在这里管理。只保存在这台设备。</p>
+    <div class="impList" id="barBarList"></div>
+    <div class="tdHead" style="border:0;padding-left:0;padding-right:0;"><span>📁 收藏夹</span></div>
+    <div class="impList" id="barFolderList"></div></div>`;
+  document.body.appendChild(m);
+  m.querySelector('#bbdX').addEventListener('click', () => m.remove());
+  paint();
+}
+
 async function renderTutorialPage(tid) {
   app.innerHTML = '<p class="muted">加载教程…</p>';
   try { window.__tutCur = null; window.__tutTotal = 0; } catch (e) {}
@@ -2312,23 +3097,28 @@ async function renderTutorialPage(tid) {
   const isHtml = t.format === 'html';
   const sizeK = Math.max(1, Math.round((t.content || '').length / 1000));
   app.innerHTML = `<div class="tutPage">
+    <div class="tutSticky">
     <div class="tutHead">
-      <button class="back" data-back="#/g/${t.goal_id}">← 返回目标</button>
-      <button class="btn small" id="tutEditBtn" title="在右侧对话栏里说你想怎么改，AI 会按意见修改（保留原有内容，只改需要改的地方）">💬 让 AI 修改</button>
-      <button class="btn small" id="tutTocBtn" title="显示 / 隐藏左侧目录">📑 目录</button>
-      ${(goalCompOn(goal, 'notes') && window.NodeNotes) ? `<button class="btn small" id="tutNoteBtn" title="展开 / 收起右侧笔记栏">🗒 笔记</button>` : ''}
-      ${(goalCompOn(goal, 'tutbookmark') && window.TutBookmark) ? `<button class="btn small" id="tutBmBtn" title="随时标记阅读位置（不用翻到底部）">🔖 标签</button>` : ''}
-      ${(goalCompOn(goal, 'workspace') && window.Workspace) ? `<button class="btn small primary" id="tutCodeBtn" title="为当前节点建好代码目录并用 VSCode 打开，边看教程边写代码（子目录嵌在父目录下，无需手动管理）">💻 写代码</button>` : ''}
-      ${(goalCompOn(goal, 'workspace') && window.Workspace) ? `<button class="btn small" id="tutPackBtn" title="把整个目标的代码目录一键打包成 zip 下载">📦 打包</button>` : ''}
-      <button class="btn small" id="tutManualBtn" title="直接手动编辑并保存（Markdown / HTML 都可以）">✎ 手动编辑</button>
+      <button class="back" data-go="#/g/${t.goal_id}">← 返回目标</button>
+      <button class="btn small" data-tbtn id="tutEditBtn" title="在右侧对话栏里说你想怎么改，AI 会按意见修改（保留原有内容，只改需要改的地方）">💬 让 AI 修改</button>
+      <button class="btn small" data-tbtn id="tutTocBtn" title="显示 / 隐藏左侧目录">📑 目录</button>
+      ${(goalCompOn(goal, 'notes') && window.NodeNotes) ? `<button class="btn small" data-tbtn id="tutNoteBtn" title="展开 / 收起右侧笔记栏">🗒 笔记</button>` : ''}
+      ${(goalCompOn(goal, 'tutbookmark') && window.TutBookmark) ? `<button class="btn small" data-tbtn id="tutBmBtn" title="随时标记阅读位置（不用翻到底部）">🔖 标签</button>` : ''}
+      ${goalCompOn(goal, 'quiz') ? `<button class="btn small" data-tbtn id="tutQuizBtn" title="按这篇教程逐点考察掌握情况（一次一题，答错可追问）">📝 测验</button>` : ''}
+      ${(goalCompOn(goal, 'workspace') && window.Workspace) ? `<button class="btn small primary" data-tbtn id="tutCodeBtn" title="为当前节点建好代码目录并用 VSCode 打开，边看教程边写代码（子目录嵌在父目录下，无需手动管理）">💻 写代码</button>` : ''}
+      ${(goalCompOn(goal, 'workspace') && window.Workspace) ? `<button class="btn small" data-tbtn id="tutPackBtn" title="把整个目标的代码目录一键打包成 zip 下载">📦 打包</button>` : ''}
+      <button class="btn small" data-tbtn id="tutManualBtn" title="直接手动编辑并保存（Markdown / HTML 都可以）">✎ 手动编辑</button>
       <button class="btn small primary" id="tutSaveBtn" hidden>💾 保存</button>
       <button class="btn small" id="tutCancelBtn" hidden>取消</button>
       <span class="mapTitle">📘 ${esc(t.title)}</span>
       <span class="chip gray">${isHtml ? 'HTML' : 'Markdown'}</span>
       <span class="chip gray">约 ${sizeK}k 字</span>
       <div class="spacer"></div>
-      <button class="btn small" id="tutDl">下载</button>
-      <button class="btn small danger" id="tutDel">删除</button>
+      <button class="btn small" id="tutMoreBtn" data-morebtn-of="tut" hidden>⋯</button>
+      <button class="btn small" data-tbtn id="tutDl">下载</button>
+      <button class="btn small danger" data-tbtn id="tutDel">删除</button>
+    </div>
+    <div class="tutFavBar" id="tutFavBar" hidden></div>
     </div>
     <div class="tutMeta">${node ? '对应任务：' + esc(node.title) : ''}${goal ? '　·　所属目标：' + esc(goal.title) : ''}　·　生成于 ${esc(fmtDate(t.created_at))}${(goalCompOn(goal, 'workspace') && window.Workspace) ? '　·　<span class="wsHint" id="wsHint"></span>' : ''}</div>
     ${isHtml
@@ -2357,6 +3147,12 @@ async function renderTutorialPage(tid) {
     const tbb = document.getElementById('tutBmBtn');
     if (tbb) tbb.addEventListener('click', () => window.TutBookmark.toggle(tid));
   }
+  if (goalCompOn(goal, 'quiz')) {
+    const tq = document.getElementById('tutQuizBtn');
+    if (tq) tq.addEventListener('click', () => { location.hash = '#/t/' + tid + '/quiz'; });
+  }
+  applyBarOverflow('tut');
+
   if (window.Workspace && goalCompOn(goal, 'workspace')) {
     try { window.Workspace.bindTutorial(tid, node, goal); } catch (e) {}
   }
@@ -2481,7 +3277,7 @@ async function renderVersionsPage(gid) {
   const counts = { all: versions.length, star: versions.filter(v => Number(v.starred)).length, manual: versions.filter(v => Number(v.manual)).length };
   const list = versions.filter(v => f === 'star' ? Number(v.starred) : f === 'manual' ? Number(v.manual) : true);
   app.innerHTML = `<div class="page"><div class="pageHead">
-      <button class="back js-back" data-back="#/g/${gid}">← 返回目标</button>
+      <button class="back js-back" data-go="#/g/${gid}">← 返回目标</button>
       <h2 class="title" style="margin-left:10px;">📜 版本管理</h2>
       <span class="chip gray">${esc((g && g.title) || '')}</span>
       <div class="spacer"></div>
@@ -3656,9 +4452,10 @@ function listViewHTML(stages) {
   let h = '<div class="taskListView">';
   stages.forEach((st, si) => {
     const p = subtreeProgress(st);
+    const sst = ST_LABEL[st.status] ? st.status : 'todo';
     const sKey = 'tl-s' + st.id, sClosed = foldClosed(gid, sKey, true);
     h += `<div class="tlStage">
-      <div class="tlStageHead" data-node-id="${st.id}" data-detail="${st.id}" title="点击查看详情">
+      <div class="tlStageHead ${sst}" data-node-id="${st.id}" data-detail="${st.id}" title="点击查看详情">
         ${foldBtn(sKey, sClosed)}
         <span class="stageIdx">${String(si + 1).padStart(2, '0')}</span>
         <span class="tlStageTitle">${esc(st.title)}</span>
@@ -3667,9 +4464,10 @@ function listViewHTML(stages) {
       <div data-foldbody="${sKey}"${sClosed ? ' hidden' : ''}>`;
     for (const g of st.children) {
       const gp = subtreeProgress(g);
+      const gst = ST_LABEL[g.status] ? g.status : 'todo';
       const gKey = 'tl-g' + g.id, gClosed = foldClosed(gid, gKey, true);
       h += `<div class="tlSub">
-        <div class="tlSubHead" data-node-id="${g.id}" data-detail="${g.id}" title="点击查看详情">${foldBtn(gKey, gClosed)}<span class="tlSubTitle">${esc(g.title)}</span><span class="mtProg">${gp.done}/${gp.total}</span></div>
+        <div class="tlSubHead ${gst}" data-node-id="${g.id}" data-detail="${g.id}" title="点击查看详情">${foldBtn(gKey, gClosed)}<span class="tlSubTitle">${esc(g.title)}</span><span class="mtProg">${gp.done}/${gp.total}</span></div>
         <div data-foldbody="${gKey}"${gClosed ? ' hidden' : ''}>${g.children.map(listTaskHTML).join('')}</div>
       </div>`;
     }
@@ -3734,18 +4532,24 @@ function renderGoal() {
   const stMap = { draft: ['待规划', 'warn'], review: ['骨架待确认', 'warn'], planned: ['已规划', 'ok'], failed: ['规划失败', 'danger'] };
   const st = (g.status === 'planning' && !state.planning) ? ['上次规划中断', 'warn'] : (stMap[g.status] || (state.planning ? ['规划中…', ''] : ['待规划', 'warn']));
   let html = `<div class="page">
+    <div class="goalSticky">
     <div class="pageHead">
       <button class="back js-back" data-back="#/">← 返回</button>
       <div class="spacer"></div>
-      <button class="btn" id="editGoalBtn">编辑目标</button>
-      <button class="btn" id="shareGoalBtn" title="把这份规划与资料库打包分享给别人（对方可一键导入）。默认隐去学校/公司/姓名/联系方式等隐私">🔗 分享</button>
-      ${goalCompOn(g, 'workspace') ? '<button class="btn" id="wsPackBtn" title="把整个目标的代码目录一键打包成 zip 下载（一个节点对应一个文件夹，子目录嵌在父目录下）">📦 打包代码</button>' : ''}
-      ${goalCompOn(g, 'chat') ? '<button class="btn" id="chatBtn">💬 AI 助手</button>' : ''}
+    </div>
+    <div class="goalBar">
+      <button class="btn small" data-tbtn id="editGoalBtn">编辑目标</button>
+      <button class="btn small" data-tbtn id="shareGoalBtn" title="把这份规划与资料库打包分享给别人（对方可一键导入）。默认隐去学校/公司/姓名/联系方式等隐私">🔗 分享</button>
+      ${goalCompOn(g, 'workspace') ? '<button class="btn small" data-tbtn id="wsPackBtn" title="把整个目标的代码目录一键打包成 zip 下载（一个节点对应一个文件夹，子目录嵌在父目录下）">📦 打包代码</button>' : ''}
+      ${goalCompOn(g, 'chat') ? '<button class="btn small" data-tbtn id="chatBtn">💬 AI 助手</button>' : ''}
       ${pluginButtonsHTML(g)}
       ${goalPluginsHTML(g)}
-      ${g.nodes.length && goalCompOn(g, 'versions') ? '<button class="btn" id="verBtn">📜 版本对比</button>' : ''}
-      <button class="btn primary" id="planBtn">${g.nodes.length ? '重新规划（AI 先澄清）' : '开始 AI 规划（AI 先澄清）'}</button>
-      <button class="btn danger" id="delGoalBtn">删除</button>
+      ${g.nodes.length && goalCompOn(g, 'versions') ? '<button class="btn small" data-tbtn id="verBtn">📜 版本对比</button>' : ''}
+      <button class="btn small primary" data-tbtn id="planBtn" title="重新规划（会清空现有路径，请三思；微调骨架用下面的调整面板）">${g.nodes.length ? '重新规划（AI 先澄清）' : '开始 AI 规划（AI 先澄清）'}</button>
+      <button class="btn small danger" data-tbtn id="delGoalBtn">删除</button>
+      <button class="btn small" id="goalMoreBtn" data-morebtn-of="goal" hidden>⋯</button>
+    </div>
+    <div class="tutFavBar" id="goalFavBar" hidden></div>
     </div>
     <div class="goalHead">
       <div class="ghTop"><h2 class="ghTitle">${esc(g.title)}</h2><span class="chip ${st[1]}">${st[0]}</span>${foldBtn('head', foldClosed(g.id, 'head', true))}</div>
@@ -4101,6 +4905,8 @@ function bindTreeEvents(rerender) {
     } catch (err) { toast(err.message); }
   }));
   drawMapLines();
+  // 顶栏收藏栏：与教程页同一套（钉选 / 收藏夹 / 横向拖拽 / ⋯ 收纳）
+  applyBarOverflow('goal');
 }
 function editGoalHTML(g) {
   return `<form class="newForm" id="editGoalForm">
@@ -4466,8 +5272,16 @@ function goalCompOn(goal, id) {
   if (obj && obj[id] != null) return !!obj[id];
   return compOn(id);
 }
+/* 动态加载的插件脚本/样式同样带版本戳（与入口同版本） */
+function assetUrl(u) {
+  try {
+    const v = (document.querySelector('meta[name="asset-v"]') || {}).content || '';
+    if (!v) return u;
+    return u + (u.includes('?') ? '&' : '?') + 'v=' + encodeURIComponent(v);
+  } catch (e) { return u; }
+}
 function applyComponentStyles(styles) {
-  const want = new Set(styles || []);
+  const want = new Set((styles || []).map(assetUrl));
   // 移除不再需要的
   document.querySelectorAll('link[data-component-style]').forEach(l => {
     if (!want.has(l.getAttribute('href'))) l.remove();
@@ -4533,7 +5347,7 @@ async function renderLibraryPage() {
   };
   let h = `<div class="page">
     <div class="pageHead">
-      <button class="back js-back" data-back="#/g/${g.id}">← 返回目标</button>
+      <button class="back js-back" data-go="#/g/${g.id}">← 返回目标</button>
       <h2 class="title">📚 资源库</h2>
       <span class="muted" style="font-size:12.5px;">资料 ${sources.length} 条（自己提供 ${own.length} / 网络 ${net.length}）· 汇总 ${digests.length} 篇</span>
       <div class="spacer"></div>
@@ -4668,7 +5482,6 @@ const card = (c) => `<div class="cmpCard ${c.scope === 'core' ? 'isCore' : ''}">
         ${c.author ? `<span class="cmpAuthor">by ${esc(c.author)}</span>` : ''}
       </div>
       <div class="cmpOps">
-        <button class="btn tiny cmpPin" data-cmp-pin="${esc(c.id)}" title="${(state.componentPins || []).includes(c.id) ? '移出常用' : '加入常用（侧边栏置顶）'}">${(state.componentPins || []).includes(c.id) ? '★' : '☆'}</button>
         ${sw(c)}</div>
     </div>
     <div class="cmpDesc">${esc(c.desc || '')}</div>
@@ -4692,7 +5505,7 @@ const modHint = (k, list) => {
   if (!hints.length) hints.push('全局开关 = 新目标的默认值；已在目标里单独设置过的，以目标自己的设置为准、互不干扰。');
   return `<p class="hint" style="margin:0 0 8px;">${hints.join('')}</p>`;
 };
-  let html = `<div class="page">
+  let html = `<div class="page wide cmpPage">
     <div class="pageHead">
       <button class="back js-back" data-back="#/">← 返回</button>
       <h2 class="title" style="margin-left:10px;">🧩 组件</h2>
@@ -4712,6 +5525,7 @@ const modHint = (k, list) => {
         : '全局开关 = 新目标的默认值，也管应用级组件（番茄钟浮窗、笔记面板等）；已经单独设置过的目标不受影响。'}</p>
     </div>
     ${scopeGoal ? `<div class="sec"><div class="secTitle">🎯 ${esc(scopeGoal.title)} 的组件（只改本目标）</div>
+      <p class="hint" style="margin:0 0 10px;">这里的开关<b>只写这一个目标</b>，其它目标完全不受影响。没单独设置过的组件，仍按🌍 全局默认走。</p>
       <div class="cmpGrid">${goalManageableEntries({ id: scopeGoal.id, plugins: JSON.stringify(scopeConfig || {}) }).map(e => {
         const on = SiErXing.pluginEnabled({ id: scopeGoal.id, plugins: JSON.stringify(scopeConfig || {}) }, e.id);
         return `<div class="cmpCard"><div class="cmpCardTop">
@@ -4722,26 +5536,33 @@ const modHint = (k, list) => {
           </label></div>
         </div></div>`; }).join('')}</div>
     </div>` : ''}
-    <div class="sec">
-      <div class="secTitle">分类管理</div>
-      <p class="hint" style="margin:0 0 10px;">分类用于整理组件，也可以在「新建目标」时<b>按分类批量选择</b>组件。可以新建/重命名/删除分类，并把任意组件移动到别的分类。</p>
-      <div class="catList" id="catList"></div>
-      <div class="consAdd" style="margin-top:10px;">
-        <input type="text" id="catNewName" placeholder="新建分类，例如：学习成长 / 效率工具 / 我的收藏">
-        <button class="btn small primary" id="catAddBtn">新建分类</button>
+    ${(() => {
+      // 选了某个目标时，下面的全局开关会"看起来"也属于这个目标，很容易误改到所有目标。
+      // 所以把它们整体折叠起来，并明确标注作用域。
+      const inner = `
+      <div class="sec">
+        <div class="secTitle">分类管理</div>
+        <p class="hint" style="margin:0 0 10px;">分类用于整理组件，也可以在「新建目标」时<b>按分类批量选择</b>组件。可以新建/重命名/删除分类，并把任意组件移动到别的分类。</p>
+        <div class="catList" id="catList"></div>
+        <div class="consAdd" style="margin-top:10px;">
+          <input type="text" id="catNewName" placeholder="新建分类，例如：学习成长 / 效率工具 / 我的收藏">
+          <button class="btn small primary" id="catAddBtn">新建分类</button>
+        </div>
       </div>
-    </div>
-    ${catOrder.map(k => `<div class="sec" data-catmod="${esc(k)}"><div class="secTitle">${esc(k)}<span class="muted" style="font-weight:400;font-size:12px;">（${(groups[k] || []).length}）</span></div>
-      ${modHint(k, groups[k] || [])}
-      ${(groups[k] || []).length ? `<div class="cmpGrid">${groups[k].map(c => card(c)).join('')}</div>` : '<div class="muted" style="font-size:13px;">（空分类：把某个组件的分类改到这里，它就会搬过来）</div>'}
-    </div>`).join('')}
-    <div class="sec"><div class="secTitle">分享组件</div>
-      <p class="hint" style="line-height:1.9;">
-        · 导出：点组件的「导出」得到 <code>*.component.json</code> 文件（含服务端代码、前端代码与样式），发给别人即可<br>
-        · 导入：点右上「导入组件」选择该文件，组件会立刻装好并可开关<br>
-        · 自己写一个：把 <code>server/plugins/xxx.js</code>（声明元数据 + 接口 + 建表）和 <code>public/plugins/xxx.js</code>（界面）、<code>public/plugins/xxx.css</code>（样式）放进去即可，详见 README「插件开发」
-      </p>
-    </div>
+      <div class="cmpCols">${catOrder.map(k => `<div class="sec" data-catmod="${esc(k)}"><div class="secTitle">${esc(k)}<span class="muted" style="font-weight:400;font-size:12px;">（${(groups[k] || []).length}）</span></div>
+        ${modHint(k, groups[k] || [])}
+        ${(groups[k] || []).length ? `<div class="cmpGrid">${groups[k].map(c => card(c)).join('')}</div>` : '<div class="muted" style="font-size:13px;">（空分类：把某个组件的分类改到这里，它就会搬过来）</div>'}
+      </div>`).join('')}</div>
+      <div class="sec"><div class="secTitle">分享组件</div>
+        <p class="hint" style="line-height:1.9;">
+          · 导出：点组件的「导出」得到 <code>*.component.json</code> 文件（含服务端代码、前端代码与样式），发给别人即可<br>
+          · 导入：点右上「导入组件」选择该文件，组件会立刻装好并可开关<br>
+          · 自己写一个：把 <code>server/plugins/xxx.js</code>（声明元数据 + 接口 + 建表）和 <code>public/plugins/xxx.js</code>（界面）、<code>public/plugins/xxx.css</code>（样式）放进去即可，详见 README「插件开发」
+        </p>
+      </div>`;
+      if (!scopeGoal) return inner;
+      return `<details class="cmpGlobalFold"><summary>🌍 全局组件与分类（下面的开关影响<b>所有</b>目标，别在这里改单个目标）</summary>${inner}</details>`;
+    })()}
   </div>`;
   app.innerHTML = html;
 
@@ -4820,18 +5641,6 @@ renderRail();
     } catch (e) { toast(e.message); }
   }));
 
-  app.querySelectorAll('[data-cmp-pin]').forEach(b => b.addEventListener('click', async () => {
-    const id = b.getAttribute('data-cmp-pin');
-    const pins = (state.componentPins || []).slice();
-    const has = pins.includes(id);
-    try {
-      const r = await api('/api/component-pins', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action: has ? 'remove' : 'add' }) });
-      state.componentPins = r.pins || pins;
-      toast(has ? '已移出常用' : '已加入常用（侧边栏置顶）');
-      renderRail();
-      renderComponentsPage();
-    } catch (e) { toast(e.message); }
-  }));
   app.querySelectorAll('[data-cmp]').forEach(inp => inp.addEventListener('change', async () => {
     const id = inp.getAttribute('data-cmp');
     const enabled = inp.checked;
@@ -5514,17 +6323,25 @@ async function ensureAIConfigured() {
 
 /* ============ 插件宿主 ============ */
 let BOOTED = false;
-function pluginButtonsHTML(goal) {
-  if (!window.SiErXing) return '';
-  return SiErXing.goalEntries(goal)
+const PLUGIN_BTNS_VISIBLE = 4;
+function pluginEntriesVisible(goal) {
+  if (!window.SiErXing) return { visible: [], overflow: [] };
+  const all = SiErXing.goalEntries(goal)
     .filter(e => e.header !== false)
-    .filter(e => goalCompOn(goal, e.id))
-    .map(e => `<button class="btn" data-plugin-go="${esc(e.hash(goal.id))}">${e.icon} ${esc(e.label)}</button>`).join('');
+    .filter(e => goalCompOn(goal, e.id));
+  // 顶栏已改成收藏栏，全部入口都渲染出来，溢出由栏内 ⋯ 收纳
+  return { visible: all, overflow: [] };
+}
+/* 目标页组件入口按钮：全部交给收藏栏排布（溢出由栏内 ⋯ 收纳，不再单独发一个 ⋯ 按钮） */
+function pluginButtonsHTML(goal) {
+  const { visible } = pluginEntriesVisible(goal);
+  return visible.map(e =>
+    `<button class="btn small" data-tbtn id="goalComp_${esc(e.id)}" data-plugin-go="${esc(e.hash(goal.id))}" title="${esc(e.label)}">${e.icon} ${esc(e.label)}</button>`).join('');
 }
 /* 目标页：按目标开关组件（只改本目标，其它目标不受影响） */
 function goalPluginsHTML(g) {
   if (!window.SiErXing) return '';
-  return `<button class="btn" id="goalPluginsBtn" title="为本目标开关组件（只改本目标）">🧩 组件</button>`;
+  return `<button class="btn small" data-tbtn id="goalPluginsBtn" title="为本目标开关组件（只改本目标）">🧩 组件</button>`;
 }
 function goalManageableEntries(pg) {
   const out = [];
@@ -5697,118 +6514,27 @@ const RAIL_LOGO_SVG = `<svg viewBox="0 0 64 64" width="46" height="46" aria-hidd
         font-family="Songti SC,Noto Serif SC,Source Han Serif SC,STSong,SimSun,Georgia,serif" fill="#ffffff">思</text>
   <path d="M21 51h22" stroke="#ffffff" stroke-opacity="0.55" stroke-width="2.2" stroke-linecap="round"/>
 </svg>`;
-function railExpanded() {
-  if (state.railExpanded == null) {
-    try { state.railExpanded = localStorage.getItem('sierxing-rail-comps') === '1'; } catch (e) { state.railExpanded = false; }
-  }
-  return !!state.railExpanded;
-}
-function setRailExpanded(v) {
-  state.railExpanded = !!v;
-  try { localStorage.setItem('sierxing-rail-comps', v ? '1' : '0'); } catch (e) {}
-  renderRail();
-}
-function railCompItemHTML(e, pinned, active) {
-  if (e.bm) {
-    return `<button class="railCompItem" data-rail-bm title="打开教程后点我呼出书签面板">
-      <span class="rciIcon">${e.icon}</span>
-      <span class="rciName">${esc(e.label)}</span>
-    </button>`;
-  }
-  return `<a class="railCompItem ${active ? 'active' : ''} ${pinned ? 'pinned' : ''}" href="${e.hash}" draggable="true"
-      data-rail-comp="${esc(e.id)}" data-cat="${esc(e.category || '其它')}" title="${esc(e.label)}${pinned ? '（常用）' : ''}">
-      <span class="rciIcon">${e.icon}</span>
-      <span class="rciName">${esc(e.label)}</span>
-      ${pinned ? '<span class="rciPin">⭐</span>' : ''}
-    </a>`;
-}
-/* 左栏组件模块的目标语境：只在有明确目标的页面显示该目标的组件。
-   主页/设置/组件管理等无目标页面不猜（避免沿用上一个目标导致串台）；
-   教程页用教程所属目标（state.tutGoal）。 */
-function railGoal() {
-  const r = parseRoute();
-  if (r.view === 'tutorial') return (state.tutGoal && state.tutGoal.id) ? state.tutGoal : null;
-  if (r.view === 'goal' || r.view === 'map' || r.view === 'plugin') {
-    const m = (location.hash || '').match(/^#\/g\/(\d+)/);
-    const g = state.goal;
-    if (g && m && Number(m[1]) === g.id) return g;
-    return null;
-  }
-  return null;
-}
-function railCompsHTML() {
-  const r = parseRoute();
-  const g = railGoal();
-  // 左栏只放「扩展组件」：内置基础功能组件（问卷/约束/图片资料…）的入口在目标页里，不在这里重复
-  const metaOf = id => (SiErXing.serverPlugins() || []).find(x => x.id === id) || {};
-  let entries = ((window.SiErXing && g) ? SiErXing.goalEntries(g) : [])
-    .filter(e => { const m = metaOf(e.id); return !(m.builtin && m.scope === 'base'); });
-  // 按目标开关过滤：只显示本目标开启的（目标之间不串）
-  entries = entries.filter(e => goalCompOn(g, e.id));
-  // 教程书签没有独立页面（住在每篇教程里）：作为普通条目进入分组，和其他组件一样显示图标+全名
-  const bmOn = !!g && goalCompOn(g, 'tutbookmark') && !!window.TutBookmark;
-  if (bmOn) {
-    const bmMeta = metaOf('tutbookmark');
-    entries.unshift({ id: 'tutbookmark', label: '教程书签', icon: bmMeta.icon || '🔖', category: bmMeta.category || '其它', bm: true });
-  }
-  if (!entries.length) {
-    return `<button class="railItem railCompToggle" id="railCompToggle" title="${g ? '本目标还没有扩展组件' : '进入某个目标后，这里显示该目标的组件'}">
-        <span class="railIcon">📦</span><span class="railLabel">组件</span>
-      </button>`;
-  }
-  if (g && g.id) for (const e of entries) { if (typeof e.hash === 'function') e.hash = e.hash(g.id); }
-  const pins = (state.componentPins || []).filter(id => entries.some(e => e.id === id));
-  const groups = {};
-  for (const e of entries) {
-    if (pins.includes(e.id)) continue;
-    const k = e.category || '其它';
-    (groups[k] = groups[k] || []).push(e);
-  }
-  const isActive = e => r.view === 'plugin' && r.pluginId === e.id;
-  let h = `<button class="railItem railCompToggle ${railExpanded() ? 'open' : ''}" id="railCompToggle" title="展开/收起组件列表">
-      <span class="railIcon">📦</span><span class="railLabel">组件</span>
-      <span class="railCaret">${railExpanded() ? '▾' : '▸'}</span>
-    </button>`;
-  if (railExpanded()) {
-    h += `<div class="railComps" id="railComps">`;
-
-    h += `<div class="railGroup" data-drop-group="pins">
-        <div class="railGroupHead">⭐ 常用 <span class="rgHint">（拖到这里置顶）</span></div>
-        <div class="railGroupBody" data-group="pins">
-          ${pins.length ? pins.map(id => entries.find(e => e.id === id)).filter(Boolean).map(e => railCompItemHTML(e, true, isActive(e))).join('') : '<div class="railEmpty">把常用组件拖进来，或右键「加入常用」</div>'}
-        </div>
-      </div>`;
-    if (!pins.length && !Object.keys(groups).length) h += '<div class="railEmpty">本目标还没有扩展组件</div>';
-    for (const k of Object.keys(groups)) {
-      h += `<div class="railGroup">
-          <div class="railGroupHead">${esc(k)}</div>
-          <div class="railGroupBody" data-group="${esc(k)}">${groups[k].map(e => railCompItemHTML(e, false, isActive(e))).join('')}</div>
-        </div>`;
-    }
-    h += `</div>`;
-  }
-  return h;
-}
+/* 左栏主导航。左栏原有的「📦 组件」分组（含常用置顶、组件入口、教程书签）已下线：
+   组件入口改为放进各页面顶栏的标签栏（收藏栏），组件管理保留下面这个 🧩 入口。 */
 function railItemsHTML() {
   const r = parseRoute();
   const g = state.goal;
   const themeIcon = currentThemeEff() === 'dark' ? '☀️' : '🌙';
-  let items = [{ icon: '🏠', label: '目标', hash: '#/', active: r.view === 'home' }];
-  if (g && (r.view === 'goal' || r.view === 'map' || r.view === 'plugin')) {
-    items.push({ icon: '🗺', label: '路线图', hash: '#/g/' + g.id, active: r.view === 'goal' });
-  }
+  const inGoal = !!(g && (r.view === 'goal' || r.view === 'map' || r.view === 'plugin'));
+  const items = [{ icon: '🏠', label: '目标', hash: '#/', active: r.view === 'home' }];
+  if (inGoal) items.push({ icon: '🗺', label: '路线图', hash: '#/g/' + g.id, active: r.view === 'goal' });
   const hasUpd = !!(state.update && state.update.supported && state.update.behind > 0 && state.update.latestShort !== updSkipHash());
   items.push({ icon: '⚙', label: '设置', hash: '#/settings', active: r.view === 'settings', dot: hasUpd });
   items.push({ icon: '📚', label: '资源库', hash: '#/library', active: r.view === 'library' });
   items.push({ icon: '🧩', label: '组件管理', hash: '#/components', active: r.view === 'components' });
-  const compsHTML = railCompsHTML();
+  const head = items.slice(0, inGoal ? 2 : 1);
+  const tail = items.slice(inGoal ? 2 : 1);
+  const row = i => `<a class="railItem ${i.active ? 'active' : ''}" href="${i.hash}" title="${esc(i.label)}${i.dot ? ' · 有新版本' : ''}">
+        <span class="railIcon">${i.icon}${i.dot ? '<i class="railDot"></i>' : ''}</span><span class="railLabel">${esc(i.label)}</span></a>`;
   return `<a class="railLogo" href="#/" title="思而行 · 返回目标列表">${RAIL_LOGO_SVG}</a>
     <div class="railNav">
-      ${items.slice(0, g && (r.view === 'goal' || r.view === 'map' || r.view === 'plugin') ? 2 : 1).map(i => `<a class="railItem ${i.active ? 'active' : ''}" href="${i.hash}" title="${esc(i.label)}${i.dot ? ' · 有新版本' : ''}">
-        <span class="railIcon">${i.icon}${i.dot ? '<i class="railDot"></i>' : ''}</span><span class="railLabel">${esc(i.label)}</span></a>`).join('')}
-      ${compsHTML}
-      ${items.slice(g && (r.view === 'goal' || r.view === 'map' || r.view === 'plugin') ? 2 : 1).map(i => `<a class="railItem ${i.active ? 'active' : ''}" href="${i.hash}" title="${esc(i.label)}${i.dot ? ' · 有新版本' : ''}">
-        <span class="railIcon">${i.icon}${i.dot ? '<i class="railDot"></i>' : ''}</span><span class="railLabel">${esc(i.label)}</span></a>`).join('')}
+      ${head.map(row).join('')}
+      ${tail.map(row).join('')}
     </div>
     <div class="railBottom">
       <button class="railItem" id="railTheme" title="切换白天 / 黑夜模式">
@@ -5816,102 +6542,6 @@ function railItemsHTML() {
       </button>
     </div>`;
 }
-/* ---- 常用组件：拖拽 / 右键 ---- */
-async function savePins(list) {
-  state.componentPins = list;
-  renderRail();
-  try {
-    const r = await api('/api/component-pins', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pins: list }) });
-    state.componentPins = r.pins || list;
-    renderRail();
-  } catch (e) { toast(e.message); }
-}
-function bindRailComps() {
-  const tg = document.getElementById('railCompToggle');
-  if (tg) tg.addEventListener('click', () => setRailExpanded(!railExpanded()));
-  const box = document.getElementById('railComps');
-  if (!box) return;
-  const bmBtn = box.querySelector('[data-rail-bm]');
-  if (bmBtn) bmBtn.addEventListener('click', () => {
-    const rr = parseRoute();
-    if (rr.view === 'tutorial' && rr.id && window.TutBookmark) window.TutBookmark.toggle(rr.id);
-    else toast('🔖 书签住在教程里：打开任意一篇教程，点顶栏「标签」即可标记');
-  });
-  // 右键菜单
-  box.querySelectorAll('[data-rail-comp]').forEach(el => el.addEventListener('contextmenu', e => {
-    e.preventDefault();
-    const id = el.getAttribute('data-rail-comp');
-    const pinned = (state.componentPins || []).includes(id);
-    const label = (SiErXing.goalEntries(railGoal()).find(x => x.id === id) || {}).label || id;
-    document.querySelectorAll('.ctxMenu').forEach(x => x.remove());
-    const m = document.createElement('div');
-    m.id = 'ctxMenu';
-    m.className = 'ctxMenu railCtx';
-    m.style.left = Math.min(e.clientX, window.innerWidth - 200) + 'px';
-    m.style.top = Math.min(e.clientY, window.innerHeight - 140) + 'px';
-    m.innerHTML = `
-      <div class="ctxTitle">${esc(label)}</div>
-      <button data-act="open">打开</button>
-      <button data-act="pin">${pinned ? '⭐ 移出常用' : '⭐ 加入常用（置顶）'}</button>
-      ${pinned ? '<button data-act="pinTop">⬆ 移到常用最前</button>' : ''}`;
-    document.body.appendChild(m);
-    const close = () => m.remove();
-    m.querySelector('[data-act="open"]').addEventListener('click', () => { close(); go(el.getAttribute('href')); });
-    m.querySelector('[data-act="pin"]').addEventListener('click', () => {
-      close();
-      const pins = (state.componentPins || []).slice();
-      savePins(pinned ? pins.filter(x => x !== id) : pins.concat([id]));
-    });
-    const pt = m.querySelector('[data-act="pinTop"]');
-    if (pt) pt.addEventListener('click', () => { close(); savePins([id].concat((state.componentPins || []).filter(x => x !== id))); });
-  }));
-  // 拖拽
-  let dragId = '';
-  box.querySelectorAll('[data-rail-comp]').forEach(el => {
-    el.addEventListener('dragstart', e => {
-      dragId = el.getAttribute('data-rail-comp');
-      e.dataTransfer.effectAllowed = 'move';
-      try { e.dataTransfer.setData('text/plain', dragId); } catch (err) {}
-      el.classList.add('dragging');
-    });
-    el.addEventListener('dragend', () => { dragId = ''; el.classList.remove('dragging'); box.querySelectorAll('.dropOn').forEach(x => x.classList.remove('dropOn')); });
-    // 拖到某个已置顶项上 → 插到它前面（排序）
-    el.addEventListener('dragover', e => {
-      const targetPinned = el.classList.contains('pinned');
-      if (!targetPinned || !dragId || dragId === el.getAttribute('data-rail-comp')) return;
-      e.preventDefault();
-      el.classList.add('dropOn');
-    });
-    el.addEventListener('dragleave', () => el.classList.remove('dropOn'));
-    el.addEventListener('drop', e => {
-      e.preventDefault();
-      el.classList.remove('dropOn');
-      const id = dragId || e.dataTransfer.getData('text/plain');
-      const target = el.getAttribute('data-rail-comp');
-      if (!id || !el.classList.contains('pinned') || id === target) return;
-      const pins = (state.componentPins || []).filter(x => x !== id);
-      pins.splice(Math.max(0, pins.indexOf(target)), 0, id);
-      savePins(pins);
-    });
-  });
-  // 拖到「常用」分组空白处 → 追加
-  const pinsBody = box.querySelector('[data-group="pins"]');
-  if (pinsBody) {
-    pinsBody.addEventListener('dragover', e => { if (dragId) { e.preventDefault(); pinsBody.classList.add('dropOn'); } });
-    pinsBody.addEventListener('dragleave', () => pinsBody.classList.remove('dropOn'));
-    pinsBody.addEventListener('drop', e => {
-      e.preventDefault();
-      pinsBody.classList.remove('dropOn');
-      const id = dragId || e.dataTransfer.getData('text/plain');
-      if (!id) return;
-      const pins = (state.componentPins || []).slice();
-      if (!pins.includes(id)) pins.push(id);
-      savePins(pins);
-      toast('已加入常用（置顶）');
-    });
-  }
-}
-
 function renderRail() {
   let el = document.getElementById('rail');
   const r = parseRoute();
@@ -5926,11 +6556,6 @@ function renderRail() {
   el.innerHTML = railItemsHTML();
   const th = document.getElementById('railTheme');
   if (th) th.addEventListener('click', toggleTheme);
-  bindRailComps();
-  // 展开且有内容（页面类组件入口 / 书签入口）时才加宽；只看有没有渲染出列表，不再要求目标有页面类插件
-  const wide = railExpanded() && !!document.getElementById('railComps');
-  el.classList.toggle('wide', wide);
-  document.body.classList.toggle('railWide', wide);
   document.body.classList.add('hasRail');
 }
 async function loadFrontendPlugins() {
@@ -5941,7 +6566,7 @@ async function loadFrontendPlugins() {
     await Promise.all(list.map(p => new Promise(resolve => {
       if (SiErXing.findPlugin(p.id)) return resolve();
       const s = document.createElement('script');
-      s.src = p.client;
+      s.src = assetUrl(p.client);
       s.onload = () => resolve();
       s.onerror = () => { console.warn('[plugin] 脚本加载失败:', p.client); resolve(); };
       document.head.appendChild(s);

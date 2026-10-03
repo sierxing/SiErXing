@@ -9,9 +9,9 @@
  */
 const { execFile, spawn } = require('node:child_process');
 
-let db, sendJSON, nowISO, getGoal, DATA_DIR, path, fs;
+let db, sendJSON, nowISO, getGoal, DATA_DIR, APP_DIR, path, fs;
 function bind(ctx) {
-  ({ db, sendJSON, nowISO, getGoal, DATA_DIR, path, fs } = ctx);
+  ({ db, sendJSON, nowISO, getGoal, DATA_DIR, APP_DIR, path, fs } = ctx);
 }
 
 const SCHEMA = `
@@ -274,6 +274,21 @@ module.exports = {
   },
 
   api: [
+    {
+      // 项目源码只读清单（给教程"结合源码"用）：可见范围由 code-read 硬黑名单决定
+      method: 'GET',
+      pattern: /^\/api\/code\/files$/,
+      handler: async (req, res, u, ctx) => {
+        const m = u.pathname.match(/^\/api\/code\/files$/);
+        if (!m || req.method !== 'GET') return false;
+        try {
+          const { listCodeFiles } = require('../code-read.js');
+          return sendJSON(res, 200, { files: listCodeFiles(APP_DIR) });
+        } catch (e) {
+          return sendJSON(res, 500, { error: '列取失败：' + e.message });
+        }
+      }
+    },
     {
       method: 'GET',
       pattern: /^\/api\/nodes\/(\d+)\/workspace$/,
