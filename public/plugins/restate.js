@@ -1,0 +1,759 @@
+/**
+ * 思而行 · 前端插件：用自己的话（把教程知识点内化成用户自己的语言）
+ * ------------------------------------------------------------------
+ * 循序渐进，不一上来就问细节。AI 在提炼大纲时给每个知识点生成一条「理解阶梯」：
+ *   ① 缘起（为什么会遇到它）→ ② 轮廓（它大致在做什么）→ ③ 关键（最关键的机制）
+ *   → ④ 串讲（连起来完整表述）
+ * 用户当前停在第 N 级，AI 先抛引导性问题（不给答案），用户答完判「这一级到没到位」，
+ * 只指出最关键的那一个缺口 + 给方向（不给答案）。可反复答、可追问、可跳过、可回退，
+ * 全程用户说了算，没有倒计时、不自动推进。走完后收尾对照，沉淀成「我的话」。
+ */
+'use strict';
+(function () {
+  const { api, esc, toast, mdToHTML } = SiErXing;
+
+  let tid = 0, points = [], rounds = [], arc = null;
+  let view = 'pick';
+  let cur = null;          // { round, point, turns }
+  let busy = false;
+  let histIdx = -1;        // 对话存档当前看的知识点
+  let selId = 0;           // 右栏正在看哪一轮的解析（0 = 跟最新走）
+
+  const DONE = r => r && r.status === 'done' && r.mine;
+  /* 某个知识点做过的所有轮次（含对话条数），最新的在前 —— 对话不会因为退出而丢 */
+  function roundsOf(idx) {
+    return rounds.filter(r => Number(r.point_idx) === idx).slice().reverse();
+  }
+  const FALLBACK = [
+    { t: '缘起', q: '在遇到它之前，这件事是怎么做的？卡在哪儿了？', hint: '想想没有它的时候你会怎么做、哪里别扭' },
+    { t: '轮廓', q: '那它到底在做什么？用一句粗话概括。', hint: '先别管细节，说个大概就行' },
+    { t: '关键', q: '它成立最关键的那一点是什么？少了哪条就不成立？', hint: '找它的前提、边界或最容易误解的地方' },
+    { t: '串讲', q: '现在把前面几级连起来，用你自己的话完整讲一遍。', hint: '从「为什么要它」开始，一路讲到「它怎么做、关键在哪」' },
+  ];
+  const stepsOf = p => (p && p.steps && p.steps.length) ? p.steps : FALLBACK;
+  const stepOf = () => {
+    const steps = stepsOf(cur && cur.point);
+    const i = Math.max(0, Math.min(Number((cur && cur.round && cur.round.step_idx) || 0), steps.length - 1));
+    return { i: i, total: steps.length, s: steps[i] };
+  };
+  /* 每一级答过没有 / AI 判过没到位 */
+  function stepMarks() {
+    const out = [];
+    for (const t of (cur.turns || [])) {
+      let v = {};
+      try { v = JSON.parse(t.verdict || '{}'); } catch (e) {}
+      if (typeof v.step_idx !== 'number' || v.kind === 'chat') continue;
+      const m = out[v.step_idx] || (out[v.step_idx] = { tries: 0, ok: false });
+      m.tries++;
+      if (v.ok) m.ok = true;
+    }
+    return out;
+  }
+  function progressOf(idx) {
+    const rs = rounds.filter(r => Number(r.point_idx) === idx && r.mine);
+    return { done: rs.length, active: rounds.some(r => Number(r.point_idx) === idx && r.status === 'active') };
+  }
+
+  async function renderPage(t) {
+    tid = Number(t);
+    app.innerHTML = '<p class="muted">加载中…</p>';
+    await reload();
+    // 落地页要接着上次的地方，而不是一律丢回知识点列表 ——
+    // 否则收尾后回来看不到自己说过的话，以为没保存。
+    const act = rounds.filter(r => r.status === 'active').pop();
+    const lastDone = rounds.filter(DONE).pop();
+    const target = act || lastDone;
+    if (target) {
+      try {
+        await loadRound(target.id);
+        view = act ? 'talk' : 'done';
+      } catch (e) { cur = null; view = 'pick'; }
+    } else {
+      cur = null;
+      view = 'pick';
+    }
+    draw();
+  }
+  async function reload() {
+    try {
+      const r = await api('/api/tutorials/' + tid + '/restate/points');
+      points = r.points || [];
+      rounds = r.rounds || [];
+      arc = r.arc || null;
+    } catch (e) { points = []; rounds = []; arc = null; }
+  }
+  const branchOf = p => (arc && (arc.branches || []).find(b => b.id === p.branch)) || null;
+  /* 这个点在架构里的位置：主线第几步 · 哪个知识块的第几个点 */
+  function positionOf(idx) {
+    if (!arc) return '';
+    const p = points[idx];
+    if (!p) return '';
+    const br = branchOf(p);
+    const inBr = br ? points.map((q, i) => (q.branch === br.id ? i : -1)).filter(i => i >= 0) : [];
+    const bi = br ? (arc.branches || []).findIndex(b => b.id === br.id) : -1;
+    const si = (arc.spine || []).findIndex(s => String(s).indexOf(String(p.title).slice(0, 6)) >= 0);
+    const bits = [];
+    if (bi >= 0) bits.push('知识块「' + (arc.branches[bi].name || '') + '」第 ' + (inBr.indexOf(idx) + 1) + '/' + inBr.length + ' 个点');
+    if (si >= 0) bits.push('主线第 ' + (si + 1) + ' 步');
+    return bits.join(' · ');
+  }
+  /* 读一轮（含 point 与全部对话），用于刷新后续接 */
+  async function loadRound(id) {
+    const r = await api('/api/restate-round/' + id);
+    cur = { round: r.round, point: r.point || { title: r.round.point_title }, turns: r.turns || [] };
+    selId = 0;
+  }
+
+  function headHTML(title) {
+    return `<div class="jdHead">
+      <a class="back" href="#/t/${tid}">← 返回教程</a>
+      <span class="mapTitle">🧠 用自己的话</span>
+      <span class="chip gray">${esc(title || '')}</span>
+    </div>`;
+  }
+  function draw() {
+    if (view === 'pick') drawPick();
+    else if (view === 'talk') drawTalk();
+    else if (view === 'notes') drawNotes();
+    else if (view === 'hist') drawHistory(histIdx);
+    else drawDone();
+    if (view !== 'hist') window.scrollTo(0, 0);
+  }
+
+  /* ---------- 知识架构：先看全局，再逐点深入 ---------- */
+  function arcHTML() {
+    if (!arc || (!arc.thesis && !(arc.spine || []).length && !(arc.branches || []).length)) return '';
+    const used = new Set(points.map(p => p.branch));
+    return `<div class="rsArc">
+      ${arc.thesis ? `<div class="rsArcThesis"><b>这篇教程想让你理解的是</b><br>${esc(arc.thesis)}</div>` : ''}
+      ${(arc.spine || []).length ? `<div class="rsArcBlock"><div class="rsArcT">主线怎么推进</div>
+        <ol class="rsSpine">${arc.spine.map(s => '<li>' + esc(s) + '</li>').join('')}</ol></div>` : ''}
+      ${(arc.branches || []).length ? `<div class="rsArcBlock"><div class="rsArcT">分成这几块</div>
+        <div class="rsBranches">${arc.branches.map(b => {
+          const n = points.filter(p => p.branch === b.id).length;
+          return `<div class="rsBranch ${used.has(b.id) ? '' : 'off'}">
+            <div class="rsBranchN">${esc(b.name || '')} <span class="muted">${n} 个点</span></div>
+            ${b.gist ? '<div class="rsBranchG">' + esc(b.gist) + '</div>' : ''}</div>`;
+        }).join('')}</div></div>` : ''}
+    </div>`;
+  }
+  /* 各点在架构里的位置（悬停/标题都能看到） */
+  const branchTagOf = p => {
+    const b = branchOf(p);
+    return b ? '<span class="rsBranchTag">' + esc(b.name || '') + '</span>' : '';
+  };
+
+  /* ---------- 挑知识点 ---------- */
+  function drawPick() {
+    const doneCount = rounds.filter(DONE).length;
+    const woven = arc && arc.weave;
+    app.innerHTML = `<div class="jdPage rsPage">
+      ${headHTML('整篇的知识架构')}
+      ${arcHTML()}
+      ${woven ? `<div class="rsSec"><div class="rsSecT">🧩 你自己串起来的整篇</div>
+        <div class="rsMine"><div class="rsMineB mdBody">${mdToHTML(woven.narrative || '')}</div></div>
+        ${(woven.links || []).length ? '<div class="toolbarRow"><button class="btn" id="rsWeave2">看完整串联</button></div>' : ''}
+      </div>` : ''}
+      <div class="rsIntro">
+        <p>看懂却说不出来，是最常见的假掌握。这里 AI <b>不会先甩答案给你</b>，而是带你沿一条阶梯一步步走：</p>
+        <ol class="rsLadderIntro">
+          <li><b>缘起</b> —— 为什么会遇到这个问题？之前卡在哪</li>
+          <li><b>轮廓</b> —— 它大致在做什么</li>
+          <li><b>关键</b> —— 最关键的机制 / 前提 / 边界</li>
+          <li><b>串讲</b> —— 把前三级连起来，用你自己的话讲一遍</li>
+        </ol>
+        <p class="muted">每一级 AI 只追问你<b>最关键的那一个</b>缺口，给方向不给答案。哪级都能反复答、跳过或回退，你说了算。</p>
+        <p class="muted">走完几个点之后，可以点下面的<b>「串起整篇」</b>，AI 会把你说过的话按主线拼成一篇连贯的整体叙述 —— 那是真正的"知识架构内化"。</p>
+      </div>
+      ${points.length ? `
+      <div class="rsSec">
+        <div class="rsSecT">知识点（${doneCount ? '已有 ' + doneCount + ' 个沉淀出「我的话」' : '共 ' + points.length + ' 个'}）</div>
+        <div class="rsList">${points.map((p, i) => {
+          const pr = progressOf(i);
+          const rs = roundsOf(i);
+          const n = stepsOf(p).length;
+          // 进行中的那一轮：直接续接，别再开一轮空的（服务端也会兜住）
+          const live = rs.find(r => r.status === 'active');
+          const liveTurns = live ? (Number(live.turns) || 0) : 0;
+          return `<div class="rsPt ${pr.done ? 'done' : ''}">
+            <div class="rsPtL"><span class="rsPtDot">${i + 1}</span>
+              <span class="rsPtBody"><b>${esc(p.title)} ${branchTagOf(p)}</b><span>${esc(p.summary || '')}</span>
+                <span class="rsPtSteps">${n} 级阶梯：${esc(stepsOf(p).map(x => x.t).join(' → '))}</span>
+                ${live ? `<span class="rsPtLive">✍️ 没做完，已说 ${liveTurns} 条 —— 点「继续」接着来</span>` : ''}
+                ${rs.length ? `<span class="rsPtHist">🗨 ${rs.length} 轮对话 · 共 ${rs.reduce((a, r) => a + (Number(r.turns) || 0), 0)} 条
+                  <button class="btn tiny" data-rs-hist="${i}">看对话</button></span>` : ''}</span></div>
+            <div class="rsPtR">
+              ${pr.done ? '<span class="rsTag ok">已沉淀 ' + pr.done + ' 版</span>' : ''}
+              ${live ? '<span class="rsTag act">进行中</span>' : ''}
+              <button class="btn small primary" data-rs-go="${i}">${live ? '继续' : (pr.done ? '再来一轮' : '开始')}</button>
+            </div>
+          </div>`;
+        }).join('')}</div>
+      </div>` : `
+      <div class="rsSec"><div class="rsSecT">知识点大纲</div>
+        <p class="muted">还没提炼。先让 AI 从这篇教程里拆出知识点，并为每个点生成一条理解阶梯。</p></div>`}
+      <div class="toolbarRow">
+        ${points.length ? `<button class="btn primary" id="rsWeave" ${doneCount < 1 ? 'disabled title="先至少走完一个点并收尾"' : ''}>🧩 串起整篇${doneCount ? '（已沉淀 ' + doneCount + ' 个点）' : ''}</button>
+          <button class="btn" id="rsRedo">重新提炼架构</button>`
+          + (doneCount ? `<button class="btn" id="rsNotes">看我沉淀的话（${doneCount}）</button>` : '')
+          : '<button class="btn primary" id="rsOutline">提炼架构</button>'}
+      </div>
+    </div>`;
+
+    const ob = document.getElementById('rsOutline');
+    if (ob) ob.addEventListener('click', () => doOutline(ob));
+    const rd = document.getElementById('rsRedo');
+    if (rd) rd.addEventListener('click', async () => {
+      if (!confirm('重新提炼会覆盖现有大纲（已沉淀的话不受影响）。继续？')) return;
+      await doOutline(rd, true);
+    });
+    const nb = document.getElementById('rsNotes');
+    if (nb) nb.addEventListener('click', drawNotes);
+    const wv = document.getElementById('rsWeave');
+    if (wv) wv.addEventListener('click', () => drawWeave());
+    const wv2 = document.getElementById('rsWeave2');
+    if (wv2) wv2.addEventListener('click', () => drawWeave());
+    app.querySelectorAll('[data-rs-hist]').forEach(b => b.addEventListener('click', async e => {
+      e.stopPropagation();
+      await drawHistory(Number(b.getAttribute('data-rs-hist')));
+    }));
+    app.querySelectorAll('[data-rs-go]').forEach(b => b.addEventListener('click', async () => {
+      const i = Number(b.getAttribute('data-rs-go'));
+      b.disabled = true;
+      try {
+        const r = await api('/api/tutorials/' + tid + '/restate/round', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ point_idx: i })
+        });
+        // ⚠️ 必须用服务端返回的 turns。之前写死 turns:[]，
+        // 续接已有轮次时对话全被清空 —— 表现就是"换个知识点再回来，记录没了"。
+        cur = { round: r.round, point: r.point, turns: r.turns || [] };
+        selId = 0;
+        view = 'talk';
+        draw();
+        if (r.resumed) toast('接着上次那一轮继续');
+      } catch (e) { toast(e.message); b.disabled = false; }
+    }));
+  }
+  async function doOutline(btn, force) {
+    btn.disabled = true;
+    btn.textContent = '提炼中…（约半分钟）';
+    try {
+      const r = await api('/api/tutorials/' + tid + '/restate/points', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force: !!force })
+      });
+      points = r.points || [];
+      rounds = r.rounds || [];
+      toast('大纲已提炼（' + points.length + ' 个知识点）');
+    } catch (e) { toast(e.message); }
+    draw();
+  }
+
+  /* ---------- 串起整篇：把各点的话按主线拼成一篇 ---------- */
+  async function drawWeave() {
+    app.innerHTML = '<p class="muted">加载…</p>';
+    let w = (arc && arc.weave) || null;
+    if (!w) {
+      app.innerHTML = `<div class="jdPage rsPage">${headHTML('串起整篇')}
+        <div class="rsSec"><p class="rsBusy" style="text-align:left;">AI 正在把你说过的话按主线串成一篇连贯叙述，这一步会比单点久一些…</p></div></div>`;
+      try {
+        const r = await api('/api/tutorials/' + tid + '/restate/weave', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+        });
+        w = r.weave;
+        arc = arc || {};
+        arc.weave = w;
+        toast('已串起 ' + (r.used || 0) + ' 个点');
+      } catch (e) { toast(e.message); view = 'pick'; draw(); return; }
+    }
+    app.innerHTML = `<div class="jdPage rsPage">
+      ${headHTML('你自己串起来的整篇')}
+      <div class="rsSec">
+        <div class="rsSecT">用你自己的话，把这篇教程讲了一遍</div>
+        <div class="rsWeaveBody mdBody">${mdToHTML(w.narrative || '')}</div>
+        <div class="toolbarRow"><button class="btn tiny" id="rsWCopy">复制</button><button class="btn tiny" id="rsWRe">用最新的话重串一次</button></div>
+      </div>
+      ${(w.links || []).length ? `<div class="rsSec">
+        <div class="rsSecT">你可能还没连起来的关系</div>
+        <div class="rsLinks">${w.links.map(l => `<div class="rsLink">
+          <div class="rsLinkP"><span>${esc(l.a)}</span><i>↔</i><span>${esc(l.b)}</span></div>
+          <div class="rsLinkH">${esc(l.how || '')}</div></div>`).join('')}</div>
+      </div>` : ''}
+      ${(w.missing || []).length ? `<div class="rsSec">
+        <div class="rsSecT">还没走到的块</div>
+        <div class="rsChips">${w.missing.map(x => '<span class="rsChip miss">' + esc(x) + '</span>').join('')}</div>
+      </div>` : ''}
+      <div class="toolbarRow">
+        <button class="btn" id="rsWBack">← 回到知识点列表</button>
+        <button class="btn" id="rsWTut">← 返回教程</button>
+      </div>
+    </div>`;
+    const cp = document.getElementById('rsWCopy');
+    if (cp) cp.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(w.narrative || ''); toast('已复制'); }
+      catch (e) { toast('复制失败，可手动选中'); }
+    });
+    document.getElementById('rsWRe').addEventListener('click', async () => {
+      if (!confirm('用你最新沉淀的话重新串一次？')) return;
+      arc.weave = null;
+      await drawWeave();
+    });
+    document.getElementById('rsWBack').addEventListener('click', () => { view = 'pick'; draw(); });
+    document.getElementById('rsWTut').addEventListener('click', () => { location.hash = '#/t/' + tid; });
+  }
+
+  /* ---------- 对话存档（只读）：任何一轮都能翻回去看 ---------- */
+  async function drawHistory(idx) {
+    view = 'hist';
+    histIdx = idx;
+    app.innerHTML = '<p class="muted">加载对话…</p>';
+    const point = points[idx] || { title: '' };
+    const rs = roundsOf(idx);
+    const blocks = [];
+    for (const r of rs) {
+      let turns = [];
+      try { const x = await api('/api/restate-round/' + r.id); turns = x.turns || []; } catch (e) {}
+      let gaps = [];
+      try { gaps = JSON.parse(r.gaps || '[]'); } catch (e) {}
+      const badge = r.status === 'active' ? '<span class="rsTag act">进行中</span>'
+        : (DONE(r) ? '<span class="rsTag ok">已沉淀</span>' : '<span class="rsTag">已归档</span>');
+      blocks.push(`<div class="rsHistBlk">
+        <div class="rsHistT">${esc(String(r.created_at || '').slice(0, 16).replace('T', ' '))} ${badge}
+          <span class="muted">${turns.length} 条 · 走到第 ${(Number(r.step_idx) || 0) + 1} 级</span></div>
+        ${turns.length ? `<div class="rsThread">${turns.map(t => turnHTML(t, -1)).join('')}</div>` : '<p class="muted">这轮还没说话。</p>'}
+        ${DONE(r) ? `<div class="rsMine"><div class="rsMineT">🗣 这一轮沉淀的「我的话」</div><div class="rsMineB mdBody">${mdToHTML(r.mine)}</div></div>
+          ${r.line ? '<p class="rsLine">' + esc(r.line) + '</p>' : ''}
+          ${gaps.length ? '<div class="rsGaps">' + gaps.map(g => '<div class="rsGap"><b>' + esc(g.key) + '</b><span>' + esc(g.why || '') + '</span></div>').join('') + '</div>' : ''}` : ''}
+      </div>`);
+    }
+    app.innerHTML = `<div class="jdPage rsPage">
+      ${headHTML('对话存档')}
+      <div class="rsSec"><div class="rsSecT">${esc(point.title || '')}</div>
+        <p class="hint" style="margin:0;">共 ${rs.length} 轮。退出页面、刷新、关掉浏览器都不会丢。</p></div>
+      <div class="rsHists">${blocks.join('') || '<p class="muted">还没有对话。</p>'}</div>
+      <div class="toolbarRow"><button class="btn" id="rsHBack">← 返回</button></div>
+    </div>`;
+    document.getElementById('rsHBack').addEventListener('click', () => { view = 'pick'; draw(); });
+  }
+
+  /* ---------- 阶梯复述 ---------- */
+  function ladderHTML() {
+    const steps = stepsOf(cur.point);
+    const marks = stepMarks();
+    const now = stepOf().i;
+    return `<div class="rsLadder">${steps.map((s, i) => {
+      const m = marks[i];
+      const cls = i < now ? 'passed' : (i === now ? 'now' : 'todo');
+      const mk = i < now ? '✓' : (m && m.ok ? '✓' : (m ? '·' : ''));
+      return `<div class="rsRung ${cls}">
+        <span class="rsRungN">${i + 1}</span>
+        <span class="rsRungT">${esc(s.t || ('第' + (i + 1) + '级'))}</span>
+        <span class="rsRungM">${mk}</span>
+      </div>`;
+    }).join('')}</div>`;
+  }
+
+  /* 三栏：左=问题（常驻可见）· 中=对话（自己滚）· 右=选中那一轮的解析。
+     这样对话再长也压不跑问题；每一轮的解析都留在右栏，点哪轮看哪轮，翻回去也还在。 */
+  function drawTalk() {
+    const point = cur.point || { title: '' };
+    const turns = cur.turns || [];
+    const { i: si, total: stot, s: step } = stepOf();
+    const last = [...turns].reverse().find(x => {
+      let v = {}; try { v = JSON.parse(x.verdict || '{}'); } catch (e) {}
+      return v.step_idx === si && v.kind !== 'chat';
+    });
+    const spoke = turns.some(x => x.user_text);
+    const isLast = si >= stot - 1;
+    // 右栏解释哪一轮：默认跟着**最新一条**（就是你眼前这条），发送后自动选中新轮。
+    // 之前默认取「当前级最近一条」，结果右栏停在第 39 轮、中间栏已滚到第 44 轮，两边对不上。
+    // 归一化成具体 id，这样 turnHTML 能把它高亮出来 —— 右栏在讲哪条，中间栏得看得出来。
+    if (!selId && turns.length) selId = turns[turns.length - 1].id;
+    const selTurn = turns.find(t => t.id === selId) || turns[turns.length - 1] || last || null;
+    const selNo = turns.indexOf(selTurn) + 1;   // 1 起；0 = 没有
+    const pos = positionOf(Number(cur.round.point_idx || 0));
+
+    app.innerHTML = `<div class="jdPage rsPage rsTalkPage">
+      ${headHTML('第 ' + (si + 1) + ' / ' + stot + ' 级 · ' + (step.t || ''))}
+      <div class="rsPanes" id="rsPanes">
+        <aside class="rsPane rsPaneQ">
+          <div class="rsPaneT">🧭 上下文</div>
+          <div class="rsPaneBody">
+            <div class="rsPaneTopic">${esc(point.title || '')}</div>
+            ${pos ? '<div class="rsPos">📍 ' + esc(pos) + '</div>' : ''}
+            ${ladderHTML()}
+            <div class="rsQ">
+              <div class="rsQT"><span class="rsQBadge">${esc(step.t || ('第' + (si + 1) + '级'))}</span>${isLast ? '<span class="rsQFinal">最后一级</span>' : ''}</div>
+              <p class="rsQQ">${esc(step.q || '')}</p>
+              ${step.hint ? `<details class="rsKey"><summary>想不出来？看方向提示（不是答案）</summary><p>${esc(step.hint)}</p></details>` : ''}
+            </div>
+          </div>
+          <div class="rsNav">
+            ${si > 0 ? '<button class="btn tiny" id="rsPrev">← 上一级</button>' : ''}
+            ${!isLast ? '<button class="btn tiny primary" id="rsNext">下一级 →</button>' : ''}
+            <button class="btn tiny" id="rsBack">换个知识点</button>
+          </div>
+        </aside>
+        <div class="rsSplit" data-k="q"></div>
+
+        <section class="rsPane rsPaneC">
+          <div class="rsPaneT">💬 对话
+            <span class="rsPaneN">${turns.length ? turns.length + ' 轮' : '还没开口'}</span>
+            ${turns.length ? '<button class="btn tiny" id="rsLatest">跳到最新 ↓</button>' : ''}
+          </div>
+          <div class="rsThread" id="rsThread">${turns.length ? turns.map(t => turnHTML(t, si)).join('')
+            : `<div class="rsEmpty"><span class="rsEmptyI">${si === 0 ? '🤔' : '✍️'}</span>
+                 <p><b>${si === 0 ? '先别急着想定义。' : '这一级'}</b>${si === 0
+                   ? '回想一下：在学会它之前，这件事你是怎么做的？卡在哪一步？'
+                   : '按左边那个问题回答就好，写得零散、口语都没关系。'}</p></div>`}
+          </div>
+          ${busy ? '<div class="rsBusy">AI 在想…</div>' : ''}
+          <div class="rsInput">
+            <textarea id="rsSay" rows="2" placeholder="按左边这级的问题回答…（Ctrl/⌘+Enter 发送）"></textarea>
+            <div class="rsInputBtns">
+              <button class="btn primary" id="rsSend">${busy ? '发送中…' : '我说完了'}</button>
+              <button class="btn" id="rsAsk">不明白，问一句</button>
+              ${spoke ? '<button class="btn" id="rsFinish">收尾对照</button>' : ''}
+            </div>
+          </div>
+        </section>
+        <div class="rsSplit" data-k="a"></div>
+
+        <aside class="rsPane rsPaneA">
+          <div class="rsPaneT">📋 解析反馈<span class="rsPaneN" id="rsAnWhich">${selNo ? '第 ' + selNo + ' 轮' : ''}</span></div>
+          <div class="rsPaneBody" id="rsAnalysis">${analysisHTML(selTurn, si)}</div>
+        </aside>
+      </div>
+    </div>`;
+
+    // 点对话里的任意一轮 → 右栏显示那一轮的解析；再点一次回到「跟随最新」
+    app.querySelectorAll('[data-rs-turn]').forEach(el => el.addEventListener('click', () => {
+      const id = Number(el.getAttribute('data-rs-turn'));
+      const list = cur.turns || [];
+      const lastId = list.length ? list[list.length - 1].id : 0;
+      selId = (selId === id) ? lastId : id;
+      app.querySelectorAll('[data-rs-turn]').forEach(x => x.classList.toggle('sel', Number(x.getAttribute('data-rs-turn')) === selId));
+      const t = list.find(x => x.id === selId) || selTurn;
+      const box = document.getElementById('rsAnalysis');
+      if (box) box.innerHTML = analysisHTML(t, si);
+      const which = document.getElementById('rsAnWhich');
+      if (which) {
+        const i = list.indexOf(t);
+        which.textContent = i >= 0 ? '第 ' + (i + 1) + ' 轮' : '';
+      }
+    }));
+
+    const ta = document.getElementById('rsSay');
+    ta.addEventListener('keydown', e => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); send(); }
+    });
+    document.getElementById('rsSend').addEventListener('click', send);
+    document.getElementById('rsAsk').addEventListener('click', ask);
+    const pv = document.getElementById('rsPrev');
+    if (pv) pv.addEventListener('click', () => moveStep('prev'));
+    const nx = document.getElementById('rsNext');
+    if (nx) nx.addEventListener('click', () => moveStep('next'));
+    const fb = document.getElementById('rsFinish');
+    if (fb) fb.addEventListener('click', finish);
+    document.getElementById('rsBack').addEventListener('click', () => { cur = null; view = 'pick'; draw(); });
+    const lt = document.getElementById('rsLatest');
+    if (lt) lt.addEventListener('click', scrollThreadToEnd);
+    initSplit();
+    scrollThreadToEnd();
+    setTimeout(() => { if (!busy) ta.focus(); }, 30);
+  }
+  /* ---------- 三栏宽度可拖动 ----------
+     宽度写在 CSS 变量 --rs-col-q / --rs-col-a 上，存在 localStorage。
+     两侧都夹住，中栏永远留够宽度 —— 否则拖过头会把对话挤成一条缝。 */
+  const COL_KEY = 'sierxing-restate-cols-v1';
+  const COL_DEF = { q: 300, a: 344 };
+  const COL_MIN = { q: 210, a: 236 };
+  function colCfg() {
+    let o = {};
+    try { o = JSON.parse(localStorage.getItem(COL_KEY) || '{}') || {}; } catch (e) { o = {}; }
+    return { q: clampCol('q', o.q), a: clampCol('a', o.a) };
+  }
+  function clampCol(k, v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.min(Math.max(Math.round(n), COL_MIN[k]), 560) : COL_DEF[k];
+  }
+  function applyCols(cfg) {
+    const c = cfg || colCfg(), el = document.getElementById('rsPanes');
+    if (!el) return;
+    el.style.setProperty('--rs-col-q', c.q + 'px');
+    el.style.setProperty('--rs-col-a', c.a + 'px');
+  }
+  function initSplit() {
+    const el = document.getElementById('rsPanes');
+    if (!el) return;
+    applyCols();
+    el.querySelectorAll('.rsSplit').forEach(h => {
+      h.addEventListener('pointerdown', e => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        const k = h.getAttribute('data-k');
+        const cfg = colCfg();
+        const box = el.getBoundingClientRect();
+        // 非中间部分 = 两个把手(6px×2) + 面板之间的外边距(7px×2)
+        const chrome = 26;
+        const startX = e.clientX, startW = cfg[k];
+        const other = k === 'q' ? cfg.a : cfg.q;
+        const MID_MIN = 360;
+        const maxW = Math.max(COL_MIN[k], box.width - chrome - other - MID_MIN);
+        document.body.classList.add('rsResizing');
+        h.setPointerCapture && h.setPointerCapture(e.pointerId);
+        const move = ev => {
+          const d = ev.clientX - startX;
+          cfg[k] = Math.min(Math.max(k === 'q' ? startW - d : startW + d, COL_MIN[k]), maxW);
+          cfg[k] = Math.round(cfg[k]);
+          applyCols(cfg);
+        };
+        const up = () => {
+          h.removeEventListener('pointermove', move);
+          h.removeEventListener('pointerup', up);
+          h.removeEventListener('pointercancel', up);
+          document.body.classList.remove('rsResizing');
+          try { localStorage.setItem(COL_KEY, JSON.stringify(cfg)); } catch (e) {}
+        };
+        h.addEventListener('pointermove', move);
+        h.addEventListener('pointerup', up);
+        h.addEventListener('pointercancel', up);
+      });
+      // 双击复位
+      h.addEventListener('dblclick', () => {
+        try { localStorage.removeItem(COL_KEY); } catch (e) {}
+        applyCols(COL_DEF);
+      });
+    });
+  }
+  /* 对话栏滚到底（发送后看最新回复），不再把整页拉回顶部 */
+  function scrollThreadToEnd() {
+    const el = document.getElementById('rsThread');
+    if (el) el.scrollTop = el.scrollHeight;
+  }
+  /* 右栏：选中那一轮的解析。没选中就提示怎么用。 */
+  function analysisHTML(t, si) {
+    if (!t) {
+      return `<div class="rsAnNone"><span class="rsEmptyI">📋</span>
+        <p>你说完一段，这里会显示 AI 对<b>那一轮</b>的判定：讲到了什么、还缺什么、往哪想。</p>
+        <p class="muted">对话再长也不会把左边的题挤走，点中间任意一轮就能回看它的解析。</p></div>`;
+    }
+    let v = {};
+    try { v = JSON.parse(t.verdict || '{}'); } catch (e) {}
+    const stepLbl = v.step_t ? '第 ' + ((Number(v.step_idx) || 0) + 1) + ' 级 · ' + esc(v.step_t) : '';
+    const head = `<div class="rsAnHead">${stepLbl ? '<span class="rsAnStep">' + stepLbl + '</span>' : ''}
+      ${v.ok === true ? '<span class="rsAnTag ok">到位</span>' : (v.ok === false ? '<span class="rsAnTag warn">还差一点</span>' : '')}
+      <span class="rsAnWhen">${esc(String(t.created_at || '').slice(11, 16))}</span></div>`;
+    if (v.kind === 'chat') {
+      return head + '<div class="rsAnChat"><b>你问的</b>' + esc(t.user_text) + '</div>'
+        + '<div class="rsAnReply mdBody">' + mdToHTML(t.ai_text) + '</div>';
+    }
+    // 下一手提示：以前是插在对话流里的独立段落，现在跟着解析走，位置永远固定
+    const st = stepOf();
+    const hint = (v.step_idx !== st.i) ? ''
+      : (v.ok === true
+        ? (st.i >= st.total - 1
+          ? '<div class="rsAnNext">✅ 串讲完成 —— 点左下「收尾对照」，看看你的版本和原文差在哪。</div>'
+          : '<div class="rsAnNext">✅ 这一级到位了，点左边「下一级 →」继续往上走。</div>')
+        : '<div class="rsAnNext">还差一点。AI 只挑了<b>最关键的那个缺口</b>：补上再答一次，或者直接点左边「下一级 →」回头补。</div>');
+    return head + verdictHTML(v) + hint;
+  }
+
+  /* si = 当前级序号；si < 0 表示「存档浏览」。
+     ⚠️ 正常对话中（si >= 0）判定**一律不内联** —— 内联会把左边的题越推越远，
+        100 轮对话后用户要滚一整屏才看得到问题。判定只在右栏显示选中那一轮的。
+        存档浏览没有右栏，所以那儿仍然内联摊开。 */
+  function turnHTML(t, si) {
+    let v = {};
+    try { v = JSON.parse(t.verdict || '{}'); } catch (e) {}
+    const isChat = v.kind === 'chat';
+    const hist = si < 0;
+    const hasV = !isChat && ((v.hit || []).length + (v.missed || []).length + (v.wrong || []).length > 0 || !!(v.scaffold || ''));
+    const mark = isChat
+      ? '<span class="rsTurnTag chat">问了一句</span>'
+      : (v.ok === true ? '<span class="rsTurnTag ok">到位</span>'
+        : (v.ok === false ? '<span class="rsTurnTag warn">还差一点</span>' : ''));
+    const sel = !hist && selId === t.id ? ' sel' : '';
+    const hd = `<div class="rsTurnHd">${mark}
+      ${hist && v.step_t ? '<span class="rsStepTag">第 ' + ((Number(v.step_idx) || 0) + 1) + ' 级 · ' + esc(v.step_t) + '</span>' : ''}
+      <span class="rsTurnTime">${esc(String(t.created_at || '').slice(11, 16))}</span>
+      ${hasV && !hist ? '<span class="rsTurnGo">看解析 ›</span>' : ''}
+    </div>`;
+    const bubble = `<div class="rsSay"><span class="rsWho">我</span><div class="rsBubble">${esc(t.user_text)}</div></div>
+      <div class="rsAi"><span class="rsWho ai">AI</span><div class="rsBubble ai mdBody">${mdToHTML(t.ai_text)}</div></div>`;
+    if (hist) return `<div class="rsTurn${isChat ? ' chat' : (v.ok ? ' ok' : '')}">${hd}${bubble}${verdictHTML(v)}</div>`;
+    return `<div class="rsTurn${isChat ? ' chat' : (v.ok ? ' ok' : '')}${sel}" data-rs-turn="${t.id}"${hasV ? ' title="点这轮看右栏解析"' : ''}>
+      ${hd}${bubble}</div>`;
+  }
+  /* 判定结果。
+     之前把 hit / missed / wrong / 方向 一律平铺成整行，4-5 行下来 AI 的回复框
+     就被压成一条瘦高的竖条。这里改成：一行摘要计数 + 只把「最该补的那一条」摊开，
+     其余折叠 —— AI 说的话始终是主角，机器判定只是脚手架。 */
+  function verdictHTML(v) {
+    const hit = v.hit || [], missed = v.missed || [], wrong = v.wrong || [];
+    if (!hit.length && !missed.length && !wrong.length && !(v.scaffold || '')) return '';
+    const clip = (s, n) => { s = String(s || '').trim(); return s.length > n ? s.slice(0, n) + '…' : s; };
+    const counts = [];
+    if (hit.length) counts.push('<span class="rsChip hit">✓ 讲到 ' + hit.length + ' 点</span>');
+    if (missed.length) counts.push('<span class="rsChip miss">还缺 ' + missed.length + ' 处</span>');
+    if (wrong.length) counts.push('<span class="rsChip wrong">有 ' + wrong.length + ' 处说反</span>');
+    // 只摊开第一条 missed —— 那正是 AI 要你补的那一个
+    const firstMiss = missed.length
+      ? '<div class="rsMissFirst"><b>最该补的</b>' + esc(clip(missed[0], 200)) + (missed.length > 1 ? '<span class="muted">（还有 ' + (missed.length - 1) + ' 处，看下面展开）</span>' : '') + '</div>'
+      : '';
+    const wrongAll = wrong.length
+      ? '<div class="rsWrongList">' + wrong.map(w => '<div class="rsChip wrong">你写「' + esc(clip(w.said, 60)) + '」→ 应是「' + esc(clip(w.right, 80)) + '」</div>').join('') + '</div>'
+      : '';
+    const full = (hit.length || missed.length > 1)
+      ? '<details class="rsFullV"><summary>看完整判定</summary>'
+        + (missed.length > 1 ? '<div class="rsChips">' + missed.slice(1).map(m => '<span class="rsChip miss"><b>还缺</b>' + esc(clip(m, 160)) + '</span>').join('') + '</div>' : '')
+        + (hit.length ? '<div class="rsChips">' + hit.map(h => '<span class="rsChip hit"><b>✓ 讲到了</b>' + esc(clip(h, 160)) + '</span>').join('') + '</div>' : '')
+        + '</details>'
+      : '';
+    return `<div class="rsVerdict">
+      ${counts.length ? '<div class="rsVCnt">' + counts.join('') + '</div>' : ''}
+      ${firstMiss}${wrongAll}
+      ${v.scaffold ? '<div class="rsScaffold"><b>💡 方向</b>（不是答案）：' + esc(clip(v.scaffold, 200)) + '</div>' : ''}
+      ${full}
+    </div>`;
+  }
+
+  async function send() {
+    if (busy) return;
+    const ta = document.getElementById('rsSay');
+    const text = String(ta.value || '').trim();
+    if (!text) return toast('先写下你的理解');
+    busy = true; draw();
+    try {
+      const r = await api('/api/restate-round/' + cur.round.id + '/turn', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text })
+      });
+      cur.turns.push(r.turn);
+      selId = r.turn.id;        // 右栏自动跟上最新一轮
+    } catch (e) { toast(e.message); }
+    busy = false; draw();
+    scrollThreadToEnd();        // 只滚对话栏，不再把整页拉回顶部
+  }
+  async function ask() {
+    if (busy) return;
+    const ta = document.getElementById('rsSay');
+    const text = String(ta.value || '').trim();
+    if (!text) return toast('先写下你的问题');
+    busy = true; draw();
+    try {
+      const r = await api('/api/restate-round/' + cur.round.id + '/chat', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text })
+      });
+      cur.turns.push(r.turn);
+      selId = r.turn.id;
+    } catch (e) { toast(e.message); }
+    busy = false; draw();
+    scrollThreadToEnd();
+  }
+  async function moveStep(action) {
+    if (busy) return;
+    busy = true;
+    try {
+      const r = await api('/api/restate-round/' + cur.round.id + '/step', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action })
+      });
+      cur.round = r.round;
+      selId = 0;                // 换级后右栏回到「当前级最近一轮」，别把上一级的判定留着
+    } catch (e) { toast(e.message); }
+    busy = false; draw();
+  }
+  async function finish() {
+    if (busy) return;
+    if (!confirm('现在收尾，生成「我的话」对照？\n（后面还可以换个角度再来一轮）')) return;
+    busy = true; draw();
+    try {
+      await api('/api/restate-round/' + cur.round.id + '/finish', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+      });
+      await reload();
+      view = 'done';
+    } catch (e) { toast(e.message); }
+    busy = false; draw();
+  }
+
+  /* ---------- 收尾对照 ---------- */
+  function drawDone() {
+    const r = cur.round || {};
+    let gaps = [];
+    try { gaps = JSON.parse(r.gaps || '[]'); } catch (e) {}
+    app.innerHTML = `<div class="jdPage rsPage">
+      ${headHTML('你的版本 vs 原文')}
+      <div class="rsSec">
+        <div class="rsSecT">${esc(r.point_title || '')}</div>
+        <div class="rsMine">
+          <div class="rsMineT">🗣 我的话<button class="btn tiny" id="rsCopy">复制</button></div>
+          <div class="rsMineB mdBody">${mdToHTML(r.mine || '')}</div>
+        </div>
+        ${r.line ? `<p class="rsLine">${esc(r.line)}</p>` : ''}
+      </div>
+      <div class="rsSec">
+        <div class="rsSecT">${gaps.length ? '和关键要点的差距（' + gaps.length + '）' : '要点都覆盖了 ✓'}</div>
+        ${gaps.length ? `<div class="rsGaps">${gaps.map(g => `
+          <div class="rsGap"><b>${esc(g.key)}</b><span>${esc(g.why || '')}</span></div>`).join('')}</div>`
+          : '<p class="muted">这一轮你已经用自己的话讲全了。</p>'}
+        ${gaps.length ? '<p class="hint">不用现在补。过两天回来看这条，你会认出哪些点是「以为自己懂了」。</p>' : ''}
+      </div>
+      <div class="toolbarRow">
+        <button class="btn" id="rsWHist">🗨 看这段对话（${(cur.turns || []).length} 条）</button>
+        <button class="btn primary" id="rsNextPt">下一个知识点 →</button>
+        <button class="btn" id="rsAll">看我沉淀的话</button>
+        <button class="btn" id="rsBackT">← 返回教程</button>
+      </div>
+    </div>`;
+    const wh = document.getElementById('rsWHist');
+    if (wh) wh.addEventListener('click', () => drawHistory(Number(r.point_idx || 0)));
+    const cp = document.getElementById('rsCopy');
+    if (cp) cp.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(r.mine || ''); toast('已复制'); }
+      catch (e) { toast('复制失败，可手动选中'); }
+    });
+    document.getElementById('rsNextPt').addEventListener('click', async () => {
+      const idx = points.findIndex((p, i) => !rounds.find(x => Number(x.point_idx) === i && x.mine));
+      if (idx < 0) { cur = null; view = 'pick'; draw(); return; }
+      try {
+        const res = await api('/api/tutorials/' + tid + '/restate/round', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ point_idx: idx })
+        });
+        cur = { round: res.round, point: res.point, turns: [] };
+        view = 'talk'; draw();
+      } catch (e) { toast(e.message); }
+    });
+    document.getElementById('rsAll').addEventListener('click', drawNotes);
+    document.getElementById('rsBackT').addEventListener('click', () => { location.hash = '#/t/' + tid; });
+  }
+
+  /* ---------- 我沉淀的话 ---------- */
+  async function drawNotes() {
+    app.innerHTML = '<p class="muted">加载…</p>';
+    let notes = [];
+    try { const r = await api('/api/tutorials/' + tid + '/restate/notes'); notes = r.notes || []; } catch (e) {}
+    app.innerHTML = `<div class="jdPage rsPage">
+      ${headHTML('我说过的话')}
+      ${notes.length ? `<div class="rsNotes">${notes.map(n => `
+        <div class="rsNote">
+          <div class="rsNoteT">${esc(n.point_title || '')}<span class="muted">${esc(String(n.created_at || '').slice(0, 10))}</span></div>
+          <div class="rsNoteB mdBody">${mdToHTML(n.mine)}</div>
+          ${n.line ? '<p class="rsLine">' + esc(n.line) + '</p>' : ''}
+        </div>`).join('')}</div>`
+        : '<p class="muted">还没有沉淀。先挑一个知识点走一遍阶梯吧。</p>'}
+      <div class="toolbarRow"><button class="btn" id="rsNB">← 返回</button></div>
+    </div>`;
+    document.getElementById('rsNB').addEventListener('click', () => { view = 'pick'; draw(); });
+  }
+
+  SiErXing.registerPlugin({
+    id: 'restate',
+    routes: [
+      {
+        match: h => h.match(/^#\/t\/(\d+)\/restate$/),
+        render: async m => { await renderPage(Number(m[1])); }
+      }
+    ]
+  });
+})();

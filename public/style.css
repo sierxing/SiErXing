@@ -687,19 +687,27 @@ body.mapMode{overflow:hidden;}
 .tutHead .back{white-space:nowrap;}
 /* 教程大纲（侧边） */
 .tutToc{
-  position:fixed; left:90px; top:110px; width:220px; max-height:70vh; overflow:auto;
+  position:fixed; left:90px; top:110px; width:220px; max-height:70vh;
   background:var(--card); border:1px solid var(--border); border-radius:12px; padding:10px 12px;
   box-shadow:var(--shadow-sm); z-index:25;
+  /* 顶栏/底部常驻，只有中间列表滚 —— 所以自己不能滚，滚动交给 .tutTocScroll */
+  display:flex; flex-direction:column; overflow:hidden;
 }
 .tutTocResize{position:absolute; right:-4px; top:0; bottom:0; width:9px; cursor:col-resize;}
 .tutTocResize:hover{background:var(--accent-soft);}
-.tutTocTitle{font-size:12px; font-weight:700; color:var(--muted); margin-bottom:6px; display:flex; align-items:center; gap:6px;}
+.tutTocTitle{
+  flex:none; font-size:12px; font-weight:700; color:var(--muted);
+  display:flex; align-items:center; gap:6px;
+  background:var(--card); padding-bottom:7px; margin-bottom:7px;
+  border-bottom:1px solid var(--border);
+}
+.tutTocScroll{flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; margin:0 -4px; padding:0 4px;}
 .tutTocItem{display:block; font-size:12.3px; line-height:1.5; color:var(--text); text-decoration:none; padding:4px 6px; border-radius:7px; cursor:pointer; border-left:2px solid transparent;}
 .tutTocItem:hover{background:var(--soft);}
 .tutTocItem.active{background:var(--accent-soft); color:var(--accent); border-left-color:var(--accent); font-weight:600;}
 .tutTocItem.lv3{padding-left:16px; font-size:11.8px; color:var(--muted);}
 .tutTocItem.lv4{padding-left:26px; font-size:11.5px; color:var(--muted);}
-.tutTocProg{font-size:11px; color:var(--muted); margin-top:8px; border-top:1px dashed var(--border); padding-top:6px;}
+.tutTocProg{flex:none; font-size:11px; color:var(--muted); margin-top:8px; border-top:1px dashed var(--border); padding-top:6px;}
 @media (max-width:1420px){ .tutToc{display:none;} }
 .tutHead .spacer{flex:1;}
 .tutMeta{font-size:12.5px; color:var(--muted); margin-bottom:14px;}
@@ -858,6 +866,8 @@ h3.mdH{font-size:17px;} h4.mdH,h5.mdH,h6.mdH{font-size:15px;}
 .mdBody code{background:var(--soft); border:1px solid var(--border); border-radius:5px; padding:1px 5px; font-size:12.4px; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
 .mdBody pre{background:var(--soft); border:1px solid var(--border); border-radius:10px; padding:10px 12px; overflow-x:auto; margin:9px 0; position:relative;}
 .mdBody pre[data-lang]:before{content:attr(data-lang); position:absolute; top:5px; right:10px; font-size:10.5px; color:var(--muted); letter-spacing:.4px;}
+/* 有语言标识时给右侧留出空位，否则长代码行的开头会被标识压住 */
+.mdBody pre[data-lang]{padding-right:58px;}
 .mdBody pre code{background:none; border:none; padding:0; font-size:12.4px; line-height:1.6; white-space:pre;}
 .mdBody blockquote{border-left:3px solid var(--accent-border); background:var(--accent-soft); color:var(--text); border-radius:0 9px 9px 0; padding:7px 12px; margin:9px 0;}
 .mdBody blockquote p{margin:3px 0;}

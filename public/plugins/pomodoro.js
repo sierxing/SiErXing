@@ -14,7 +14,7 @@
   const LS = 'sierxing-pomodoro';
   const DAY = () => { const d = new Date(); return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate(); };
 
-  const DEF = { focusMin: 25, breakMin: 5, phase: 'focus', running: false, deadline: 0, remaining: 25 * 60000, collapsed: false, right: 18, bottom: 18, doneToday: 0, dayStamp: DAY(), sound: true, notify: true, bindNodeId: 0, bindTitle: '', bindGoalId: 0, auto: true };
+  const DEF = { focusMin: 25, breakMin: 5, phase: 'focus', running: false, deadline: 0, remaining: 25 * 60000, collapsed: false, right: 18, bottom: 18, doneToday: 0, dayStamp: DAY(), sound: true, notify: true, bindNodeId: 0, bindTitle: '', bindGoalId: 0, auto: true, idleMin: 0, restKeys: ['bilibili'] };
 
   function load() {
     let s = {};
@@ -23,9 +23,37 @@
     if (st.dayStamp !== DAY()) { st.dayStamp = DAY(); st.doneToday = 0; }
     st.focusMin = clampMin(st.focusMin, DEF.focusMin);
     st.breakMin = clampMin(st.breakMin, DEF.breakMin);
+    // idleMin：多少分钟没动静就自动暂停专注。0 = 不检测（只看页面切换）。
+    // 旧存档没有这个字段 → 按 0 处理，等于不再有「1 分钟没滚动就停」的硬性打断。
+    st.idleMin = clampIdle(st.idleMin, DEF.idleMin);
+    // restKeys：切走页面时，只有前台窗口标题命中这些关键词才算「休息」。
+    // 空数组 = 不做筛选，切走就算休息（等同旧行为）。
+    st.restKeys = normKeys(st.restKeys !== undefined ? st.restKeys : DEF.restKeys);
     return st;
   }
+  /* 关键词去空白、去重（大小写不敏感去重）、限长限量，避免脏存档把渲染/匹配搞坏 */
+  function normKeys(v) {
+    const arr = Array.isArray(v) ? v : (typeof v === 'string' && v ? v.split(/[,，\s]+/) : DEF.restKeys);
+    const seen = {}, out = [];
+    for (const x of arr) {
+      const k = String(x == null ? '' : x).trim().slice(0, 40);
+      if (!k) continue;
+      const kk = k.toLowerCase();
+      if (seen[kk]) continue;
+      seen[kk] = 1; out.push(k);
+      if (out.length >= 12) break;
+    }
+    return out;
+  }
+  function matchKeys(hay, keys) {
+    const h = String(hay || '').toLowerCase();
+    if (!h) return false;
+    for (const k of (keys || [])) { const kk = String(k).trim().toLowerCase(); if (kk && h.indexOf(kk) >= 0) return true; }
+    return false;
+  }
   function clampMin(v, fb) { v = Math.round(Number(v)); return (v >= 1 && v <= 180) ? v : fb; }
+  // 允许 0（关闭检测）与 1~180（分钟）
+  function clampIdle(v, fb) { v = Math.round(Number(v)); return (v === 0 || (v >= 1 && v <= 180)) ? v : fb; }
   let S = load();
   function save() { try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) {} }
   // 刷新后恢复：如果上次 running，本轮 tick 会按 deadline 继续（已超时则直接结算）
@@ -89,8 +117,10 @@
   let awaySaved = null;   // 切出时暂存的专注轮次 { remaining }，回来恢复
   let awayStartAt = 0;    // 本次切出休息开始的时间戳，用来算“已休息多久”
   let awayInfoModal = false; // 当前弹窗只是“已开始休息”告知，点“知道了”不碰计时
+  let researching = false;   // 切出去但判定为「在查资料」：专注继续跑，不记休息
+  let researchAt = 0;
+  let researchWin = '';
   let pauseReason = '';   // 自动暂停原因展示
-  let lastScrollAt = Date.now();
   function start(phase) {
     S.phase = (phase === 'break') ? 'break' : 'focus';
     S.remaining = phaseLen(S.phase);
@@ -99,8 +129,9 @@
     finished = false;
     autoPaused = false; pauseReason = '';
     runRoute = location.hash || '#/';
-    lastScrollAt = Date.now();   // 手动点开始也算一次露面，起码给 60 秒宽限
+    markActive();   // 手动点开始也算一次露面，给一个完整周期的宽限
     awayMode = false; awaySaved = null; awayInfoModal = false; awayStartAt = 0;
+    researching = false; researchAt = 0; researchWin = '';
     closeModal();
     stopFlash();
     save(); render();
@@ -111,6 +142,7 @@
     S.running = false;
     S.deadline = 0;
     awayMode = false; awaySaved = null; awayStartAt = 0;   // 手动接管：切屏休息模式一并结束
+    researching = false; researchAt = 0; researchWin = '';
     save(); render();
     flushStats();
   }
@@ -128,7 +160,7 @@
     S.running = true;
     autoPaused = false; pauseReason = '';
     runRoute = location.hash || '#/';
-    lastScrollAt = Date.now();   // 手动点继续也算露面，否则会被 idle 规则秒停
+    markActive();   // 手动点继续也算露面，否则会被 idle 规则秒停
     save(); render();
   }
   function stop() {
@@ -139,6 +171,7 @@
     autoPaused = false; pauseReason = '';
     runRoute = null;
     awayMode = false; awaySaved = null; awayInfoModal = false; awayStartAt = 0;
+    researching = false; researchAt = 0; researchWin = '';
     closeModal();
     stopFlash();
     save(); render();
@@ -152,7 +185,7 @@
     S.deadline = Date.now() + S.remaining;
     S.running = true;
     finished = false;
-    lastScrollAt = Date.now();
+    markActive();
     closeModal();
     stopFlash();
     save(); render();
@@ -164,6 +197,7 @@
     if (finished) return;
     finished = true;
     awayMode = false; awayInfoModal = false; awayStartAt = 0;
+    researching = false; researchAt = 0; researchWin = '';
     const was = S.phase;
     S.running = false;
     S.deadline = 0;
@@ -206,8 +240,20 @@
         `<button id="pomoBind" class="pomoBind" title="绑定节点：专注时间全部记到该节点（在哪页都一样）；点我更换"></button>` +
         `<div class="pomoRows"><label>专注 <input id="pomoFocusMin" type="number" min="1" max="180" step="1"> 分钟</label>` +
         `<label>休息 <input id="pomoBreakMin" type="number" min="1" max="180" step="1"> 分钟</label></div>` +
+        `<label class="pomoIdleRow" title="读教程时多久没动静就自动暂停专注。默认「不检测」——专注只在你切走页面或手动点停时才会中断，适合长时间看代码。">` +
+        `<span class="pomoIdleLabel">没动静</span><select id="pomoIdleMin">` +
+        `<option value="0">不检测</option><option value="1">1 分钟</option><option value="3">3 分钟</option>` +
+        `<option value="5">5 分钟</option><option value="10">10 分钟</option><option value="15">15 分钟</option>` +
+        `<option value="30">30 分钟</option><option value="60">1 小时</option></select>` +
+        `<span class="pomoIdleLabel">自动暂停</span></label>` +
+        `<div class="pomoKeys" id="pomoKeysBox" title="切走页面时，只有前台窗口标题里含下面这些关键词才判定为「在休息」；去查资料/看文档则不算，专注继续走。留空 = 切走就算休息（旧行为）。">` +
+          `<div class="pomoKeysHead"><span>切走算休息</span><span class="pomoKeysHint" id="pomoKeysHint"></span></div>` +
+          `<div class="pomoKeysList" id="pomoKeysList"></div>` +
+          `<div class="pomoKeysAdd"><input id="pomoKeyIn" placeholder="加关键词，如 bilibili" maxlength="40" autocomplete="off">` +
+          `<button class="btn tiny" id="pomoKeyAdd">添加</button></div>` +
+        `</div>` +
         `<div class="pomoBtns"><button id="pomoMain" class="btn small primary">开始专注</button><button id="pomoStop" class="btn small">结束</button><a id="pomoStats" class="btn small" href="#/studystats" title="学习统计：按天/按节点看学了多久">📊</a></div>` +
-        `<button id="pomoAuto" class="pomoAuto" title="开着时：滚动教程自动开始专注，切出教程/1分钟没滚动自动暂停"></button>` +
+        `<button id="pomoAuto" class="pomoAuto" title="开着时：在教程页有动静就自动开始专注，切出教程页自动暂停；「没动静」的时长在上面的下拉里调"></button>` +
         `<div class="pomoHint">时间到会弹窗 + 系统通知 + 提示音，切页面、刷视频也能收到</div>` +
       `</div>` +
       `<div id="pomoModalWrap" class="pomoModalWrap" hidden><div class="pomoModal">` +
@@ -240,7 +286,23 @@
     el('pomoStop').addEventListener('click', () => stop());
     el('pomoFocusMin').addEventListener('change', onDur);
     el('pomoBreakMin').addEventListener('change', onDur);
+    el('pomoIdleMin').addEventListener('change', () => {
+      S.idleMin = clampIdle(el('pomoIdleMin').value, S.idleMin);
+      save(); render();
+      toast(S.idleMin === 0 ? '⏱ 已关闭没动静检测：专注只在你切走页面时中断' : '⏱ ' + S.idleMin + ' 分钟没动静就自动暂停专注');
+    });
     el('pomoAuto').addEventListener('click', () => { S.auto = !S.auto; save(); render(); toast(S.auto ? '🤖 读教程自动计时：开' : '🤖 读教程自动计时：关'); });
+    /* ---- 「切走算休息」的关键词：可增删改（逻辑在 renderKeys/commitKeys，模块级） ---- */
+    el('pomoKeyAdd').addEventListener('click', () => {
+      const k = el('pomoKeyIn');
+      const v = String(k && k.value || '').trim();
+      if (!v) return;
+      commitKeys((S.restKeys || []).concat([v]), '已添加「' + v + '」');
+      setTimeout(() => { const k2 = el('pomoKeyIn'); if (k2) { k2.value = ''; k2.focus(); } }, 0);
+    });
+    const keyIn0 = el('pomoKeyIn');
+    if (keyIn0) keyIn0.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); el('pomoKeyAdd').click(); } });
+    renderKeys();
     el('pomoModalLater').addEventListener('click', () => {
       if (awayInfoModal) { awayInfoModal = false; closeModal(); stopFlash(); render(); return; }  // 只是知道了，休息继续记
       S.remaining = phaseLen(S.phase); finished = false; closeModal(); stopFlash(); save(); render();
@@ -304,7 +366,7 @@
     if (!w) return;
     el('pomoModalIcon').textContent = '📵';
     el('pomoModalTitle').textContent = '开始休息计时了';
-    el('pomoModalDesc').textContent = `检测到你切出了教程页，休息计时中（${S.breakMin} 分钟，到点会再提醒）。只要没切回教程页就持续计时；回来自动恢复专注。`;
+    el('pomoModalDesc').textContent = `检测到你切到了「${(S.restKeys || []).join('、')}」，休息计时中（${S.breakMin} 分钟，到点会再提醒）。只要没切回来就持续计时；回来自动恢复专注。`;
     el('pomoModalGo').hidden = true;
     el('pomoModalMore').hidden = true;
     el('pomoModalLater').textContent = '知道了，继续休息';
@@ -473,11 +535,18 @@
     el('pomoModeBreak').classList.toggle('active', S.phase === 'break');
     const st = el('pomoStatus');
     const rec = (S.bindNodeId && S.running && S.phase === 'focus') ? (' · 记到「' + String(S.bindTitle || '').slice(0, 12) + '」') : '';
-    if (S.running) st.textContent = (S.phase === 'break' ? '☕ 休息中' : '🎯 专注中') + ' · 今日专注 ' + S.doneToday + ' 次' + rec;
+    // 运行中且在教程页时，提示当前用的哪种「算在专注」口径，免得用户以为被莫名暂停
+    const mode = S.idleMin === 0 ? '不限时' : (S.idleMin + ' 分钟没动静才停');
+    // 切出去但判定成「在查资料」：要说清楚，不然用户以为番茄钟坏了
+    const research = (researching && S.running && S.phase === 'focus')
+      ? ' · 📖 查资料中（不算休息）' + (researchWin ? '：' + researchWin : '') : '';
+    if (S.running) st.textContent = (S.phase === 'break' ? '☕ 休息中' : '🎯 专注中') + ' · 今日专注 ' + S.doneToday + ' 次' + rec
+      + (S.auto && S.phase === 'focus' && onTutorialRoute() ? ' · ' + mode : '') + research;
     else if (ms > 0 && ms < total) st.textContent = '⏸ 已暂停' + (pauseReason ? '（' + pauseReason + '）' : '') + ' · 点击继续';
     else st.textContent = '待开始 · 今日专注 ' + S.doneToday + ' 次';
     el('pomoAuto').textContent = S.auto ? '🤖 读教程自动计时：开' : '🤖 读教程自动计时：关';
     el('pomoAuto').classList.toggle('off', !S.auto);
+    renderKeys();
     try {
       const bell = el('pomoBell');
       const perm = ('Notification' in window) ? Notification.permission : 'denied';
@@ -505,23 +574,40 @@
     el('pomoModeBreak').disabled = dis;
     if (document.activeElement !== el('pomoFocusMin')) el('pomoFocusMin').value = S.focusMin;
     if (document.activeElement !== el('pomoBreakMin')) el('pomoBreakMin').value = S.breakMin;
+    // 没动静检测时长：运行中也可以随时改，不用先暂停
+    if (el('pomoIdleMin')) el('pomoIdleMin').value = String(S.idleMin || 0);
   }
 
   /* ---------------- 读教程自动计时 ----------------
-   * 教程页上下滚动 = 在学：暂停的半截直接继续，否则开新专注；
-   * 切出教程页 / 1 分钟没滚动 → 自动暂停，回来滚动自动继续；
-   * 手动点的暂停只是停住这一秒，下一次滚动就继续（想彻底停就点结束或关自动）。 */
+   * 教程页有动静 = 在学：暂停的半截直接继续，否则开新专注；
+   * 切出教程页 / 太久没动静（时长由用户设置，默认不检测）→ 自动暂停；
+   * 手动点的暂停只是停住这一秒，下一次有动静就继续（想彻底停就点结束或关自动）。 */
   function onTutorialRoute() { return /^#\/t\/(\d+)$/.test(location.hash || ''); }
   function tutorialId() { const m = (location.hash || '').match(/^#\/t\/(\d+)$/); return m ? Number(m[1]) : 0; }
+  /* 「在动」的判定不只看滚动：读代码时人可能一直盯着屏幕不动，
+   * 但只要动了鼠标、敲了键盘、滚了滚轮，就说明还醒着。
+   * mousemove 事件极密集，必须节流，否则每帧都写时间戳。 */
+  let lastActiveAt = Date.now();
+  let mousemoveAt = 0;
+  function markActive() { lastActiveAt = Date.now(); }
+  ['wheel', 'keydown', 'pointerdown', 'touchstart', 'focus'].forEach(ev => {
+    window.addEventListener(ev, markActive, { passive: true, capture: true });
+  });
+  window.addEventListener('mousemove', () => {
+    const now = Date.now();
+    if (now - mousemoveAt < 2000) return;   // 2 秒节流一次即可
+    mousemoveAt = now;
+    markActive();
+  }, { passive: true });
   window.addEventListener('scroll', () => {
     try {
-      lastScrollAt = Date.now();
+      markActive();
       if (onTutorialRoute()) maybeAutoStart();
     } catch (e) {}
   }, { passive: true });
   window.addEventListener('hashchange', () => {
     try {
-      lastScrollAt = Date.now();
+      markActive();
       autoPaused = false; pauseReason = '';
       // 切到别的教程页：自动绑的旧节点清掉（暂停的半截留着，滚一下就按新节点继续）
       if (onTutorialRoute() && !S.running && S.bindAuto) {
@@ -574,8 +660,141 @@
       runRoute = cur;
       if (leftTut) { autoPause('切换页面'); return; }
     }
-    // 1分钟没滚动只管专注：休息本来就不用动手，不该停
-    if (S.phase === 'focus' && onTutorialRoute() && Date.now() - lastScrollAt > 60000) autoPause('1 分钟没滚动');
+    // 多久没动静就自动暂停：默认关闭（idleMin=0）。
+    // 开着时按用户设定的分钟数判定，且只在教程页生效（休息本来就不用动手，不该停）。
+    const idleMs = (S.idleMin || 0) * 60000;
+    if (idleMs > 0 && S.phase === 'focus' && onTutorialRoute() && Date.now() - lastActiveAt > idleMs) {
+      autoPause(S.idleMin + ' 分钟没动静');
+    }
+  }
+  /* ---------------- 前台窗口探测（切走时判断「是在刷视频还是在查资料」） ----------------
+   * ⚠️ 网页自己读不到别的窗口的网址（浏览器就是不给这个能力），所以由本机 Node 去问操作系统。
+   *    拿回来的是**窗口标题**：Edge/Chrome 形如「页面标题 和另外 1 个页面 - 个人 - Microsoft Edge」，
+   *    没有网址，但 bilibili 的 <title> 通常带 `_哔哩哔哩_bilibili`，所以关键词匹配可用。
+   *    探测不可用（Wayland / 没装 xdotool / 权限不足）→ ok:false → 退回旧行为，
+   *    宁可多记休息，也不要悄悄不记。 */
+  let winProbeCache = { at: 0, val: null };
+  let winProbeBroken = false;     // 连着失败几次就只提示一次，别反复弹
+  async function fetchActiveWindow(maxAgeMs) {
+    const now = Date.now();
+    if (winProbeCache.val && now - winProbeCache.at < (maxAgeMs || 1500)) return winProbeCache.val;
+    try {
+      const r = await fetch('/api/pomodoro/activewin?maxAge=1200', { cache: 'no-store' });
+      const j = await r.json();
+      const v = { ok: !!j.ok, title: j.title || '', app: j.app || '', source: j.source || '', platform: j.platform || '' };
+      winProbeCache = { at: Date.now(), val: v };
+      if (v.ok) winProbeBroken = false;
+      return v;
+    } catch (e) {
+      const v = { ok: false, title: '', app: '', err: String(e && e.message || e) };
+      winProbeCache = { at: Date.now(), val: v };
+      return v;
+    }
+  }
+  /* 切出去之后必须**持续重判**，不能只在 hide 那一刻判一次。
+     ⚠️ 用户实测踩到的坑：「先打开百度，再打开 B 站」判不出来。
+        因为 visibilitychange 只在**整个标签页被藏起来**时触发一次；
+        之后在同一浏览器窗口内换标签页，思而行那个标签始终是 hidden，
+        事件根本不再发 —— 第一次判定成「查资料」之后就永远锁死了。
+        而且 hide 那一刻读到的窗口标题还可能没更新（浏览器是异步改标题的）。
+   * 只做单向升级：查资料 → 休息。已经是休息了就让它跑完，不来回抖。
+   * 间隔别太短：后台标签页的定时器会被浏览器降频（隐藏后逐步到 1s/次，长时间后更慢），
+     服务器侧也有 1.2s 缓存，2.5s 一次足够灵敏也不浪费。 */
+  let lastAwayCheck = 0;
+  function awayPoll() {
+    try {
+      if (!S.auto || awayMode) return;
+      if (document.visibilityState !== 'hidden') return;
+      if (!enabled()) return;
+      if (!researching) return;                  // 只在「查资料」态才可能升级为休息
+      if (!(S.restKeys || []).length) return;    // 没关键词 = 旧行为，hide 时已处理过
+      const now = Date.now();
+      if (now - lastAwayCheck < 2500) return;
+      lastAwayCheck = now;
+      recheckAway();
+    } catch (e) {}
+  }
+  async function recheckAway() {
+    const keys = S.restKeys || [];
+    const v = await fetchActiveWindow(800);
+    if (!v.ok) return;                            // 探测失败就保持现状，别来回乱改
+    if (document.visibilityState !== 'hidden' || awayMode || !researching) return;
+    if (winMatches(v, keys)) {
+      researching = false; researchAt = 0; researchWin = '';
+      convertToAwayRest();
+    } else {
+      researchWin = (v.title || v.app || '').slice(0, 60);
+      try { save(); } catch (e) {}
+    }
+  }
+
+  function winMatches(v, keys) {
+    // 标题优先（能区分同一浏览器里的不同标签页）；再退到应用名（区分不同程序）
+    return matchKeys(v && v.title, keys) || matchKeys(v && v.app, keys);
+  }
+
+  /* ---- 关键词编辑区（面板里那一小块）：模块级，render() 也要能刷新它 ---- */
+  function commitKeys(list, msg) {
+    S.restKeys = normKeys(list);
+    save();
+    renderKeys();
+    if (msg) toast(msg);
+  }
+  function renderKeys() {
+    const box = el('pomoKeysList');
+    if (!box) return;
+    const keys = S.restKeys || [];
+    if (!keys.length) {
+      box.innerHTML = '<span class="pomoKeysEmpty">留空 = 切走就算休息（同旧行为）</span>';
+    } else {
+      box.innerHTML = keys.map((k, i) => '<span class="pomoKey">' +
+        `<input class="pomoKeyEdit" data-i="${i}" value="${String(k).replace(/"/g, '&quot;')}" maxlength="40" title="点一下就能改">` +
+        `<button class="pomoKeyDel" data-i="${i}" title="删除">×</button></span>`).join('');
+      box.querySelectorAll('.pomoKeyDel').forEach(b => b.addEventListener('click', () => {
+        const i = Number(b.getAttribute('data-i'));
+        commitKeys(keys.filter((_, j) => j !== i), '已删除「' + keys[i] + '」');
+      }));
+      box.querySelectorAll('.pomoKeyEdit').forEach(inp => {
+        const apply = () => {
+          const i = Number(inp.getAttribute('data-i'));
+          const v = String(inp.value || '').trim();
+          if (!v || v === keys[i]) { renderKeys(); return; }   // 清空/没改 → 还原，不留空标签
+          const next = keys.slice(); next[i] = v;
+          commitKeys(next, '已改为「' + v + '」');
+        };
+        inp.addEventListener('change', apply);
+        inp.addEventListener('blur', apply);
+        inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); } });
+      });
+    }
+    const hint = el('pomoKeysHint');
+    if (hint) hint.textContent = keys.length ? ('命中才算休息 · ' + keys.length + ' 条') : '未启用筛选';
+  }
+
+  /* 切出页面时的判定。异步是因为要问一次操作系统，串行不能省。
+   * 用序号防止「问的功夫里已经切回来了」还傻乎乎转休息。 */
+  let awaySeq = 0;
+  async function decideAwayOnHide() {
+    if (!S.auto || awayMode) return;
+    if (!enabled()) return;
+    const keys = S.restKeys || [];
+    if (!keys.length) { convertToAwayRest(); return; }   // 没填关键词 = 旧行为
+    const seq = ++awaySeq;
+    lastAwayCheck = Date.now();     // 刚判过一次，轮询先让 2.5s
+    const v = await fetchActiveWindow(1500);
+    if (seq !== awaySeq) return;                          // 已经切回来了
+    if (document.visibilityState !== 'hidden') return;    // 同上
+    if (v.ok && winMatches(v, keys)) { convertToAwayRest(); return; }
+    if (!v.ok) {
+      winProbeBroken = true;
+      convertToAwayRest();   // 探测不了就按老规矩，别把功能弄没了
+      return;
+    }
+    // 没命中 → 你是在查资料，专注继续跑，不记休息
+    researching = true;
+    researchAt = Date.now();
+    researchWin = (v.title || v.app || '').slice(0, 60);
+    try { save(); render(); } catch (e) {}
   }
   /* 切出应用（标签不可见，如去刷视频）：专注转休息一直记，回来自动恢复专注。
    * 注意：只要标签藏起来就转，不要求计时是在教程页开始的——看不见页面就不算在学。 */
@@ -629,6 +848,7 @@
   function restoreFocus() {
     if (!awayMode) return;
     awayMode = false; awayInfoModal = false; awayStartAt = 0;
+    researching = false; researchAt = 0; researchWin = '';
     const r = awaySaved && awaySaved.remaining > 0 ? awaySaved.remaining : phaseLen('focus');
     awaySaved = null;
     S.phase = 'focus';
@@ -637,7 +857,7 @@
     S.running = true;
     finished = false;
     autoPaused = false; pauseReason = '';
-    lastScrollAt = Date.now();   // 回来=露面，给 fresh 的 60 秒
+    markActive();   // 回来=露面，给一个完整周期的宽限
     closeModal();
     stopFlash();
     save(); render();
@@ -647,12 +867,16 @@
   document.addEventListener('visibilitychange', () => {
     try {
       if (document.visibilityState === 'hidden') {
-        convertToAwayRest();
+        decideAwayOnHide();   // 要问一次操作系统才能判断，异步；见 decideAwayOnHide
       } else {
+        awaySeq++;            // 作废切出时那次未完成的判定（已经回来了）
+        lastAwayCheck = 0;
+        if (researching) { researching = false; researchAt = 0; researchWin = ''; }
         // 回来先追一次结算（后台节流可能延迟了到点判定）
         if (S.running && remainMs() <= 0) { checkFinish(); return; }
-        if (onTutorialRoute()) lastScrollAt = Date.now();   // 露面了就给 fresh 的 60 秒，别落地秒停
+        if (onTutorialRoute()) markActive();   // 露面了就给一个完整周期的宽限，别落地秒停
         if (awayMode && S.running && S.phase === 'break' && onTutorialRoute()) restoreFocus();
+        else try { render(); } catch (e2) {}
       }
     } catch (e) {}
   });
@@ -663,6 +887,7 @@
       if (!enabled()) { unmount(); return; }
       if (!el('pomoRoot')) mount();
       if (S.dayStamp !== DAY()) { S.dayStamp = DAY(); S.doneToday = 0; save(); }
+      awayPoll();      // 切出去之后持续重判（同一浏览器窗口内换标签页不再有 visibilitychange）
       autoWatch();
       if (S.running && remainMs() <= 0) checkFinish();
       else render();
@@ -672,7 +897,11 @@
   /* 对外极小接口（测试 / 调试 / 跨插件用） */
   window.Pomodoro = {
     start, pause, resume, stop, setBind,
-    state: () => ({ phase: S.phase, running: S.running, remainMs: remainMs(), focusMin: S.focusMin, breakMin: S.breakMin, doneToday: S.doneToday, auto: S.auto, autoPaused, away: awayMode, awayMin: awayMode && awayStartAt ? Math.floor((Date.now() - awayStartAt) / 60000) : 0, bind: { nodeId: S.bindNodeId, title: S.bindTitle, goalId: S.bindGoalId } }),
+    state: () => ({ phase: S.phase, running: S.running, remainMs: remainMs(), focusMin: S.focusMin, breakMin: S.breakMin, idleMin: S.idleMin || 0, doneToday: S.doneToday, auto: S.auto, autoPaused, away: awayMode, awayMin: awayMode && awayStartAt ? Math.floor((Date.now() - awayStartAt) / 60000) : 0, bind: { nodeId: S.bindNodeId, title: S.bindTitle, goalId: S.bindGoalId }, restKeys: (S.restKeys || []).slice(), researching, researchWin }),
+    /* 供设置面板「试一下」按钮 / 调试用 */
+    _probeWin: () => fetchActiveWindow(0),
+    _matchKeys: (hay, keys) => matchKeys(hay, keys || (S.restKeys || [])),
+    _setKeys: list => { commitKeys(list); return (S.restKeys || []).slice(); },
     _finishNow: () => { if (S.running) { S.deadline = Date.now(); } }
   };
 

@@ -49,7 +49,8 @@ SiErXing/
 │   ├── sdk.js         ★ 前端组件 SDK，109 行，改组件必读
 │   ├── style.css      设计系统 + 深色模式 + 组件样式（~1800 行）
 │   └── plugins/       ★ 前端组件（js + 可选 css），按需动态加载
-├── scripts/           install.sh/.bat/.ps1、start.sh/.bat（不在根目录堆着）
+├── scripts/           install.sh/.bat/.ps1、start.sh/.bat、build-exe.js（打包 Windows exe）
+├── release/           ★ 在线更新的发布件：latest.json + payload-<版本>.sxar（要提交）
 ├── examples/          示例组件包，可在「组件」页导入体验
 ├── docs/screenshots/  README 用截图
 ├── data/              ★ 运行时生成（数据库/备份/上传），已 gitignore
@@ -211,9 +212,71 @@ SDK（`public/sdk.js`，全部接口就这些）：`registerPlugin / getPlugins 
 
 10. **在函数中间插入代码要读回上下文**。曾两次在函数中部插入内容引发 TDZ / 结构错误而 `node --check` 没发现。
 
+11. **`new URL(req.url, …)` 之类的解析必须放在 try 里面**。`server/server.js` 的请求处理曾经写成 `const u = new URL(...)` 在 try **外面** —— 请求行是 `//` 时抛异常 → unhandledRejection → **整个服务进程退出**，一次手滑的 URL 就能让应用挂掉、正在进行的会话全丢。现在已挡下回 400，并在进程级加了只记日志不退出的兜底。
+
+12. **`--dump-dom` 会在 load 事件就快照**，那时 SPA 的 `route()` 还没跑完、`#app` 是空的。所以用它做路由自检会**假通过**（只 grep「页面出错」三个字当然全绿）。
+    - 必须先用一个同源中转页关掉首次引导再跳到目标路由
+    - 不能拿 DOM 字节数当判据（首页天生就小），要 grep **该路由特有的**标记元素
+    - 拿不到 post-load 状态就别用 dump-dom，改用 `--screenshot` 看图
+
+13. **`mdToHTML` 的围栏正则曾有贪婪回溯 bug**：`/(```+[ \t]*[\w+-]*)[ \t]*([^\n`])/` 会把 ```` ```python\n ```` 拆成 ```` ```pytho\nn ````（语言标识少一个字母、代码块凭空多一行 `n`）。另外 ```` ```` ````（四个反引号）和 `#标题`（井号后无空格）会让 `while (i < lines)` **死循环、标签页卡死**。改这块前先读第 7 节附近的注释。
+
+14. **HTML 教程的正文在 `<iframe id="tutFrame">` 里，而且是固定高度、滚动发生在 iframe 内部**。主文档不滚。任何要「找标题 / 读滚动位置 / 跳转」的功能都必须走 `tutDoc()` / `tutWin()` / `tutRoot()` / `tutHeadEl()` 这四个入口，直接 `document.querySelector('.tutBody')` + `window.scrollY` 会**静默失效**。
+
 ---
 
-## 8. 零依赖纪律
+## 8. 打包 exe 与在线更新（`scripts/build-exe.js`）
+
+给「不想装 Node 的人」用的单文件 Windows 程序。**运行时依然零第三方依赖**。
+
+```bash
+node scripts/build-exe.js --skip-exe --notes="修了 XX"   # 只出发布件（更新用，最快）
+node scripts/build-exe.js                                # 再加上 dist/SiErXing.exe（约 89MB）
+```
+
+产物三样：
+
+| 产物 | 提交？ | 说明 |
+| --- | --- | --- |
+| `release/latest.json` | ✅ 提交 | 清单：版本号、下载地址、sha256、更新说明 |
+| `release/payload-<版本>.sxar` | ✅ 提交 | 程序文件载荷，约 450KB |
+| `dist/SiErXing.exe` | ❌ 只上传附件 | 89MB，其中 88.7MB 是 node 运行时，**永不变** |
+
+**在线更新为什么成立**：exe 里 99.5% 是不变的 node 运行时，会变的只有那 450KB 的程序文件。
+所以发新版 = 换一个 payload + 改一行 `latest.json`，用户下次启动只下 450KB，**不用重下 89MB**。
+
+### 三种安装形态，`server/update.js` 按 `mode` 分发
+
+| mode | 判定依据 | 更新方式 |
+| --- | --- | --- |
+| `git` | 存在 `.git` | `git pull --ff-only`（原有逻辑） |
+| `payload` | 存在 `.sx-current` | 下载 payload → 校验 sha256 → 解包 |
+| `none` | 两者都没有（zip 解压） | `supported:false` |
+
+`SX_UPDATE=off` 完全关掉；`SX_UPDATE_URL` 可把清单指到自己的地址（离线/内网用）。
+
+### ⚠️ 这里有四个必须记住的坑
+
+1. **解出来的目录里没有 `.git`，而 node.exe 也不带 git** —— 所以打包版的更新**完全不能走 git 那条路**，`update.js` 必须有 payload 后端，否则 exe 用户永远更新不了。
+
+2. **SEA 里不能 `require(绝对路径)`** —— SEA 主脚本的 `require` 是 `embedderRequire`，会把路径当成内置模块名，报 `ERR_UNKNOWN_BUILTIN_MODULE`。必须 `require('node:module').createRequire(...)`。
+
+3. **载荷的版本标记必须按版本号比较，不能按「不相等就解」** —— 在线更新后本地会比 exe 内嵌的还新（exe 本身没换）。若按"不相等"判断，启动时会把**旧的内嵌载荷又铺回去，把刚更新的代码覆盖掉**。
+
+4. **`VER` 必须按文件内容算哈希** —— 早先只 hash 了 `package.json`，改 `public/app.js` 而不动 `package.json` 时哈希不变 → 更新被当成"已是最新"静默跳过。
+
+### 用户数据在任何路径下都不会被覆盖
+
+- `DATA_DIR = APP_DIR/data`，而 `data/` **不在打包清单里**（`collect()` 里显式跳过）
+- `applyPayload()` 解包时逐条 `if (f.p.startsWith('data/')) continue`
+- payload 的 zip-slip 风险已挡：路径只来自自家生成的头部，且都在 `appDir` 下
+
+**测打包版务必用别的端口**（`PORT=3214`）。用默认 3213 会把用户正在用的服务顶掉，
+表现为「数据全都不见了」——其实数据好好地在，只是浏览器连到了空库的新实例。
+
+---
+
+## 9. 零依赖纪律
 
 **不要引入任何 npm 依赖。** 这是产品的核心卖点（`git clone` 完直接 `node server/server.js` 就能跑）。
 
@@ -221,7 +284,7 @@ SDK（`public/sdk.js`，全部接口就这些）：`registerPlugin / getPlugins 
 
 ---
 
-## 9. 前端资源访问约定
+## 10. 前端资源访问约定
 
 **只有两个前端文件**：`app.js`（核心）与 `sdk.js`（组件 SDK）。没有打包器、没有模块系统。
 
@@ -231,7 +294,7 @@ SDK（`public/sdk.js`，全部接口就这些）：`registerPlugin / getPlugins 
 
 ---
 
-## 10. 修改后的自检清单
+## 11. 修改后的自检清单
 
 ```bash
 node --check public/app.js && node --check server/server.js     # 语法
@@ -246,6 +309,6 @@ node --check public/app.js && node --check server/server.js     # 语法
 
 ---
 
-## 11. 许可
+## 12. 许可
 
 MIT。**不要修改 `LICENSE`**。分发时必须保留 `sierxing` 的署名。

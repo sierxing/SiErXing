@@ -9,10 +9,22 @@
 (function () {
   const { api, esc, toast } = SiErXing;
 
+  /* ⚠️ HTML 教程的正文在 <iframe id="tutFrame"> 里（srcdoc、同源），而且那个 iframe 是固定高度、
+     滚动发生在它内部。tutsec-N 这些标题 id 是 tutTocBuild 打的，打在 iframe 的文档里。
+     所以「找标题」和「滚动」都得认 iframe，不能一律用 document / window ——
+     否则 HTML 教程上标签跳转会直接报「该章节不在当前渲染中」。 */
+  function tutCtx() {
+    const f = document.getElementById('tutFrame');
+    if (f && f.contentDocument && f.contentWindow) return { doc: f.contentDocument, win: f.contentWindow };
+    return { doc: document, win: window };
+  }
+
   function jump(idx) {
-    const h = document.getElementById('tutsec-' + idx);
+    const { doc, win } = tutCtx();
+    const h = doc.getElementById('tutsec-' + idx);
     if (!h) return toast('该章节不在当前渲染中');
-    window.scrollTo({ top: h.getBoundingClientRect().top + window.scrollY - 110, behavior: 'smooth' });
+    try { win.scrollTo({ top: h.getBoundingClientRect().top + win.scrollY - 110, behavior: 'smooth' }); }
+    catch (e) { win.scrollTo(0, h.getBoundingClientRect().top + win.scrollY - 110); }
   }
 
   /* 浮动面板：随时呼出，不用翻到底部 */

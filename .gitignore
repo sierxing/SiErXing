@@ -12,3 +12,7 @@ Thumbs.db
 
 # 运行时生成（仅在使用 opencode CLI 接入方式时自动创建）
 .opencode/
+
+# 打包 Windows exe 的中间产物与产物（体积大，可随时用 scripts/build-exe.js 重建）
+.build/
+dist/

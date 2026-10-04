@@ -268,7 +268,16 @@ async function route() {
   if (oldTocTab) oldTocTab.remove();
   if (window.TutBookmark) { try { window.TutBookmark.unmount(); } catch (e) {} }
   if (window.NodeNotes) { try { window.NodeNotes.unmount(); } catch (e) {} }
-  if (window.__tutTocScroll) { try { window.removeEventListener('scroll', window.__tutTocScroll); } catch (e) {} window.__tutTocScroll = null; }
+  // 监听挂在"正文所在的那个 window"上：Markdown 是主窗口，HTML 教程是 iframe 内的窗口。
+  // 只摘主窗口的话，iframe 里那个监听会残留，离开后再回来会对着旧 DOM 反复跑。
+  try {
+    const tw = window.__tutTocWin || window;
+    if (tw && tw.__tutTocScroll) { tw.removeEventListener('scroll', tw.__tutTocScroll); tw.__tutTocScroll = null; }
+    if (window.__tutTocScroll) { window.removeEventListener('scroll', window.__tutTocScroll); window.__tutTocScroll = null; }
+    window.__tutTocWin = null;
+  } catch (e) {}
+  // 换页要把"上次位置"的锁重置，否则新教程进来时不会重新读取它的书签
+  try { window.__tutTocTid = null; window.__tutTocRestoring = false; } catch (e) {}
   const r = parseRoute();
   try { tutProgressFlush(); } catch (e) {}   // 离开教程页先把阅读位置记上（DOM 替换前）
   const backScroll = navTrack();   // 先记滚动（此时还是旧页面），返回导航则带回待恢复位置
@@ -1070,7 +1079,8 @@ const TASK_META = {
   tutorial: { icon: '📘', label: '生成教程' },
   digest: { icon: '🧠', label: '信息提炼' },
   collect: { icon: '🔍', label: '收集资料' },
-  image: { icon: '📷', label: '识别图片' }
+  image: { icon: '📷', label: '识别图片' },
+  restate: { icon: '🧠', label: '用自己的话' }
 };
 function taskActive(t) { return t && (t.status === 'running' || t.status === 'queued'); }
 function taskBarEnsure() {
@@ -1340,18 +1350,7 @@ function tutEditPos(src, fmt, ratioFb) {
   // 兜底：按正文滚动比例映射到源码位置（HTML 教程也走这里；ratioFb 是替换 DOM 前量好的）
   try {
     let ratio = (typeof ratioFb === 'number') ? ratioFb : -1;
-    if (ratio < 0) {
-      ratio = 0;
-      const body = document.querySelector('.tutBody') || document.querySelector('.mdBody');
-      if (body) {
-        const r = body.getBoundingClientRect();
-        const total = r.height - window.innerHeight;
-        if (total > 0) ratio = Math.max(0, Math.min(1, (0 - r.top) / total));
-      } else {
-        const total = document.body.scrollHeight - window.innerHeight;
-        if (total > 0) ratio = Math.max(0, Math.min(1, window.scrollY / total));
-      }
-    }
+    if (ratio < 0) ratio = tutScrollRatio();
     return { off: Math.floor(String(src).length * ratio), sec: 0 };
   } catch (e) { return { off: 0, sec: 0 }; }
 }
@@ -1364,20 +1363,13 @@ document.addEventListener('click', async e => {
   if (rr.view !== 'tutorial') return;
   const tut = ((state.goal && state.goal.tutorials) || []).find(x => Number(x.id) === Number(rr.id));
   // 找到教程正文容器（iframe / md 渲染区），只替换它，不动整个页面
-  const contentEl = document.getElementById('tutFrame') || document.querySelector('.tutBody') || document.querySelector('.mdBody');
+  const contentEl = document.getElementById('tutFrame') || tutRoot();
   if (eb) {
     if (tutEditing) return;
     tutEditing = true;
     // 先记下阅读位置（DOM 替换前量滚动比例，编辑框里直接跳过去）
     let editRatio = 0;
-    try {
-      const bd0 = document.querySelector('.tutBody') || document.querySelector('.mdBody');
-      if (bd0) {
-        const rr0 = bd0.getBoundingClientRect();
-        const tt0 = rr0.height - window.innerHeight;
-        if (tt0 > 0) editRatio = Math.max(0, Math.min(1, (0 - rr0.top) / tt0));
-      }
-    } catch (e) {}
+    try { editRatio = tutScrollRatio(); } catch (e) {}
     // 取最新内容：按教程 id 单独取（直接打开/刷新教程页时 state.goal 里没有它，也能编辑）
     let src = '', fmt = (tut && tut.format) || 'md';
     try {
@@ -1426,7 +1418,7 @@ document.addEventListener('click', async e => {
     tutEditing = false;
     try { const w = document.getElementById('tutEditorWrap'); if (w) w.remove(); } catch (e2) {}
     try {
-      const ce = document.getElementById('tutFrame') || document.querySelector('.tutBody') || document.querySelector('.mdBody');
+      const ce = document.getElementById('tutFrame') || tutRoot();
       if (ce) ce.style.display = '';
     } catch (e2) {}
     const sv2 = document.getElementById('tutSaveBtn'); if (sv2) sv2.hidden = true;
@@ -1456,6 +1448,37 @@ document.addEventListener('click', async e => {
   }
 });
 /* ===== 教程大纲（侧边栏）：点击跳转 + 当前章节高亮 + 阅读进度 ===== */
+/* ⚠️ 教程正文**不一定在主文档里**：
+     - Markdown 教程 → 主文档的 .tutBody
+     - HTML 教程    → <iframe id="tutFrame">（srcdoc，同源可访问 contentDocument）
+   而且 .tutFrame 是**固定高度**（height:calc(100vh - 170px)），滚动发生在 iframe 内部，
+   主文档并不滚。
+   目录 / 阅读位置 / 标签书签以前全都直接 document.querySelector('.tutBody') + window.scrollY，
+   对 HTML 教程一律落空 —— 而且是**静默 return**，肉眼看就是"这三个组件坏了"。
+   所以下面这四个函数是唯一的入口，目录/位置/书签都必须穿过它们。 */
+function tutFrameEl() { return document.getElementById('tutFrame'); }
+function tutDoc() { const f = tutFrameEl(); return (f && f.contentDocument) ? f.contentDocument : document; }
+function tutWin() { const f = tutFrameEl(); return (f && f.contentWindow) ? f.contentWindow : window; }
+/* 正文容器：找不到就用文档根，好过什么都拿不到 */
+function tutRoot() {
+  const d = tutDoc();
+  try { return d.querySelector('.tutBody') || d.querySelector('.mdBody') || d.body || d.documentElement; }
+  catch (e) { return null; }
+}
+function tutHeadEl(i) { try { return tutDoc().getElementById('tutsec-' + i); } catch (e) { return null; } }
+/* 正文滚了多少 / 能滚多远 —— Markdown 用主文档，HTML 用 iframe 内部 */
+function tutScrollRatio() {
+  try {
+    const w = tutWin(), root = tutRoot();
+    if (!root) return 0;
+    const r = root.getBoundingClientRect();
+    const total = r.height - w.innerHeight;
+    if (total > 0) return Math.max(0, Math.min(1, (0 - r.top) / total));
+    const d2 = tutDoc();
+    const t2 = (d2.body ? d2.body.scrollHeight : 0) - w.innerHeight;
+    return t2 > 0 ? Math.max(0, Math.min(1, w.scrollY / t2)) : 0;
+  } catch (e) { return 0; }
+}
 function tutTocOpen() { try { return localStorage.getItem('sierxing-toc-open') !== '0'; } catch (e) { return true; } }
 function tutTocWidth() {
   try { const w = Number(localStorage.getItem('sierxing-toc-w')) || 220; return Math.max(160, Math.min(360, w)); }
@@ -1475,12 +1498,24 @@ function tutTocShowTab(tid) {
   document.body.appendChild(tab);
 }
 function tutTocBuild(tid) {
-  const body = document.querySelector('.tutBody') || document.querySelector('.mdBody');
+  const body = tutRoot();
   if (!body) return;
   const heads = [...body.querySelectorAll('h1,h2,h3,h4')].filter(h => (h.textContent || '').trim());
   try { window.__tutTotal = heads.length; } catch (e) {}
   if (heads.length < 2) return;   // 章节太少就不显示
+  /* ⚠️ 这个函数一次打开会被调用多次（iframe 的 load、兜底定时器、顶栏「目录」切换…），
+     而 onScroll 每次都会把 localStorage['sierxing-tut-pos-<id>'] 写成当前节号。
+     所以"上次位置"必须在第一次进来时就锁住，恢复完成之前不许被 onScroll 覆盖 ——
+     否则等于每次打开教程都把书签清成 0，下次自然回不去原来那一节。 */
+  if (window.__tutTocTid !== Number(tid)) {
+    window.__tutTocTid = Number(tid);
+    let sv = 0;
+    try { sv = Number(localStorage.getItem('sierxing-tut-pos-' + tid) || 0); } catch (e) {}
+    window.__tutTocSaved = (sv > 0 && sv < heads.length) ? sv : 0;
+    window.__tutTocRestoring = true;   // 恢复期间不要回写位置
+  }
   heads.forEach((h, i) => { h.id = 'tutsec-' + i; });
+  const w = tutWin();   // Markdown = window；HTML 教程 = iframe 内部那个 window
   // 面板只在展开时建；追踪常驻（书签要用）
   const old = document.getElementById('tutToc'); if (old) old.remove();
   const oldTab = document.getElementById('tutTocTab'); if (oldTab) oldTab.remove();
@@ -1489,11 +1524,15 @@ function tutTocBuild(tid) {
   toc.id = 'tutToc';
   toc.className = 'tutToc';
   toc.style.width = tutTocWidth() + 'px';
+  /* 目录面板：顶栏和底部进度条**常驻**，只有中间的条目列表滚动。
+   （以前标题也是滚动区里的普通内容，一翻就滚没了，想点「收起」得先滚回顶。） */
   toc.innerHTML = `<div class="tutTocTitle"><span>📑 目录（${heads.length}）</span><div class="spacer"></div><button class="btn tiny" id="tutTocHide" title="收起（顶栏「目录」可再打开）">« 收起</button></div>`
+    + `<div class="tutTocScroll" id="tutTocScroll">`
     + heads.map((h, i) => {
       const lv = Number(h.tagName.slice(1));
       return `<a class="tutTocItem lv${Math.min(lv, 4)}" data-toc="${i}">${esc((h.textContent || '').trim().slice(0, 40))}</a>`;
     }).join('')
+    + `</div>`
     + `<div class="tutTocProg" id="tutTocProg">阅读位置：—</div>
     <div class="tutTocResize" id="tutTocResize" title="拖动调宽"></div>`;
   if (tutTocOpen()) {
@@ -1501,10 +1540,10 @@ function tutTocBuild(tid) {
     const tb = document.getElementById('tutTocTab'); if (tb) tb.remove();
   }
   toc.querySelectorAll('[data-toc]').forEach(a => a.addEventListener('click', () => {
-    const h = document.getElementById('tutsec-' + a.getAttribute('data-toc'));
+    const h = tutHeadEl(a.getAttribute('data-toc'));
     if (!h) return;
-    const y = h.getBoundingClientRect().top + window.scrollY - 110;   // 给吸顶顶栏留位置
-    window.scrollTo({ top: y, behavior: 'smooth' });
+    const y = h.getBoundingClientRect().top + w.scrollY - 110;   // 给吸顶顶栏留位置
+    try { w.scrollTo({ top: y, behavior: 'smooth' }); } catch (e) {}
   }));
   const hideBtn = toc.querySelector('#tutTocHide');
   if (hideBtn) hideBtn.addEventListener('click', () => {
@@ -1541,31 +1580,47 @@ function tutTocBuild(tid) {
       }
       const items = toc.querySelectorAll('[data-toc]');
       if (items.length) items.forEach(a => a.classList.toggle('active', Number(a.getAttribute('data-toc')) === cur));
+      /* 章节多的时候（比如 HTML 教程动辄四五十节），当前节往往在目录可视区之外，
+         高亮了也看不见 = 看起来像没生效。变化时才滚一下，别每帧都动。 */
+      if (cur !== toc.__active) {
+        toc.__active = cur;
+        const act = items[cur];
+        if (act && act.scrollIntoView) { try { act.scrollIntoView({ block: 'nearest' }); } catch (e) {} }
+      }
       try { window.__tutCur = { idx: cur, title: String((heads[cur] || {}).textContent || '').trim().slice(0, 80) }; } catch (e) {}
       try { tutProgressSave(tid, false); } catch (e) {}
       const prog = document.getElementById('tutTocProg');
       if (prog) {
-        const h = window.scrollY + window.innerHeight;
-        const pct = Math.min(100, Math.round(h / document.body.scrollHeight * 100));
+        const dd = tutDoc();
+        const h = w.scrollY + w.innerHeight;
+        const tot = (dd.body ? dd.body.scrollHeight : 0) || 1;
+        const pct = Math.min(100, Math.round(h / tot * 100));
         prog.textContent = '阅读位置：第 ' + (cur + 1) + '/' + heads.length + ' 节 · 全文 ' + pct + '%';
       }
-      try { localStorage.setItem('sierxing-tut-pos-' + tid, String(cur)); } catch (e) {}
+      try { if (!window.__tutTocRestoring) localStorage.setItem('sierxing-tut-pos-' + tid, String(cur)); } catch (e) {}
     });
   };
-  window.removeEventListener('scroll', window.__tutTocScroll || (() => {}));
-  window.__tutTocScroll = onScroll;
-  window.addEventListener('scroll', onScroll, { passive: true });
+  w.removeEventListener('scroll', w.__tutTocScroll || (() => {}));
+  w.__tutTocScroll = onScroll;
+  w.addEventListener('scroll', onScroll, { passive: true });
+  try { window.__tutTocWin = w; } catch (e) {}   // 记下监听挂在哪，切页时要摘掉
   onScroll();
-  // 回到上次阅读位置
+  // 回到上次阅读位置（直接跳过去，不要平滑滚动：一进来就动画一大段很晃）
   try {
-    const saved = Number(localStorage.getItem('sierxing-tut-pos-' + tid) || 0);
+    const saved = window.__tutTocSaved || 0;
     if (saved > 0 && saved < heads.length) {
       setTimeout(() => {
-        const h = document.getElementById('tutsec-' + saved);
-        if (h) window.scrollTo({ top: h.getBoundingClientRect().top + window.scrollY - 110, behavior: 'smooth' });
-      }, 400);
+        const h = tutHeadEl(saved);
+        if (h) {
+          const y = Math.max(0, h.getBoundingClientRect().top + w.scrollY - 110);
+          try { w.scrollTo(0, y); } catch (e) { try { w.scrollTo({ top: y, behavior: 'auto' }); } catch (e2) {} }
+        }
+        window.__tutTocRestoring = false;
+      }, 350);
+    } else {
+      window.__tutTocRestoring = false;
     }
-  } catch (e) {}
+  } catch (e) { window.__tutTocRestoring = false; }
 }
 
 
@@ -2317,7 +2372,12 @@ function mdInline(s) {
 /* 把与文字挤在一行的 ``` 围栏拆到独立行（题面/粘贴内容里常见） */
 function normalizeFences(raw) {
   let t = String(raw == null ? '' : raw).replace(/\r\n/g, '\n');
-  t = t.replace(/(```+[ \t]*[\w+-]*)[ \t]*([^\n`])/g, '$1\n$2');   // 开围栏后面直接跟内容
+  /* ⚠️ 这里原来写成 /(```+[ \t]*[\w+-]*)[ \t]*([^\n`])/ —— 贪婪的 [\w+-]* 会回溯，
+     把 ```` ```python\n ```` 拆成 ```` ```pytho\nn ````：语言标识少掉最后一个字母，
+     代码块里凭空多出一行字母 n（用户报的就是「首行被吞 + 语言标识错位」）。
+     语言标识后面必须**真的有空白**、且空白后面**真的有内容**，才允许拆行；
+     这样"标识+换行"、"标识+行尾空格"都不会误伤。 */
+  t = t.replace(/(```+[ \t]*[\w+-]*[ \t]+)([^\s\n`])/g, '$1\n$2');   // 开围栏后面直接跟内容
   t = t.replace(/([^\n`])(```+)/g, '$1\n$2');                        // 围栏紧跟在文字后面
   return t;
 }
@@ -2336,16 +2396,31 @@ function mdToHTML(text) {
   while (i < lines.length) {
     const line = lines[i];
     if (!line.trim()) { i++; continue; }
-    const fence = line.match(/^\s*```([\w-]*)\s*$/);
+    /* 围栏：`{3,}` 而不是恰好 ```。
+       ⚠️ 原来只认恰好三个反引号，于是「````」这种四反引号行既不匹配围栏分支、
+          又被 isBlock 判成块级 → 落到段落分支后一行都没吃掉 → while(i<lines) 死循环，
+          整个标签页卡死。中文语境里 ``` 连着内容、#### 这种写法并不少见。 */
+    const fence = line.match(/^\s*(`{3,})([\w-]*)\s*$/);
     if (fence) {
-      const buf = []; i++;
-      while (i < lines.length && !/^\s*```+\s*$/.test(lines[i])) { buf.push(lines[i]); i++; }
+      const mark = fence[1], start = i, buf = []; let closed = false;
       i++;
-      html += '<pre' + (fence[1] ? ' data-lang="' + mdEscape(fence[1]) + '"' : '') + '><code>' + mdEscape(buf.join('\n')) + '</code></pre>';
+      // 收尾围栏至少要跟开围栏一样长，否则 ``` 会把 ```` 开的块提前关掉
+      while (i < lines.length) {
+        const cl = lines[i].match(/^\s*(`{3,})\s*$/);
+        if (cl && cl[1].length >= mark.length) { closed = true; break; }
+        buf.push(lines[i]); i++;
+      }
+      // 没找到收尾围栏 → 这行其实不是围栏开头，当普通文本处理
+      // （否则末尾会凭空多出一个空的 <pre>）
+      // ⚠️ 这里只能 i = start + 1，不能退回 start：那会让同一行被反复重新判定，死循环。
+      if (!closed) { i = start + 1; html += '<p>' + mdInline(mdEscape(line)) + '</p>'; continue; }
+      i++;
+      html += '<pre' + (fence[2] ? ' data-lang="' + mdEscape(fence[2]) + '"' : '') + '><code>' + mdEscape(buf.join('\n')) + '</code></pre>';
       continue;
     }
-    const h = line.match(/^\s*(#{1,6})\s+(.*)$/);
-    if (h) { const n = h[1].length; html += '<h' + n + '>' + mdInline(mdEscape(h[2])) + '</h' + n + '>'; i++; continue; }
+    // 标题：中文里 `##标题` 不加空格很常见，这里容忍没有空格的情况
+    const h = line.match(/^\s*(#{1,6})\s*(.*)$/);
+    if (h && h[2].trim()) { const n = h[1].length; html += '<h' + n + '>' + mdInline(mdEscape(h[2])) + '</h' + n + '>'; i++; continue; }
     if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { html += '<hr>'; i++; continue; }
     if (/^\s*>\s?/.test(line)) {
       const buf = [];
@@ -2392,6 +2467,10 @@ function mdToHTML(text) {
       if (isBlock(l) || (l.includes('|') && lines[i + 1] && isSep(lines[i + 1]))) break;
       buf.push(l); i++;
     }
+    /* ⚠️ 死循环兜底：isBlock 认得、但上面任何一个分支都没接住的行（````、`#无空格标题` 等），
+       会走到这里 buf 为空且 i 没前进 → 外层 while 无限转、标签页卡死。
+       所以"什么都没吃掉"时必须强制前进一行。 */
+    if (!buf.length) i++;
     if (buf.length) html += '<p>' + buf.map(x => mdInline(mdEscape(x))).join('<br>') + '</p>';
   }
   return html;
@@ -3104,6 +3183,7 @@ async function renderTutorialPage(tid) {
       <button class="btn small" data-tbtn id="tutTocBtn" title="显示 / 隐藏左侧目录">📑 目录</button>
       ${(goalCompOn(goal, 'notes') && window.NodeNotes) ? `<button class="btn small" data-tbtn id="tutNoteBtn" title="展开 / 收起右侧笔记栏">🗒 笔记</button>` : ''}
       ${(goalCompOn(goal, 'tutbookmark') && window.TutBookmark) ? `<button class="btn small" data-tbtn id="tutBmBtn" title="随时标记阅读位置（不用翻到底部）">🔖 标签</button>` : ''}
+      ${goalCompOn(goal, 'restate') ? `<button class="btn small" data-tbtn id="tutRestateBtn" title="循序渐进把知识点变成你自己的话：先搞懂前因后果，AI 一次只追问最关键的一个缺口、给方向不给答案">🧠 用自己的话</button>` : ''}
       ${goalCompOn(goal, 'quiz') ? `<button class="btn small" data-tbtn id="tutQuizBtn" title="按这篇教程逐点考察掌握情况（一次一题，答错可追问）">📝 测验</button>` : ''}
       ${(goalCompOn(goal, 'workspace') && window.Workspace) ? `<button class="btn small primary" data-tbtn id="tutCodeBtn" title="为当前节点建好代码目录并用 VSCode 打开，边看教程边写代码（子目录嵌在父目录下，无需手动管理）">💻 写代码</button>` : ''}
       ${(goalCompOn(goal, 'workspace') && window.Workspace) ? `<button class="btn small" data-tbtn id="tutPackBtn" title="把整个目标的代码目录一键打包成 zip 下载">📦 打包</button>` : ''}
@@ -3126,7 +3206,17 @@ async function renderTutorialPage(tid) {
       : `<div class="tutBody mdBody">${mdToHTML(t.content)}</div>`}
     {/* 书签为浮动面板（顶栏按钮呼出），此处不占位 */}
   </div>`;
-  if (isHtml) document.getElementById('tutFrame').setAttribute('srcdoc', tutThemedHTML(t.content));
+  if (isHtml) {
+    const fr = document.getElementById('tutFrame');
+    /* HTML 教程正文在 iframe 里，得等它 load 完才有 headings。
+       以前统一 setTimeout(200) —— iframe 内容多的时候 200ms 还没解析完，
+       tutTocBuild 拿到 0 个标题就静默 return，表现为"目录组件失效"。 */
+    let built = false;
+    const build = () => { if (built) return; built = true; try { tutTocBuild(tid); } catch (e) {} };
+    fr.addEventListener('load', build, { once: true });
+    fr.setAttribute('srcdoc', tutThemedHTML(t.content));
+    setTimeout(build, 1500);   // 兜底：万一 load 没触发
+  }
   setTimeout(() => { try { tutTocBuild(tid); } catch (e) {} }, 200);   // 侧边目录大纲
   const tutNoteBtn = document.getElementById('tutNoteBtn');
   if (tutNoteBtn && window.NodeNotes && goalCompOn(goal, 'notes')) {
@@ -3146,6 +3236,10 @@ async function renderTutorialPage(tid) {
     window.TutBookmark.badge(tid);
     const tbb = document.getElementById('tutBmBtn');
     if (tbb) tbb.addEventListener('click', () => window.TutBookmark.toggle(tid));
+  }
+  if (goalCompOn(goal, 'restate')) {
+    const trs = document.getElementById('tutRestateBtn');
+    if (trs) trs.addEventListener('click', () => { location.hash = '#/t/' + tid + '/restate'; });
   }
   if (goalCompOn(goal, 'quiz')) {
     const tq = document.getElementById('tutQuizBtn');
@@ -5697,6 +5791,20 @@ function updHasUpdate() {
   const u = state.update || {};
   return !!(u.supported && u.behind > 0 && u.latestShort && u.latestShort !== updSkipHash());
 }
+/* 打包版（单个 exe）走 payload 后端：没有提交概念，只比版本号。
+   文案必须换掉，否则会出现「落后 1 个提交」这种对 exe 用户毫无意义的话。 */
+function updIsPayload() { return (state.update || {}).mode === 'payload'; }
+function updSizeText() {
+  const m = (state.update || {}).manifest;
+  if (!m || !m.size) return '';
+  const kb = Math.round(m.size / 1024);
+  return kb >= 1024 ? (kb / 1024).toFixed(1) + ' MB' : kb + ' KB';
+}
+function updWhereText() {
+  const u = state.update || {};
+  if (updIsPayload()) return '下载程序文件 ' + (updSizeText() || '') + '（不会重下整个 exe）';
+  return '落后 ' + u.behind + ' 个提交';
+}
 /* 启动时检查（服务端启动后已后台检测过一次，这里取缓存，没有就补一次） */
 async function checkUpdateOnBoot() {
   try {
@@ -5722,8 +5830,8 @@ function renderUpdateBanner() {
   el.innerHTML = `
     <span class="updIcon">🚀</span>
     <div class="updText">
-      <b>发现新版本</b>
-      <span>落后 ${u.behind} 个提交 · 最新：${esc(u.latestSubject || '')}</span>
+      <b>发现新版本 ${updIsPayload() ? 'v' + esc(u.latestShort || '') : ''}</b>
+      <span>${esc(updWhereText())} · ${esc(u.latestSubject || '')}</span>
     </div>
     <button class="btn tiny" id="updDetails">更新内容</button>
     <button class="btn tiny primary" id="updNow">立即更新</button>
@@ -5778,11 +5886,13 @@ async function applyUpdate() {
   const b = document.getElementById('updBanner');
   if (b) b.remove();
   updMaskShow('正在更新…');
-  updMaskSub('从远端拉取最新代码');
+  updMaskSub(updIsPayload() ? '下载并校验程序文件' : '从远端拉取最新代码');
   try {
     const r = await api('/api/update/apply', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     if (!r.updated) { updMaskShow('已经是最新版本'); setTimeout(() => { const m = document.getElementById('updMask'); if (m) m.remove(); }, 1200); return; }
-    updMaskSub('已更新 ' + r.before + ' → ' + r.after + '（' + r.commits + ' 个提交）' + (r.warning ? ' · ' + r.warning : ''));
+    updMaskSub('已更新 ' + r.before + ' → ' + r.after
+      + (r.mode === 'payload' ? '（' + (r.files || 0) + ' 个文件）' : '（' + r.commits + ' 个提交）')
+      + (r.warning ? ' · ' + r.warning : ''));
     updMaskShow('更新完成，正在重启应用…');
     updMaskSub('重启后会自动刷新页面，请稍候');
     try { await api('/api/update/restart', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch (e) {}
@@ -5795,7 +5905,7 @@ async function applyUpdate() {
     }
   } catch (e) {
     updMaskShow('更新失败');
-    updMaskSub(e.message + ' · 可在项目目录手动执行 git pull');
+    updMaskSub(e.message + (updIsPayload() ? ' · 可稍后重试，或到项目仓库手动下载最新程序文件' : ' · 可在项目目录手动执行 git pull'));
     setTimeout(() => { const m = document.getElementById('updMask'); if (m) m.remove(); }, 8000);
   }
 }
@@ -5803,16 +5913,21 @@ async function applyUpdate() {
 async function updateSectionHTML() {
   let u = state.update;
   if (!u) { try { u = await api('/api/update/status'); state.update = u; } catch (e) { u = {}; } }
-  const cur = u.currentShort ? `<code>${esc(u.currentShort)}</code> ${esc(fmtUpdTime(u.currentDate))}` : '（未检测）';
+  const isPay = u.mode === 'payload';
+  const cur = isPay
+    ? (u.localVersion ? '<code>v' + esc(u.localVersion) + '</code>' : '（未检测）')
+    : (u.currentShort ? `<code>${esc(u.currentShort)}</code> ${esc(fmtUpdTime(u.currentDate))}` : '（未检测）');
   const supported = u.supported !== false;
   const has = updHasUpdate();
   const status = !supported
-    ? '<span style="color:var(--warn)">当前不是 git 安装，无法自动更新（可重新用 git clone 安装，数据不会丢）</span>'
+    ? '<span style="color:var(--warn)">当前安装方式不支持自动更新（可重新用 git clone 安装，数据不会丢）</span>'
     : (u.reason === 'fetch-failed'
       ? '<span style="color:var(--warn)">检查失败：' + esc(u.error || '网络或权限问题') + '</span>'
       : (has
-        ? '<b style="color:var(--accent)">有 ' + u.behind + ' 个新提交</b> · 最新：' + esc(u.latestSubject || '')
-        : '已是最新版本' + (u.dirty ? ' · 本地有 ' + u.dirty + ' 个改动文件（更新时会自动暂存）' : '')));
+        ? (isPay
+          ? '<b style="color:var(--accent)">有新版本 v' + esc(u.latestShort || '') + '</b> · 只下载程序文件 ' + (updSizeText() || '') + '，不会重下整个 exe · ' + esc(u.latestSubject || '')
+          : '<b style="color:var(--accent)">有 ' + u.behind + ' 个新提交</b> · 最新：' + esc(u.latestSubject || ''))
+        : (isPay ? '已是最新版本' : '已是最新版本' + (u.dirty ? ' · 本地有 ' + u.dirty + ' 个改动文件（更新时会自动暂存）' : ''))));
   return `<div class="sec">
       <div class="secTitle">版本与更新</div>
       <div class="svcRow">
@@ -5824,7 +5939,7 @@ async function updateSectionHTML() {
       </div>
       <p class="hint" id="updStatus" style="margin-top:8px; line-height:1.8;">${status}${u.checkedAt ? ' · 上次检查：' + esc(fmtUpdTime(new Date(u.checkedAt).toISOString())) : ''}</p>
       ${(u.commits && u.commits.length) ? `<div class="updList" style="margin-top:6px;">${u.commits.map(c => `<div class="updItem"><code>${esc(c.hash)}</code><span>${esc(c.subject)}</span><i>${esc(fmtUpdTime(c.date))}</i></div>`).join('')}</div>` : ''}
-      <p class="hint" style="margin-top:8px;">· 启动时会自动检查一次；也可以随时点「检查更新」<br>· 更新只替换程序文件，本地数据（目标 / 组件设置 / 密钥）不受影响；更新后会自动重启应用</p>
+      <p class="hint" style="margin-top:8px;">· 启动时会自动检查一次；也可以随时点「检查更新」<br>· 更新只替换程序文件，本地数据（目标 / 组件设置 / 密钥）不受影响；更新后会自动重启应用${isPay ? '<br>· 你是单文件 exe 版本：更新只下载程序文件（几百 KB），<b>不用重下 89MB 的 exe</b>' : ''}</p>
     </div>`;
 }
 function bindUpdateSection() {
@@ -5834,9 +5949,11 @@ function bindUpdateSection() {
     try {
       const u = await api('/api/update/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       state.update = u;
-      toast(u.supported === false ? '当前不是 git 安装，无法自动更新'
+      toast(u.supported === false ? '当前安装方式不支持自动更新'
         : (u.reason === 'fetch-failed' ? '检查失败：' + (u.error || '网络或权限问题')
-          : (u.behind > 0 ? '发现 ' + u.behind + ' 个新提交' : '已是最新版本')));
+          : (u.behind > 0
+            ? (u.mode === 'payload' ? '发现新版本 v' + u.latestShort : '发现 ' + u.behind + ' 个新提交')
+            : '已是最新版本')));
       renderRail();
       rerenderCurrent();
     } catch (e) { toast(e.message); }

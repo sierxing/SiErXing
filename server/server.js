@@ -4008,11 +4008,12 @@ function extractEbookPrefFromAnswers(answers) {
     return sendJSON(res, 200, await update.check(true));
   }
   if (p === '/api/update/apply' && method === 'POST') {
-    try { return sendJSON(res, 200, await update.apply()); }
+    /* 打包版走 payload 后端：只换 450KB 的程序文件，不碰 git */
+    try { return sendJSON(res, 200, update.mode() === 'payload' ? await update.applyPayload() : await update.apply()); }
     catch (e) { return sendJSON(res, 400, { error: e.message }); }
   }
   if (p === '/api/update/restart' && method === 'POST') {
-    return sendJSON(res, 200, update.restart());
+    return sendJSON(res, 200, update.mode() === 'payload' ? update.restartPayload() : update.restart());
   }
 
   if (p === '/api/sync/status' && method === 'GET') {
@@ -4521,7 +4522,17 @@ function serveStatic(req, res, p) {
 }
 
 const server = http.createServer(async (req, res) => {
-  const u = new URL(req.url, `http://localhost:${PORT}`);
+  let u;
+  try {
+    u = new URL(req.url, `http://localhost:${PORT}`);
+  } catch (e) {
+    /* ⚠️ 畸形请求行（例如 "//"）会让 new URL 直接抛异常。
+       它原来写在下面那个 try 的**外面**，抛出后成为 unhandledRejection，
+       Node 会**整个进程退出** —— 一次手滑的 URL / 代理转发就能让应用挂掉、
+       正在进行的会话全丢。这里挡下来回 400。 */
+    try { sendJSON(res, 400, { error: '非法请求地址' }); } catch (e2) { try { res.end(); } catch (e3) {} }
+    return;
+  }
   try {
     if (u.pathname.startsWith('/api/')) return await handleAPI(req, res, u);
     if (u.pathname.startsWith('/uploads/')) serveUpload(req, res, u.pathname.slice('/uploads/'.length));
@@ -4557,3 +4568,9 @@ server.on('error', e => {
     process.exit(1);
   } else console.error(e);
 });
+
+/* 本地单进程应用：一次没接住的异常不该让整个服务退出（正在进行的会话、番茄钟、
+   同步都会丢）。这里只记日志、不退出；真正的 bug 依然会留在日志里可查。
+   Node 默认对 unhandledRejection 是直接终止进程的。 */
+process.on('unhandledRejection', e => { console.error('[未捕获的 Promise 拒绝]', (e && e.stack) || e); });
+process.on('uncaughtException', e => { console.error('[未捕获的异常]', (e && e.stack) || e); });

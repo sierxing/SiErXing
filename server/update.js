@@ -1,13 +1,17 @@
 'use strict';
 /**
- * 更新检查与一键更新（基于 git）
+ * 更新检查与一键更新 —— 两种后端共用一套接口
  *
- *   · 启动后自动检测远端仓库是否有新提交（异步、不阻塞启动、失败不打扰）
- *   · 前端拿到状态后弹出提示，用户可选择「立即更新 / 稍后 / 跳过此版本」
- *   · 更新用 git pull --ff-only；本地有改动会先自动 stash，失败会明确告知原因
- *   · 更新完成后由前端调用 restart() 自动拉起新进程（旧进程退出）
+ *   mode='git'     ：git clone 安装的副本。用 git pull --ff-only，
+ *                    本地有改动会先自动 stash，失败会明确告知原因。
+ *   mode='payload' ：打包成单个 exe 的用户。exe 里没有 .git、node 也不带 git，
+ *                    所以改用「清单 + 载荷」：只下 450KB 的程序文件换掉旧的，
+ *                    node 运行时不动（重下整个 exe 要 89MB）。
+ *   mode='none'    ：zip 解压安装，既没有 .git 也没有载荷标记 → 不支持。
  *
- * 只有 git clone 安装的副本才支持自动更新；zip 解压安装会返回 supported:false。
+ * 两种后端都：启动后异步检测（不阻塞启动、失败不打扰）、前端提示后由用户点确认、
+ * 更新完调 restart() 重新拉起（旧进程退出）。
+ * SX_UPDATE=off 可完全关掉；SX_UPDATE_URL 可把清单指到自己的地址。
  */
 const { execFile, spawn } = require('node:child_process');
 const fs = require('node:fs');
@@ -15,11 +19,17 @@ const path = require('node:path');
 
 const CHECK_TTL = 10 * 60 * 1000; // 10 分钟内不重复联网检测
 
+/* payload 模式的默认清单地址（AtomGit contents 接口，免鉴权） */
+const DEFAULT_MANIFEST = 'https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main';
+
 module.exports = function createUpdate({ appDir, port = 3213, log = () => {} }) {
   const state = {
-    supported: null,     // null=未检测 / true=git 安装 / false=不支持自动更新
-    reason: '',          // not-git | fetch-failed | ''
+    supported: null,     // null=未检测 / true=可以自动更新 / false=不支持
+    reason: '',          // not-git | fetch-failed | off | ''
     error: '',           // 失败详情（给用户看的一句话）
+    mode: '',            // 'git' | 'payload' | 'none'  ← 见下面「两种更新后端」
+    localVersion: '',    // 打包版的当前版本（payload 模式）
+    manifest: null,      // 远端清单：{version, notes, publishedAt, size, sha256…}
     branch: '',
     current: '', currentShort: '', currentSubject: '', currentDate: '',
     latest: '', latestShort: '', latestSubject: '', latestDate: '',
@@ -75,9 +85,13 @@ module.exports = function createUpdate({ appDir, port = 3213, log = () => {} }) 
     try {
       state.error = '';
       state.reason = '';
-      if (!fs.existsSync(path.join(appDir, '.git'))) {
+      const m = detectMode();
+      state.mode = m;
+      if (m !== 'git') {
+        /* 打包版没有 .git、node.exe 也不带 git —— 走 payload 后端（见文件末尾） */
+        if (m === 'payload') return checkPayload();
         state.supported = false;
-        state.reason = 'not-git';
+        state.reason = process.env.SX_UPDATE === 'off' ? 'off' : 'not-git';
         state.checkedAt = Date.now();
         return state;
       }
@@ -216,5 +230,158 @@ module.exports = function createUpdate({ appDir, port = 3213, log = () => {} }) 
     setTimeout(() => { check().catch(() => {}); }, delay);
   }
 
-  return { check, apply, restart, startAutoCheck, state };
+  /* ======================================================================
+   * payload 后端：给打包成单个 .exe 的用户用
+   * ----------------------------------------------------------------------
+   * 为什么需要它：打包版解包出来的目录里**没有 .git**，而 exe 里那个 node 运行时
+   * 也**不带 git**，所以上面整套 git 逻辑对它一律 supported:false —— 永远更新不了。
+   *
+   * 但真的不需要 git：exe 里 99.5% 是 node 运行时，永远不变。会变的只有那 450KB 的
+   * 程序文件。所以更新 = 只换这一个载荷：
+   *    latest.json（几十字节，跟代码一起提交到仓库）
+   *      → payload-1.2.0.sxar（约 450KB，校验 sha256 后解包，**保留 data/**）
+   * 重新下整个 exe 要 89MB，换载荷只要 450KB。
+   *
+   * 清单与载荷都放在 AtomGit 仓库里，用它的 contents 接口取：免鉴权、返回 base64。
+   * 离线/内网用户把 SX_UPDATE_URL 指向自己的地址即可（也能 SX_UPDATE=off 关掉）。
+   * ====================================================================== */
+  const MANIFEST_URL = process.env.SX_UPDATE_URL || DEFAULT_MANIFEST;
+
+  /* 版本比较：a 比 b 新返回正数。认 v1.2.3 / 1.2.3 / 1.2 这种写法。 */
+  function cmpVer(a, b) {
+    const pa = String(a || '0').replace(/^v/i, '').split(/[.-]/).map(x => (parseInt(x, 10) || 0));
+    const pb = String(b || '0').replace(/^v/i, '').split(/[.-]/).map(x => (parseInt(x, 10) || 0));
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const d = (pa[i] || 0) - (pb[i] || 0);
+      if (d) return d;
+    }
+    return 0;
+  }
+
+  /* 三种安装形态：git clone / 打包 exe / zip 解压 */
+  function detectMode() {
+    if (process.env.SX_UPDATE === 'off') return 'none';
+    if (fs.existsSync(path.join(appDir, '.git'))) return 'git';
+    if (fs.existsSync(path.join(appDir, '.sx-current'))) return 'payload';
+    return 'none';
+  }
+  function readCurrent() {
+    try { return JSON.parse(fs.readFileSync(path.join(appDir, '.sx-current'), 'utf8')) || {}; }
+    catch (e) { return {}; }
+  }
+  /* AtomGit contents 接口返回 { content: base64, encoding: 'base64' } */
+  async function fetchViaContents(url) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 20000);
+    try {
+      const r = await fetch(url, { signal: ac.signal, headers: { 'User-Agent': 'SiErXing-update' } });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      if (j && j.content) return Buffer.from(j.content, 'base64');
+      throw new Error('响应里没有 content 字段');
+    } finally { clearTimeout(timer); }
+  }
+  async function fetchManifest() {
+    const buf = await fetchViaContents(MANIFEST_URL);
+    return JSON.parse(buf.toString('utf8'));
+  }
+
+  async function checkPayload() {
+    state.mode = 'payload';
+    state.supported = true;
+    const cur = readCurrent();
+    state.localVersion = cur.rel || '';
+    state.current = state.localVersion;
+    state.currentShort = state.localVersion;
+    try {
+      const man = await fetchManifest();
+      state.manifest = man;
+      state.latest = String(man.version || '');
+      state.latestShort = state.latest;
+      state.latestSubject = String(man.notes || '').slice(0, 200);
+      state.latestDate = String(man.publishedAt || '');
+      /* 语义化比较：只有远端真的更新才提示。
+         反过来「本地比清单还新」（自己编译过、或清单回滚了）也绝不能提示降级。 */
+      state.behind = cmpVer(state.latest, state.localVersion) > 0 ? 1 : 0;
+      state.ahead = cmpVer(state.localVersion, state.latest) > 0 ? 1 : 0;
+      state.commits = [];
+      state.error = '';
+    } catch (e) {
+      state.behind = 0; state.ahead = 0;
+      state.reason = 'fetch-failed';
+      state.error = '连不上更新服务器：' + ((e && e.message) || e) + '（不影响使用，可稍后再试）';
+    }
+    state.checkedAt = Date.now();
+    state.checking = false;
+    return state;
+  }
+
+  function unpackPayload(buf) {
+    const zlib = require('node:zlib');
+    const raw = zlib.gunzipSync(buf);
+    if (raw.slice(0, 4).toString('ascii') !== 'SXA1') throw new Error('更新包已损坏');
+    const hl = raw.readUInt32LE(4);
+    const head = JSON.parse(raw.slice(8, 8 + hl).toString('utf8'));
+    let off = 8 + hl;
+    let n = 0;
+    for (const f of head.files) {
+      const out = path.join(appDir, f.p);
+      if (f.p.startsWith('data/')) { off += f.size; continue; }   // 用户数据绝不被覆盖
+      fs.mkdirSync(path.dirname(out), { recursive: true });
+      fs.writeFileSync(out, raw.slice(off, off + f.size));
+      off += f.size; n++;
+    }
+    return { head, written: n };
+  }
+
+  async function applyPayload() {
+    state.mode = 'payload';
+    const before = readCurrent();
+    const man = await fetchManifest();
+    if (!man || !man.payload || !man.sha256) throw new Error('更新清单不完整');
+    log('[update] 下载载荷 ' + man.payload + ' …');
+    const buf = await fetchViaContents(man.url);
+    const crypto = require('node:crypto');
+    const got = crypto.createHash('sha256').update(buf).digest('hex');
+    if (got !== man.sha256) throw new Error('更新包校验失败（sha256 不匹配），已放弃本次更新');
+    const { head, written } = unpackPayload(buf);
+    /* 载荷自称的版本要和清单一致，否则说明发布时搞混了，不能写标记 */
+    if (head.rel && man.version && head.rel !== man.version) {
+      throw new Error('更新包版本（' + head.rel + '）与清单（' + man.version + '）不一致，已放弃');
+    }
+    /* 只在真正落盘成功后才写标记 → 中途失败下次启动会重新解内嵌载荷，不会半残 */
+    fs.writeFileSync(path.join(appDir, '.sx-current'),
+      JSON.stringify({ rel: head.rel || man.version, ver: head.ver || '' }));
+    state.localVersion = head.rel || man.version;
+    state.checkedAt = 0;
+    log(`[update] 已更新 ${before.rel || '?'} → ${state.localVersion}（${written} 个文件）`);
+    return {
+      ok: true, updated: true, before: before.rel || '', after: state.localVersion,
+      files: written, restartRequired: true, mode: 'payload', state,
+    };
+  }
+
+  /** 打包版的「重启」：拉起一个新的 exe 实例，等旧实例让出端口 */
+  function restartPayload() {
+    const logFile = path.join(appDir, 'data', 'server.log');
+    try { fs.mkdirSync(path.dirname(logFile), { recursive: true }); } catch (e) {}
+    try {
+      const p = spawn(process.execPath, [], {
+        cwd: appDir, detached: true, stdio: 'ignore', windowsHide: true,
+        env: Object.assign({}, process.env, { SX_WAIT: '1' }),
+      });
+      p.unref();
+    } catch (e) {
+      return { ok: false, error: '自动重启失败：' + ((e && e.message) || e) + '（请手动关闭后重新双击）' };
+    }
+    log('[update] 正在重启…');
+    setTimeout(() => process.exit(0), 500);
+    return { ok: true, restarting: true, port, mode: 'payload' };
+  }
+
+  return {
+    check, apply, restart, startAutoCheck, state,
+    mode: detectMode,
+    checkPayload, applyPayload, restartPayload,
+  };
 };
