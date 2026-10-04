@@ -322,15 +322,51 @@ function downloadNode() {
   return exe;
 }
 
-/* ---------------- 6. postject（只在构建期用一次） ---------------- */
-function getPostject() {
-  const pj = path.join(BUILDDIR, 'node_modules', 'postject');
-  if (fs.existsSync(pj)) return require(pj);
-  log('安装 postject（构建期工具，不进产物）…');
-  fs.mkdirSync(BUILDDIR, { recursive: true });
-  const r = spawnSync('npm', ['install', '--no-save', '--no-audit', '--no-fund', '--prefix', BUILDDIR, 'postject'], { stdio: 'inherit' });
-  if (r.status !== 0 || !fs.existsSync(pj)) die('postject 安装失败（构建机需要能访问 npm）');
-  return require(pj);
+/* ---------------- 6. 构建期工具（postject / resedit，都不进产物） ---------------- */
+/** 只负责「装好并返回路径」。有些包（如 resedit）主入口是 ESM，require 会炸，
+ *  交给调用方按它自己的方式加载。 */
+function ensureTool(name) {
+  const p = path.join(BUILDDIR, 'node_modules', name);
+  if (!fs.existsSync(p)) {
+    log('安装 ' + name + '（构建期工具，不进产物）…');
+    fs.mkdirSync(BUILDDIR, { recursive: true });
+    const r = spawnSync('npm', ['install', '--no-save', '--no-audit', '--no-fund', '--prefix', BUILDDIR, name], { stdio: 'inherit' });
+    if (r.status !== 0 || !fs.existsSync(p)) die(name + ' 安装失败（构建机需要能访问 npm）');
+  }
+  return p;
+}
+/** CJS 的包直接 require（如 postject） */
+function getBuildTool(name) { return require(ensureTool(name)); }
+
+/* ---------------- 7. 给 exe 换上图标 ----------------
+   用的就是 public/icon.ico —— 和 Linux 桌面图标（service.js 建 .desktop 时引用的
+   icon.svg / icon.png / icon.ico）是同一套源，所以任务栏、资源管理器、开始菜单
+   看到的图标与桌面上一致。
+   node.exe 自带的图标在 .rsrc 段里，要用 resedit 改写整份 PE 资源。三个注意点：
+     · NtExecutable.from(bin, {ignoreCert:true})：node.exe 带 Authenticode 签名，
+       不给这个参数会直接抛 "Parsing signed executable binary is not allowed"。
+       反正 postject 注入时签名已失效，这里顺手清掉。
+     · 传进去的必须是 new Uint8Array(buf)（byteOffset=0）。直接传 Buffer 有可能
+       落在 Node 的内存池里、offset 不为 0，解析出来的 PE 全是错的。
+     · outputResource(exe) 不返回值，最后要从 exe 上 generate() 拿字节。 */
+function setExeIcon(exePath) {
+  const icoPath = path.join(ROOT, 'public', 'icon.ico');
+  if (!fs.existsSync(icoPath)) { log('（没有 public/icon.ico，跳过换图标）'); return; }
+  // resedit v3 主入口是 ESM，但自带 CJS 版；用 createRequire 从它的目录解析
+  const dir = ensureTool('resedit');
+  const R = require('module').createRequire(path.join(dir, 'x.js'))('resedit');
+  const { icons } = R.Data.IconFile.from(fs.readFileSync(icoPath));
+  const pe = R.NtExecutable.from(new Uint8Array(fs.readFileSync(exePath)), { ignoreCert: true });
+  const res = R.NtExecutableResource.from(pe, true);
+  const groups = res.entries.filter(e => e.type === 14);   // 14 = RT_GROUP_ICON
+  const g = groups[0];
+  // 沿用已有组的 id/lang，等于「替换」；没有就新建一个
+  R.Resource.IconGroupEntry.replaceIconsForResource(res.entries, g ? g.id : 1, g ? g.lang : 1033,
+    // IconFile.from 给的是包装对象，真正的 RT_ICON 数据在 .data（RawIconItem）上
+    icons.map(i => i.data));
+  res.outputResource(pe);
+  fs.writeFileSync(exePath, Buffer.from(pe.generate()));
+  log('已换图标：' + icons.length + ' 种尺寸（' + icons.map(i => (i.width || 256)).join('/') + '）');
 }
 
 /* ---------------- main ---------------- */
@@ -380,9 +416,10 @@ function main() {
   const outExe = path.join(OUTDIR, OUT_NAME);
   fs.copyFileSync(nodeExe, outExe);
   log('注入 blob …');
-  getPostject().inject(outExe, 'NODE_SEA_BLOB', fs.readFileSync(blob), {
+  getBuildTool('postject').inject(outExe, 'NODE_SEA_BLOB', fs.readFileSync(blob), {
     sentinelFuse: 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2',
   });
+  setExeIcon(outExe);
 
   log('');
   log('✓ 产出 ' + path.relative(ROOT, outExe) + '  ' + (fs.statSync(outExe).size / 1024 / 1024).toFixed(1) + ' MB');

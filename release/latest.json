@@ -1,13 +1,13 @@
 {
   "version": "1.0.0",
-  "buildVer": "930b8969252f",
+  "buildVer": "5523c9a9f182",
   "payload": "release/payload-1.0.0.sxar",
   "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.0.0.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
-  "sha256": "4a57759d677eefd25ff066be593b5fa936de3a395fe0e187e7adf95e187237bd",
-  "size": 469766,
-  "unpackedSize": 1462220,
-  "publishedAt": "2026-10-04T15:13:49.763Z",
+  "sha256": "91013b77146fd8564e47a28bf67901d6701f86698914641903d66a733c77b6c7",
+  "size": 472493,
+  "unpackedSize": 1467827,
+  "publishedAt": "2026-10-04T23:51:13.120Z",
   "notes": "见 CHANGELOG / 提交记录",
   "exeRequired": false
 }
