@@ -1,13 +1,13 @@
 {
-  "version": "1.5.1",
-  "buildVer": "f041ed7bd734",
-  "payload": "release/payload-1.5.1.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.5.1.sxar?ref=main",
+  "version": "1.5.2",
+  "buildVer": "b43098211540",
+  "payload": "release/payload-1.5.2.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.5.2.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
-  "sha256": "995e3ce6a88d9c8e6e32598b5fbdf95f9d95f4efd9f111aef463f0babda31126",
-  "size": 499528,
-  "unpackedSize": 1907878,
-  "publishedAt": "2026-10-05T03:39:00.546Z",
-  "notes": "opencode报错走stdout导致测试只显示未返回内容，现把真实原因翻译成人话",
+  "sha256": "b105fe75704e0d1b074b706e235505f6736eb397cc6dbfad7f443047458e73ed",
+  "size": 499649,
+  "unpackedSize": 1908147,
+  "publishedAt": "2026-10-05T03:45:29.763Z",
+  "notes": "opencode额度/欠费类报错也翻译成人话",
   "exeRequired": false
 }

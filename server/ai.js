@@ -743,6 +743,9 @@ function opencodeStdioError(out) {
     if (/auth|login|401|403|FreeTier|forbidden|unauthorized/i.test(et + ' ' + msg)) {
       return 'opencode 本机登录不可用：' + (msg || et) + '（先在终端执行 `opencode auth login` 登录或配好 Key，再点测试）';
     }
+    if (/quota|429|insufficient.*fund|UsageLimit|limit exceeded/i.test(et + ' ' + msg)) {
+      return 'opencode 账号额度用完了：' + (msg || et) + '（去该账号的控制台充值或等额度重置；也可以换条 API 连接直接调官方接口）';
+    }
     if (msg) return 'opencode 报错：' + msg.slice(0, 200);
   }
   return '';
