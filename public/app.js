@@ -6276,6 +6276,7 @@ const AI_PROVIDERS_FALLBACK = [
   { id: 'openai', name: 'OpenAI', brand: 'OA', baseUrl: 'https://api.openai.com/v1', models: ['gpt-5.4', 'gpt-4o', 'gpt-4o-mini'], vision: 'gpt-4o' },
   { id: 'openrouter', name: 'OpenRouter', brand: 'OR', baseUrl: 'https://openrouter.ai/api/v1', models: ['anthropic/claude-sonnet-4.6', 'google/gemini-3.8-flash'], vision: '' },
   { id: 'ollama', name: '本地 Ollama', brand: 'OL', baseUrl: 'http://localhost:11434/v1', models: ['qwen3:8b', 'llama3.1:8b', 'deepseek-r1:8b'], vision: 'gemma3:4b', noKey: true },
+  { id: 'zen', name: 'OpenCode Zen', brand: 'ZEN', baseUrl: 'https://opencode.ai/zen/v1', models: ['space-bunny-free', 'big-pickle', 'mimo-v2.6-flash-free', 'ling-3.1-flash-free'], vision: '' },
   { id: 'custom', name: '其他 / 自填', brand: '···', baseUrl: '', models: [], vision: '' },
   { id: 'opencode', name: 'opencode CLI', brand: 'OC', baseUrl: '', models: [], vision: '', isOpencode: true }
 ];

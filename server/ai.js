@@ -68,6 +68,10 @@ const PROVIDERS = [
   { id: 'tencent', name: '腾讯混元', brand: 'HY', baseUrl: 'https://api.hunyuan.cloud.tencent.com/v1', models: ['hunyuan-turbos-latest', 'hunyuan-t1-latest', 'hunyuan-a13b'], vision: 'hunyuan-vision', docs: 'https://cloud.tencent.com/document/product/1729' },
   /* 已亲手核对 https://ollama.com/library（按 Pulls 排序，tag 为模型页实际标签） */
   { id: 'ollama', name: '本地 Ollama', brand: 'OL', baseUrl: 'http://localhost:11434/v1', models: ['qwen3:8b', 'llama3.1:8b', 'deepseek-r1:8b', 'qwen2.5:7b', 'gemma3:4b', 'mistral:7b', 'gpt-oss:20b', 'llava:7b'], vision: 'gemma3:4b', noKey: true, docs: 'https://ollama.com' },
+  /* OpenCode Zen：官方 AI 网关，OpenAI 兼容直调（/chat/completions）。
+     模型列表接口是公开的（无 key 也能取到 86 个），调用才要 key。
+     key 去 https://opencode.ai/auth 登录后复制。免费款以 -free 结尾。 */
+  { id: 'zen', name: 'OpenCode Zen', brand: 'ZEN', baseUrl: 'https://opencode.ai/zen/v1', models: ['space-bunny-free', 'big-pickle', 'mimo-v2.6-flash-free', 'ling-3.1-flash-free', 'longcat-2.5-preview-free', 'fledge-alpha-free', 'nemotron-3-ultra-free', 'muse-spark-1.3-contributor-free'], vision: '', docs: 'https://opencode.ai/auth' },
   { id: 'lmstudio', name: 'LM Studio', brand: 'LM', baseUrl: 'http://localhost:1234/v1', models: [], vision: '', noKey: true, docs: 'https://lmstudio.ai' },
   { id: 'custom', name: '其他 / 自填', brand: '···', baseUrl: '', models: [], vision: '', docs: '' },
   /* opencode 也放进服务商列表：前端按服务商按钮统一渲染，
