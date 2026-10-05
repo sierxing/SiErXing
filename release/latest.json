@@ -1,13 +1,13 @@
 {
-  "version": "1.4.0",
-  "buildVer": "51c8b0186bc0",
-  "payload": "release/payload-1.4.0.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.4.0.sxar?ref=main",
+  "version": "1.4.1",
+  "buildVer": "501051fe47af",
+  "payload": "release/payload-1.4.1.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.4.1.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
-  "sha256": "87beecd5345fa7e7ff40352cc780ea3baeba7c2a78517545ef137ce3e12fe839",
-  "size": 491257,
-  "unpackedSize": 1881896,
-  "publishedAt": "2026-10-05T02:34:59.444Z",
-  "notes": "设置页顶栏页签+风格统一（AI/同步/服务/更新/备份/帮助/关于，一点直达）；连接名称自动按服务商起，不用再填；同步冲突二选一：两边都有改动时停下来让用户选本地或云端，不再直接覆盖",
+  "sha256": "8824670f9bdffd8a7e5eb17e7b4e2ca0ad3e0cd08f9aa29fc51dd5cad9384f92",
+  "size": 491095,
+  "unpackedSize": 1881405,
+  "publishedAt": "2026-10-05T02:36:43.675Z",
+  "notes": "设置页签改成整页切换：点一个只显示一块，不再全挤在一起",
   "exeRequired": false
 }

@@ -6747,43 +6747,30 @@ async function renderSettings() {
   bindUpdateSection();
   bindSyncSection();
 
-  /* 顶栏页签：点一下滚到对应区块；手滚页面时高亮当前区块；保存重绘后回到刚才的位置。
-     不用「一次只显示一块」—— 那样切页签要重绑一堆监听，滚动定位更稳。 */
+  /* 顶栏页签：一次只显示一块，整页切换，不再全挤在一起。
+     切页签只做 hidden 显隐 —— 输入框里的未保存内容不会丢，各区块的监听也都在，
+     比销毁重建稳。保存重绘后停在刚才看的那块。 */
   const tabsBox = document.getElementById('setTabs');
   const tabIds = state._setTabs || [];
   const markTab = id => tabsBox && tabsBox.querySelectorAll('.setTab').forEach(b =>
     b.classList.toggle('on', b.getAttribute('data-tab') === id));
+  const applyTab = () => {
+    const cur = (state.settingsTab && document.getElementById(state.settingsTab)) ? state.settingsTab : 'set-ai';
+    state.settingsTab = cur;
+    markTab(cur);
+    tabIds.forEach(id => { const el = document.getElementById(id); if (el) el.hidden = (id !== cur); });
+  };
   if (tabsBox) {
+    if (window.__setSpy) { try { window.__setSpy.disconnect(); } catch (e) {} window.__setSpy = null; }
     tabsBox.addEventListener('click', e => {
       const b = e.target.closest('[data-tab]');
       if (!b) return;
-      const id = b.getAttribute('data-tab');
-      state.settingsTab = id;
-      markTab(id);
-      const el = document.getElementById(id);
-      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      state.settingsTab = b.getAttribute('data-tab');
+      applyTab();
+      window.scrollTo(0, 0);
     });
-    if (window.__setSpy) window.__setSpy.disconnect();
-    if ('IntersectionObserver' in window) {
-      const spy = new IntersectionObserver(entries => {
-        for (const en of entries) {
-          if (en.isIntersecting) { state.settingsTab = en.target.id; markTab(en.target.id); }
-        }
-      }, { rootMargin: '-30% 0px -60% 0px' });
-      tabIds.forEach(id => { const el = document.getElementById(id); if (el) spy.observe(el); });
-      window.__setSpy = spy;
-    }
-    /* 首次进设置页停在顶部；保存/重绘后回到刚才看的区块 */
-    const back = state.settingsTab;
-    if (back && document.getElementById(back)) {
-      markTab(back);
-      requestAnimationFrame(() => {
-        const el = document.getElementById(back);
-        if (el) el.scrollIntoView({ block: 'start' });
-      });
-    } else {
-      markTab('set-ai');
-    }
+    applyTab();
+    window.scrollTo(0, 0);
   }
   const sgb = document.getElementById('showGuideBtn');
   if (sgb) sgb.addEventListener('click', () => showGuide(0));
