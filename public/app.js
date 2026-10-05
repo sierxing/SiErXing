@@ -6280,25 +6280,20 @@ const AI_PROVIDERS_FALLBACK = [
   { id: 'opencode', name: 'opencode CLI', brand: 'OC', baseUrl: '', models: [], vision: '', isOpencode: true }
 ];
 let AI_PROVIDERS = AI_PROVIDERS_FALLBACK;
+/* 可添加的 Agent 类型（服务端 /api/ai/agents 下发，以后加 codex 之类不用改前端） */
+const AI_AGENTS_FALLBACK = [
+  { id: 'opencode', name: 'opencode CLI', brand: 'OC', hint: '本机已安装 opencode 时可选' }
+];
+let AI_AGENTS = AI_AGENTS_FALLBACK;
 
 /* ---------- AI 连接卡片 ----------
    交互按用户描述来：先点服务商按钮（地址自动填好）→ 填密钥 → 模型以按钮成排出现，
    点哪个加哪个。不给「下拉 + 勾选框 + 先保存才能取列表」那套绕路。 */
 
-/** 视觉模型下拉选项：这条连接的可选+已选模型 + 服务商推荐 + 当前值兜底。
- *  视觉模型必须跟某条连接走（地址/密钥都在连接上），光一个手填框确实没意义。 */
-function visOptionsHTML(models, cur, preset) {
-  const seen = [];
-  const push = m => { m = String(m || '').trim(); if (m && seen.indexOf(m) < 0) seen.push(m); };
-  (models || []).forEach(push);
-  if (preset) push(preset);
-  if (cur) push(cur);
-  return `<option value="">自动（用服务商推荐）</option>` + seen.map(m =>
-    `<option value="${esc(m)}"${m === cur ? ' selected' : ''}>${esc(m)}</option>`).join('');
-}
-/** 一排服务商按钮。点了就把 Base URL 等自动填好。 */
+/** 一排服务商按钮。点了就把 Base URL 等自动填好。
+ *  opencode 不在这里（它走 Agent 连接，有自己单独的流程）。 */
 function providerButtonsHTML(sel) {
-  const list = AI_PROVIDERS;
+  const list = AI_PROVIDERS.filter(p => !p.isOpencode);
   return `<div class="provGrid">${list.map(p => `
     <button type="button" class="provBtn${p.id === sel ? ' on' : ''}" data-prov="${esc(p.id)}" title="${esc(p.baseUrl || '自己填地址')}">
       <span class="pbBrand">${esc(p.brand)}</span>
@@ -6329,43 +6324,63 @@ function shortHost(base) {
 function connFolded(id) {
   try { return !!(JSON.parse(localStorage.getItem('sierxing-conn-fold') || '{}')[id]); } catch (e) { return false; }
 }
+/** 全局识图选择器选项：只列识图专用连接的模型（id 为 连接::模型）。
+ *  没有识图连接时给一句明的，不给空下拉让人猜。 */
+function visPickOptions(conns, cur) {
+  const opts = [];
+  for (const c of (conns || [])) {
+    if (c.purpose !== 'vision' || c.enabled === false) continue;
+    for (const m of (c.models || [])) opts.push({ id: c.id + '::' + m, label: (c.name || '识图') + ' · ' + m });
+  }
+  if (cur && !opts.some(o => o.id === cur)) opts.push({ id: cur, label: cur + '（连接已删或停用）' });
+  return `<option value="">自动（没有识图连接时跟对话走）</option>` + opts.map(o =>
+    `<option value="${esc(o.id)}"${o.id === cur ? ' selected' : ''}>${esc(o.label)}</option>`).join('');
+}
+/** Agent 选择按钮（以后加 codex 之类只改服务端 AGENTS，前端自动多出来） */
+function agentButtonsHTML(sel) {
+  const list = AI_AGENTS;
+  return `<div class="provGrid">${list.map(a => `
+    <button type="button" class="provBtn${a.id === sel ? ' on' : ''}" data-agent="${esc(a.id)}" title="${esc(a.hint || '')}">
+      <span class="pbBrand">${esc(a.brand)}</span>
+      <span class="pbName">${esc(a.name)}</span>
+    </button>`).join('')}</div>`;
+}
 function connCardHTML(c, provs, ctx) {
+  const kind = (c.kind === 'agent' || c.provider === 'opencode') && c.purpose !== 'vision' ? 'agent' : 'api';
+  if (kind === 'agent') return agentCardHTML(c, ctx);
   const pid = c.providerId || '';
   const p = (provs || []).find(x => x.id === pid);
-  const isOC = pid === 'opencode';
+  const isVis = c.purpose === 'vision';
   const sel = c.models || [];
   /* avail：已经取到的可选模型。取之前先用服务商自带的常用模型占位，
      这样「点了 DeepSeek」立刻就有模型按钮可选，不用先取一次。 */
   const avail = (ctx && ctx.avail && ctx.avail[c.id]) || (p ? (p.models || []) : []);
-  const ocState = ctx && ctx.ocState;
-  const ocOK = ocState && ocState.installed;
   /* 连接名不让用户填了：直接用服务商名（DeepSeek），重名的自动加序号。
      之前那个「连接名称」输入框用户根本不知道填什么 —— 它确实没有意义。 */
   const dispName = c.name || (p ? p.name : '自定义连接');
-  const host = isOC ? '本机 CLI' : (shortHost(c.baseUrl) || (p ? shortHost(p.baseUrl) : '') || '未填地址');
-  const folded = connFolded(c.id);
 
-  return `<div class="connCard" data-conn="${esc(c.id)}" data-prov="${esc(pid)}">
+  return `<div class="connCard" data-conn="${esc(c.id)}" data-kind="api" data-purpose="${isVis ? 'vision' : 'chat'}" data-prov="${esc(pid)}">
     <div class="ccHead">
-      <button type="button" class="foldBtn" data-act="fold" title="折叠 / 展开">${folded ? '▸' : '▾'}</button>
+      <button type="button" class="foldBtn" data-act="fold" title="折叠 / 展开">${connFolded(c.id) ? '▸' : '▾'}</button>
       <span class="ccBrand" data-role="brand">${esc((p && p.brand) || '···')}</span>
       <span class="ccTitle" data-role="title">${esc(dispName)}</span>
-      <span class="ccUrl" data-role="host">${esc(host)}</span>
+      ${isVis ? '<span class="ccKind vis">识图</span>' : ''}
       <div class="spacer"></div>
+      <span class="dirtyDot" data-role="dirty" hidden>●未保存</span>
       <label class="sw" title="启用 / 停用这条连接"><input type="checkbox" data-f="enabled" ${c.enabled !== false ? 'checked' : ''}><i></i></label>
+      <button class="btn tiny" data-act="saveone">保存</button>
       <button class="btn tiny danger" data-act="del">删除</button>
     </div>
-    <div class="ccBody" data-role="body"${folded ? ' hidden' : ''}>
-
+    <div class="ccBody" data-role="body"${connFolded(c.id) ? ' hidden' : ''}>
     <div class="ccBlock">
       <div class="ccLabel">① 选择服务商<span class="hint">点一下自动填好官方地址</span></div>
       ${providerButtonsHTML(pid)}
     </div>
 
     <div class="ccBlock">
-      <div class="ccLabel">② ${isOC ? 'opencode 不用填地址与密钥' : '填地址与密钥'}
-        <span class="hint">${isOC ? '它自己管登录' : ((p && p.noKey) ? '本地服务，密钥可留空' : '填完才能取到模型列表')}</span></div>
-      ${isOC ? '' : `<div class="ccRow">
+      <div class="ccLabel">② 填地址与密钥
+        <span class="hint">${(p && p.noKey) ? '本地服务，密钥可留空' : '填完才能取到模型列表'}</span></div>
+      <div class="ccRow">
         <label class="ccWide">API 地址
           <span class="inWrap"><i>🔗</i><input class="mono" data-f="baseUrl" value="${esc(c.baseUrl || '')}" placeholder="选服务商会自动填好" spellcheck="false"></span>
         </label>
@@ -6373,20 +6388,16 @@ function connCardHTML(c, provs, ctx) {
           <span class="inWrap"><i>🔑</i><input type="password" data-f="apiKey" value="" placeholder="${c.hasKey ? '已保存（留空则不修改）' : 'sk-…'}" spellcheck="false"><button type="button" class="peekBtn" data-act="peek" title="显示 / 隐藏">👁</button></span>
         </label>
       </div>
-      ${p && p.docs ? `<div class="ccDoc">没密钥？<a href="${esc(p.docs)}" target="_blank" rel="noopener">去 ${esc(p.name)} 控制台申请 →</a></div>` : ''}`}
+      ${p && p.docs ? `<div class="ccDoc">没密钥？<a href="${esc(p.docs)}" target="_blank" rel="noopener">去 ${esc(p.name)} 控制台申请 →</a></div>` : ''}
     </div>
 
     <div class="ccBlock">
       <div class="ccLabel">③ 选择模型
-        <span class="hint">${isOC ? '先检测本机 opencode，再列出它可用的模型' : (avail.length ? '点按钮加入，可多选；列表里没有就下面手填' : '点右侧按钮获取该地址实际支持的模型，列表里没有就下面手填')}</span>
+        <span class="hint">${avail.length ? '点模型按钮加入，可多选；列表里没有就下面手填' : '点右侧按钮获取该地址实际支持的模型，列表里没有就下面手填'}</span>
         <div class="spacer"></div>
         <button class="btn tiny" data-act="test">测试连通</button>
-        <button class="btn tiny" data-act="models">${isOC ? '🔄 检测并获取模型' : '🔄 获取可用模型'}</button>
+        <button class="btn tiny" data-act="models">🔄 获取可用模型</button>
       </div>
-      ${isOC ? `<div class="ocProbe" data-role="ocprobe">${ocOK
-        ? `<span class="ok">✓ 已检测到 opencode${esc(ocState.version ? ' ' + ocState.version : '')}</span>`
-        : (ocState ? `<span class="bad">✗ ${esc(ocState.hint || '未检测到 opencode')}</span>`
-                   : '<span class="muted">点上面的按钮检测本机 opencode 并列出可用模型</span>')}</div>` : ''}
       <div data-role="availBox">${modelButtonsHTML(avail, sel)}</div>
       <div class="mAddRow">
         <span class="inWrap"><i>⌨️</i><input data-role="mCustom" placeholder="手动输入模型名，回车加入（官方出新模型、名单没更新时用这个）" spellcheck="false"></span>
@@ -6395,16 +6406,95 @@ function connCardHTML(c, provs, ctx) {
       <div class="ccLabel" style="margin-top:10px;"><span data-role="selCount">已选模型（${sel.length}）</span><span class="hint">保存后才会出现在对话栏</span></div>
       <div data-role="chosenBox">${chosenChipsHTML(avail, sel)}</div>
       <div class="ccHint" data-role="msghint"></div>
-      <details class="ccAdv"><summary>更多选项（视觉模型）</summary>
+      <details class="ccAdv"><summary>更多选项（超时）</summary>
         <div class="ccRow" style="margin-top:8px;">
-          <label>识图用哪个模型（从这条连接的模型里选）
-            <span class="inWrap"><i>👁️</i><select data-f="visionModel" data-role="visSel">${visOptionsHTML(sel.concat(avail), c.visionModel, p && p.vision)}</select></span>
+          <label>单次请求超时（毫秒）
+            <span class="inWrap"><i>⏱️</i><input data-f="timeoutMs" value="${esc(c.timeoutMs || '')}" placeholder="默认 300000"></span>
           </label>
         </div>
       </details>
     </div>
     </div>
   </div>`;
+}
+/** Agent 连接卡：没有地址密钥这两项，流程是 选Agent → 检测本机 → 列模型 → 选 → 测。 */
+function agentCardHTML(c, ctx) {
+  const aid = c.providerId || 'opencode';
+  const a = AI_AGENTS.find(x => x.id === aid) || AI_AGENTS[0] || { id: aid, name: aid, brand: 'AG' };
+  const sel = c.models || [];
+  const avail = (ctx && ctx.avail && ctx.avail[c.id]) || [];
+  const agentState = (ctx && ctx.agentState) || {};
+  const probe = agentState[aid];
+  const dispName = c.name || a.name;
+
+  return `<div class="connCard" data-conn="${esc(c.id)}" data-kind="agent" data-purpose="chat" data-prov="${esc(aid)}">
+    <div class="ccHead">
+      <button type="button" class="foldBtn" data-act="fold" title="折叠 / 展开">${connFolded(c.id) ? '▸' : '▾'}</button>
+      <span class="ccBrand" data-role="brand">${esc(a.brand || 'AG')}</span>
+      <span class="ccTitle" data-role="title">${esc(dispName)}</span>
+      <span class="ccKind">Agent</span>
+      <div class="spacer"></div>
+      <span class="dirtyDot" data-role="dirty" hidden>●未保存</span>
+      <label class="sw" title="启用 / 停用这条连接"><input type="checkbox" data-f="enabled" ${c.enabled !== false ? 'checked' : ''}><i></i></label>
+      <button class="btn tiny" data-act="saveone">保存</button>
+      <button class="btn tiny danger" data-act="del">删除</button>
+    </div>
+    <div class="ccBody" data-role="body"${connFolded(c.id) ? ' hidden' : ''}>
+    <div class="ccBlock">
+      <div class="ccLabel">① 选择 Agent<span class="hint">${esc(a.hint || '')}</span></div>
+      ${agentButtonsHTML(aid)}
+    </div>
+    <div class="ccBlock">
+      <div class="ccLabel">② 检测本机并获取模型
+        <span class="hint">先确认本机装了，再列出它能用的模型</span>
+        <div class="spacer"></div>
+        <button class="btn tiny" data-act="test">测试连通</button>
+        <button class="btn tiny" data-act="models">🔄 检测并获取模型</button>
+      </div>
+      <div class="ocProbe" data-role="ocprobe">${probe
+        ? (probe.installed
+          ? `<span class="ok">✓ 已检测到 ${esc(a.name)}${esc(probe.version ? ' ' + probe.version : '')}</span>`
+          : `<span class="bad">✗ ${esc(probe.hint || '未检测到')}</span>`)
+        : '<span class="muted">点上面的按钮检测本机并列出可用模型</span>'}</div>
+      <div data-role="availBox">${modelButtonsHTML(avail, sel)}</div>
+      <div class="mAddRow">
+        <span class="inWrap"><i>⌨️</i><input data-role="mCustom" placeholder="手动输入模型名，回车加入" spellcheck="false"></span>
+        <button type="button" class="btn tiny" data-act="madd">添加</button>
+      </div>
+      <div class="ccLabel" style="margin-top:10px;"><span data-role="selCount">已选模型（${sel.length}）</span><span class="hint">保存后才会出现在对话栏</span></div>
+      <div data-role="chosenBox">${chosenChipsHTML(avail, sel)}</div>
+      <div class="ccHint" data-role="msghint"></div>
+      <details class="ccAdv"><summary>更多选项（代理 / 超时）</summary>
+        <div class="ccRow" style="margin-top:8px;">
+          <label>Agent 代理
+            <span class="inWrap"><i>🤖</i><input data-f="agent" value="${esc(c.agent || 'NoTools')}" placeholder="NoTools（禁用工具、只输出文本）"></span>
+          </label>
+          <label>单次请求超时（毫秒）
+            <span class="inWrap"><i>⏱️</i><input data-f="timeoutMs" value="${esc(c.timeoutMs || '')}" placeholder="默认 300000"></span>
+          </label>
+        </div>
+      </details>
+    </div>
+    </div>
+  </div>`;
+}
+/* 设置页底部的状态行（初次渲染与保存后原地刷新共用，不整页重绘） */
+function aiStatusBoxHTML(st) {
+  st = st || {};
+  return `${st.connCount
+    ? `已启用 <b>${st.connCount}</b> 条连接 · 共 <b>${st.modelCount}</b> 个可选模型${st.modelCount ? '' : '（还没选模型，请到上面点模型按钮加入）'}`
+    : `<span style="color:var(--warn)">还没有可用的 AI 连接</span>`}
+  ${st.baseUrl ? '<br>默认连接：' + esc(st.baseUrl) : ''}
+  ${st.model ? ' · 默认模型 ' + esc(st.model) : ''}
+  ${st.hint ? '<br><span style="color:var(--warn)">' + esc(st.hint) + '</span>' : ''}`;
+}
+/* 全局识图选择器刷新：连接增删/改模型后选项跟着变，尽量保留当前选择 */
+function refreshVisPick(conns) {
+  const sel = document.getElementById('visPick');
+  if (!sel) return;
+  const cur = sel.value;
+  sel.innerHTML = visPickOptions(conns || [], cur);
+  if (cur && Array.from(sel.options).some(o => o.value === cur)) sel.value = cur;
 }
 async function renderSettings() {
   app.innerHTML = '<p class="muted">加载中…</p>';
@@ -6424,6 +6514,8 @@ async function renderSettings() {
   const provRes = await api('/api/ai/providers').catch(() => ({ providers: [] }));
   const provs = (provRes.providers && provRes.providers.length) ? provRes.providers : AI_PROVIDERS_FALLBACK;
   AI_PROVIDERS = provs;
+  const agentRes = await api('/api/ai/agents').catch(() => ({ agents: [] }));
+  AI_AGENTS = (agentRes.agents && agentRes.agents.length) ? agentRes.agents : AI_AGENTS_FALLBACK;
   /* opencode 装没装，进设置页就先探一次 —— 用户点了 opencode 按钮就该立刻看到结论，
      不用等他自己去点「检测」。 */
   const ocState = await api('/api/ai/opencode-status').catch(() => null);
@@ -6465,9 +6557,11 @@ async function renderSettings() {
   state._setTabs = SET_TABS.map(([id]) => id);
   html += `<div class="sec aiSec" id="set-ai">
       <div class="secTitle">AI 接入方式 <span class="secSub">选服务商 → 填密钥 → 点模型按钮加入</span></div>
-      <p class="hint" style="margin:-4px 0 10px;">对话时在 💬 AI 助手的模型下拉里选具体用哪个 —— 可以是不同服务商、不同模型。</p>
+      <p class="hint" style="margin:-4px 0 10px;">对话时在 💬 AI 助手的模型下拉里选具体用哪个 —— 可以是不同服务商、不同模型。识图专用连接不进对话下拉，只供识图用。</p>
       <div class="toolbarRow" style="margin-bottom:12px;">
-        <button class="btn primary" id="addConn">＋ 添加连接</button>
+        <button class="btn primary" id="addApi">＋ API 连接</button>
+        <button class="btn" id="addAgent">＋ Agent 连接</button>
+        <button class="btn" id="addVision">＋ 识图专用</button>
       </div>
       <div id="connList">${conns.map(c => connCardHTML(c, provs, aiCtx)).join('')}</div>
       <div id="connEmpty" ${conns.length ? 'hidden' : ''} class="emptyBox" style="margin:10px 0;">
@@ -6475,19 +6569,16 @@ async function renderSettings() {
         <div class="ebTitle">还没有 AI 连接</div>
         <div class="ebText">点上面「添加连接」，选一个服务商（地址自动填好）→ 填密钥 → 点模型按钮加入要用的模型。</div>
       </div>
-      <div class="field"><label>单次请求超时（毫秒）</label><input id="aiTimeout" value="${esc(s.ai_timeout_ms || '300000')}"></div>
-      <div class="field"><label>opencode 代理（agent，仅 opencode 连接用）</label><input id="aiAgent" value="${esc(s.ai_opencode_agent || 'NoTools')}" placeholder="NoTools（项目自带：禁用工具、只输出文本）"></div>
+      <div class="field visPickField"><label>识图用哪个模型</label>
+        <span class="inWrap"><i>👁️</i><select id="visPick">${visPickOptions(conns, s.vision_model || '')}</select></span>
+        <div class="hint" style="margin-top:4px;">从上面的「识图专用」连接里选（自带地址密钥）。不选则自动跟对话走。</div>
+      </div>
       <div class="toolbarRow" style="margin-top:12px;">
-        <button class="btn primary" id="saveSettings">保存设置</button>
+        <button class="btn primary" id="saveSettings">保存全部连接</button>
         <button class="btn" id="testAi">测试第一条连接</button>
       </div>
       <div id="aiStatusBox" class="hint" style="margin-top:10px; line-height:1.8;">
-        ${st.connCount
-          ? `已启用 <b>${st.connCount}</b> 条连接 · 共 <b>${st.modelCount}</b> 个可选模型${st.modelCount ? '' : '（还没勾选模型，请到上面勾选）'}`
-          : `<span style="color:var(--warn)">还没有可用的 AI 连接</span>`}
-        ${st.baseUrl ? '<br>默认连接：' + esc(st.baseUrl) : ''}
-        ${st.model ? ' · 默认模型 ' + esc(st.model) : ''}
-        ${st.hint ? '<br><span style="color:var(--warn)">' + esc(st.hint) + '</span>' : ''}
+        ${aiStatusBoxHTML(st)}
       </div>
     </div>
     <div class="setGrid">
@@ -6551,8 +6642,7 @@ async function renderSettings() {
         if (box) box.innerHTML = modelButtonsHTML(list, sel);
         const chosen = card.querySelector('[data-role="chosenBox"]');
         if (chosen) chosen.innerHTML = chosenChipsHTML(list, sel);
-        refreshVisSel(card);
-        const lbl = card.querySelector('[data-role="selCount"]');
+                const lbl = card.querySelector('[data-role="selCount"]');
         if (lbl) lbl.textContent = '已选模型（' + sel.length + '）';
         if (hint) hint.innerHTML = (r.error ? '<span style="color:var(--warn)">' + esc(r.error) + '</span><br>' : '')
           + '取到 <b>' + list.length + '</b> 个模型，点按钮加入，点「保存设置」后才会出现在对话栏。';
@@ -6569,17 +6659,6 @@ async function renderSettings() {
     if (chips.length) return chips;
     return Array.from(card.querySelectorAll('[data-mbtn].on')).map(x => x.getAttribute('data-mbtn'));
   };
-  /* 视觉模型下拉：选项 = 当前按钮 + 已选小片 + 服务商推荐，保留当前值。
-     每次重绘按钮区后都要跟一句，不然选项还是旧的。 */
-  const refreshVisSel = card => {
-    const sel = card.querySelector('[data-role="visSel"]');
-    if (!sel) return;
-    const cur = sel.value;
-    const models = Array.from(card.querySelectorAll('[data-mbtn]')).map(x => x.getAttribute('data-mbtn'))
-      .concat(Array.from(card.querySelectorAll('[data-chip]')).map(x => x.getAttribute('data-chip')));
-    const p = AI_PROVIDERS.find(x => x.id === (card.getAttribute('data-prov') || ''));
-    sel.innerHTML = visOptionsHTML(models, cur, p && p.vision);
-  };
   /* 刷新一张卡的按钮区：可选模型排成按钮，已选的排成小片。
      ⚠️ sel 必须由调用方传进来 —— 点模型按钮时要先改选中态再重绘，
      如果重绘里再从 DOM 反读，会把刚点的那一下丢掉（点不动的 bug 就是这么来的）。 */
@@ -6592,8 +6671,7 @@ async function renderSettings() {
     if (chosen) chosen.innerHTML = chosenChipsHTML(avail, sel);
     const lbl = card.querySelector('[data-role="selCount"]');
     if (lbl) lbl.textContent = '已选模型（' + sel.length + '）';
-    refreshVisSel(card);
-  };
+      };
   /* 把卡片上的输入读成连接对象。密钥框留空 = 没碰过，不发 apiKey，
      服务端会保留已存的密钥（否则每次保存都把密钥清成空）。
      连接名不让用户填：按服务商自动起名，重名的加序号（DeepSeek、DeepSeek 2）。
@@ -6603,33 +6681,62 @@ async function renderSettings() {
     return Array.from(app.querySelectorAll('.connCard')).map(card => {
       const g = f => { const el = card.querySelector('[data-f="' + f + '"]'); return el ? el.value : ''; };
       const en = card.querySelector('[data-f="enabled"]');
+      const kind = card.getAttribute('data-kind') || 'api';
+      const purpose = card.getAttribute('data-purpose') || 'chat';
       const pid = card.getAttribute('data-prov') || '';
-      const p = AI_PROVIDERS.find(x => x.id === pid);
-      const base = p ? p.name : '自定义连接';
-      seen[pid] = (seen[pid] || 0) + 1;
+      let base;
+      if (kind === 'agent') {
+        const ag = AI_AGENTS.find(x => x.id === pid);
+        base = ag ? ag.name : 'Agent';
+      } else {
+        const p = AI_PROVIDERS.find(x => x.id === pid);
+        base = p ? p.name : '自定义连接';
+        if (purpose === 'vision') base += ' · 识图';
+      }
+      seen[pid + '|' + kind + '|' + purpose] = (seen[pid + '|' + kind + '|' + purpose] || 0) + 1;
+      const n = seen[pid + '|' + kind + '|' + purpose];
       return {
         id: card.getAttribute('data-conn'),
-        name: seen[pid] > 1 ? base + ' ' + seen[pid] : base,
+        name: n > 1 ? base + ' ' + n : base,
+        kind, purpose,
         providerId: pid,
-        provider: pid === 'opencode' ? 'opencode' : 'openai',
+        provider: kind === 'agent' ? 'opencode' : 'openai',
         baseUrl: (g('baseUrl') || '').trim(),
         apiKey: (g('apiKey') || '').trim(),
-        visionModel: (g('visionModel') || '').trim(),
+        agent: (g('agent') || '').trim(),
+        timeoutMs: Math.max(0, Number(g('timeoutMs')) || 0),
         enabled: en ? en.checked : true,
         models: cardSel(card)
       };
     });
   };
-  const save = async () => {
-    /* 连接与旧设置分两个接口发：连接整体覆盖，超时/agent 仍走 /api/settings */
-    await api('/api/ai/connections', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connections: readConns() }) });
-    await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-      ai_timeout_ms: val('aiTimeout'),
-      ai_opencode_agent: val('aiAgent')
-    }) });
-    /* 对话栏的模型下拉来自模型池，保存后必须让它重新拉一次，否则列表还是旧的 */
+  /* 保存后原地刷新：状态行计数 + 识图下拉选项 + 对话池失效，不整页重绘 */
+  const afterSave = async savedConns => {
     state.aiModels = null;
-    state.aiStatus = await api('/api/ai/status').catch(() => null);
+    try { state.aiStatus = await api('/api/ai/status').catch(() => null); } catch (e) {}
+    const box = document.getElementById('aiStatusBox');
+    if (box && state.aiStatus) box.innerHTML = aiStatusBoxHTML(state.aiStatus);
+    refreshVisPick(savedConns || readConns());
+  };
+  const save = async () => {
+    const r = await api('/api/ai/connections', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connections: readConns() }) });
+    clearDirty();
+    await afterSave(r.connections);
+    return r;
+  };
+  /* 标某张卡未保存（输入即标）；saveone 只清自己，保存全部清所有 */
+  const markDirty = card => {
+    if (!card) return;
+    card.classList.add('dirty');
+    const d = card.querySelector('[data-role="dirty"]');
+    if (d) d.hidden = false;
+  };
+  const clearDirty = only => {
+    (only ? [only] : Array.from(app.querySelectorAll('.connCard'))).forEach(card => {
+      card.classList.remove('dirty');
+      const d = card.querySelector('[data-role="dirty"]');
+      if (d) d.hidden = true;
+    });
   };
 
   /* 点服务商按钮 → 自动填官方地址、视觉模型、连接名；并把该服务商的常用模型铺成按钮。
@@ -6655,23 +6762,24 @@ async function renderSettings() {
           const host = card.querySelector('[data-role="host"]');
           if (host) host.textContent = shortHost(p.baseUrl);
         }
-        if (g('visionModel') && p.vision) g('visionModel').value = p.vision;
         const title = card.querySelector('[data-role="title"]');
         if (title) title.textContent = p.name;
         const brand = card.querySelector('[data-role="brand"]');
         if (brand) brand.textContent = p.brand || '···';
       }
+      /* opencode 不再走服务商按钮（它已搬到 Agent 连接），这里只剩兜底 */
       if (pid === 'opencode') {
         card.setAttribute('data-prov', 'opencode');
         card.querySelectorAll('button[data-prov]').forEach(x => x.classList.toggle('on', x === pb));
         const probe = card.querySelector('[data-role="ocprobe"]');
-        if (probe) probe.innerHTML = '<span class="muted">正在检测本机 opencode…</span>';
+        if (probe) probe.innerHTML = '<span class="muted">正在检测本机…</span>';
         try {
-          const st = await api('/api/ai/opencode-status');
-          aiCtx.ocState = st;
+          const st = await api('/api/ai/agent-status?agent=opencode');
+          aiCtx.agentState = aiCtx.agentState || {};
+          aiCtx.agentState.opencode = st;
           if (probe) probe.innerHTML = st.installed
             ? `<span class="ok">✓ 已检测到 opencode${esc(st.version ? ' ' + st.version : '')}</span>`
-            : `<span class="bad">✗ ${esc(st.hint || '未检测到 opencode')}</span>`;
+            : `<span class="bad">✗ ${esc(st.hint || '未检测到')}</span>`;
           if (st.installed) await fetchModelsInto(card, 'opencode');
         } catch (err) {
           if (probe) probe.innerHTML = '<span class="bad">检测失败：' + esc(err.message) + '</span>';
@@ -6685,9 +6793,37 @@ async function renderSettings() {
         if (box) box.innerHTML = modelButtonsHTML(p.models, keep);
         const chosen = card.querySelector('[data-role="chosenBox"]');
         if (chosen) chosen.innerHTML = chosenChipsHTML(p.models, keep);
-        refreshVisSel(card);
-        const lbl = card.querySelector('[data-role="selCount"]');
+                const lbl = card.querySelector('[data-role="selCount"]');
         if (lbl) lbl.textContent = '已选模型（' + keep.length + '）';
+      }
+      return;
+    }
+
+    /* 点 Agent 按钮 → 切 Agent 类型，自动检测本机并列模型（以后加 codex 同走这里） */
+    const ab = e.target.closest('button[data-agent]');
+    if (ab && ab.closest('.connCard')) {
+      const card = ab.closest('.connCard');
+      const aid = ab.getAttribute('data-agent');
+      card.setAttribute('data-prov', aid);
+      card.querySelectorAll('button[data-agent]').forEach(x => x.classList.toggle('on', x === ab));
+      const a = AI_AGENTS.find(x => x.id === aid);
+      const title = card.querySelector('[data-role="title"]');
+      if (title) title.textContent = a ? a.name : aid;
+      const brand = card.querySelector('[data-role="brand"]');
+      if (brand) brand.textContent = a ? (a.brand || 'AG') : 'AG';
+      const probe = card.querySelector('[data-role="ocprobe"]');
+      if (probe) probe.innerHTML = '<span class="muted">正在检测本机…</span>';
+      try {
+        const st = await api('/api/ai/agent-status?agent=' + encodeURIComponent(aid));
+        aiCtx.agentState = aiCtx.agentState || {};
+        aiCtx.agentState[aid] = st;
+        if (probe) probe.innerHTML = st.installed
+          ? `<span class="ok">✓ 已检测到${esc((a && a.name) || aid)}${esc(st.version ? ' ' + st.version : '')}</span>`
+          : `<span class="bad">✗ ${esc(st.hint || '未检测到')}</span>`;
+        if (st.installed) await fetchModelsInto(card, aid);
+        else toast(st.hint || '未检测到');
+      } catch (err) {
+        if (probe) probe.innerHTML = '<span class="bad">检测失败：' + esc(err.message) + '</span>';
       }
       return;
     }
@@ -6716,19 +6852,23 @@ async function renderSettings() {
       if (chosen) chosen.innerHTML = chosenChipsHTML(avail, sel);
       const lbl = card.querySelector('[data-role="selCount"]');
       if (lbl) lbl.textContent = '已选模型（' + sel.length + '）';
-      refreshVisSel(card);
-      return;
+            return;
     }
 
-    const addBtn = e.target.closest('#addConn');
-    if (addBtn) {
+    /* 三种添加：API 连接 / Agent 连接 / 识图专用（自带地址密钥，不进对话下拉） */
+    const addApi = e.target.closest('#addApi');
+    const addAgent = e.target.closest('#addAgent');
+    const addVision = e.target.closest('#addVision');
+    if (addApi || addAgent || addVision) {
       const list = document.getElementById('connList');
       const id = 'c' + Date.now().toString(36);
-      list.insertAdjacentHTML('beforeend', connCardHTML({
-        id, name: '', provider: 'openai', providerId: '', baseUrl: '', apiKey: '',
-        models: [], visionModel: '', enabled: true, hasKey: false
-      }, provs, aiCtx));
+      const draft = addAgent
+        ? { id, name: '', kind: 'agent', purpose: 'chat', provider: 'opencode', providerId: 'opencode', baseUrl: '', apiKey: '', agent: 'NoTools', timeoutMs: 0, models: [], enabled: true, hasKey: false }
+        : { id, name: '', kind: 'api', purpose: addVision ? 'vision' : 'chat', provider: 'openai', providerId: '', baseUrl: '', apiKey: '', agent: '', timeoutMs: 0, models: [], enabled: true, hasKey: false };
+      list.insertAdjacentHTML('beforeend', connCardHTML(draft, provs, aiCtx));
       document.getElementById('connEmpty').hidden = true;
+      const el = list.lastElementChild;
+      if (el) el.scrollIntoView({ block: 'nearest' });
       return;
     }
     const btn = e.target.closest('.connCard [data-act]');
@@ -6759,8 +6899,7 @@ async function renderSettings() {
       if (chosen) chosen.innerHTML = chosenChipsHTML(avail, sel);
       const lbl = card.querySelector('[data-role="selCount"]');
       if (lbl) lbl.textContent = '已选模型（' + sel.length + '）';
-      refreshVisSel(card);
-      inp.value = '';
+            inp.value = '';
       toast('已加入：' + m + '（记得点「保存设置」）');
       return;
     }
@@ -6803,6 +6942,23 @@ async function renderSettings() {
       if (!confirm('删除「' + n + '」？对话栏里选它的模型也会一并失效。')) return;
       card.remove();
       if (!app.querySelector('.connCard')) document.getElementById('connEmpty').hidden = false;
+      refreshVisPick(readConns());
+      return;
+    }
+    /* 只保存这一条：整表提交（服务端本来就是整体覆盖），但只清这张卡的未保存标记 */
+    if (act === 'saveone') {
+      const oldT = btn.textContent;
+      btn.disabled = true; btn.textContent = '保存中…';
+      try {
+        const r = await save();
+        const cid = card.getAttribute('data-conn');
+        const saved = ((r && r.connections) || []).find(x => x.id === cid);
+        const key = card.querySelector('[data-f="apiKey"]');
+        if (key) { key.value = ''; key.placeholder = (saved && saved.hasKey) ? '已保存（留空则不修改）' : 'sk-…'; }
+        clearDirty(card);
+        toast('已保存这条连接');
+      } catch (e) { toast('保存失败：' + e.message); }
+      finally { btn.disabled = false; btn.textContent = oldT; }
       return;
     }
     if (act === 'models') {
@@ -6841,11 +6997,34 @@ async function renderSettings() {
     if (btn) btn.click();
   };
   app.addEventListener('keydown', window.__aiSetKeyH);
-  document.getElementById('saveSettings').addEventListener('click', async () => {
+  /* 卡片里一改就标未保存（跟上面的叠加监听同理，先解绑再绑定） */
+  if (window.__aiSetDirtyH) app.removeEventListener('input', window.__aiSetDirtyH);
+  window.__aiSetDirtyH = e => {
+    const card = e.target && e.target.closest ? e.target.closest('.connCard') : null;
+    if (!card || !document.getElementById('connList') || !document.getElementById('connList').contains(card)) return;
+    markDirty(card);
+  };
+  app.addEventListener('input', window.__aiSetDirtyH);
+  /* 全局识图选择：一切换就存，不用等保存全部 */
+  const visPick = document.getElementById('visPick');
+  if (visPick) visPick.addEventListener('change', async () => {
     try {
-      await save();
-      toast('已保存');
-      renderSettings();   // 重绘：密钥框清空、模型勾选回到服务端的确认值
+      await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ vision_model: visPick.value }) });
+      toast(visPick.value ? '识图将使用：' + visPick.selectedOptions[0].textContent : '识图已切回自动');
+    } catch (e) { toast('保存失败：' + e.message); }
+  });
+  document.getElementById('saveSettings').addEventListener('click', async () => {
+    /* 保存全部：原地刷新，不整页重绘（重绘会丢滚动位置；各卡输入都在 DOM 里没丢） */
+    try {
+      const r = await save();
+      const byId = {};
+      for (const c of ((r && r.connections) || [])) byId[c.id] = c;
+      app.querySelectorAll('.connCard').forEach(card => {
+        const key = card.querySelector('[data-f="apiKey"]');
+        const sv = byId[card.getAttribute('data-conn')];
+        if (key) { key.value = ''; key.placeholder = (sv && sv.hasKey) ? '已保存（留空则不修改）' : 'sk-…'; }
+      });
+      toast('已保存全部连接');
     } catch (e) { toast(e.message); }
   });
   document.getElementById('testAi').addEventListener('click', async e => {

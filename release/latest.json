@@ -1,13 +1,13 @@
 {
-  "version": "1.4.4",
-  "buildVer": "fc60605f150e",
-  "payload": "release/payload-1.4.4.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.4.4.sxar?ref=main",
+  "version": "1.5.0",
+  "buildVer": "adfd70b1b5b8",
+  "payload": "release/payload-1.5.0.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.5.0.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
-  "sha256": "c116fcb60e26fb37796a7465465a758b4583839d3c2052961ef4062563f04ef0",
-  "size": 495214,
-  "unpackedSize": 1892276,
-  "publishedAt": "2026-10-05T02:58:18.414Z",
-  "notes": "视觉模型改成从本连接模型里下拉选择；同步鉴权失败给AtomGit令牌分步指引；修失败回显模型名",
+  "sha256": "2424df3a688bae00272647d27ce1dbcd6daa5232bad236f5db87770fec77d2e9",
+  "size": 499054,
+  "unpackedSize": 1906628,
+  "publishedAt": "2026-10-05T03:20:40.672Z",
+  "notes": "AI连接分API/Agent/识图三种卡：Agent独立流程（选Agent-检测本机-列模型），识图专用+全局识图选择，超时与代理逐卡设置，每卡独立保存+未保存标记",
   "exeRequired": false
 }

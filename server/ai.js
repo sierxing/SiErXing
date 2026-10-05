@@ -75,6 +75,12 @@ const PROVIDERS = [
      没有这一项的话 opencode 就没有「选模型」的地方 —— 那正是用户报的毛病。 */
   { id: 'opencode', name: 'opencode CLI', brand: 'OC', baseUrl: '', models: [], vision: '', isOpencode: true, docs: 'https://opencode.ai/docs' }
 ];
+/* 可添加的 Agent 类型（与 API 连接并列的第二种连接）。
+   以后加 codex 之类只往这里添一项，前端卡片按这个列表渲染。 */
+const AGENTS = [
+  { id: 'opencode', name: 'opencode CLI', brand: 'OC', hint: '本机已安装 opencode 时可选，模型与登录都由它自己管' }
+];
+function agentById(id) { return AGENTS.find(a => a.id === id) || null; }
 function providerById(id) { return PROVIDERS.find(p => p.id === id) || null; }
 
 function env(name, alt) {
@@ -111,21 +117,34 @@ function normalizeConn(c) {
   const pid = String((c && c.providerId) || '');
   const p = pid ? providerById(pid) : null;
   const nm = String((c && c.name) || '').trim();
+  const provider = (c && c.provider) === 'opencode' ? 'opencode' : 'openai';
+  /* kind: api（默认，走 Base URL）/ agent（走本机 Agent，如 opencode）。
+     老数据没有 kind：provider 是 opencode 的算 agent，其余算 api。 */
+  const kind = (c && c.kind) === 'agent' || ((!(c && c.kind)) && provider === 'opencode') ? 'agent' : 'api';
   return {
     id: String((c && c.id) || newConnId()),
     /* 连接名前端不再让用户填（按服务商自动起）。
        这里是兜底：名字空了就按服务商补，别让界面上出现「未命名」。 */
     name: nm || (p ? p.name : '自定义连接'),
-    provider: (c && c.provider) === 'opencode' ? 'opencode' : 'openai',
-    providerId: String(c.providerId || ''),
-    baseUrl: String(c.baseUrl || '').trim(),
-    apiKey: String(c.apiKey || ''),
+    provider,
+    kind,
+    /* purpose: chat（默认，进对话下拉）/ vision（识图专用，不进对话下拉）。
+       有的服务商没有视觉模型，用户单加一条识图连接即可。 */
+    purpose: (c && c.purpose) === 'vision' ? 'vision' : 'chat',
+    providerId: String((c && c.providerId) || ''),
+    baseUrl: String((c && c.baseUrl) || '').trim(),
+    apiKey: String((c && c.apiKey) || ''),
     /* 勾选要用的模型。留空表示「这条连接下还没选模型」，
        调用时会退回 conn.defaultModel，再退回连接预设里的第一个。 */
     models: Array.isArray(c.models) ? c.models.map(String).filter(Boolean) : [],
-    defaultModel: String(c.defaultModel || ''),
-    visionModel: String(c.visionModel || ''),
-    enabled: c.enabled !== false
+    defaultModel: String((c && c.defaultModel) || ''),
+    visionModel: String((c && c.visionModel) || ''),
+    /* agent 参数（NoTools 之类）：只对 agent 连接有意义，放卡片里单独设，
+       不再用全局那一个。api 连接忽略它。 */
+    agent: String((c && c.agent) || ''),
+    /* 单次请求超时毫秒：0 = 跟全局，卡片里可单独设 */
+    timeoutMs: Math.max(0, Number((c && c.timeoutMs) || 0) || 0),
+    enabled: !c || c.enabled !== false
   };
 }
 /** 老设置折算成连接。环境变量也算 —— 只用环境变量的人不该被迁移逻辑改动行为。 */
@@ -139,6 +158,7 @@ function legacyAsConn() {
   if (!baseUrl && !apiKey && !model) return null;
   return normalizeConn({
     id: 'default', name: '默认连接', provider,
+    kind: provider === 'opencode' ? 'agent' : 'api', purpose: 'chat',
     providerId: PROVIDERS.find(p => p.baseUrl && (p.baseUrl === baseUrl || p.baseUrl.replace(/\/v\d+$/, '') === String(baseUrl).replace(/\/v\d+$/, '').replace(/\/+$/, '')))?.id || '',
     baseUrl, apiKey,
     models: model ? [model] : [],
@@ -186,6 +206,9 @@ function cfg(modelRef) {
   const get = ctx.getSetting;
   const list = connections();
   const enabled = list.filter(c => c.enabled);
+  /* 默认走第一条启用的对话连接 —— 识图专用连接不参与默认，
+     否则聊天会走到识图连接的地址上去。 */
+  const enabledChat = enabled.filter(c => c.purpose !== 'vision');
   const ref = splitModelRef(modelRef);
   let conn = null;
   let model = '';
@@ -195,12 +218,12 @@ function cfg(modelRef) {
     if (!conn) throw new Error('找不到对应的模型连接（可能已被删除），请重新选择模型');
     model = ref.model;
   } else if (modelRef) {
-    // 裸模型名：在启用连接里找第一条支持它的。找不到就退回第一条连接，
+    // 裸模型名：在启用连接里找第一条支持它的。找不到就退回第一条对话连接，
     // 让请求照常发出去、由接口报「模型不存在」—— 比在这里抛个含糊错好排查。
     model = String(modelRef).trim();
-    conn = enabled.find(c => c.models.includes(model) || c.defaultModel === model) || enabled[0] || null;
+    conn = enabled.find(c => c.models.includes(model) || c.defaultModel === model) || enabledChat[0] || null;
   } else {
-    conn = enabled[0] || null;
+    conn = enabledChat[0] || null;
     model = conn ? connModel(conn) : '';
   }
 
@@ -226,8 +249,10 @@ function cfg(modelRef) {
   }
 
   const p = providerById(conn.providerId);
+  const isAgent = conn.kind === 'agent' || conn.provider === 'opencode';
   return {
-    provider: conn.provider,
+    provider: isAgent ? 'opencode' : 'openai',
+    kind: conn.kind,
     connId: conn.id,
     connName: conn.name,
     baseUrl: conn.baseUrl,
@@ -235,8 +260,10 @@ function cfg(modelRef) {
     apiKey: conn.apiKey || env('SIERXING_API_KEY', ['OPENAI_API_KEY']),
     model: connModel(conn, model),
     visionModel: conn.visionModel || (p ? p.vision : ''),
-    agent: get('ai_opencode_agent', '') || env('SIERXING_OPENCODE_AGENT') || 'NoTools',
-    timeoutMs: Number(get('ai_timeout_ms', '') || env('SIERXING_AI_TIMEOUT_MS') || '300000') || 300000
+    /* agent 参数跟连接走（卡片里单独设），没设才回落到全局旧值 */
+    agent: (isAgent && conn.agent) || get('ai_opencode_agent', '') || env('SIERXING_OPENCODE_AGENT') || 'NoTools',
+    /* 超时跟连接走，没设才回落全局 */
+    timeoutMs: conn.timeoutMs || Number(get('ai_timeout_ms', '') || env('SIERXING_AI_TIMEOUT_MS') || '300000') || 300000
   };
 }
 
@@ -246,6 +273,17 @@ function modelPool() {
   const out = [];
   for (const c of connections()) {
     if (!c.enabled) continue;
+    if (c.purpose === 'vision') continue;   // 识图专用不进对话下拉
+    for (const m of c.models) out.push({ id: c.id + '::' + m, connId: c.id, connName: c.name, model: m, label: c.name + ' · ' + m });
+  }
+  return out;
+}
+/** 识图模型池：只含 purpose=vision 的连接。全局识图选择器的数据源。 */
+function modelPoolVision() {
+  const out = [];
+  for (const c of connections()) {
+    if (!c.enabled) continue;
+    if (c.purpose !== 'vision') continue;
     for (const m of c.models) out.push({ id: c.id + '::' + m, connId: c.id, connName: c.name, model: m, label: c.name + ' · ' + m });
   }
   return out;
@@ -781,6 +819,7 @@ const ai = {
   config: cfg,
   /* 连接与模型池 */
   PROVIDERS,
+  AGENTS,
   connections() {
     /* 密钥不下发给前端，只回 hasKey —— 前端留空表示「不修改」 */
     return connections().map(c => ({ ...c, hasKey: !!c.apiKey, apiKey: '' }));
@@ -796,8 +835,8 @@ const ai = {
     });
     saveConnections(next);
     /* 同步一份单值设置给老代码路径（currentModel 等），
-       取第一条启用连接的默认模型 —— 不然升级后各处读到的模型会是空的。 */
-    const first = next.find(c => c.enabled);
+       取第一条启用的对话连接 —— 识图专用不参与，不然默认聊天会走错地址。 */
+    const first = next.find(c => c.enabled && c.purpose !== 'vision');
     if (first) {
       ctx.setSetting('ai_provider', first.provider);
       ctx.setSetting('ai_base_url', first.baseUrl);
@@ -808,6 +847,7 @@ const ai = {
     return { ok: true, count: next.length };
   },
   modelPool,
+  modelPoolVision,
   modelsFor: fetchModelsFor,
 
   /** 统一入口：返回纯文本。opts.model 可为 '连接id::模型名' */
@@ -873,6 +913,12 @@ const ai = {
   newConnId,
   /** opencode 是否可用（设置页在列出 opencode 模型前先探这个） */
   opencodeStatus,
+  /** 按 Agent 类型探测（以后加 codex 之类走这里，现在只有 opencode） */
+  agentStatus(agentId) {
+    const aid = String(agentId || 'opencode');
+    if (aid !== 'opencode') return { installed: false, agent: aid, hint: '暂只支持 opencode CLI' };
+    return { ...opencodeStatus(), agent: aid };
+  },
   /** 使用 opencode 时确保代理配置存在（供设置页调用） */
   ensureOpencodeAgent,
   /** 连接测试：发一句最短的请求 */

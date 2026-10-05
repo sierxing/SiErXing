@@ -1070,6 +1070,14 @@ body.aiOpen .nodePanel{right:calc(var(--ai-w, 440px) + 26px);}
   background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:2px 7px;
   max-width:230px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
 .ccHead .spacer{flex:1;}
+/* 连接类型徽标 + 未保存标记 */
+.ccKind{font-size:10.5px; font-weight:700; border-radius:6px; padding:2px 7px; background:rgba(99,102,241,.12); color:var(--accent);}
+.ccKind.vis{background:rgba(14,159,110,.12); color:var(--ok);}
+.dirtyDot{font-size:11px; color:var(--warn); font-weight:700; white-space:nowrap;}
+.connCard.dirty{border-color:var(--warn);}
+/* 识图选择行 */
+.visPickField{max-width:560px;}
+.visPickField .inWrap select{flex:1;}
 /* 带图标的输入框：🔗🔑 前缀 + 明文开关，替代光秃秃的 input */
 .inWrap{display:flex; align-items:center; gap:8px; background:var(--bg);
   border:1.5px solid var(--border); border-radius:10px; padding:0 8px 0 11px; transition:.15s;}

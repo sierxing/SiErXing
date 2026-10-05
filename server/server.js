@@ -175,7 +175,16 @@ ai.init({ getSetting: (k, d) => getSetting(k, d), setSetting: (k, v) => setSetti
 function currentModel() { return getSetting('model', '') || ai.config().model || ''; }
 const DEFAULT_VISION_MODEL = 'opencode-go/deepseek-v4-flash-vision-exp';   // opencode 用户的默认视觉模型（与实习速成一致）
 function currentVisionModel() {
-  const saved = getSetting('vision_model', '') || ai.config().visionModel;
+  /* 优先级：用户在设置页选的识图模型 > 识图专用连接的第一个模型 >
+     对话连接自带的视觉模型 > 旧单值。识图连接是用户单加的（自带地址密钥），
+     不用再跟对话连接绑在一起。 */
+  const ref = getSetting('vision_model', '');
+  if (ref) return ref;
+  try {
+    const vp = ai.modelPoolVision();
+    if (vp && vp.length) return vp[0].id;
+  } catch (e) {}
+  const saved = ai.config().visionModel;
   if (saved) return saved;
   // 没配视觉模型时：opencode 走可读图的默认模型，避免用纯文本模型硬读图导致"提炼失败"
   if (getSetting('ai_provider', 'openai') === 'opencode') return DEFAULT_VISION_MODEL;
@@ -4324,6 +4333,16 @@ function extractEbookPrefFromAnswers(answers) {
   if (p === '/api/ai/providers' && method === 'GET') {
     return sendJSON(res, 200, { providers: ai.PROVIDERS });
   }
+  /* 可添加的 Agent 类型（以后加 codex 之类只在服务端添一项） */
+  if (p === '/api/ai/agents' && method === 'GET') {
+    return sendJSON(res, 200, { agents: ai.AGENTS });
+  }
+  /* 按 Agent 类型探测本机装没装（?agent=opencode，缺省 opencode） */
+  if (p === '/api/ai/agent-status' && method === 'GET') {
+    const st = ai.agentStatus(u.searchParams.get('agent') || 'opencode');
+    if (st.installed) ai.ensureOpencodeAgent();
+    return sendJSON(res, 200, st);
+  }
   /* opencode 装没装。设置页在列出 opencode 模型前先探这个，
      免得用户点了才发现没装、界面上却没有「检测」这一步。 */
   if (p === '/api/ai/opencode-status' && method === 'GET') {
@@ -4339,6 +4358,11 @@ function extractEbookPrefFromAnswers(answers) {
     /* 整体提交：设置页「保存」时一次存完，避免前端为每条连接各调一次 */
     if (!body || !Array.isArray(body.connections)) return sendJSON(res, 400, { error: '缺少 connections' });
     ai.saveConnections(body.connections);
+    /* 用到 opencode Agent 才生成 .opencode/opencode.json（不用就不生成） */
+    try {
+      const list = ai.connections();
+      if (list.some(c => c.enabled && c.kind === 'agent' && (c.providerId === 'opencode' || c.provider === 'opencode'))) ai.ensureOpencodeAgent();
+    } catch (e) {}
     return sendJSON(res, 200, { ok: true, connections: ai.connections(), pool: ai.modelPool() });
   }
   /* 取某条连接（或一段草稿）的模型列表。草稿也能取，供设置页「填完先试一下」。 */
