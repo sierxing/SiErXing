@@ -363,11 +363,16 @@ module.exports = function createUpdate({ appDir, port = 3213, log = () => {} }) 
     };
   }
 
-  /** 打包版的「重启」：拉起一个新的 exe 实例，等旧实例让出端口 */
-  function restartPayload() {
-    const logFile = path.join(appDir, 'data', 'server.log');
-    try { fs.mkdirSync(path.dirname(logFile), { recursive: true }); } catch (e) {}
+  /** 打包版的「重启」。
+   *  关键顺序（都是血泪）：
+   *   1. 先关本进程的监听端口 —— 老启动器只认"空闲端口"（ping 不通就 boot）；
+   *      若端口还占着，新实例会以为撞了别的实例而直接退出（旧 bug）。
+   *   2. 再拉新实例（SX_WAIT=1 兜底），本进程 800ms 后退出。
+   *  不用 cmd 延迟链：在 wine 下父进程退出会连带收走子进程；
+   *  也不用 exe -e：SEA 下 -e 不执行。 */
+  async function restartPayload(releasePort) {
     try {
+      if (releasePort) { try { await releasePort(); } catch (e) {} }
       const p = spawn(process.execPath, [], {
         cwd: appDir, detached: true, stdio: 'ignore', windowsHide: true,
         env: Object.assign({}, process.env, { SX_WAIT: '1' }),
@@ -377,7 +382,6 @@ module.exports = function createUpdate({ appDir, port = 3213, log = () => {} }) 
       return { ok: false, error: '自动重启失败：' + ((e && e.message) || e) + '（请手动关闭后重新双击）' };
     }
     log('[update] 正在重启…');
-    setTimeout(() => process.exit(0), 500);
     return { ok: true, restarting: true, port, mode: 'payload' };
   }
 

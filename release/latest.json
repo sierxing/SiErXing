@@ -1,14 +1,14 @@
 {
   "version": "1.6.0",
-  "buildVer": "79fbc1269147",
+  "buildVer": "21479b36e6c5",
   "payload": "release/payload-1.6.0.sxar",
   "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.6.0.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "64e05231f6deffe45b4961108a8067d04cadeccd5aeefe010c8aa8c615bf7b60",
-  "size": 504529,
-  "unpackedSize": 1926125,
-  "publishedAt": "2026-10-05T04:29:21.264Z",
-  "notes": "识图模型单独配置（自带地址密钥+当前用谁一目了然）；修exe重启交接（旧启动器更新后页面断开）；更新卡片显示本次内容，需换整个exe的一次",
+  "sha256": "4d48a1ff302bdf4c94a2d2b403c431e35a8f693989a375785ada6aa4cbecd41c",
+  "size": 505902,
+  "unpackedSize": 1929923,
+  "publishedAt": "2026-10-05T04:54:26.822Z",
+  "notes": "识图模型单独配置（自带地址密钥+当前用谁一目了然）；修exe重启交接；更新卡片显示本次内容，需换整个exe的一次",
   "exeRequired": true
 }

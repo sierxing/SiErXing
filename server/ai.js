@@ -596,16 +596,23 @@ async function fetchModelsFor(target) {
     try {
       const r = await runOpencode(c, ['models'], 60000);
       /* `opencode models` 的输出是每行一个模型名，可能带 provider 前缀；
-         有的版本会打成表格/带对号，统一去掉前缀符号再过滤。 */
-      const models = String(r.out).split('\n')
-        .map(s => s.trim().replace(/^[✓✔•*-]\s*/, '').replace(/\s*\(.*\)$/, '').trim())
+         有的版本/系统会打成表格（含 │┃┌ 等制表符）或带对号，统一清理再过滤。
+         Windows 上如果双击启动的 exe 继承不到终端 PATH，这里也会空，
+         所以失败时把原始输出摘要带回去，前端可一键复制发来排查。 */
+      const rawLines = String(r.out).split('\n');
+      const models = rawLines
+        .map(s => s.trim()
+          .replace(/^[│┃┌┐└┘├┤┬┴┼─\s|]+/, '').replace(/[│┃┌┐└┘├┤┬┴┼─\s|]+$/, '')
+          .replace(/^[✓✔•*-]\s*/, '').replace(/\s*\(.*\)$/, '').trim())
         .filter(Boolean)
-        .filter(s => !/^(provider|model|models|available|available models)\b/i.test(s))
+        .filter(s => !/^(provider|model|models|available|available models|name)\b/i.test(s))
         .filter(s => /[a-z0-9]/i.test(s));
       if (models.length) return { models, error: '' };
-      return { models: [], error: 'opencode 返回了空列表：先在终端跑 `opencode models` 看看，或完成 `opencode auth login` 登录' };
+      const diag = '命令已执行但解析不出模型。原始输出前 500 字：' + String(r.out).slice(0, 500)
+        + (r.err ? '；stderr：' + String(r.err).slice(0, 200) : '');
+      return { models: [], error: 'opencode 没有返回可识别的模型列表。' + diag, detail: String(r.out).slice(0, 2000) };
     } catch (e) {
-      return { models: [], error: e.message };
+      return { models: [], error: e.message, detail: '执行 `opencode models` 失败（双击启动时可能继承不到终端的 PATH，可尝试从终端启动一次）：' + e.message };
     }
   }
   try {

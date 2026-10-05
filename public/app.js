@@ -5077,22 +5077,16 @@ const GUIDE_STEPS = [
   {
     icon: '🔌', title: '接入模型 / Agent（最重要）',
     visual: `<div class="gmSetting">
-      <div class="gmSeg">
-        <span class="gmSegHi"></span>
-        <span class="gmSegBtn">OpenAI 兼容接口</span>
-        <span class="gmSegBtn">opencode CLI（Agent）</span>
-      </div>
-      <div class="gmRow"><span class="gmLabel">服务商</span><span class="gmInput gmPicker">OpenAI 兼容接口 ▾　（也可选 opencode CLI）</span></div>
-      <div class="gmRow"><span class="gmLabel">API 地址</span><span class="gmInput gmTypingBox"><span class="gmTyping">https://api.deepseek.com/v1</span></span></div>
-      <div class="gmRow"><span class="gmLabel">API 密钥</span><span class="gmInput">••••••••••••<span class="gmCaret"></span></span></div>
-      <div class="gmRow"><span class="gmLabel">模型</span><span class="gmInput">deepseek-flash</span></div>
-      <div class="gmCliHint">选 <b>opencode CLI</b>：地址与密钥留空，模型填 <code>provider/model</code>（如 opencode-go/deepseek-v4-flash），由本机已登录的 CLI 提供能力</div>
+      <div class="gmRow"><span class="gmLabel">连接</span><span class="gmInput">＋ API 连接　＋ Agent 连接　＋ 识图专用</span></div>
+      <div class="gmRow"><span class="gmLabel">服务商</span><span class="gmInput gmPicker">DeepSeek ▾　通义千问　Kimi　智谱…（点一下地址自动填好）</span></div>
+      <div class="gmRow"><span class="gmLabel">模型</span><span class="gmInput">deepseek-flash　deepseek-v4-pro　（点按钮多选，也可手填）</span></div>
+      <div class="gmCliHint">点「🔄 获取并测试」：取列表后<b>逐个测能否联通</b>，绿=通、红=不通</div>
       <div class="gmRowEnd">
-        <span class="gmBtn gmBtnClick">测试连接</span>
-        <span class="gmOk">✅ 连接正常</span>
+        <span class="gmBtn gmBtnClick">保存</span>
+        <span class="gmOk">对话时在 💬 的模型下拉里选具体用哪个</span>
       </div>
     </div>
-    <div class="gmCaption">左侧栏 → ⚙ 设置：选服务商 → 填密钥 → 测试连接</div>`,
+    <div class="gmCaption">左侧栏 → ⚙ 设置 → 顶栏切到「AI 接入方式」：选服务商 → 填密钥 → 获取并测试</div>`,
     html: `<p class="gdP">问卷、规划、教程、对话都由 AI 完成，<b>先接一个模型</b>。可以直接在下面配置（也能稍后在「设置」里改）：</p>
       <div class="gdForm" id="gdAiForm">
         <div class="gdSeg2" id="gdProvSeg">
@@ -6592,10 +6586,10 @@ async function renderSettings() {
         </div>
         <div class="ccRow">
           <label class="ccWide">模型名
-            <span class="inWrap"><i>⌨️</i><input id="visModel" list="visModelList" value="${esc(s.vision_model || '')}" placeholder="如 qwen-vl-max，点右侧获取可列出该地址支持的" spellcheck="false"></span>
-            <datalist id="visModelList">${(state.visModels || []).map(m => `<option value="${esc(m)}"></option>`).join('')}</datalist>
+            <span class="inWrap"><i>⌨️</i><input id="visModel" value="${esc(s.vision_model || '')}" placeholder="点下面按钮选，或手动输入" spellcheck="false"></span>
           </label>
         </div>
+        <div class="mBtnGrid" id="visOpts" style="margin-top:8px;"><div class="hint">点「获取可用模型」列出该地址支持的，点一下填入上面；列表里没有就直接手填。</div></div>
         <div class="toolbarRow" style="margin-top:9px;">
           <button class="btn tiny cbtn" id="visFetch">🔄 获取可用模型</button>
           <button class="btn tiny cbtn" id="visTest">测试连通</button>
@@ -6662,7 +6656,9 @@ async function renderSettings() {
       }) });
       const list = r.models || [];
       if (!list.length) {
-        if (hint) hint.innerHTML = '<span style="color:var(--warn)">没取到模型列表：' + esc(r.error || '接口未返回') + '</span>';
+        if (hint) hint.innerHTML = '<span style="color:var(--warn)">没取到模型列表：' + esc(r.error || '接口未返回') + '</span>'
+          + (r.detail ? '<br><button type="button" class="btn tiny" data-act="copydiag" style="margin-top:6px;">📋 复制诊断信息发来排查</button>' : '');
+        if (r.detail) card.dataset.diag = r.detail;
         toast('没取到模型列表，见卡片内说明');
       } else {
         /* 记住这次取到的列表：保存后重绘时不再退回服务商自带的占位模型 */
@@ -6894,6 +6890,16 @@ async function renderSettings() {
       return;
     }
 
+    /* 识图模型按钮：点一下填入输入框 */
+    const vo = e.target.closest('[data-visopt]');
+    if (vo) {
+      const inp = document.getElementById('visModel');
+      if (inp) {
+        inp.value = vo.getAttribute('data-visopt');
+        document.querySelectorAll('#visOpts [data-visopt]').forEach(x => x.classList.toggle('on', x === vo));
+      }
+      return;
+    }
     /* 点模型按钮 → 加入 / 移出 */
     const mb = e.target.closest('[data-mbtn]');
     if (mb) {
@@ -6968,6 +6974,18 @@ async function renderSettings() {
     if (act === 'peek') {
       const inp = btn.closest('.inWrap').querySelector('input');
       if (inp) { inp.type = inp.type === 'password' ? 'text' : 'password'; btn.textContent = inp.type === 'password' ? '👁' : '🙈'; }
+      return;
+    }
+    /* 复制诊断信息：取列表失败时，把服务端带回的原始输出贴给开发者看 */
+    if (act === 'copydiag') {
+      const txt = card.dataset.diag || '';
+      if (!txt) { toast('没有可复制的诊断信息'); return; }
+      try {
+        await navigator.clipboard.writeText(txt);
+        toast('诊断信息已复制');
+      } catch (e) {
+        prompt('复制失败，请手动复制：', txt.slice(0, 2000));
+      }
       return;
     }
     if (act === 'madd') {
@@ -7122,6 +7140,14 @@ async function renderSettings() {
      与对话连接完全分开（有的服务商没有视觉模型，绑在一起讲不清楚）。 */
   const visMsg = document.getElementById('visMsg');
   const visSay = t => { if (visMsg) visMsg.innerHTML = t; };
+  /* 识图模型按钮：点一下填入输入框（和连接卡的模型按钮同一套样式） */
+  const renderVisOpts = list => {
+    const box = document.getElementById('visOpts');
+    if (!box) return;
+    const cur = ((document.getElementById('visModel') || {}).value || '').trim();
+    box.innerHTML = (list || []).map(m => `<button type="button" class="mBtn${m === cur ? ' on' : ''}" data-visopt="${esc(m)}">${esc(m)}</button>`).join('')
+      || '<div class="hint">没有可选模型。</div>';
+  };
   const visVals = () => ({
     base: (document.getElementById('visBase') || {}).value || '',
     key: (document.getElementById('visKey') || {}).value || '',
@@ -7160,10 +7186,8 @@ async function renderSettings() {
       if (!list.length) {
         visSay('<span style="color:var(--warn)">没取到：' + esc(r.error || '接口未返回') + '</span>');
       } else {
-        state.visModels = list;
-        const dl = document.getElementById('visModelList');
-        if (dl) dl.innerHTML = list.map(m => `<option value="${esc(m)}"></option>`).join('');
-        visSay((r.error ? '<span style="color:var(--warn)">' + esc(r.error) + '</span><br>' : '') + '取到 <b>' + list.length + '</b> 个，点模型名输入框的小箭头选，选完点「保存识图配置」。');
+        renderVisOpts(list);
+        visSay((r.error ? '<span style="color:var(--warn)">' + esc(r.error) + '</span><br>' : '') + '取到 <b>' + list.length + '</b> 个，点一下填入上面，选完点「保存识图配置」。');
         toast('取到 ' + list.length + ' 个模型');
       }
     } catch (e) { visSay('<span style="color:var(--warn)">取列表失败：' + esc(e.message) + '</span>'); }
@@ -7185,8 +7209,16 @@ async function renderSettings() {
       visSay(r.ok ? `✅ <b>连通正常</b> · ${esc(r.model)}<br>回复：${esc(r.sample || '')}` : `❌ <b>连不通</b>：${esc(r.message || '')}`);
     } catch (e) { visSay('❌ 测试失败：' + esc(e.message)); }
   });
-  document.getElementById('saveSettings').addEventListener('click', async () => {
-    /* 保存全部：原地刷新，不整页重绘（重绘会丢滚动位置；各卡输入都在 DOM 里没丢） */
+  /* 进设置页时如果识图地址已存，静默取一次模型列表供点选（失败不打扰） */
+  (async () => {
+    try {
+      const vb = ((document.getElementById('visBase') || {}).value || '').trim();
+      if (!vb) return;
+      const r = await api('/api/ai/models-for', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ baseUrl: vb, useVisKey: true }) });
+      if (r.models && r.models.length) renderVisOpts(r.models);
+    } catch (e) {}
+  })();
+  document.getElementById('saveSettings').addEventListener('click', async () => {    /* 保存全部：原地刷新，不整页重绘（重绘会丢滚动位置；各卡输入都在 DOM 里没丢） */
     try {
       const r = await save();
       const byId = {};

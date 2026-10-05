@@ -4015,6 +4015,19 @@ function extractEbookPrefFromAnswers(answers) {
   }
 
   /* ---- 更新检查与一键更新 ---- */
+  /* 关监听端口（给更新重启用）：已建立的连接不受影响，响应照常发完；
+     新连接不再接受。1500ms 还关不掉就放弃等待直接继续。 */
+  function closeHttpServer() {
+    return new Promise(resolve => {
+      let done = false;
+      const fin = () => { if (!done) { done = true; resolve(); } };
+      try {
+        if (server.closeIdleConnections) { try { server.closeIdleConnections(); } catch (e) {} }
+        server.close(fin);
+        setTimeout(fin, 1500);
+      } catch (e) { fin(); }
+    });
+  }
   if (p === '/api/update/status' && method === 'GET') {
     return sendJSON(res, 200, update.state);
   }
@@ -4027,7 +4040,18 @@ function extractEbookPrefFromAnswers(answers) {
     catch (e) { return sendJSON(res, 400, { error: e.message }); }
   }
   if (p === '/api/update/restart' && method === 'POST') {
-    return sendJSON(res, 200, update.mode() === 'payload' ? update.restartPayload() : update.restart());
+    /* payload 版：先回响应，再关端口、拉新实例、退出旧进程。
+       顺序不能乱 —— 响应要在关端口前发出去（已建立的连接不受 close 影响），
+       新实例要在端口空闲后拉（老启动器只认空闲端口），旧进程最后退出。 */
+    if (update.mode() === 'payload') {
+      try {
+        const r = await update.restartPayload(closeHttpServer);
+        sendJSON(res, 200, r);
+        if (r.restarting) setTimeout(() => process.exit(0), 800);
+        return;
+      } catch (e) { return sendJSON(res, 500, { error: e.message }); }
+    }
+    return sendJSON(res, 200, update.restart());
   }
 
   if (p === '/api/sync/status' && method === 'GET') {
@@ -4373,13 +4397,13 @@ function extractEbookPrefFromAnswers(answers) {
   if (p === '/api/ai/models-for' && method === 'GET') {
     const id = u.searchParams.get('conn') || '';
     const r = await ai.modelsFor({ id: id || undefined, baseUrl: u.searchParams.get('base') || undefined });
-    return sendJSON(res, 200, { models: r.models || [], error: r.error || '' });
+    return sendJSON(res, 200, { models: r.models || [], error: r.error || '', detail: r.detail || '' });
   }
   if (p === '/api/ai/models-for' && method === 'POST') {
     let body = {};
     try { body = await readBody(req); } catch (e) {}
     const r = await ai.modelsFor(body || {});
-    return sendJSON(res, 200, { models: r.models || [], error: r.error || '' });
+    return sendJSON(res, 200, { models: r.models || [], error: r.error || '', detail: r.detail || '' });
   }
   if (p === '/api/ai/pool' && method === 'GET') {
     return sendJSON(res, 200, { pool: ai.modelPool() });
@@ -4604,8 +4628,7 @@ function serveStatic(req, res, p) {
   });
 }
 
-const server = http.createServer(async (req, res) => {
-  let u;
+const server = http.createServer(async (req, res) => {  let u;
   try {
     u = new URL(req.url, `http://localhost:${PORT}`);
   } catch (e) {
