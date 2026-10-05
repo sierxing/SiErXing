@@ -378,7 +378,7 @@ async function renderHome() {
       const st = { draft: ['待规划', 'warn'], planning: ['规划中', ''], planned: ['已规划', 'ok'], failed: ['规划失败', 'danger'] }[g.status] || ['未知', 'gray'];
       const updated = g.updated_at ? String(g.updated_at).slice(0, 10) : '';
       html += `<div class="goalCard" data-go="#/g/${g.id}">
-        <div class="gcHead"><span class="gcTitle">${esc(g.title)}</span><span class="chip ${st[1]}">${st[0]}</span><div class="spacer"></div><button class="btn tiny gcComps" data-gc-comps="${g.id}" title="管理本目标的组件（只改这个目标）">🧩</button></div>
+        <div class="gcHead"><span class="gcTitle">${esc(g.title)}</span><span class="chip ${st[1]}">${st[0]}</span><button class="btn tiny gcComps" data-gc-comps="${g.id}" title="管理本目标的组件（只改这个目标）">🧩</button></div>
         ${g.summary ? `<div class="gcSummary">${mdOneLine(g.summary)}</div>` : '<div class="gcSummary muted">尚未生成规划</div>'}
         ${g.next_task ? `<div class="gcNext">▸ 下一步：${esc(g.next_task)}</div>` : ''}
         <div class="gcProgress">

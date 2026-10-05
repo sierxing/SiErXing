@@ -1,14 +1,14 @@
 {
-  "version": "1.9.3",
-  "buildVer": "e9e02a811cbd",
-  "payload": "release/payload-1.9.3.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.9.3.sxar?ref=main",
+  "version": "1.9.4",
+  "buildVer": "2fc3c0848a8d",
+  "payload": "release/payload-1.9.4.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.9.4.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "3ce14961059013eb2ff98c25cd658f05d91a100427b126bc9d02e65a8d88a5f9",
-  "size": 569383,
-  "unpackedSize": 2136060,
-  "publishedAt": "2026-10-05T13:26:30.904Z",
-  "notes": "修今日复习出现两张相同练习：清单去重+读时自愈+标练过改命中的全部+池空时不调AI",
+  "sha256": "c75d2e200f2fa0858da1c148c8ff3ec0f4b2e32f2e46146fed0965c071e79db3",
+  "size": 569274,
+  "unpackedSize": 2135529,
+  "publishedAt": "2026-10-05T14:31:45.580Z",
+  "notes": "修首页目标卡片标题被挤到左边一小条：删掉gcHead里白占一半宽度的spacer",
   "exeRequired": false
 }

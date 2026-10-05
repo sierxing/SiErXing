@@ -203,8 +203,11 @@ body:has(.cmpPage) .wrap{max-width:1460px;}
   display:flex; flex-direction:column; gap:10px;
 }
 .goalCard:hover{border-color:var(--accent-border); box-shadow:var(--shadow); transform:translateY(-2px);}
-.gcHead{display:flex; align-items:center; gap:10px;}
-.gcTitle{font-size:15px; font-weight:700; flex:1; line-height:1.4;}
+/* ⚠️ gcHead 里不要放 .spacer 占位：它和标题一样 flex:1，会把标题挤到左边一小条。
+   标题独占剩余宽度，长标题顶多换两行。 */
+.gcHead{display:flex; align-items:flex-start; gap:10px;}
+.gcTitle{font-size:15px; font-weight:700; flex:1; min-width:0; line-height:1.55; word-break:break-word;}
+.gcHead .chip, .gcHead .gcComps{flex:none; margin-top:1px;}
 .gcSummary{font-size:12.5px; color:var(--muted); line-height:1.6; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;}
 .gcProgress{display:flex; align-items:center; gap:9px;}
 .gcProgress .bar{flex:1; margin:0;}
