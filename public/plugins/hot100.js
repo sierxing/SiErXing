@@ -249,7 +249,9 @@ async function openProblemInIDE(pid) {
     const prob = (state.problems || []).find(x => x.id === pid) || (state.problem && state.problem.problem && state.problem.problem.id === pid ? state.problem.problem : null);
     if (prob) { try { await navigator.clipboard.writeText(prob.fid + '. ' + prob.title); } catch (e) {} }
     const r = await api('/api/problems/' + pid + '/ide', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
-    toast('已用 VSCode 打开：' + r.file.split('/').pop() + (r.created ? '（已生成模板）' : '') + '　题名已复制');
+    toast('已用 VSCode 打开：' + r.file.split('/').pop()
+      + (r.created ? '（已生成模板）' : (r.repaired ? '（模板还是旧的，已重写）' : ''))
+      + '　题名已复制');
   } catch (e) { toast('打开失败：' + e.message); }
 }
 async function renderProblemPage(pid) {

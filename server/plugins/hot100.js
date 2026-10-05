@@ -667,6 +667,39 @@ function templateFor(lang, problem) {
   if (lang === 'rust') return 'impl Solution {\n}\n';
   return '// ' + L + '\n';
 }
+/** 出过事的那版通用骨架（Python 里写死了 twoSum）。
+ *  只用来**识别**磁盘上遗留的坏文件，不该再拿去写新文件。
+ *  为什么需要识别：openInIDE 只在文件不存在时才写模板，所以旧版本建出来的
+ *  「字母异位词分组.py 里写着 twoSum」会永远留在磁盘上，光修代码救不回来。 */
+function legacyTemplateFor(lang) {
+  if (lang === 'python3' || lang === 'python') return 'class Solution:\n    def twoSum(self, nums, target):\n        pass\n';
+  if (lang === 'cpp') return '#include <bits/stdc++.h>\nusing namespace std;\n\nclass Solution {\npublic:\n};\n';
+  if (lang === 'java') return 'class Solution {\n}\n';
+  if (lang === 'javascript' || lang === 'typescript') return '// ' + (LANG_NAME[lang] || 'Python3') + '\nvar solve = function() {\n};\n';
+  if (lang === 'go') return 'package main\n\nfunc main() {\n}\n';
+  if (lang === 'rust') return 'impl Solution {\n}\n';
+  return '// ' + (LANG_NAME[lang] || 'Python3') + '\n';
+}
+/** 组出「题头注释 + 空行 + 模板」的完整文件内容，用于比对磁盘上那份是不是还没动过的骨架 */
+function stubFile(problem, lang, tpl) {
+  const lines = [];
+  if (lang === 'python3' || lang === 'python' || lang === 'ruby') {
+    lines.push('# @lc app=leetcode.cn id=' + problem.fid + ' lang=' + lang);
+    lines.push('#');
+    lines.push('# [' + problem.fid + '] ' + problem.title);
+    lines.push('# ' + problem.link);
+  } else {
+    lines.push('/*');
+    lines.push(' * @lc app=leetcode.cn id=' + problem.fid + ' lang=' + lang);
+    lines.push(' *');
+    lines.push(' * [' + problem.fid + '] ' + problem.title);
+    lines.push(' * ' + problem.link);
+    lines.push(' */');
+  }
+  lines.push('');
+  lines.push(tpl);
+  return lines.join('\n');
+}
 let VSCODE_SETTINGS = '';
 let VSCODE_SETTINGS_ALT = '';
 function vscodeSettingsPath() {
@@ -707,8 +740,8 @@ function openInIDE(problem, language) {
   fs.mkdirSync(dir, { recursive: true });
   const safe = String(problem.title || problem.slug).replace(/[\\/:*?"<>|\n\r]/g, '').slice(0, 60).trim();
   const file = path.join(dir, problem.fid + '.' + (safe || problem.slug) + '.' + ext);
-  let created = false;
-  if (!fs.existsSync(file)) {
+  let created = false, repaired = false;
+  const content = () => {
     const lines = [];
     if (lang === 'python3' || lang === 'python' || lang === 'ruby') {
       lines.push('# @lc app=leetcode.cn id=' + problem.fid + ' lang=' + lang);
@@ -725,8 +758,25 @@ function openInIDE(problem, language) {
     }
     lines.push('');
     lines.push(templateFor(lang, problem));
-    fs.writeFileSync(file, lines.join('\n'));
+    return lines.join('\n');
+  };
+  if (!fs.existsSync(file)) {
+    fs.writeFileSync(file, content());
     created = true;
+  } else {
+    /* 已有文件可能是旧版本留下的坏模板（当年每道题都写着 twoSum）。
+       只有在内容**恰好等于**「题头 + 某份空白骨架」时才重写 ——
+       也就是能确定用户一个字都没改过；只要动过就绝不碰，宁可留旧内容。 */
+    let cur = '';
+    try { cur = fs.readFileSync(file, 'utf8').replace(/\s+$/, ''); } catch (e) {}
+    const isStub = cur && [
+      stubFile(problem, lang, templateFor(lang, problem)),
+      stubFile(problem, lang, legacyTemplateFor(lang))
+    ].some(s => s.replace(/\s+$/, '') === cur);
+    if (isStub) {
+      fs.writeFileSync(file, content());
+      repaired = true;
+    }
   }
   try {
     const c1 = spawn('code', [dir], { detached: true, stdio: 'ignore' });
@@ -735,5 +785,5 @@ function openInIDE(problem, language) {
       try { const c2 = spawn('code', [file], { detached: true, stdio: 'ignore' }); c2.unref(); } catch (e) {}
     }, 1200);
   } catch (e) {}
-  return { file, dir, lang, langName: LANG_NAME[lang] || lang, created };
+  return { file, dir, lang, langName: LANG_NAME[lang] || lang, created, repaired };
 }
