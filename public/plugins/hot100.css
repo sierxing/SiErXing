@@ -1,0 +1,234 @@
+/* 思而行 · 每日刷题：掌握闭环的界面
+   —— 引导提炼（导师问答）、盲写重做（对照判定）、易错卡片、AI 排期
+   放在组件自己的 css 里：这几块样式量不小，混进 style.css 只会更难维护。
+   加载顺序在 style.css 之后（宿主 applyComponentStyles 保证），所以可以直接覆盖。 */
+
+/* ============ 通用小件 ============ */
+.pfChip{
+  display:inline-flex; align-items:center; gap:4px; font-size:11px; font-weight:700;
+  border-radius:999px; padding:2px 9px; white-space:nowrap; line-height:1.7;
+}
+.pfChip.risk{background:rgba(224,36,36,.1); color:var(--danger);}
+.pfChip.risk.mid{background:rgba(217,119,6,.12); color:var(--warn);}
+.pfChip.risk.low{background:rgba(14,159,110,.12); color:var(--ok);}
+.pfChip.tag{background:var(--accent-soft); color:var(--accent);}
+.pfChip.hit{background:rgba(224,36,36,.1); color:var(--danger);}
+.pfChip.hit.mid{background:rgba(217,119,6,.13); color:var(--warn);}
+.pfChip.fixed{background:rgba(14,159,110,.13); color:var(--ok);}
+
+.pfSub{font-size:12px; color:var(--muted); line-height:1.75;}
+.pfEmpty{
+  text-align:center; padding:26px 18px; color:var(--muted); font-size:13px; line-height:1.9;
+}
+.pfEmpty .pfEi{font-size:26px; display:block; margin-bottom:6px; opacity:.65;}
+.pfBtn{
+  display:inline-flex; align-items:center; justify-content:center; gap:5px;
+  border:1.5px solid var(--border); background:var(--card); color:var(--text);
+  border-radius:10px; padding:8px 15px; font-size:13px; font-weight:600; cursor:pointer;
+  font-family:inherit; transition:border-color .14s, background .14s, transform .1s; text-decoration:none;
+}
+.pfBtn:hover{border-color:var(--accent); color:var(--accent);}
+.pfBtn:active{transform:translateY(1px);}
+.pfBtn:disabled{opacity:.5; cursor:not-allowed; transform:none;}
+.pfBtn.go{background:var(--accent); border-color:var(--accent); color:#fff;}
+.pfBtn.go:hover{filter:brightness(1.07); color:#fff;}
+.pfBtn.sm{padding:5px 11px; font-size:12px; border-radius:8px;}
+.pfBtn.sm:hover{background:var(--accent-soft);}
+.pfBtn.ghost{border-color:transparent; background:none; color:var(--muted);}
+.pfBtn.ghost:hover{background:var(--soft); color:var(--accent);}
+.pfBtn.danger:hover{border-color:var(--danger); color:var(--danger);}
+
+/* ============ 浮层：提炼 / 盲写 ============ */
+.pfMask{
+  position:fixed; inset:0; z-index:980; background:rgba(14,16,24,.46);
+  backdrop-filter:blur(3px); display:flex; align-items:center; justify-content:center; padding:24px;
+  animation:pfIn .16s ease-out;
+}
+@keyframes pfIn{from{opacity:0;}to{opacity:1;}}
+.pfWin{
+  background:var(--card); border:1.5px solid var(--border); border-radius:18px;
+  box-shadow:var(--shadow-lg); width:100%; max-width:860px; max-height:calc(100vh - 48px);
+  display:flex; flex-direction:column; overflow:hidden; animation:pfUp .2s ease-out;
+}
+.pfWin.narrow{max-width:720px;}
+@keyframes pfUp{from{transform:translateY(14px) scale(.99); opacity:.4;}to{transform:none; opacity:1;}}
+.pfHead{
+  display:flex; align-items:center; gap:10px; padding:14px 18px;
+  border-bottom:1px solid var(--border); background:var(--bg); flex:none;
+}
+.pfHead .pfHT{font-size:14.5px; font-weight:800; letter-spacing:-.2px;}
+.pfHead .pfHS{font-size:11.5px; color:var(--muted);}
+.pfHead .spacer{flex:1;}
+.pfX{
+  border:0; background:none; cursor:pointer; color:var(--muted); font-size:19px;
+  line-height:1; padding:5px 9px; border-radius:8px; flex:none;
+}
+.pfX:hover{background:var(--soft); color:var(--danger);}
+.pfBody{padding:18px; overflow:auto; flex:1; min-height:0;}
+.pfFoot{
+  display:flex; align-items:center; gap:9px; padding:12px 18px;
+  border-top:1px solid var(--border); background:var(--bg); flex:none; flex-wrap:wrap;
+}
+.pfFoot .spacer{flex:1;}
+
+/* ---- 导师问答流 ---- */
+.pfThread{display:flex; flex-direction:column; gap:14px; margin-bottom:16px;}
+.pfTurn{display:flex; gap:11px; align-items:flex-start;}
+.pfAv{
+  width:27px; height:27px; border-radius:9px; flex:none; display:flex;
+  align-items:center; justify-content:center; font-size:13px; background:var(--accent-soft); color:var(--accent);
+}
+.pfTurn.me{flex-direction:row-reverse;}
+.pfTurn.me .pfAv{background:rgba(14,159,110,.13); color:var(--ok);}
+.pfBubble{
+  max-width:82%; background:var(--soft); border:1px solid var(--border);
+  border-radius:4px 13px 13px 13px; padding:10px 13px; font-size:13.4px; line-height:1.8;
+  white-space:pre-wrap; word-break:break-word;
+}
+.pfTurn.me .pfBubble{
+  background:var(--accent-soft); border-color:var(--accent-border); border-radius:13px 4px 13px 13px;
+}
+.pfBubble .pfLabel{font-size:10.5px; font-weight:800; color:var(--accent); display:block; margin-bottom:3px; letter-spacing:.4px;}
+.pfTurn.me .pfBubble .pfLabel{color:var(--ok); text-align:right;}
+.pfTyping{display:flex; gap:4px; padding:4px 2px;}
+.pfTyping i{width:6px; height:6px; border-radius:50%; background:var(--accent); animation:pfBl 1.05s infinite;}
+.pfTyping i:nth-child(2){animation-delay:.16s;} .pfTyping i:nth-child(3){animation-delay:.32s;}
+@keyframes pfBl{0%,60%,100%{opacity:.25; transform:translateY(0);}30%{opacity:1; transform:translateY(-3px);}}
+.pfSay{
+  width:100%; border:1.5px solid var(--border); border-radius:13px; background:var(--bg);
+  padding:11px 13px; font-size:13.4px; font-family:inherit; color:var(--text); resize:vertical; min-height:82px;
+  outline:none; line-height:1.75;
+}
+.pfSay:focus{border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); background:var(--card);}
+.pfSay::placeholder{color:var(--muted); opacity:.75;}
+/* 整理出来的思路卡 */
+.pfCardBox{
+  border:1.5px solid var(--accent-border); background:var(--accent-soft);
+  border-radius:13px; padding:14px 16px; font-size:13.4px; line-height:1.85; white-space:pre-wrap;
+}
+.pfCardBox .pfCt{font-size:11.5px; font-weight:800; color:var(--accent); letter-spacing:.5px; margin-bottom:7px;}
+
+/* ---- 盲写 ---- */
+.pfWarn{
+  display:flex; gap:9px; align-items:flex-start; background:rgba(217,119,6,.09);
+  border:1px solid rgba(217,119,6,.28); color:var(--warn);
+  border-radius:11px; padding:9px 13px; font-size:12.5px; line-height:1.7; margin-bottom:14px;
+}
+.pfCode{
+  width:100%; min-height:290px; border:1.5px solid var(--border); border-radius:12px;
+  background:var(--soft); padding:12px 14px; font-size:12.8px; line-height:1.72;
+  font-family:var(--mono,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace);
+  color:var(--text); resize:vertical; outline:none; tab-size:4;
+}
+.pfCode:focus{border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft);}
+.pfStepLbl{
+  display:flex; align-items:center; gap:8px; font-size:12.5px; font-weight:800;
+  color:var(--muted); letter-spacing:.3px; margin:0 0 8px;
+}
+.pfStepLbl b{
+  width:20px; height:20px; border-radius:50%; background:var(--accent); color:#fff;
+  font-size:11px; display:flex; align-items:center; justify-content:center; flex:none;
+}
+.pfTimer{font-family:var(--mono,ui-monospace,Consolas,monospace); font-size:12.5px; color:var(--muted);}
+/* 折叠起来的参考代码 */
+.pfRefBox{
+  border:1.5px solid var(--border); border-radius:12px; background:var(--soft);
+  padding:11px 14px; margin-bottom:16px;
+}
+.pfRefBox .pfRefHd{display:flex; align-items:center; gap:9px; flex-wrap:wrap; font-size:12.5px; color:var(--muted);}
+.pfRefBox pre{
+  margin:10px 0 0; max-height:280px; overflow:auto; font-size:12.4px; line-height:1.7;
+  background:var(--card); border:1px solid var(--border); border-radius:10px; padding:11px 13px;
+  font-family:var(--mono,ui-monospace,Consolas,monospace); white-space:pre-wrap; word-break:break-word;
+}
+/* 对照结论 */
+.pfScore{display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-bottom:14px;}
+.pfRing{
+  width:66px; height:66px; border-radius:50%; flex:none; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; border:4px solid var(--border); background:var(--bg);
+}
+.pfRing b{font-size:19px; font-weight:800; letter-spacing:-.6px; line-height:1;}
+.pfRing i{font-style:normal; font-size:9.5px; color:var(--muted);}
+.pfRing.good{border-color:var(--ok);} .pfRing.good b{color:var(--ok);}
+.pfRing.mid{border-color:var(--warn);} .pfRing.mid b{color:var(--warn);}
+.pfRing.bad{border-color:var(--danger);} .pfRing.bad b{color:var(--danger);}
+.pfVerdict{font-size:16px; font-weight:800; letter-spacing:-.3px;}
+.pfVerdict.pass{color:var(--ok);} .pfVerdict.fuzzy{color:var(--warn);} .pfVerdict.forgotten{color:var(--danger);}
+.pfLst{list-style:none; margin:0; padding:0;}
+.pfLst li{
+  position:relative; padding:7px 0 7px 25px; font-size:13.2px; line-height:1.75;
+  border-bottom:1px dashed var(--border);
+}
+.pfLst li:last-child{border-bottom:0;}
+.pfLst li:before{position:absolute; left:4px; top:7px; font-size:12px; font-weight:800;}
+.pfLst.good li:before{content:'✓'; color:var(--ok);}
+.pfLst.bad li:before{content:'✗'; color:var(--danger);}
+.pfLst.miss li:before{content:'⚠'; color:var(--warn);}
+.pfLst b{font-weight:700;}
+.pfLst .pfWhy{display:block; font-size:12.2px; color:var(--muted); margin-top:1px;}
+.pfHint{
+  margin-top:12px; background:var(--accent-soft); border:1px solid var(--accent-border);
+  border-radius:11px; padding:9px 13px; font-size:12.8px; color:var(--accent); line-height:1.7;
+}
+
+/* ============ 易错卡片 ============ */
+.pfPitWrap{padding:12px 14px;}
+.pfPits{display:flex; flex-direction:column; gap:10px;}
+.pfPit{
+  position:relative; border:1.5px solid var(--border); border-radius:13px;
+  padding:11px 14px 11px 16px; background:var(--card);
+}
+.pfPit:before{
+  content:''; position:absolute; left:0; top:11px; bottom:11px; width:4px;
+  border-radius:0 4px 4px 0; background:var(--muted);
+}
+.pfPit.t-边界:before, .pfPit.t-下标:before{background:var(--danger);}
+.pfPit.t-逻辑:before{background:#e02424;}
+.pfPit.t-复杂度:before{background:var(--warn);}
+.pfPit.t-算法选择:before{background:var(--accent-2);}
+.pfPit.t-语法:before{background:#0ea5e9;}
+.pfPit.t-状态定义:before{background:var(--accent);}
+.pfPit.isFixed{opacity:.62;}
+.pfPit.isFixed .pfPitTitle{text-decoration:line-through;}
+.pfPitTop{display:flex; align-items:center; gap:7px; flex-wrap:wrap; margin-bottom:5px;}
+.pfPitTitle{font-size:13.4px; font-weight:700; line-height:1.6;}
+.pfPitTop .spacer{flex:1;}
+.pfPitDetail{font-size:12.5px; color:var(--muted); line-height:1.75;}
+.pfPitAdv{
+  font-size:12.4px; margin-top:7px; padding:7px 11px; border-radius:9px;
+  background:var(--soft); color:var(--text); line-height:1.7;
+}
+.pfPitAdv b{color:var(--accent);}
+.pfPitFoot{display:flex; align-items:center; gap:8px; margin-top:9px; flex-wrap:wrap;}
+.pfPitFoot .spacer{flex:1;}
+
+/* ============ 今日复习（AI 排期） ============ */
+.pfPlan{
+  margin:14px 16px; border-radius:14px; padding:15px 17px;
+  background:linear-gradient(135deg, var(--accent-soft), var(--card) 70%);
+  border:1.5px solid var(--accent-border);
+}
+.pfPlanTop{display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:4px;}
+.pfPlanNote{font-size:13.2px; line-height:1.8; color:var(--text);}
+.pfPlanGrid{display:grid; grid-template-columns:repeat(auto-fill,minmax(268px,1fr)); gap:11px; margin-top:13px;}
+.pfTask{
+  background:var(--card); border:1.5px solid var(--border); border-radius:13px;
+  padding:12px 14px; display:flex; flex-direction:column; gap:8px; transition:border-color .14s;
+}
+.pfTask:hover{border-color:var(--accent-border);}
+.pfTask.done{opacity:.6;}
+.pfTaskTop{display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
+.pfTaskTop .spacer{flex:1;}
+.pfTaskT{font-size:13.6px; font-weight:700; line-height:1.55;}
+.pfTaskWhy{font-size:12.2px; color:var(--muted); line-height:1.7;}
+.pfTaskFoot{display:flex; align-items:center; gap:7px; margin-top:auto; flex-wrap:wrap;}
+.pfTaskFoot .spacer{flex:1;}
+/* 风险条 */
+.pfBar{height:4px; border-radius:3px; background:var(--soft); overflow:hidden; flex:1; min-width:44px;}
+.pfBar i{display:block; height:100%; border-radius:3px; background:var(--danger);}
+.pfBar.mid i{background:var(--warn);} .pfBar.low i{background:var(--ok);}
+
+/* ============ 作答记录行上的两个新按钮 ============ */
+.pfRedoHint{
+  font-size:12.2px; color:var(--muted); line-height:1.7; margin-top:2px;
+}

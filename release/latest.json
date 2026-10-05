@@ -1,14 +1,14 @@
 {
-  "version": "1.7.0",
-  "buildVer": "73bcc92554c0",
-  "payload": "release/payload-1.7.0.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.7.0.sxar?ref=main",
+  "version": "1.8.0",
+  "buildVer": "fc4d24777f4c",
+  "payload": "release/payload-1.8.0.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.8.0.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "e9e4701acf6a5d869025db4bf56d8f1b5ad1705d2ff24cffc83e45555b52c793",
-  "size": 510688,
-  "unpackedSize": 1949299,
-  "publishedAt": "2026-10-05T05:55:35.504Z",
-  "notes": "每日刷题加思路内化+艾宾浩斯复习：做对自动进复习流（1/2/4/7/15/30/60天），题目页可写解题思路与易错点并AI梳理",
+  "sha256": "c75f0b31ddf865bf3209518172861f84a51318986e6c12762a86e4a033b23dbb",
+  "size": 534222,
+  "unpackedSize": 2025286,
+  "publishedAt": "2026-10-05T06:24:49.912Z",
+  "notes": "刷题改成掌握闭环：①作答记录栏加「AI 引导提炼思路」，AI一次问一个问题帮你把思路说清楚，整理成思路卡；②每条作答记录加「尝试重做」，遮住代码凭记忆重敲，AI对照后把这次的跟脚做成易错卡片（同坑自动合并、按犯过几次排序）；③复习不再死板套艾宾浩斯曲线，改按遗忘风险现算、当天由AI排该练哪几道",
   "exeRequired": false
 }
