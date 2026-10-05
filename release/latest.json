@@ -1,13 +1,13 @@
 {
-  "version": "1.1.0",
-  "buildVer": "d75791733ea8",
-  "payload": "release/payload-1.1.0.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.1.0.sxar?ref=main",
+  "version": "1.2.0",
+  "buildVer": "bda0fb9a6781",
+  "payload": "release/payload-1.2.0.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.2.0.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
-  "sha256": "6385d46c3176f4d110b48077e996cdc4863a787986e84246f27f3ab1db0bffd3",
-  "size": 473339,
-  "unpackedSize": 1817127,
-  "publishedAt": "2026-10-05T01:38:55.688Z",
-  "notes": "每日刷题：修返回跳主页、作答记录可编辑、VSCode 模板用本题代码定义（旧的两数之和会自动重写）、完成状态三处可改且互相同步、分组展开状态不再被重绘收起",
+  "sha256": "27b76c80ff572d6e96b5660d0307a39d8a4f71caa6892fe4dddcfda2d9f3d345",
+  "size": 480932,
+  "unpackedSize": 1842265,
+  "publishedAt": "2026-10-05T02:02:37.805Z",
+  "notes": "AI 接入方式改为「连接 + 模型池」：选服务商自动填官方 Base URL，按连接获取模型列表并多选；同一个 Base URL 可挂多个模型，可添加多个 Base URL；对话栏按 连接::模型 选择用哪个模型；opencode 也能列出模型。密钥不再明文下发前端。",
   "exeRequired": false
 }

@@ -1011,6 +1011,27 @@ body.aiOpen .nodePanel{right:calc(var(--ai-w, 440px) + 26px);}
 .btn.tiny.ok{color:var(--ok); border-color:var(--ok);}
 /* 编辑作答记录时的表单标题行 */
 .rfFormHead{display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600; margin-bottom:8px;}
+
+/* ===== AI 接入方式：连接卡片 ===== */
+/* 一条连接 = 一个服务商 + 一套地址/密钥 + 多个已勾选的模型 */
+.connCard{border:1px solid var(--border); border-radius:12px; background:var(--soft); padding:11px 12px; margin-bottom:11px;}
+.ccHead{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:9px;}
+.ccHead .ccName{flex:1; min-width:150px; font-weight:600; background:var(--bg);}
+.ccOn{display:inline-flex; align-items:center; gap:5px; font-size:12.5px; color:var(--muted); white-space:nowrap;}
+.ccRow{display:flex; gap:10px; flex-wrap:wrap; margin-bottom:9px;}
+.ccRow > label{display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); flex:1; min-width:170px;}
+.ccRow > label.ccWide{flex:2; min-width:260px;}
+.ccModels{border-top:1px dashed var(--border); padding-top:9px;}
+.ccModelsHead{display:flex; align-items:baseline; gap:9px; font-size:12.5px; font-weight:600; margin-bottom:6px; flex-wrap:wrap;}
+.ccModelsHead .hint{font-weight:400;}
+/* 模型多选：竖排网格，一眼能扫完 */
+.mPickList{display:flex; flex-direction:column; gap:3px; max-height:210px; overflow:auto; background:var(--bg); border:1px solid var(--border); border-radius:9px; padding:7px 9px;}
+.mPick{display:flex; align-items:center; gap:7px; font-size:12.5px; padding:2px 3px; border-radius:6px; cursor:pointer; word-break:break-all;}
+.mPick:hover{background:var(--soft);}
+.mPick input{flex:none; margin:0;}
+.mPick span{font-family:var(--mono,ui-monospace,Consolas,monospace);}
+.ccHint{font-size:12px; color:var(--muted); margin-top:6px; line-height:1.7;}
+.ccHint:empty{display:none;}
 .prTitle{color:var(--text); text-decoration:none; font-size:13px;}
 .prTitle:hover{color:var(--accent);}
 .prTitle b{color:var(--muted); font-weight:600; margin-right:3px;}

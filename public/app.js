@@ -1,6 +1,10 @@
 /* 思而行 · 前端逻辑（原生 JS，零依赖） */
 
 const app = document.getElementById('app');
+/* 服务商预设：选一个就自动填好官方 Base URL，用户不用手打地址。
+   模型列表不在这里写死 —— 填完地址与密钥后向该服务的 /models 现取，
+   取不到时服务端会退回各服务商的常用模型（见 server/ai.js 的 PROVIDERS）。
+   这里只保留「引导页快速填一份」的最小集合。 */
 const AI_PRESETS = [
   { name: 'DeepSeek', base: 'https://api.deepseek.com/v1', model: 'deepseek-chat', vision: '' },
   { name: '通义千问', base: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', vision: 'qwen-vl-max' },
@@ -2012,13 +2016,28 @@ async function aiSetModel(model) {
   }
   toast('已切换模型：' + model);
 }
+/* 对话栏的模型下拉：读「连接 × 已勾选模型」摊平的模型池（/api/ai/pool）。
+   模型 id 是 '连接id::模型名' —— 带上连接 id 才能区分两条连接里的同名模型。
+   取不到就退回旧的 /api/ai/models（裸模型名），保证旧数据仍能对话。 */
 async function aiLoadModels() {
   if (state.aiModels) return;
   try {
+    const r = await api('/api/ai/pool');
+    if (r.pool && r.pool.length) {
+      state.aiModels = r.pool.map(x => x.id);
+      state.aiModelLabels = {};
+      for (const x of r.pool) state.aiModelLabels[x.id] = x.label;
+      state.aiPoolLoaded = true;
+      return;
+    }
+  } catch (e) {}
+  try {
     const r = await api('/api/ai/models');
     state.aiModels = r.models || [];
+    state.aiModelLabels = null;
+    state.aiPoolLoaded = false;
     state.aiDefaultModel = r.default || '';
-  } catch (e) { state.aiModels = []; }
+  } catch (e) { state.aiModels = []; state.aiModelLabels = null; state.aiPoolLoaded = false; }
 }
 function aiRenderMsgs() {
   const box = document.getElementById('adMsgs');
@@ -2054,7 +2073,15 @@ function aiRender() {
   if (modelSel) {
     const models = state.aiModels || [];
     const cur = state.aiModel || '';
-    modelSel.innerHTML = `<option value="">默认模型</option>` + models.map(m => `<option value="${esc(m)}" ${m === cur ? 'selected' : ''}>${esc(m)}</option>`).join('');
+    const labels = state.aiModelLabels || null;
+    const opt = m => `<option value="${esc(m)}" ${m === cur ? 'selected' : ''}>${esc(labels && labels[m] ? labels[m] : m)}</option>`;
+    /* 池子里为空 = 用户还没在设置里勾模型。这时不该只显示一个没用的「默认模型」，
+       直接说明去哪儿勾，比让人对着一个空下拉框猜好。 */
+    const dflt = state.aiDefaultModel || '';
+    modelSel.innerHTML = models.length
+      ? `<option value="">默认（${esc(dflt || '第一条连接的第一个模型')}）</option>` + models.map(opt).join('')
+      : `<option value="">${dflt ? esc(dflt) : '尚未选择模型'}</option>`;
+    modelSel.title = models.length ? '这一轮对话用哪个模型（按连接区分，可随时切换）' : '到「设置 → AI 接入方式」里勾选要用的模型';
   }
   aiRenderMsgs();
 }
@@ -6139,15 +6166,59 @@ function bindSyncSection() {
   });
 }
 
+/* 一条连接的卡片。模型勾选用 checkbox 而不是下拉 —— 用户要的就是
+   「同一个 Base URL 下同时挂多个模型」，下拉一次只能选一个。 */
+function connCardHTML(c, provs) {
+  const p = (provs || []).find(x => x.id === c.providerId);
+  const isOC = c.provider === 'opencode';
+  const sel = c.models || [];
+  const rows = sel.length
+    ? sel.map(m => `<label class="mPick"><input type="checkbox" data-cmodel="${esc(m)}" checked><span>${esc(m)}</span></label>`).join('')
+    : '<div class="hint" style="padding:6px 2px;">还没选模型 —— 点上面「获取模型列表」后勾选。</div>';
+  return `<div class="connCard" data-conn="${esc(c.id)}">
+    <div class="ccHead">
+      <input class="ccName" data-f="name" value="${esc(c.name || '')}" placeholder="连接名称">
+      <label class="ccOn"><input type="checkbox" data-f="enabled" ${c.enabled !== false ? 'checked' : ''}> 启用</label>
+      <div class="spacer"></div>
+      <button class="btn tiny" data-act="models">获取模型列表</button>
+      <button class="btn tiny danger" data-act="del">删除</button>
+    </div>
+    <div class="ccRow">
+      <label>服务商
+        <select data-f="providerId">
+          <option value="" ${!c.providerId ? 'selected' : ''}>自定义（手填地址）</option>
+          ${(provs || []).map(x => `<option value="${esc(x.id)}" ${x.id === c.providerId ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}
+          ${c.providerId && !(provs || []).some(x => x.id === c.providerId) ? `<option value="${esc(c.providerId)}" selected>（未知服务商）</option>` : ''}
+        </select>
+      </label>
+      <label class="ccWide">API 地址（Base URL）
+        <input data-f="baseUrl" value="${esc(c.baseUrl || '')}" placeholder="选服务商会自动填好，也可以自己改">
+      </label>
+    </div>
+    <div class="ccRow">
+      <label class="ccWide">API 密钥
+        <input type="password" data-f="apiKey" value="" placeholder="${c.hasKey ? '已保存（留空则不修改）' : (isOC ? 'opencode 自己管理登录，留空即可' : (p && p.noKey ? '本地服务，可随便填或留空' : 'sk-...'))}">
+      </label>
+      <label>视觉模型（可选，识图用）
+        <input data-f="visionModel" value="${esc(c.visionModel || '')}" placeholder="如 qwen-vl-max" list="visList">
+        <datalist id="visList">${[(p && p.vision) || '', 'qwen-vl-max', 'gpt-4o', 'glm-4v-plus'].filter(Boolean).map(x => `<option value="${esc(x)}"></option>`).join('')}</datalist>
+      </label>
+    </div>
+    <div class="ccModels">
+      <div class="ccModelsHead"><span>已选模型（${sel.length}）</span>
+        <span class="hint">${isOC ? 'opencode 的模型写法为 provider/model' : '下面这些会出现在对话栏的模型下拉里'}</span>
+      </div>
+      <div class="mPickList">${rows}</div>
+      <div class="ccHint" data-role="msghint"></div>
+    </div>
+  </div>`;
+}
 async function renderSettings() {
   app.innerHTML = '<p class="muted">加载中…</p>';
-  const [modelsRes, s, st] = await Promise.all([
-    api('/api/ai/models').catch(e => ({ models: [], error: e.message })),
+  const [s, st] = await Promise.all([
     api('/api/settings'),
     api('/api/ai/status')
   ]);
-  const models = modelsRes.models || [];
-  state.models = models;
   state.aiStatus = st;
   const provider = s.ai_provider || 'openai';
   const configured = !!st.configured;
@@ -6155,6 +6226,9 @@ async function renderSettings() {
   const visionHint = st.visionModel
     ? '识别图片会使用：' + st.visionModel + (st.visionModelSaved ? '' : '（未单独配置，自动选用）')
     : '识别图片需要支持视觉的模型（如 qwen-vl-max / gpt-4o / glm-4v-plus）；留空则用上面的文本模型，若它不支持读图，识图会提示失败。';
+
+  const conns = (await api('/api/ai/connections').catch(() => ({ connections: [] }))).connections || [];
+  const provs = (await api('/api/ai/providers').catch(() => ({ providers: [] }))).providers || [];
 
   let html = `<div class="page">
     <div class="pageHead"><button class="back js-back" data-back="#/">← 返回</button><h2 class="title" style="margin-left:10px;">设置</h2>
@@ -6165,57 +6239,45 @@ async function renderSettings() {
   if (!configured) {
     html += `<div class="setupCard">
       <h3>⚙️ 先配置 AI 接入方式（3 步）</h3>
-      <p class="hint" style="margin:0;">思而行的问卷、规划、教程、对话都由 AI 完成，所以需要先接入一个模型服务。推荐任意 <b>OpenAI 兼容接口</b>（DeepSeek、通义千问、Kimi、智谱、硅基流动、OpenAI、本地 Ollama 都行）。</p>
+      <p class="hint" style="margin:0;">思而行的问卷、规划、教程、对话都由 AI 完成，所以需要先接入模型服务。推荐任意 <b>OpenAI 兼容接口</b>（DeepSeek、通义千问、Kimi、智谱、硅基流动、OpenAI、本地 Ollama 都行）。</p>
       <ol class="setupSteps">
-        <li>选一个服务商（下面有常用预设，点一下自动填好地址与模型）</li>
-        <li>填上你的 <b>API 密钥</b>（本地 Ollama 可随便填）</li>
-        <li>点 <b>测试连接</b>，显示「连接正常」就能用了</li>
+        <li>点下面「添加连接」，选一个服务商 —— <b>地址会自动填好，不用手打</b></li>
+        <li>填上 <b>API 密钥</b>（本地 Ollama 可随便填），点「获取模型列表」</li>
+        <li><b>勾选</b>要用的模型（可以多选），保存即可</li>
       </ol>
-      <p class="hint" style="margin:0;">没有密钥？也可以先用 <b>本地模型</b>：装好 <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> 后选「本地 Ollama」预设，无需密钥。</p>
+      <p class="hint" style="margin:0;">没有密钥？也可以先用 <b>本地模型</b>：装好 <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> 后添加「本地 Ollama」连接，无需密钥。</p>
     </div>`;
   }
 
+  /* AI 连接：一条连接 = 一个服务商 + 一套地址/密钥，下挂多个模型。
+     可以加多个 Base URL（同一家不同线路、或不同家并存都行），
+     每条连接里多选模型；具体用哪个模型由「AI 助手」对话栏的模型下拉决定。 */
   html += `<div class="sec">
       <div class="secTitle">AI 接入方式</div>
-      <div class="field">
-        <select id="aiProvider">
-          <option value="openai" ${provider === 'openai' ? 'selected' : ''}>OpenAI 兼容接口（推荐，无需安装其它软件）</option>
-          <option value="opencode" ${provider === 'opencode' ? 'selected' : ''}>opencode CLI（本机已安装 opencode 时可选）</option>
-        </select>
+      <p class="hint" style="margin:-4px 0 10px;">添加服务商连接后，在每条连接里<b>勾选</b>要用的模型（可多选）。对话时在 💬 AI 助手的模型下拉里选具体用哪个 —— 可以是不同服务商、不同模型。</p>
+      <div class="toolbarRow" style="margin-bottom:12px;">
+        <button class="btn primary" id="addConn">＋ 添加连接</button>
       </div>
-      <div id="openaiCfg" ${provider === 'opencode' ? 'hidden' : ''}>
-        <div class="presetRow" id="presetRow">
-          ${AI_PRESETS.map((p, i) => `<button type="button" class="presetChip" data-preset="${i}">${esc(p.name)}</button>`).join('')}
-        </div>
-        <div class="field"><label>API 地址（Base URL）</label><input id="aiBase" value="${esc(s.ai_base_url || '')}" placeholder="如 https://api.deepseek.com/v1"></div>
-        <div class="field"><label>API 密钥</label><input id="aiKey" type="password" value="" placeholder="${s.ai_api_key ? '已保存（留空则不修改）' : (s.env_keys && s.env_keys.key ? '已通过环境变量提供（留空则用环境变量）' : 'sk-...')}"></div>
-        <div class="field"><label>视觉模型（可选：用于识别图片资料）</label>
-          <input id="aiVisionModel" list="modelList" value="${esc(s.ai_vision_model || '')}" placeholder="如 qwen-vl-max / gpt-4o / glm-4v-plus">
-        </div>
-        <p class="hint" id="aiVisionHint" style="margin:-4px 0 10px;">${esc(visionHint)}</p>
-        <div class="field"><label>单次请求超时（毫秒）</label><input id="aiTimeout" value="${esc(s.ai_timeout_ms || '300000')}"></div>
+      <div id="connList">${conns.map(c => connCardHTML(c, provs)).join('')}</div>
+      <div id="connEmpty" ${conns.length ? 'hidden' : ''} class="emptyBox" style="margin:10px 0;">
+        <div class="ebIcon">🔌</div>
+        <div class="ebTitle">还没有 AI 连接</div>
+        <div class="ebText">点上面「添加连接」，选一个服务商（地址会自动填好），填密钥后获取模型列表并勾选。</div>
       </div>
-      <div id="opencodeCfg" ${provider === 'openai' ? 'hidden' : ''}>
-        <div class="field"><label>opencode 代理（agent）</label><input id="aiAgent" value="${esc(s.ai_opencode_agent || 'NoTools')}" placeholder="NoTools（项目自带：禁用工具、只输出文本）"></div>
-        <p class="hint" style="margin-top:8px;">使用 opencode 时：模型名填 <code>provider/model</code>（如 <code>opencode-go/deepseek-v4-flash</code>）；地址与密钥留空即可（由 opencode 自己管理登录）。</p>
-      </div>
-      <div class="field"><label>模型（Model）*</label>
-        <input id="aiModel" list="modelList" value="${esc(s.model || '')}" placeholder="如 deepseek-chat / qwen-plus / opencode-go/deepseek-v4-flash">
-        <datalist id="modelList">${models.map(m => `<option value="${esc(m)}"></option>`).join('')}</datalist>
-        <div class="hint" id="modelHint" style="margin-top:4px;"></div>
-      </div>
+      <div class="field"><label>单次请求超时（毫秒）</label><input id="aiTimeout" value="${esc(s.ai_timeout_ms || '300000')}"></div>
+      <div class="field"><label>opencode 代理（agent，仅 opencode 连接用）</label><input id="aiAgent" value="${esc(s.ai_opencode_agent || 'NoTools')}" placeholder="NoTools（项目自带：禁用工具、只输出文本）"></div>
       <div class="toolbarRow" style="margin-top:12px;">
         <button class="btn primary" id="saveSettings">保存设置</button>
-        <button class="btn" id="testAi">测试连接</button>
-        <button class="btn" id="reloadModels">刷新模型列表</button>
+        <button class="btn" id="testAi">测试第一条连接</button>
       </div>
       <div id="aiStatusBox" class="hint" style="margin-top:10px; line-height:1.8;">
-        当前：<b>${provider === 'openai' ? 'OpenAI 兼容接口' : 'opencode CLI'}</b>
-        ${st.baseUrl ? ' · ' + esc(st.baseUrl) : ''}
-        ${st.model ? ' · 模型 ' + esc(st.model) : ' · <span style="color:var(--warn)">未设置模型</span>'}
-        ${provider === 'opencode' ? '' : (st.hasKey ? ' · 已配置密钥' : ' · <span style="color:var(--warn)">未配置密钥</span>')}
+        ${st.connCount
+          ? `已启用 <b>${st.connCount}</b> 条连接 · 共 <b>${st.modelCount}</b> 个可选模型${st.modelCount ? '' : '（还没勾选模型，请到上面勾选）'}`
+          : `<span style="color:var(--warn)">还没有可用的 AI 连接</span>`}
+        ${st.baseUrl ? '<br>默认连接：' + esc(st.baseUrl) : ''}
+        ${st.model ? ' · 默认模型 ' + esc(st.model) : ''}
+        ${st.hint ? '<br><span style="color:var(--warn)">' + esc(st.hint) + '</span>' : ''}
       </div>
-      ${modelsRes.error ? `<p class="hint" style="color:var(--warn); margin-top:6px;">模型列表：${esc(modelsRes.error)}（可手动填写模型名）</p>` : ''}
     </div>
     ${await serviceSectionHTML()}
     ${await updateSectionHTML()}
@@ -6244,83 +6306,156 @@ async function renderSettings() {
   </div>`;
   app.innerHTML = html;
 
-  const pv = document.getElementById('aiProvider');
   const val = id => { const el = document.getElementById(id); return el ? el.value : ''; };
-  const collect = () => {
-    const body = {
-      ai_provider: pv.value,
-      ai_base_url: val('aiBase'),
-      model: val('aiModel'),
-      ai_vision_model: val('aiVisionModel'),
+  /* 把卡片上的输入读成连接对象。密钥框留空 = 没碰过，不发 apiKey，
+     服务端会保留已存的密钥（否则每次保存都把密钥清成空）。 */
+  const readConns = () => Array.from(app.querySelectorAll('.connCard')).map(card => {
+    const g = f => { const el = card.querySelector('[data-f="' + f + '"]'); return el ? el.value : ''; };
+    const en = card.querySelector('[data-f="enabled"]');
+    const pid = g('providerId');
+    return {
+      id: card.getAttribute('data-conn'),
+      name: (g('name') || '').trim(),
+      providerId: pid,
+      provider: pid === 'opencode' ? 'opencode' : 'openai',
+      baseUrl: (g('baseUrl') || '').trim(),
+      apiKey: (g('apiKey') || '').trim(),
+      visionModel: (g('visionModel') || '').trim(),
+      enabled: en ? en.checked : true,
+      models: Array.from(card.querySelectorAll('[data-cmodel]'))
+        .filter(x => x.parentElement && x.parentElement.querySelector('input[type=checkbox]') ? x.parentElement.querySelector('input[type=checkbox]').checked : x.checked)
+        .map(x => x.getAttribute('data-cmodel')).filter(Boolean),
+      _saved: true
+    };
+  });
+  const save = async () => {
+    /* 连接与旧设置分两个接口发：连接整体覆盖，超时/agent 仍走 /api/settings */
+    await api('/api/ai/connections', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connections: readConns() }) });
+    await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
       ai_timeout_ms: val('aiTimeout'),
       ai_opencode_agent: val('aiAgent')
-    };
-    // 密钥框留空 = 没碰过，不发送（否则空字符串会清空已保存的密钥）
-    const k = val('aiKey');
-    if (k) body.ai_api_key = k;
-    return body;
-  };
-  const save = async () => {
-    await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(collect()) });
+    }) });
+    /* 对话栏的模型下拉来自模型池，保存后必须让它重新拉一次，否则列表还是旧的 */
+    state.aiModels = null;
     state.aiStatus = await api('/api/ai/status').catch(() => null);
   };
-  const toggleProvider = () => {
-    document.getElementById('openaiCfg').hidden = pv.value !== 'openai';
-    document.getElementById('opencodeCfg').hidden = pv.value === 'openai';
-  };
-  const checkModel = () => {
-    const box = document.getElementById('modelHint');
-    if (!box) return;
-    const m = (document.getElementById('aiModel').value || '').trim();
-    const b = (document.getElementById('aiBase').value || '').trim();
-    if (pv.value === 'openai' && m.includes('/')) {
-      box.innerHTML = '⚠️ 这种 <code>xxx/yyy</code> 格式是 <b>opencode CLI 的模型写法</b>，填在这里 API 会报 400（模型不存在）。用 API key 请填服务商原生模型名（如 DeepSeek 填 <code>deepseek-chat</code>）；想用这个模型请把接入方式切到 opencode。';
-      box.style.color = 'var(--warn)';
-    } else if (pv.value === 'openai' && /deepseek\.com/.test(b) && m && !/^(deepseek-chat|deepseek-reasoner)$/.test(m)) {
-      box.innerHTML = '⚠️ DeepSeek 官方接口只有 <code>deepseek-chat</code> / <code>deepseek-reasoner</code> 两个模型，填别的会 400。';
-      box.style.color = 'var(--warn)';
-    } else { box.textContent = ''; }
-  };
-  document.getElementById('aiModel').addEventListener('input', checkModel);
-  document.getElementById('aiBase').addEventListener('input', checkModel);
-  checkModel();
-  pv.addEventListener('change', async () => { toggleProvider(); checkModel(); try { await save(); toast('已保存接入方式'); } catch (e) { toast(e.message); } });
-  document.getElementById('presetRow').addEventListener('click', e => {
-    const b = e.target.closest('[data-preset]');
-    if (!b) return;
-    const p = AI_PRESETS[Number(b.getAttribute('data-preset'))];
-    document.getElementById('aiBase').value = p.base;
-    document.getElementById('aiModel').value = p.model;
-    document.getElementById('aiVisionModel').value = p.vision || '';
-    if (p.key) document.getElementById('aiKey').value = p.key;
-    toast('已填入「' + p.name + '」配置，接着填 API 密钥即可');
-    document.getElementById('aiKey').focus();
+
+  /* 服务商变化 → 自动填官方地址，并预填该服务商的常用模型 */
+  app.addEventListener('change', e => {
+    const sel = e.target.closest('[data-f="providerId"]');
+    if (!sel) return;
+    const card = sel.closest('.connCard');
+    const p = (provs || []).find(x => x.id === sel.value);
+    if (!p) return;
+    const base = card.querySelector('[data-f="baseUrl"]');
+    const vis = card.querySelector('[data-f="visionModel"]');
+    const nm = card.querySelector('[data-f="name"]');
+    if (p.baseUrl) base.value = p.baseUrl;
+    if (p.vision) vis.value = p.vision;
+    if (nm && !nm.value.trim()) nm.value = p.name;
+    if (p.models && p.models.length) {
+      toast('已填好「' + p.name + '」的官方地址，点「获取模型列表」可核对最新可用模型');
+    }
+  });
+
+  /* 勾选/取消模型 */
+  app.addEventListener('change', e => {
+    const cb = e.target.closest('[data-cmodel]');
+    if (!cb) return;
+    const card = cb.closest('.connCard');
+    const head = card.querySelector('.ccModelsHead span');
+    const n = card.querySelectorAll('[data-cmodel]').length;
+    if (head) head.textContent = '已选模型（' + n + '）';
+  });
+
+  /* 添加 / 删除 / 取列表 —— 事件委托，重绘后不用重新绑 */
+  app.addEventListener('click', async e => {
+    const addBtn = e.target.closest('#addConn');
+    if (addBtn) {
+      const list = document.getElementById('connList');
+      const id = 'c' + Date.now().toString(36);
+      list.insertAdjacentHTML('beforeend', connCardHTML({
+        id, name: '', provider: 'openai', providerId: '', baseUrl: '', apiKey: '',
+        models: [], visionModel: '', enabled: true, hasKey: false
+      }, provs));
+      document.getElementById('connEmpty').hidden = true;
+      const first = list.lastElementChild;
+      const psel = first.querySelector('[data-f="providerId"]');
+      if (psel) psel.focus();
+      return;
+    }
+    const btn = e.target.closest('.connCard [data-act]');
+    if (!btn) return;
+    const card = btn.closest('.connCard');
+    const act = btn.getAttribute('data-act');
+    if (act === 'del') {
+      const n = card.querySelector('[data-f="name"]').value || '这条连接';
+      if (!confirm('删除「' + n + '」？对话栏里选它的模型也会一并失效。')) return;
+      card.remove();
+      if (!app.querySelector('.connCard')) document.getElementById('connEmpty').hidden = false;
+      return;
+    }
+    if (act === 'models') {
+      const hint = card.querySelector('[data-role="msghint"]');
+      const g = f => { const el = card.querySelector('[data-f="' + f + '"]'); return el ? el.value : ''; };
+      btn.disabled = true; btn.textContent = '获取中…';
+      if (hint) hint.textContent = '正在向该地址请求模型列表…';
+      try {
+        /* 先把这张卡连密钥一起存下来，再取列表 —— 密钥多半还没存过，
+           不存的话 /models 会因没鉴权而 401。 */
+        await api('/api/ai/connections', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connections: readConns() }) });
+        const r = await api('/api/ai/models-for', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+          id: card.getAttribute('data-conn'),
+          baseUrl: (g('baseUrl') || '').trim(),
+          apiKey: (g('apiKey') || '').trim(),
+          providerId: g('providerId'),
+          provider: g('providerId') === 'opencode' ? 'opencode' : 'openai'
+        }) });
+        const list = r.models || [];
+        if (!list.length) {
+          if (hint) hint.innerHTML = '<span style="color:var(--warn)">没取到模型列表：' + esc(r.error || '接口未返回') + '</span>';
+        } else {
+          const old = new Set(Array.from(card.querySelectorAll('[data-cmodel]')).map(x => x.getAttribute('data-cmodel')));
+          const box = card.querySelector('.mPickList');
+          box.innerHTML = list.map(m => `<label class="mPick"><input type="checkbox" data-cmodel="${esc(m)}" ${old.has(m) ? 'checked' : ''}><span>${esc(m)}</span></label>`).join('');
+          const head = card.querySelector('.ccModelsHead span');
+          const n = card.querySelectorAll('[data-cmodel]').length;
+          if (head) head.textContent = '已选模型（' + n + '）';
+          if (hint) hint.innerHTML = (r.error ? '<span style="color:var(--warn)">' + esc(r.error) + '</span><br>' : '')
+            + '取到 <b>' + list.length + '</b> 个模型，勾选后保存即可在对话栏选用。';
+          toast('取到 ' + list.length + ' 个模型，勾选后记得保存');
+        }
+      } catch (err) {
+        if (hint) hint.innerHTML = '<span style="color:var(--warn)">取列表失败：' + esc(err.message) + '</span>';
+      } finally { btn.disabled = false; btn.textContent = '获取模型列表'; }
+      return;
+    }
   });
   document.getElementById('saveSettings').addEventListener('click', async () => {
-    try { await save(); toast('已保存'); renderSettings(); } catch (e) { toast(e.message); }
+    try {
+      await save();
+      toast('已保存');
+      renderSettings();   // 重绘：密钥框清空、模型勾选回到服务端的确认值
+    } catch (e) { toast(e.message); }
   });
   document.getElementById('testAi').addEventListener('click', async e => {
     const btn = e.target;
     const box = document.getElementById('aiStatusBox');
     btn.disabled = true; btn.textContent = '测试中…';
-    box.innerHTML = '正在保存配置并测试连接…';
+    box.innerHTML = '正在保存配置并测试第一条启用的连接…';
     try {
       await save();  // 先保存再测试，避免"改了没存"导致误报
       const r = await api('/api/ai/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       if (r.ok) {
-        box.innerHTML = `✅ <b>连接正常</b> · ${esc(r.provider === 'openai' ? 'OpenAI 兼容接口' : 'opencode CLI')} · 模型 ${esc(r.model)}<br>模型回复：${esc(r.sample || '')}`;
+        box.innerHTML = `✅ <b>连接正常</b> · ${esc(r.connName ? r.connName + ' · ' : '')}${esc(r.provider === 'openai' ? 'OpenAI 兼容接口' : 'opencode CLI')} · 模型 ${esc(r.model)}<br>模型回复：${esc(r.sample || '')}`;
         toast('连接正常');
       } else {
-        box.innerHTML = `❌ <b>连接失败</b>：${esc(r.message || '未知错误')}<br><span class="hint">检查：API 地址是否以 /v1 结尾 · 密钥是否正确 · 模型名是否存在 · 网络/代理是否可用</span>`;
+        box.innerHTML = `❌ <b>连接失败</b>：${esc(r.message || '未知错误')}<br><span class="hint">检查：API 地址是否正确 · 密钥是否正确 · 模型名是否存在 · 网络/代理是否可用</span>`;
         toast('连接失败，见下方说明');
       }
     } catch (err) {
       box.innerHTML = '❌ 连接失败：' + esc(err.message);
-    } finally { btn.disabled = false; btn.textContent = '测试连接'; }
-  });
-  document.getElementById('reloadModels').addEventListener('click', async () => {
-    try { await save(); } catch (e) {}
-    renderSettings();
+    } finally { btn.disabled = false; btn.textContent = '测试第一条连接'; }
   });
   bindServiceSection();
   bindUpdateSection();

@@ -170,7 +170,8 @@ CREATE TABLE IF NOT EXISTS plan_drafts (
   UNIQUE(goal_id, kind)
 );
 `);
-ai.init({ getSetting: (k, d) => getSetting(k, d), appDir: APP_DIR });
+/* setSetting 也要给：连接列表存在 settings 表里，ai.js 要能自己写回去 */
+ai.init({ getSetting: (k, d) => getSetting(k, d), setSetting: (k, v) => setSetting(k, v), appDir: APP_DIR });
 function currentModel() { return getSetting('model', '') || ai.config().model || ''; }
 const DEFAULT_VISION_MODEL = 'opencode-go/deepseek-v4-flash-vision-exp';   // opencode 用户的默认视觉模型（与实习速成一致）
 function currentVisionModel() {
@@ -4310,12 +4311,45 @@ function extractEbookPrefFromAnswers(answers) {
     const r = await ai.models();
     return sendJSON(res, 200, { provider: r.provider, models: r.models || [], default: r.default || '', error: r.error || '' });
   }
+
+  /* ---- AI 连接与模型池 ----
+     模型 id 形如 '连接id::模型名'。对话栏选模型、设置页取列表都走这里。 */
+  if (p === '/api/ai/providers' && method === 'GET') {
+    return sendJSON(res, 200, { providers: ai.PROVIDERS });
+  }
+  if (p === '/api/ai/connections' && method === 'GET') {
+    return sendJSON(res, 200, { connections: ai.connections() });
+  }
+  if (p === '/api/ai/connections' && method === 'POST') {
+    const body = await readBody(req);
+    /* 整体提交：设置页「保存」时一次存完，避免前端为每条连接各调一次 */
+    if (!body || !Array.isArray(body.connections)) return sendJSON(res, 400, { error: '缺少 connections' });
+    ai.saveConnections(body.connections);
+    return sendJSON(res, 200, { ok: true, connections: ai.connections(), pool: ai.modelPool() });
+  }
+  /* 取某条连接（或一段草稿）的模型列表。草稿也能取，供设置页「填完先试一下」。 */
+  if (p === '/api/ai/models-for' && method === 'GET') {
+    const id = u.searchParams.get('conn') || '';
+    const r = await ai.modelsFor({ id: id || undefined, baseUrl: u.searchParams.get('base') || undefined });
+    return sendJSON(res, 200, { models: r.models || [], error: r.error || '' });
+  }
+  if (p === '/api/ai/models-for' && method === 'POST') {
+    let body = {};
+    try { body = await readBody(req); } catch (e) {}
+    const r = await ai.modelsFor(body || {});
+    return sendJSON(res, 200, { models: r.models || [], error: r.error || '' });
+  }
+  if (p === '/api/ai/pool' && method === 'GET') {
+    return sendJSON(res, 200, { pool: ai.modelPool() });
+  }
   if (p === '/api/ai/status' && method === 'GET') {
     // visionModel 返回「实际会用的」视觉模型（含 opencode 默认值），前端据此提示
     return sendJSON(res, 200, { ...ai.status(), visionModel: currentVisionModel(), visionModelSaved: getSetting('vision_model', '') || '', env: { base: !!process.env.SIERXING_API_BASE || !!process.env.OPENAI_BASE_URL, key: !!process.env.SIERXING_API_KEY || !!process.env.OPENAI_API_KEY } });
   }
   if (p === '/api/ai/test' && method === 'POST') {
-    const r = await ai.test();
+    let body = {};
+    try { body = await readBody(req); } catch (e) {}
+    const r = await ai.test(body || {});
     return sendJSON(res, 200, r);
   }
 

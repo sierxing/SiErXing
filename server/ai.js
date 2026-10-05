@@ -12,10 +12,23 @@
  *
  *  2. opencode —— 本机已安装 opencode CLI 时可选用（保留原有能力）
  *
+ * 连接（connection）与模型池
+ * ------------------------------------------------------------------
+ * 原来的设计只有「一套地址 + 一个模型」，于是用户要手填 Base URL 和模型名，
+ * 而且换个模型就得改设置、把对话里选好的模型顶掉。
+ * 现在引入「连接」：一条连接 = 一个服务商 + 一套地址/密钥，可以挂多个模型。
+ *
+ *   · 设置页管理连接（可加多个 Base URL），每条连接里勾选要用的模型
+ *   · 对话时按 连接::模型 选具体用哪个，两条连接里的模型不会重名打架
+ *   · 老配置（单地址 + ai_model）自动迁移成一条连接，不丢用户原有设置
+ *
  * 对外接口：
- *   ai.init({ getSetting, appDir })
+ *   ai.init({ getSetting, setSetting, appDir })
  *   ai.text({ prompt, model, images, timeoutMs, onEvent }) -> Promise<string>
- *   ai.models() -> { provider, models: string[], default }
+ *     model 可为 '模型名' 或 '连接id::模型名'
+ *   ai.connections() / ai.saveConnections() / ai.addConnection() / ai.removeConnection()
+ *   ai.modelsFor(connId) -> { models: string[], error }
+ *   ai.modelPool() -> [{ id, connId, connName, model, label }]
  *   ai.chatUrl / ai.test() -> Promise<{ ok, message, sample, provider, model }>
  */
 
@@ -24,8 +37,24 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawn, execFileSync } = require('node:child_process');
 
-let ctx = { getSetting: () => '', appDir: process.cwd() };
+let ctx = { getSetting: () => '', setSetting: () => {}, appDir: process.cwd() };
 function log(...a) { try { console.log(...a); } catch (e) {} }
+
+/* ---------------- 常用服务商的官方地址与模型 ---------------- */
+/* 选服务商 → 自动填好 Base URL，用户不用手打；模型列表则在填好地址与密钥后
+   向该地址的 /models 现取，取不到就退回这里的建议值。 */
+const PROVIDERS = [
+  { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com', models: ['deepseek-chat', 'deepseek-reasoner'], vision: '' },
+  { id: 'qwen', name: '通义千问', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen-max', 'qwen-plus', 'qwen-turbo'], vision: 'qwen-vl-max' },
+  { id: 'moonshot', name: 'Kimi', baseUrl: 'https://api.moonshot.cn/v1', models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'], vision: '' },
+  { id: 'zhipu', name: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4-plus', 'glm-4-flash', 'glm-4-air'], vision: 'glm-4v-plus' },
+  { id: 'siliconflow', name: '硅基流动', baseUrl: 'https://api.siliconflow.cn/v1', models: ['deepseek-ai/DeepSeek-V3', 'Qwen/Qwen2.5-72B-Instruct'], vision: '' },
+  { id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4o', 'gpt-4o-mini', 'o3-mini'], vision: 'gpt-4o' },
+  { id: 'openrouter', name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', models: ['anthropic/claude-3.5-sonnet', 'google/gemini-2.0-flash-001'], vision: '' },
+  { id: 'ollama', name: '本地 Ollama', baseUrl: 'http://localhost:11434/v1', models: ['qwen2.5:14b', 'llama3.1:8b'], vision: '', noKey: true },
+  { id: 'custom', name: '自定义（手填地址）', baseUrl: '', models: [], vision: '' }
+];
+function providerById(id) { return PROVIDERS.find(p => p.id === id) || null; }
 
 function env(name, alt) {
   const v = process.env[name];
@@ -37,28 +66,163 @@ function env(name, alt) {
   return '';
 }
 
-function cfg() {
-  const get = ctx.getSetting;
-  const pick = (key, envNames, dflt) => {
-    const dbVal = (get(key, '') || '').toString().trim();
-    if (dbVal) return dbVal;
-    const ev = envNames ? env(envNames[0], envNames.slice(1)) : '';
-    return ev || dflt || '';
-  };
-  const provider = (pick('ai_provider', ['SIERXING_PROVIDER', 'AI_PROVIDER'], 'openai') || 'openai').toLowerCase();
-  const dbOnly = (key) => (get(key, '') || '').toString().trim();
-  // 模型既支持新的 ai_model，也兼容应用原有的 model 设置
-  const model = dbOnly('ai_model') || dbOnly('model') || env('SIERXING_MODEL', ['OPENAI_MODEL']);
-  const visionModel = dbOnly('ai_vision_model') || dbOnly('vision_model') || env('SIERXING_VISION_MODEL', ['OPENAI_VISION_MODEL']);
+/** 连一条 id：时间戳 + 随机，避免同一毫秒建两条时重号 */
+let connSeq = 0;
+function newConnId() {
+  connSeq++;
+  return 'c' + Date.now().toString(36) + connSeq.toString(36);
+}
+
+/** 读出所有连接。老配置（单地址 + ai_model）会被自动折算成一条「默认」连接，
+    这样升级后用户原来填好的地址/密钥/模型仍然直接可用。 */
+function connections() {
+  let list = [];
+  try { list = JSON.parse(ctx.getSetting('ai_connections', '') || '[]'); } catch (e) { list = []; }
+  if (!Array.isArray(list)) list = [];
+  list = list.filter(c => c && typeof c === 'object').map(normalizeConn);
+  if (!list.length) {
+    const legacy = legacyAsConn();
+    if (legacy) list = [legacy];
+  }
+  return list;
+}
+function normalizeConn(c) {
   return {
-    provider: provider === 'opencode' ? 'opencode' : 'openai',
-    baseUrl: pick('ai_base_url', ['SIERXING_API_BASE', 'OPENAI_BASE_URL', 'OPENAI_API_BASE'], ''),
-    apiKey: pick('ai_api_key', ['SIERXING_API_KEY', 'OPENAI_API_KEY'], ''),
-    model,
-    visionModel,
-    agent: pick('ai_opencode_agent', ['SIERXING_OPENCODE_AGENT'], 'NoTools'),
-    timeoutMs: Number(pick('ai_timeout_ms', ['SIERXING_AI_TIMEOUT_MS'], '300000')) || 300000
+    id: String(c.id || newConnId()),
+    name: String(c.name || '未命名'),
+    provider: c.provider === 'opencode' ? 'opencode' : 'openai',
+    providerId: String(c.providerId || ''),
+    baseUrl: String(c.baseUrl || '').trim(),
+    apiKey: String(c.apiKey || ''),
+    /* 勾选要用的模型。留空表示「这条连接下还没选模型」，
+       调用时会退回 conn.defaultModel，再退回连接预设里的第一个。 */
+    models: Array.isArray(c.models) ? c.models.map(String).filter(Boolean) : [],
+    defaultModel: String(c.defaultModel || ''),
+    visionModel: String(c.visionModel || ''),
+    enabled: c.enabled !== false
   };
+}
+/** 老设置折算成连接。环境变量也算 —— 只用环境变量的人不该被迁移逻辑改动行为。 */
+function legacyAsConn() {
+  const get = ctx.getSetting;
+  const dbOnly = k => (get(k, '') || '').toString().trim();
+  const provider = (dbOnly('ai_provider') || env('SIERXING_PROVIDER', ['AI_PROVIDER']) || 'openai').toLowerCase();
+  const baseUrl = dbOnly('ai_base_url') || env('SIERXING_API_BASE', ['OPENAI_BASE_URL', 'OPENAI_API_BASE']);
+  const apiKey = dbOnly('ai_api_key') || env('SIERXING_API_KEY', ['OPENAI_API_KEY']);
+  const model = dbOnly('ai_model') || dbOnly('model') || env('SIERXING_MODEL', ['OPENAI_MODEL']);
+  if (!baseUrl && !apiKey && !model) return null;
+  return normalizeConn({
+    id: 'default', name: '默认连接', provider,
+    providerId: PROVIDERS.find(p => p.baseUrl && (p.baseUrl === baseUrl || p.baseUrl.replace(/\/v\d+$/, '') === String(baseUrl).replace(/\/v\d+$/, '').replace(/\/+$/, '')))?.id || '',
+    baseUrl, apiKey,
+    models: model ? [model] : [],
+    defaultModel: model,
+    visionModel: dbOnly('ai_vision_model') || dbOnly('vision_model') || env('SIERXING_VISION_MODEL', ['OPENAI_VISION_MODEL'])
+  });
+}
+function saveConnections(list) {
+  ctx.setSetting('ai_connections', JSON.stringify((list || []).map(normalizeConn)));
+}
+/** 找连接；找不到返回 null（不要静默回落到第一条 —— 那会用错地址和密钥去请求） */
+function findConn(id) {
+  const want = String(id || '').trim();
+  if (!want) return null;
+  return connections().find(c => c.id === want) || null;
+}
+
+/** '连接id::模型名' → 拆开；只给了模型名 → 返回 null 交给默认逻辑 */
+function splitModelRef(ref) {
+  const s = String(ref || '').trim();
+  const i = s.indexOf('::');
+  if (i < 0) return null;
+  return { connId: s.slice(0, i), model: s.slice(i + 2) };
+}
+
+/** 某条连接实际该用的模型：显式指定 > 该连接的默认 > 勾选的第一个 > 预设第一个 */
+function connModel(c, want) {
+  if (want) return want;
+  if (c.defaultModel) return c.defaultModel;
+  if (c.models.length) return c.models[0];
+  const p = providerById(c.providerId);
+  return (p && p.models[0]) || '';
+}
+
+/**
+ * 生成一次调用所需的配置。
+ * modelRef 可以是：
+ *   · 'connId::model'  → 用那条连接的地址/密钥 + 那个模型
+ *   · 'model'          → 依次在已启用连接里找谁有这个模型
+ *   · 空               → 用第一条启用连接
+ * 这是「同一个 Base URL 挂多个模型、多条 Base URL 各挂各的」能成立的关键：
+ * 地址与密钥跟着连接走，模型名只是挂在下面的标签。
+ */
+function cfg(modelRef) {
+  const get = ctx.getSetting;
+  const list = connections();
+  const enabled = list.filter(c => c.enabled);
+  const ref = splitModelRef(modelRef);
+  let conn = null;
+  let model = '';
+
+  if (ref) {
+    conn = findConn(ref.connId);
+    if (!conn) throw new Error('找不到对应的模型连接（可能已被删除），请重新选择模型');
+    model = ref.model;
+  } else if (modelRef) {
+    // 裸模型名：在启用连接里找第一条支持它的。找不到就退回第一条连接，
+    // 让请求照常发出去、由接口报「模型不存在」—— 比在这里抛个含糊错好排查。
+    model = String(modelRef).trim();
+    conn = enabled.find(c => c.models.includes(model) || c.defaultModel === model) || enabled[0] || null;
+  } else {
+    conn = enabled[0] || null;
+    model = conn ? connModel(conn) : '';
+  }
+
+  if (!conn) {
+    // 一条连接都没有：退回只读的环境变量 / 旧设置，行为与升级前一致
+    const pick = (key, envNames, dflt) => {
+      const dbVal = (get(key, '') || '').toString().trim();
+      if (dbVal) return dbVal;
+      return (envNames ? env(envNames[0], envNames.slice(1)) : '') || dflt || '';
+    };
+    const provider = (pick('ai_provider', ['SIERXING_PROVIDER', 'AI_PROVIDER'], 'openai') || 'openai').toLowerCase();
+    const dbOnly = k => (get(k, '') || '').toString().trim();
+    return {
+      provider: provider === 'opencode' ? 'opencode' : 'openai',
+      baseUrl: pick('ai_base_url', ['SIERXING_API_BASE', 'OPENAI_BASE_URL', 'OPENAI_API_BASE'], ''),
+      apiKey: pick('ai_api_key', ['SIERXING_API_KEY', 'OPENAI_API_KEY'], ''),
+      model: model || dbOnly('ai_model') || dbOnly('model') || env('SIERXING_MODEL', ['OPENAI_MODEL']),
+      visionModel: dbOnly('ai_vision_model') || dbOnly('vision_model') || env('SIERXING_VISION_MODEL', ['OPENAI_VISION_MODEL']),
+      agent: pick('ai_opencode_agent', ['SIERXING_OPENCODE_AGENT'], 'NoTools'),
+      timeoutMs: Number(pick('ai_timeout_ms', ['SIERXING_AI_TIMEOUT_MS'], '300000')) || 300000,
+      connId: ''
+    };
+  }
+
+  const p = providerById(conn.providerId);
+  return {
+    provider: conn.provider,
+    connId: conn.id,
+    connName: conn.name,
+    baseUrl: conn.baseUrl,
+    /* 密钥留空时回落到环境变量：老用户可能在 settings 里没填但环境里有 */
+    apiKey: conn.apiKey || env('SIERXING_API_KEY', ['OPENAI_API_KEY']),
+    model: connModel(conn, model),
+    visionModel: conn.visionModel || (p ? p.vision : ''),
+    agent: get('ai_opencode_agent', '') || env('SIERXING_OPENCODE_AGENT') || 'NoTools',
+    timeoutMs: Number(get('ai_timeout_ms', '') || env('SIERXING_AI_TIMEOUT_MS') || '300000') || 300000
+  };
+}
+
+/** 对话栏的模型下拉：把所有启用连接里勾选的模型摊平成一张列表。
+ *  id = '连接id::模型名'，label 带连接名，两条连接里同名模型也不会混。 */
+function modelPool() {
+  const out = [];
+  for (const c of connections()) {
+    if (!c.enabled) continue;
+    for (const m of c.models) out.push({ id: c.id + '::' + m, connId: c.id, connName: c.name, model: m, label: c.name + ' · ' + m });
+  }
+  return out;
 }
 
 /* ---------------- 通用工具 ---------------- */
@@ -289,6 +453,54 @@ async function openaiModels(c) {
   throw lastErr || new Error('获取模型列表失败');
 }
 
+/** 取某条连接可用的模型列表。
+ *  openai：问接口的 /models（失败就退回该服务商的建议列表，不让用户卡住）
+ *  opencode：跑 `opencode models`
+ *  传临时参数（还没保存的地址/密钥）也能取，供设置页「填完先试一下」用。 */
+async function fetchModelsFor(target) {
+  const list = connections();
+  let c;
+  if (target && target.baseUrl) {
+    /* 未保存的草稿：用调用方给的地址/密钥，但模型勾选仍取已保存的那条（如果有） */
+    const saved = target.id ? findConn(target.id) : null;
+    const p = target.providerId ? providerById(target.providerId) : null;
+    c = normalizeConn({
+      id: (saved && saved.id) || 'draft',
+      name: (saved && saved.name) || (p ? p.name : '草稿'),
+      provider: target.provider || (saved && saved.provider) || 'openai',
+      providerId: target.providerId || (saved && saved.providerId) || '',
+      baseUrl: target.baseUrl,
+      apiKey: target.apiKey || (saved && saved.apiKey) || '',
+      models: (saved && saved.models) || [],
+      defaultModel: (saved && saved.defaultModel) || '',
+      visionModel: (saved && saved.visionModel) || (p ? p.vision : '')
+    });
+  } else {
+    c = cfg(target && target.id ? target.id : undefined);
+  }
+
+  if (c.provider === 'opencode') {
+    try {
+      const r = await runOpencode(c, ['models'], 60000);
+      const models = String(r.out).split('\n').map(s => s.trim()).filter(Boolean);
+      if (models.length) return { models, error: '' };
+      return { models: [], error: 'opencode 没有返回模型列表（先在终端跑 opencode 登录并配好账号）' };
+    } catch (e) {
+      return { models: [], error: e.message };
+    }
+  }
+  try {
+    const models = await openaiModels(c);
+    return { models, error: '' };
+  } catch (e) {
+    /* 取不到就给建议列表：DeepSeek 这类官方接口不一定开放 /models，
+       但用户照样要能选模型，不能因为这个把路堵死。 */
+    const p = providerById(c.providerId);
+    if (p && p.models.length) return { models: p.models.slice(), error: e.message + '（下面是该服务商的常用模型，可直接选）' };
+    return { models: [], error: e.message };
+  }
+}
+
 /* ---------------- opencode CLI（可选） ---------------- */
 
 /**
@@ -473,15 +685,55 @@ async function opencodeText(c, opts) {
 
 const ai = {
   init(options) {
-    ctx = { getSetting: (options && options.getSetting) || (() => ''), appDir: (options && options.appDir) || process.cwd() };
+    ctx = {
+      getSetting: (options && options.getSetting) || (() => ''),
+      setSetting: (options && options.setSetting) || (() => {}),
+      appDir: (options && options.appDir) || process.cwd()
+    };
     return ai;
   },
   config: cfg,
-  /** 统一入口：返回纯文本 */
+  /* 连接与模型池 */
+  PROVIDERS,
+  connections() {
+    /* 密钥不下发给前端，只回 hasKey —— 前端留空表示「不修改」 */
+    return connections().map(c => ({ ...c, hasKey: !!c.apiKey, apiKey: '' }));
+  },
+  saveConnections(list) {
+    /* 密钥：前端留空表示「不修改」。整体覆盖保存时也必须按这条规则补回旧值 ——
+       否则设置页每点一次保存，用户已存的密钥就被清成空。 */
+    const prev = {};
+    for (const c of connections()) if (c.apiKey) prev[c.id] = c.apiKey;
+    const next = (list || []).map(c => {
+      const k = c && String(c.apiKey || '').trim();
+      return normalizeConn(k ? c : { ...c, apiKey: prev[c && c.id] || '' });
+    });
+    saveConnections(next);
+    /* 同步一份单值设置给老代码路径（currentModel 等），
+       取第一条启用连接的默认模型 —— 不然升级后各处读到的模型会是空的。 */
+    const first = next.find(c => c.enabled);
+    if (first) {
+      ctx.setSetting('ai_provider', first.provider);
+      ctx.setSetting('ai_base_url', first.baseUrl);
+      ctx.setSetting('ai_api_key', first.apiKey);
+      ctx.setSetting('ai_model', connModel(first));
+      ctx.setSetting('ai_vision_model', first.visionModel || '');
+    }
+    return { ok: true, count: next.length };
+  },
+  modelPool,
+  modelsFor: fetchModelsFor,
+
+  /** 统一入口：返回纯文本。opts.model 可为 '连接id::模型名' */
   async text(opts) {
-    const c = cfg();
-    if (c.provider === 'opencode') return opencodeText(c, opts);
-    return openaiText(c, opts);
+    const c = cfg(opts && opts.model);
+    /* opts.model 原样传给下游的话，「连接id::模型名」会被当成模型名发给接口
+       （接口回 400「模型不存在」）。这里换成 cfg 解析出来的裸模型名。 */
+    const o = (opts && typeof opts === 'object') ? { ...opts } : {};
+    if (o.model) o.model = c.model;
+    else if (c.model) o.model = c.model;
+    if (c.provider === 'opencode') return opencodeText(c, o);
+    return openaiText(c, o);
   },
   /** 带流式回调：onEvent({ text } | { thinking }) */
   async stream(opts) {
@@ -504,38 +756,79 @@ const ai = {
       return { provider: 'openai', models: c.model ? [c.model] : [], default: c.model || '', error: e.message };
     }
   },
+  /** 连接 CRUD（前端增删改连接时用；整表保存走 saveConnections） */
+  addConnection(conn) {
+    const list = connections();
+    const c = normalizeConn(conn || {});
+    if (!c.baseUrl && c.provider !== 'opencode') throw new Error('请先填写 API 地址');
+    if (list.some(x => x.id === c.id)) c.id = newConnId();
+    list.push(c);
+    saveConnections(list);
+    return c;
+  },
+  updateConnection(id, patch) {
+    const list = connections();
+    const i = list.findIndex(x => x.id === id);
+    if (i < 0) return null;
+    /* 密钥：前端留空表示「不修改」，别把已存的密钥冲掉 */
+    const merged = { ...list[i], ...(patch || {}) };
+    if (patch && !patch.apiKey) merged.apiKey = list[i].apiKey;
+    list[i] = normalizeConn(merged);
+    saveConnections(list);
+    return list[i];
+  },
+  removeConnection(id) {
+    const list = connections();
+    const next = list.filter(x => x.id !== id);
+    if (next.length === list.length) return false;
+    saveConnections(next);
+    return true;
+  },
+  newConnId,
   /** 使用 opencode 时确保代理配置存在（供设置页调用） */
   ensureOpencodeAgent,
   /** 连接测试：发一句最短的请求 */
-  async test() {
-    const c = cfg();
+  async test(opts) {
+    /* 传了 model 就按那条连接/模型测（设置页「测试这条连接」用），
+       没传就测第一条启用连接 —— 跟升级前一致。 */
+    const ref = (opts && (opts.model || (opts.connId ? opts.connId + '::' + (opts.modelName || '') : ''))) || '';
+    let c;
+    try { c = cfg(ref); }
+    catch (e) { return { ok: false, provider: '', model: '', message: e.message }; }
+    const probe = ref || c.model;
     try {
-      const text = await ai.text({ prompt: '回复两个字：正常', timeoutMs: 60000 });
-      return { ok: true, provider: c.provider, model: c.model || (c.provider === 'opencode' ? '(默认)' : '(未设置)'), sample: String(text).trim().slice(0, 40) };
+      const text = await ai.text({ prompt: '回复两个字：正常', model: ref || undefined, timeoutMs: 60000 });
+      return { ok: true, provider: c.provider, connName: c.connName || '', model: probe || (c.provider === 'opencode' ? '(默认)' : '(未设置)'), sample: String(text).trim().slice(0, 40) };
     } catch (e) {
-      return { ok: false, provider: c.provider, model: c.model || '', message: e.message };
+      return { ok: false, provider: c.provider, connName: c.connName || '', model: probe || '', message: e.message };
     }
   },
   /** 当前生效配置（隐藏密钥，仅供前端展示状态） */
   status() {
+    const list = connections().filter(c => c.enabled);
     const c = cfg();
-    // 是否已完成配置：opencode 只要模型名（默认走 CLI 默认模型）；openai 需要地址 + 模型
-    const configured = c.provider === 'opencode' ? true : !!(c.baseUrl && c.model);
+    // 是否已完成配置：至少一条启用连接，且它（或连接预设）能定出模型名
+    const configured = list.length > 0 && (c.provider === 'opencode' || !!(c.baseUrl && c.model));
     let hint = '';
-    if (!configured) {
-      if (!c.baseUrl && !c.model) hint = '还没有配置 AI 接入方式：请选择服务商并填写 API 地址与模型';
-      else if (!c.baseUrl) hint = '还缺 API 地址（Base URL）';
-      else hint = '还缺模型名（Model）';
+    if (!list.length) {
+      hint = '还没有配置 AI 接入方式：在「AI 接入方式」里添加一个服务商连接';
+    } else if (!configured) {
+      if (!c.baseUrl) hint = '还缺 API 地址（Base URL）';
+      else if (!c.model) hint = '还缺模型名：到这条连接里勾选要用的模型';
     }
     return {
       provider: c.provider,
+      connId: c.connId,
+      connName: c.connName || '',
       baseUrl: c.baseUrl,
       hasKey: !!c.apiKey,
       model: c.model,
       visionModel: c.visionModel,
       agent: c.agent,
       configured,
-      hint
+      hint,
+      connCount: list.length,
+      modelCount: modelPool().length
     };
   }
 };
