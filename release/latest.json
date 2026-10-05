@@ -1,14 +1,14 @@
 {
-  "version": "1.9.2",
-  "buildVer": "8c6590ca5cc6",
-  "payload": "release/payload-1.9.2.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.9.2.sxar?ref=main",
+  "version": "1.9.3",
+  "buildVer": "e9e02a811cbd",
+  "payload": "release/payload-1.9.3.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.9.3.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "dd6147b37269963f6f921dcee9dcaaa727e821571ddd78d0e630fae395432b26",
-  "size": 568435,
-  "unpackedSize": 2133680,
-  "publishedAt": "2026-10-05T13:14:55.953Z",
-  "notes": "数据存储路径可改可迁移+修主页面CSS崩坏+引导提炼按钮悬停变白+整理时忙碌态+思路卡更新时间+盲写代码框Tab缩进+对照结果卡重排",
+  "sha256": "3ce14961059013eb2ff98c25cd658f05d91a100427b126bc9d02e65a8d88a5f9",
+  "size": 569383,
+  "unpackedSize": 2136060,
+  "publishedAt": "2026-10-05T13:26:30.904Z",
+  "notes": "修今日复习出现两张相同练习：清单去重+读时自愈+标练过改命中的全部+池空时不调AI",
   "exeRequired": false
 }

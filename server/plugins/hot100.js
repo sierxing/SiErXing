@@ -714,16 +714,17 @@ module.exports = {
           let body = {};
           try { body = await readBody(req); } catch (e) {}
           const gid = Number(body.goal_id) || 0;
-          /* 重排前把已经练完的留下，别把用户刚做完的题又塞回来 */
+          /* 重排前把已经练完的留下，别把用户刚做完的题又塞回来。
+             pid 一律按数字比（见 dedupePlanItems 的注释）。 */
           const prev = todayPlan(gid);
           if (prev) {
             const keep = prev.items.filter(x => x.done);
             if (keep.length) {
-              const rest = reviewCandidates(gid).filter(c => !keep.some(k => k.pid === c.problem_id));
+              const keepPids = new Set(keep.map(k => Number(k.pid)));
               const n = Math.max(1, Math.min(8, Number(body.size) || 3));
               const out = await planTodayReviews(gid, Math.max(1, n - keep.length));
-              const items = keep.map(k => ({ ...k, done: true, at: k.at || nowISO() }))
-                .concat((out.items || []).filter(x => !keep.some(k => k.pid === x.pid)).slice(0, Math.max(0, n - keep.length)));
+              const items = keep.map(k => ({ ...k, pid: Number(k.pid), done: true, at: k.at || nowISO() }))
+                .concat((out.items || []).filter(x => !keepPids.has(Number(x.pid))).slice(0, Math.max(0, n - keep.length)));
               return sendJSON(res, 200, { plan: savePlan(gid, items, out.note), note: out.note, source: out.source, pool: out.pool });
             }
           }
@@ -745,10 +746,12 @@ module.exports = {
           const pid = Number(body.pid);
           const plan = todayPlan(gid);
           if (!plan) return sendJSON(res, 404, { error: '今天还没排复习' });
-          const it = plan.items.find(x => Number(x.pid) === pid);
-          if (!it) return sendJSON(res, 404, { error: '这道题不在今天的清单里' });
+          /* 同一题理论上只会有一张（savePlan/todayPlan 会去重），
+             但万一库里还有没自愈的旧重行，就把命中的全改掉，别只改第一条 */
+          const hits = plan.items.filter(x => Number(x.pid) === pid);
+          if (!hits.length) return sendJSON(res, 404, { error: '这道题不在今天的清单里' });
           const done = body.done === undefined ? true : !!body.done;
-          it.done = done; it.at = done ? nowISO() : '';
+          for (const it of hits) { it.done = done; it.at = done ? nowISO() : ''; }
           if (done) markReviewed(pid, body.verdict || 'pass', body.score);
           else db.prepare('UPDATE review_cards SET reviews = MAX(0, reviews - 1) WHERE problem_id = ?').run(pid);
           savePlan(gid, plan.items, plan.note);
@@ -1187,15 +1190,43 @@ function todayPlan(goalId) {
   if (!row) return null;
   let items = [];
   try { items = safeParse(row.items) || []; } catch (e) {}
+  /* 读时自愈：库里要是有历史遗留的重行（同一 pid 两条），读出来就地压成一条并写回去，
+     免得前端一次渲染两张卡、「标练过」还改到错的那张上。 */
+  const clean = dedupePlanItems(items);
+  if (clean.length !== items.length || clean.some((c, i) => Number(c.pid) !== Number(items[i] && items[i].pid))) {
+    db.prepare('UPDATE review_plans SET items = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(clean), nowISO(), row.id);
+    items = clean;
+  }
   return { id: row.id, date: row.date, goal_id: row.goal_id, items, note: row.note || '' };
 }
 function savePlan(goalId, items, note) {
   const t = nowISO();
+  /* 不变量：同一道题在一天的清单里最多出现一次。
+     坏行一旦写进去（比如某次并发重排），之后每次读/写都带着它，
+     前端的「标练过/撤销」还会改到错的那一张上（find 只命中第一条）。
+     所以所有写入都经过这里归一化：pid 转数字比，done:true 优先保留。 */
+  const clean = dedupePlanItems(items || []);
   const has = db.prepare('SELECT id FROM review_plans WHERE goal_id = ? AND date = ?').get(goalId || 0, todayStr());
-  if (has) db.prepare('UPDATE review_plans SET items = ?, note = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(items || []), note || '', t, has.id);
+  if (has) db.prepare('UPDATE review_plans SET items = ?, note = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(clean), note || '', t, has.id);
   else db.prepare('INSERT INTO review_plans (goal_id,date,items,note,created_at,updated_at) VALUES (?,?,?,?,?,?)')
-    .run(goalId || 0, todayStr(), JSON.stringify(items || []), note || '', t, t);
+    .run(goalId || 0, todayStr(), JSON.stringify(clean), note || '', t, t);
   return todayPlan(goalId);
+}
+/** 清单去重：pid 一律按数字比（JSON 里混进字符串 "1" 时 === 会失效，
+ *  这正是「同一道题出现两次」的成因之一）。done 的那张优先留。 */
+function dedupePlanItems(items) {
+  const byPid = new Map();
+  for (const it of (items || [])) {
+    const pid = Number(it && it.pid);
+    if (!pid) continue;   // 脏数据（没 pid 的）直接丢掉，别让它占一个坑
+    const prev = byPid.get(pid);
+    if (!prev) { byPid.set(pid, { ...it, pid }); continue; }
+    /* 同一题出现两次：done 优先；都 done 或都没 done 就留 at 更早的 */
+    const cur = { ...it, pid };
+    if (cur.done && !prev.done) byPid.set(pid, cur);
+    else if (!!cur.done === !!prev.done && String(cur.at || '') < String(prev.at || '')) byPid.set(pid, cur);
+  }
+  return [...byPid.values()];
 }
 /** 规则兜底排期（AI 不可用、或 AI 挑不出题时用）：按风险分从高到低取 size 道 */
 function rulePlan(cands, size, doneToday) {
@@ -1674,9 +1705,14 @@ async function planTodayReviews(goalId, size) {
   const cands = reviewCandidates(goalId);
   if (!cands.length) return { items: [], note: '还没有题进复习流 —— 做对一道题就会自动进来。', source: 'none', pool: 0 };
   const plan = todayPlan(goalId);
-  const doneToday = (plan ? plan.items : []).filter(x => x.done).map(x => x.pid);
+  const doneToday = (plan ? plan.items : []).filter(x => x.done).map(x => Number(x.pid));
   const n = Math.max(1, Math.min(8, Number(size) || 3));
-  const pool = cands.filter(c => !doneToday.includes(c.problem_id)).slice(0, 40);
+  const pool = cands.filter(c => !doneToday.includes(Number(c.problem_id))).slice(0, 40);
+  /* 池子里没可排的了（今天的都练完了）：别拿着空名单去调 AI，
+     之前那样会浪费一次调用，还回一句不知所云的报错当备注。 */
+  if (!pool.length) {
+    return { items: [], note: '今天池子里的都练过了，好好保持 🎉', source: 'done', pool: cands.length };
+  }
   const line = c => [
     '#' + c.fid + ' ' + c.title + '（' + (c.difficulty || '?') + '）',
     '  遗忘风险 ' + c.risk + '/100｜' + c.why.join('、'),
