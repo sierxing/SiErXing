@@ -16,3 +16,5 @@ Thumbs.db
 # 打包 Windows exe 的中间产物与产物（体积大，可随时用 scripts/build-exe.js 重建）
 .build/
 dist/
+
+public/_boot.html
