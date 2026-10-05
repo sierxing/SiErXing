@@ -1885,6 +1885,12 @@ body{padding-left:78px;}
 .npSrcAdd select{flex:1; min-width:150px; border:1px solid var(--border); background:var(--card); color:var(--text); border-radius:8px; padding:5px 8px; font-size:12px; font-family:inherit;}
 .npSrc{position:relative;}
 .npSrc .npsrcDel{position:absolute; right:0; top:0;}
+/* 文件夹资料行：路径用等宽小字，继承来的只读 */
+.npFolder .npSrcNote.mono{font-family:var(--mono,ui-monospace,Consolas,monospace); font-size:11px; word-break:break-all; color:var(--muted);}
+/* 教程对话框里的文件夹提示行 */
+.tdFolders{font-size:12.5px; line-height:1.7; margin:2px 0 10px; color:var(--muted);}
+.tdFolderCheck{display:flex; align-items:flex-start; gap:7px; cursor:pointer; color:var(--text);}
+.tdFolderCheck input{margin-top:3px; flex:none;}
 
 /* ============ 资源库页 ============ */
 .libGoalSel{border:1px solid var(--border); background:var(--card); color:var(--text); border-radius:9px; padding:6px 9px; font-size:12.5px; font-family:inherit; max-width:220px;}

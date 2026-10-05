@@ -18,7 +18,8 @@ const createService = require('./service');
 const createSync = require('./sync');
 const createUpdate = require('./update');
 const createTasks = require('./tasks');
-const { readCodeFiles, buildCodeBlock } = require('./code-read');
+const { readCodeFiles, buildCodeBlock, listCodeFiles } = require('./code-read');
+const nodeFolders = require('./node-folders');
 
 const APP_DIR = path.resolve(__dirname, '..');
 /* 前端资源版本戳：启动时对 public 下的 js/css 求哈希，发版后浏览器必取新文件。
@@ -563,12 +564,23 @@ function getGoal(id) {
 function normalizeSources(arr) {
   if (!Array.isArray(arr)) return '[]';
   const out = [];
-  for (const s of arr.slice(0, 8)) {
+  for (const s of arr.slice(0, 12)) {
     if (!s) continue;
     if (typeof s === 'string') { const name = s.trim(); if (name) out.push({ name, note: '' }); continue; }
     const name = String(s.name || '').trim();
     const note = String(s.note || '').trim();
-    if (name || note) out.push({ name: name || note.slice(0, 40), note });
+    /* 文件夹资料源条目：kind/path/source_id 必须原样保留，
+       否则 PUT 保存一次就把挂载的文件夹洗掉了 */
+    const entry = { name: name || note.slice(0, 40), note };
+    if (s.kind === 'folder') {
+      const p = String(s.path || '').trim().slice(0, 500);
+      if (!p) continue;
+      entry.kind = 'folder';
+      entry.path = p;
+    }
+    const sid = Number(s.source_id || 0);
+    if (sid) entry.source_id = sid;
+    if (entry.name || entry.note || entry.kind === 'folder') out.push(entry);
   }
   return JSON.stringify(out);
 }
@@ -1440,6 +1452,20 @@ function nodeSourceItems(goal, node) {
     if (src) out.push({ label: `[${src.site}｜${src.kind}] ${src.title}`, body: String(src.content || src.snippet || '') });
     else out.push({ label: name, body: String(it.note || '') });
   }
+  /* 3) 文件夹资料源：自己 + 所有祖先挂的（子孙可见，同级/其它分支看不到）。
+     每夹给文件清单 + README 摘要，细读留给教程阶段。目录没了只标出来，不报错。 */
+  try {
+    const nid = node && (node.id || node.node_id);
+    if (nid && goal && goal.id) {
+      for (const f of nodeFolders.collectFolderEntries(db, Number(nid))) {
+        if (f.missing) { out.push({ label: `📁 文件夹｜${f.name}（目录已不在：${f.path}）`, body: String(f.note || '') }); continue; }
+        out.push({
+          label: `📁 文件夹｜${f.name}${f.inherited ? '（继承自「' + f.nodeTitle + '」）' : ''}`,
+          body: nodeFolders.folderBodyForPrompt(f.path, 1200) + (f.note ? '\n说明：' + f.note : '')
+        });
+      }
+    }
+  } catch (e) { console.log('[node-folders] 规划提示词组装失败:', e.message); }
   return out;
 }
 function nodeSourcesBlock(goal, node, maxLen) {
@@ -2970,7 +2996,7 @@ function cleanTutorialText(txt, format) {
   }
   return s.trim();
 }
-function streamTutorial(req, res, node, format, note, codeFiles) {
+function streamTutorial(req, res, node, format, note, codeFiles, withFolders) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   const model = currentModel();
   const tk = tasks.begin({ type: 'tutorial', title: '生成教程：' + (node ? node.title : ''), goalId: node ? node.goal_id : 0, nodeId: node ? node.id : 0, note: note || '' });
@@ -2989,6 +3015,20 @@ function streamTutorial(req, res, node, format, note, codeFiles) {
           send({ status: `已载入 ${files.length} 个源码文件作为讲解依据…` });
         }
       } catch (e) { console.log('[tutorial] 源码载入失败:', e.message); }
+      /* 结合文件夹资料源：本节点 + 祖先挂的文件夹自动带上（除非调用方明确关掉）。
+         RAGFlow 这类场景就靠它 —— 挂一次，全家（本节点及子节点）的教程都能读到。 */
+      if (withFolders !== false) {
+        try {
+          const entries = nodeFolders.collectFolderEntries(db, Number(node.id));
+          const room = Math.max(5000, 60000 - codeBlock.length);
+          const g = nodeFolders.gatherFolderCode(entries.filter(e => !e.missing), room);
+          if (g.list.length) {
+            codeBlock += (codeBlock ? '\n\n' : '') + g.block;
+            for (const f of g.list) codeList.push({ root: f.root, path: f.path });
+            send({ status: `已载入文件夹资料 ${g.list.length} 个文件作为讲解依据…` });
+          }
+        } catch (e) { console.log('[tutorial] 文件夹资料载入失败:', e.message); }
+      }
       send({ status: `正在撰写「${String(node.title).slice(0, 18)}」的${format === 'html' ? ' HTML ' : ' Markdown '}教程（讲原理、分步实践、练习与自测，约需 1-3 分钟）…` });
       let txt = await aiText(buildTutorialPrompt(goal, node, format, note, codeBlock), model, 600000);
       txt = cleanTutorialText(txt, format);
@@ -3660,14 +3700,15 @@ function redactText(raw) {
   if (tutGenMatch && method === 'POST') {
     const n = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(tutGenMatch[1]));
     if (!n) return sendJSON(res, 404, { error: '节点不存在' });
-    let format = 'md', note = '', codeFiles = [];
+    let format = 'md', note = '', codeFiles = [], withFolders = true;
     try {
       const b = await readBody(req);
       format = b.format === 'html' ? 'html' : 'md';
       note = String(b.note || '').trim().slice(0, 500);
       if (Array.isArray(b.codeFiles)) codeFiles = b.codeFiles.map(x => String(x || '').slice(0, 160)).filter(Boolean).slice(0, 12);
+      if (b.withFolders === false) withFolders = false;
     } catch (e) {}
-    return streamTutorial(req, res, n, format, note, codeFiles);
+    return streamTutorial(req, res, n, format, note, codeFiles, withFolders);
   }
   const tutEditMatch = p.match(/^\/api\/tutorials\/(\d+)\/edit$/);
   if (tutEditMatch && method === 'POST') {
@@ -3694,8 +3735,17 @@ function redactText(raw) {
         try {
           const stored = JSON.parse((tut && tut.code_files) || '[]');
           if (Array.isArray(stored) && stored.length) {
-            const files = readCodeFiles(APP_DIR, stored);
-            if (files.length) editCodeBlock = buildCodeBlock(files);
+            /* code_files 两种形状：老的字符串（相对 APP_DIR）+ 新的 {root, path}
+              （文件夹资料源的文件，各读各的 root） */
+            const legacy = stored.filter(x => typeof x === 'string');
+            const parts = [];
+            if (legacy.length) {
+              const files = readCodeFiles(APP_DIR, legacy);
+              if (files.length) parts.push(buildCodeBlock(files));
+            }
+            const nf2 = nodeFolders.readStoredCodeFiles(stored);
+            if (nf2.length) parts.push(buildCodeBlock(nf2));
+            editCodeBlock = parts.join('\n\n');
           }
         } catch (e) { console.log('[tutorial] 修改时源码载入失败:', e.message); }
         const txt = await ai.text({ prompt: buildTutorialEditPrompt(goal, node, tut, feedback, tut.format, editCodeBlock), model: currentModel(), timeoutMs: 600000, signal });
@@ -3932,6 +3982,57 @@ function extractEbookPrefFromAnswers(answers) {
       backup();
       return sendJSON(res, 200, { goal: getGoal(n.goal_id) });
     }
+  }
+
+  /* ---- 节点文件夹资料源：挂载 / 移除 / 预览 / 生效列表 ----
+     可见性规则：挂在哪个节点，就只有它和它的子孙看得到（读时沿 parent_id 上收）。
+     规划、拆分、教程都会自动带上；其它分支的节点不受影响。 */
+  const nodeFolderMatch = p.match(/^\/api\/nodes\/(\d+)\/folder$/);
+  if (nodeFolderMatch && (method === 'POST' || method === 'DELETE')) {
+    const n = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(nodeFolderMatch[1]));
+    if (!n) return sendJSON(res, 404, { error: '节点不存在' });
+    const body = await readBody(req);
+    const list = nodeFolders.parseNodeSources(n);
+    if (method === 'POST') {
+      const chk = nodeFolders.validateAttachFolder(body.path, { appDir: APP_DIR, dataDir: DATA_DIR });
+      if (!chk.ok) return sendJSON(res, 400, { error: chk.error });
+      const name = String(body.name || path.basename(chk.dir)).trim().slice(0, 120) || path.basename(chk.dir);
+      const note = String(body.note || '').trim().slice(0, 300);
+      const ix = list.findIndex(x => x && x.kind === 'folder' && path.resolve(String(x.path || '')) === chk.dir);
+      const entry = { kind: 'folder', path: chk.dir, name, note };
+      if (ix >= 0) list[ix] = entry; else list.push(entry);
+      db.prepare('UPDATE nodes SET sources = ?, updated_at = ? WHERE id = ?').run(normalizeSources(list), nowISO(), n.id);
+      db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), n.goal_id);
+      return sendJSON(res, 200, { ok: true, folders: nodeFolders.collectFolderEntries(db, n.id), goal: getGoal(n.goal_id) });
+    } else {
+      const target = String(body.path || '').trim();
+      if (!target) return sendJSON(res, 400, { error: '缺少 path' });
+      const next = list.filter(x => !(x && x.kind === 'folder' && String(x.path || '') === target));
+      if (next.length === list.length) return sendJSON(res, 404, { error: '本节点没挂这个文件夹（继承来的不能在这里删，去挂载的节点删）' });
+      db.prepare('UPDATE nodes SET sources = ?, updated_at = ? WHERE id = ?').run(normalizeSources(next), nowISO(), n.id);
+      db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), n.goal_id);
+      return sendJSON(res, 200, { ok: true, folders: nodeFolders.collectFolderEntries(db, n.id), goal: getGoal(n.goal_id) });
+    }
+  }
+  const nodeFoldersMatch = p.match(/^\/api\/nodes\/(\d+)\/folders$/);
+  if (nodeFoldersMatch && method === 'GET') {
+    const n = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(nodeFoldersMatch[1]));
+    if (!n) return sendJSON(res, 404, { error: '节点不存在' });
+    return sendJSON(res, 200, { folders: nodeFolders.collectFolderEntries(db, n.id) });
+  }
+  if (p === '/api/node-folders/preview' && method === 'GET') {
+    /* 挂之前先看一眼里面有什么：文件数 + 前 30 个 + 有没有 README */
+    const chk = nodeFolders.validateAttachFolder(u.searchParams.get('path'), { appDir: APP_DIR, dataDir: DATA_DIR });
+    if (!chk.ok) return sendJSON(res, 400, { error: chk.error });
+    let files = [];
+    try { files = listCodeFiles(chk.dir); } catch (e) {
+      return sendJSON(res, 500, { error: '列不出来：' + (e.message || e) });
+    }
+    return sendJSON(res, 200, {
+      dir: chk.dir, total: files.length,
+      top: files.slice(0, 30),
+      hasReadme: files.some(f => /(^|\/)readme/i.test(f.path))
+    });
   }
 
   if (p === '/api/component-pins' && method === 'GET') {

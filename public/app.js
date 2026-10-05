@@ -844,6 +844,11 @@ function showNodePanel(id, rerender) {
       <button class="btn tiny" id="npSrcAdd">＋ 关联资料库</button>
       <button class="btn tiny" id="npSrcNew">＋ 手动写一条</button>
     </div>
+    <div class="npSrcTitle" style="margin-top:10px;">📁 文件夹资料<span class="muted" style="font-weight:400;">（挂在哪一级，哪一级和它的子节点可见，其它分支看不到）</span></div>
+    <div id="npFolders"><span class="muted" style="font-size:12.5px;">加载中…</span></div>
+    <div class="npSrcAdd">
+      <button class="btn tiny" id="npFolderAdd">＋ 关联文件夹</button>
+    </div>
     ${(() => {
       const txt = (n.title || '') + ' ' + (n.detail || '');
       const rel = (state.digests || []).map(d => ({ d, score: kwScore(txt, (d.title || '') + ' ' + String(d.content || '').slice(0, 1500)) }))
@@ -906,6 +911,34 @@ function showNodePanel(id, rerender) {
     list.push({ name: name.trim().slice(0, 120), note: note.trim().slice(0, 300) });
     saveNodeSources(list);
   });
+  /* 文件夹资料：自己挂的可以删，继承来的只读（显示来自哪一级） */
+  const paintFolders = async () => {
+    const box = div.querySelector('#npFolders');
+    if (!box) return;
+    try {
+      const r = await api('/api/nodes/' + id + '/folders');
+      const fs2 = r.folders || [];
+      box.innerHTML = fs2.length ? fs2.map((f, i) => `<div class="npSrc npFolder">
+        <div class="npSrcName">📁 ${esc(f.name)}${f.inherited ? `<span class="chip gray" style="margin-left:6px;">来自「${esc(f.nodeTitle)}」</span>` : '<span class="chip ok" style="margin-left:6px;">本节点</span>'}</div>
+        <div class="npSrcNote mono">${esc(f.path)}</div>
+        ${f.note ? `<div class="npSrcNote">${esc(f.note)}</div>` : ''}
+        ${f.missing ? '<div class="npSrcNote" style="color:var(--danger);">目录已不在（删了/移动了/U盘拔了），先不管它，恢复后自动生效</div>' : ''}
+        ${f.inherited ? '' : `<button class="btn tiny danger npsrcDel" data-npf-del="${esc(f.path)}">移除</button>`}
+      </div>`).join('') : '<div class="muted" style="font-size:12.5px;">没挂文件夹：点下面「关联文件夹」，把源码目录挂到这一级，规划和教程会自动读它</div>';
+      box.querySelectorAll('[data-npf-del]').forEach(b => b.addEventListener('click', async () => {
+        if (!confirm('取消挂载这个文件夹？\n\n只删挂载关系，磁盘上的文件不动。')) return;
+        try {
+          const rr = await api('/api/nodes/' + id + '/folder', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: b.getAttribute('data-npf-del') }) });
+          state.goal = rr.goal;
+          toast('已取消挂载');
+          showNodePanel(id, rerenderFn);
+        } catch (e) { toast(e.message); }
+      }));
+    } catch (e) { box.innerHTML = '<div class="muted" style="font-size:12.5px;">加载失败：' + esc(e.message) + '</div>'; }
+  };
+  paintFolders();
+  const npFolderAdd = div.querySelector('#npFolderAdd');
+  if (npFolderAdd) npFolderAdd.addEventListener('click', () => showFolderDialog(id, () => showNodePanel(id, rerenderFn)));
   document.getElementById('npClose').addEventListener('click', closePanel);
   if (window.TutBookmark && goalCompOn(goalCtx(), 'tutbookmark')) window.TutBookmark.bindNodeImport(div, id, (r) => { state.goal = r.goal; showNodePanel(id, rerenderFn); });
   const tutBtn = document.getElementById('npTutBtn');
@@ -2268,6 +2301,61 @@ function showShareDialog(goalId) {
     toast(redact ? '已导出分享文件（隐私已隐去）' : '已导出分享文件（原样，含个人现状）');
   });
 }
+/* 关联文件夹对话框：填绝对路径 → 预览确认 → 挂到本节点 */
+function showFolderDialog(nodeId, onDone) {
+  const old = document.getElementById('folderDialog');
+  if (old) old.remove();
+  const div = document.createElement('div');
+  div.id = 'folderDialog';
+  div.className = 'tutDialog';
+  div.innerHTML = `
+    <div class="tdHead"><span>📁</span><span>关联文件夹到本节点</span><button class="btn tiny" id="fdX">×</button></div>
+    <div class="tdBody">
+      <p class="hint" style="margin:2px 0 10px;">挂上去后，<b>本节点和它的子节点</b>在规划、拆分、生成教程时会自动读这个文件夹（文件清单 + README + 按需读代码）；其它分支的节点看不到。只读不写，磁盘文件不会动。</p>
+      <div class="field"><input type="text" id="fdPath" placeholder="绝对路径，例如 /home/xxx/ragflow" autocomplete="off" spellcheck="false"></div>
+      <div class="toolbarRow"><button class="btn small" id="fdPreview">👁 预览里面有什么</button><span class="muted" id="fdPrevMsg"></span></div>
+      <div class="tdCodeList" id="fdPrevList" style="margin-top:8px;"></div>
+      <div class="field" style="margin-top:10px;"><input type="text" id="fdName" placeholder="名称（可选，默认用文件夹名，例如 RAGFlow 源码）"></div>
+      <div class="field"><input type="text" id="fdNote" placeholder="说明（可选，例如 结合这份源码讲整体架构）"></div>
+      <div class="toolbarRow" style="margin-top:10px;">
+        <button class="btn primary" id="fdOk">挂到本节点</button>
+        <button class="btn" id="fdCancel">取消</button>
+      </div>
+      <div class="hint" id="fdMsg" style="margin-top:8px;"></div>
+    </div>`;
+  document.body.appendChild(div);
+  const close = () => div.remove();
+  div.querySelector('#fdX').addEventListener('click', close);
+  div.querySelector('#fdCancel').addEventListener('click', close);
+  const msg = m => { div.querySelector('#fdMsg').textContent = m || ''; };
+  div.querySelector('#fdPreview').addEventListener('click', async () => {
+    const p = div.querySelector('#fdPath').value.trim();
+    if (!p) return toast('先填路径');
+    div.querySelector('#fdPrevMsg').textContent = '读取中…';
+    try {
+      const r = await api('/api/node-folders/preview?path=' + encodeURIComponent(p));
+      div.querySelector('#fdPrevMsg').textContent = '';
+      div.querySelector('#fdPrevList').innerHTML = `<div class="muted" style="margin-bottom:6px;">共 ${r.total} 个可读文件${r.hasReadme ? '（有 README）' : ''}：</div>` +
+        (r.top.length ? r.top.slice(0, 15).map(f => `<div class="tdCodeItem"><span class="tdCodeName">${esc(f.path)}</span></div>`).join('') : '<span class="muted">空目录或没有可读文件</span>');
+      if (!div.querySelector('#fdName').value.trim()) div.querySelector('#fdName').value = p.split('/').filter(Boolean).pop() + ' 源码';
+    } catch (e) {
+      div.querySelector('#fdPrevMsg').textContent = '';
+      msg('预览失败：' + e.message);
+    }
+  });
+  div.querySelector('#fdOk').addEventListener('click', async () => {
+    const p = div.querySelector('#fdPath').value.trim();
+    if (!p) return toast('先填路径');
+    msg('挂载中…');
+    try {
+      const r = await api('/api/nodes/' + nodeId + '/folder', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: p, name: div.querySelector('#fdName').value.trim(), note: div.querySelector('#fdNote').value.trim() }) });
+      state.goal = r.goal;
+      close();
+      toast('已挂到本节点 ✓ 本节点和子节点可用');
+      if (onDone) onDone();
+    } catch (e) { msg(e.message); }
+  });
+}
 function showTutorialDialog(nodeId) {
   const n = state.goal.nodes.find(x => x.id === nodeId);
   if (!n) return;
@@ -2281,6 +2369,7 @@ function showTutorialDialog(nodeId) {
     <div class="tdBody">
       <p class="hint" style="margin:2px 0 10px;">教程以「真正掌握知识点」为目标：讲原理 → 分步实践（含自检与排错）→ 练习 → 掌握自测清单。生成约需 1-3 分钟。</p>
       <div class="field"><textarea id="tdNote" placeholder="补充要求（可选）：例如 我完全零基础请讲慢一点 / 多给可复制的代码 / 侧重面试常问点…"></textarea></div>
+      <div class="tdFolders muted" id="tdFolders">正在看本节点有没有挂文件夹…</div>
       <details class="tdCode" id="tdCodeBox">
         <summary>📂 结合项目源码讲解（可选，只读；data/.env/.git 等不会列出）</summary>
         <div class="tdCodeBody">
@@ -2326,18 +2415,34 @@ function showTutorialDialog(nodeId) {
   });
   const codeSearch = div.querySelector('#tdCodeSearch');
   if (codeSearch) codeSearch.addEventListener('input', () => paintCodeList(state.tdCodeFiles || []));
-  div.querySelector('#tdHtml').addEventListener('click', () => { const v = note(), cf = codeFiles(); close(); startTutorial(nodeId, 'html', v, cf); });
-  div.querySelector('#tdMd').addEventListener('click', () => { const v = note(), cf = codeFiles(); close(); startTutorial(nodeId, 'md', v, cf); });
+  div.querySelector('#tdHtml').addEventListener('click', () => { const v = note(), cf = codeFiles(); close(); startTutorial(nodeId, 'html', v, cf, withFolders()); });
+  div.querySelector('#tdMd').addEventListener('click', () => { const v = note(), cf = codeFiles(); close(); startTutorial(nodeId, 'md', v, cf, withFolders()); });
   div.querySelector('#tdX').addEventListener('click', close);
+  /* 本节点（含祖先继承）挂的文件夹：默认一起带上讲，对 RAGFlow 这种源码学习节点最有用 */
+  const withFolders = () => {
+    const c = div.querySelector('#tdWithFolders');
+    return !c || c.checked;
+  };
+  (async () => {
+    const box = div.querySelector('#tdFolders');
+    if (!box) return;
+    try {
+      const r = await api('/api/nodes/' + nodeId + '/folders');
+      const fs2 = r.folders || [];
+      box.innerHTML = fs2.length
+        ? `<label class="tdFolderCheck"><input type="checkbox" id="tdWithFolders" checked> <span>📁 附带文件夹源码一起讲（${fs2.length} 个：${fs2.map(f => esc(f.name) + (f.inherited ? '‹继承›' : '')).join('、').slice(0, 90)}）</span></label>`
+        : '<span>没挂文件夹：去节点面板「关联文件夹」把源码目录挂上，教程会自动对照代码讲</span>';
+    } catch (e) { box.innerHTML = '<span>文件夹状态读取失败，不影响生成</span>'; }
+  })();
 }
-async function startTutorial(nodeId, format, note, codeFiles) {
+async function startTutorial(nodeId, format, note, codeFiles, withFolders) {
   if (!goalCompOn(goalCtx(), 'tutorial')) { toast('「学习教程」组件在本目标已关闭：目标页 🧩 可单独开启'); return; }
   if (state.tutoring || state.planning || state.collecting || state.expanding) return;
   state.tutoring = true;
   state.tutStatus = '正在撰写教程（' + (format === 'html' ? 'HTML' : 'Markdown') + '）…';
   rerenderCurrent();
   try {
-    const resp = await fetch('/api/nodes/' + nodeId + '/tutorial', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ format, note: note || '', codeFiles: codeFiles || [] }) });
+    const resp = await fetch('/api/nodes/' + nodeId + '/tutorial', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ format, note: note || '', codeFiles: codeFiles || [], withFolders: withFolders !== false }) });
     if (!resp.ok || !resp.body) throw new Error('无法连接教程服务');
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
