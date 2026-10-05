@@ -888,7 +888,7 @@ const ai = {
       const text = await ai.text({ prompt: '回复两个字：正常', model: ref || undefined, timeoutMs: 60000 });
       return { ok: true, provider: c.provider, connName: c.connName || '', model: probe || (c.provider === 'opencode' ? '(默认)' : '(未设置)'), sample: String(text).trim().slice(0, 40) };
     } catch (e) {
-      return { ok: false, provider: c.provider, connName: c.connName || '', model: probe || '', message: e.message };
+      return { ok: false, provider: c.provider, connName: c.connName || '', model: c.model || probe || '', message: e.message };
     }
   },
   /** 当前生效配置（隐藏密钥，仅供前端展示状态） */

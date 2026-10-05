@@ -475,8 +475,11 @@ module.exports = function createSync(ctx) {
   /* 把 git 的凭据类报错翻译成可操作提示 */
   function friendlyGitError(msg) {
     const t = String(msg || '');
-    if (/cache daemon|credential|Authentication failed|could not read Username|terminal prompts disabled|Permission denied|403/i.test(t)) {
-      return t + '\n提示：请在「设置 → 多端同步」填写仓库地址（https://atomgit.com/用户名/仓库名.git）、用户名与访问令牌，再点「保存并测试连接」。AtomGit 用「用户名 + 访问令牌」（网页端 设置 → 访问令牌 生成），不要填登录密码。';
+    if (/password-based authentication.*removed|Access denied|Authorization failed|could not read Username|terminal prompts disabled|Permission denied|403|401/i.test(t)) {
+      return t + '\n\n分步解决（AtomGit 已关闭密码登录，登录密码推不动仓库）：'
+        + '\n1. 浏览器打开 AtomGit → 右上角头像 → 设置 → 访问令牌 → 生成新令牌（权限勾选仓库读写 / repository）'
+        + '\n2. 回到思而行「设置 → 多端同步」：用户名填你的 AtomGit 账号名，密码框粘贴刚生成的令牌（不是登录密码）'
+        + '\n3. 点「保存并测试连接」，显示"仓库可访问"再点「立即上传」';
     }
     return t;
   }
@@ -510,7 +513,7 @@ module.exports = function createSync(ctx) {
       child.on('error', e => { clearTimeout(timer); resolve({ ok: false, err: String(e.message) }); });
       child.on('close', code => { clearTimeout(timer); resolve({ ok: code === 0, out, err }); });
     });
-    if (!r.ok) return { ok: false, message: '无法访问仓库：' + (r.err || '').replace(/oauth2:[^@]*@/, 'oauth2:***@').slice(0, 200) };
+    if (!r.ok) return { ok: false, message: friendlyGitError('无法访问仓库：' + (r.err || '').replace(/oauth2:[^@]*@/, 'oauth2:***@').slice(0, 200)) };
     const heads = (r.out || '').split('\n').filter(Boolean).map(l => l.split('refs/heads/')[1]).filter(Boolean);
     return { ok: true, message: '仓库可访问', branches: heads, hasSnapshotBranch: heads.includes(branch()) };
   }

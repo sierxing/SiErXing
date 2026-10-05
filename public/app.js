@@ -6094,6 +6094,7 @@ async function syncSectionHTML() {
       </div>
       <div class="field"><label>密码 / 访问令牌（私有仓库需要）</label>
         <input type="password" id="syncToken" value="${st.hasToken ? '••••••••' : ''}" placeholder="${st.hasToken ? '已保存（留空则不修改）' : '粘贴访问令牌'}">
+        <div class="hint" style="margin-top:4px;">AtomGit 已关闭密码登录：令牌去网页端头像 → 设置 → 访问令牌生成，填到这里（不是登录密码）。</div>
       </div>
       <div class="svcRow"><span class="svcLabel">自动上传</span>${syncSwitch('syncAutoPush', st.autoPush, '数据变化后 20 秒自动提交并推送')}</div>
       <div class="svcRow"><span class="svcLabel">启动时拉取</span>${syncSwitch('syncAutoPull', st.autoPull, '每次打开程序时从仓库拉取最新数据')}</div>
@@ -6284,6 +6285,17 @@ let AI_PROVIDERS = AI_PROVIDERS_FALLBACK;
    交互按用户描述来：先点服务商按钮（地址自动填好）→ 填密钥 → 模型以按钮成排出现，
    点哪个加哪个。不给「下拉 + 勾选框 + 先保存才能取列表」那套绕路。 */
 
+/** 视觉模型下拉选项：这条连接的可选+已选模型 + 服务商推荐 + 当前值兜底。
+ *  视觉模型必须跟某条连接走（地址/密钥都在连接上），光一个手填框确实没意义。 */
+function visOptionsHTML(models, cur, preset) {
+  const seen = [];
+  const push = m => { m = String(m || '').trim(); if (m && seen.indexOf(m) < 0) seen.push(m); };
+  (models || []).forEach(push);
+  if (preset) push(preset);
+  if (cur) push(cur);
+  return `<option value="">自动（用服务商推荐）</option>` + seen.map(m =>
+    `<option value="${esc(m)}"${m === cur ? ' selected' : ''}>${esc(m)}</option>`).join('');
+}
 /** 一排服务商按钮。点了就把 Base URL 等自动填好。 */
 function providerButtonsHTML(sel) {
   const list = AI_PROVIDERS;
@@ -6385,8 +6397,8 @@ function connCardHTML(c, provs, ctx) {
       <div class="ccHint" data-role="msghint"></div>
       <details class="ccAdv"><summary>更多选项（视觉模型）</summary>
         <div class="ccRow" style="margin-top:8px;">
-          <label>视觉模型（可选，识图用）
-            <input data-f="visionModel" value="${esc(c.visionModel || '')}" placeholder="${(p && p.vision) || '如 qwen-vl-max / gpt-4o'}">
+          <label>识图用哪个模型（从这条连接的模型里选）
+            <span class="inWrap"><i>👁️</i><select data-f="visionModel" data-role="visSel">${visOptionsHTML(sel.concat(avail), c.visionModel, p && p.vision)}</select></span>
           </label>
         </div>
       </details>
@@ -6539,6 +6551,7 @@ async function renderSettings() {
         if (box) box.innerHTML = modelButtonsHTML(list, sel);
         const chosen = card.querySelector('[data-role="chosenBox"]');
         if (chosen) chosen.innerHTML = chosenChipsHTML(list, sel);
+        refreshVisSel(card);
         const lbl = card.querySelector('[data-role="selCount"]');
         if (lbl) lbl.textContent = '已选模型（' + sel.length + '）';
         if (hint) hint.innerHTML = (r.error ? '<span style="color:var(--warn)">' + esc(r.error) + '</span><br>' : '')
@@ -6556,6 +6569,17 @@ async function renderSettings() {
     if (chips.length) return chips;
     return Array.from(card.querySelectorAll('[data-mbtn].on')).map(x => x.getAttribute('data-mbtn'));
   };
+  /* 视觉模型下拉：选项 = 当前按钮 + 已选小片 + 服务商推荐，保留当前值。
+     每次重绘按钮区后都要跟一句，不然选项还是旧的。 */
+  const refreshVisSel = card => {
+    const sel = card.querySelector('[data-role="visSel"]');
+    if (!sel) return;
+    const cur = sel.value;
+    const models = Array.from(card.querySelectorAll('[data-mbtn]')).map(x => x.getAttribute('data-mbtn'))
+      .concat(Array.from(card.querySelectorAll('[data-chip]')).map(x => x.getAttribute('data-chip')));
+    const p = AI_PROVIDERS.find(x => x.id === (card.getAttribute('data-prov') || ''));
+    sel.innerHTML = visOptionsHTML(models, cur, p && p.vision);
+  };
   /* 刷新一张卡的按钮区：可选模型排成按钮，已选的排成小片。
      ⚠️ sel 必须由调用方传进来 —— 点模型按钮时要先改选中态再重绘，
      如果重绘里再从 DOM 反读，会把刚点的那一下丢掉（点不动的 bug 就是这么来的）。 */
@@ -6568,6 +6592,7 @@ async function renderSettings() {
     if (chosen) chosen.innerHTML = chosenChipsHTML(avail, sel);
     const lbl = card.querySelector('[data-role="selCount"]');
     if (lbl) lbl.textContent = '已选模型（' + sel.length + '）';
+    refreshVisSel(card);
   };
   /* 把卡片上的输入读成连接对象。密钥框留空 = 没碰过，不发 apiKey，
      服务端会保留已存的密钥（否则每次保存都把密钥清成空）。
@@ -6660,6 +6685,7 @@ async function renderSettings() {
         if (box) box.innerHTML = modelButtonsHTML(p.models, keep);
         const chosen = card.querySelector('[data-role="chosenBox"]');
         if (chosen) chosen.innerHTML = chosenChipsHTML(p.models, keep);
+        refreshVisSel(card);
         const lbl = card.querySelector('[data-role="selCount"]');
         if (lbl) lbl.textContent = '已选模型（' + keep.length + '）';
       }
@@ -6690,6 +6716,7 @@ async function renderSettings() {
       if (chosen) chosen.innerHTML = chosenChipsHTML(avail, sel);
       const lbl = card.querySelector('[data-role="selCount"]');
       if (lbl) lbl.textContent = '已选模型（' + sel.length + '）';
+      refreshVisSel(card);
       return;
     }
 
@@ -6732,6 +6759,7 @@ async function renderSettings() {
       if (chosen) chosen.innerHTML = chosenChipsHTML(avail, sel);
       const lbl = card.querySelector('[data-role="selCount"]');
       if (lbl) lbl.textContent = '已选模型（' + sel.length + '）';
+      refreshVisSel(card);
       inp.value = '';
       toast('已加入：' + m + '（记得点「保存设置」）');
       return;

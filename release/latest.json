@@ -1,13 +1,13 @@
 {
-  "version": "1.4.3",
-  "buildVer": "2741ee0bd63e",
-  "payload": "release/payload-1.4.3.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.4.3.sxar?ref=main",
+  "version": "1.4.4",
+  "buildVer": "fc60605f150e",
+  "payload": "release/payload-1.4.4.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.4.4.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
-  "sha256": "9d1b8c04b6541e22ac9ffd05fc09701d85e2df3e94f4dcc73968261c95efd2ef",
-  "size": 494465,
-  "unpackedSize": 1890089,
-  "publishedAt": "2026-10-05T02:49:18.651Z",
-  "notes": "修AI卡片一堆点不动（事件被吞/选中态丢失）+ 卡片可折叠 + 同步保存不再闪刷整页",
+  "sha256": "c116fcb60e26fb37796a7465465a758b4583839d3c2052961ef4062563f04ef0",
+  "size": 495214,
+  "unpackedSize": 1892276,
+  "publishedAt": "2026-10-05T02:58:18.414Z",
+  "notes": "视觉模型改成从本连接模型里下拉选择；同步鉴权失败给AtomGit令牌分步指引；修失败回显模型名",
   "exeRequired": false
 }
