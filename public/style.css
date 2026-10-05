@@ -1123,6 +1123,13 @@ body.aiOpen .nodePanel{right:calc(var(--ai-w, 440px) + 26px);}
 .mChip{display:inline-flex; align-items:center; gap:6px; padding:4px 6px 4px 11px; border:1px solid var(--accent-border); background:var(--accent-soft); color:var(--accent); border-radius:20px; font-size:12px; font-family:var(--mono,ui-monospace,Consolas,monospace);}
 .mChip i{font-style:normal; cursor:pointer; border-radius:50%; width:16px; height:16px; line-height:15px; text-align:center; background:var(--bg); font-size:12px;}
 .mChip i:hover{background:var(--danger); color:#fff;}
+/* 小片上的单独测试按钮 + 结果态 */
+.mT{border:1px solid var(--border); background:var(--bg); color:var(--muted); border-radius:11px;
+  font-size:10.5px; padding:1px 7px; cursor:pointer; font-family:inherit;}
+.mT:hover{color:var(--accent); border-color:var(--accent);}
+.mT:disabled{opacity:.6; cursor:wait;}
+.mChip.ok{border-color:var(--ok); color:var(--ok);}
+.mChip.bad{border-color:var(--danger); color:var(--danger);}
 .ocProbe{font-size:12px; margin-bottom:7px;}
 .ocProbe .ok{color:var(--ok);} .ocProbe .bad{color:var(--danger);} .ocProbe .muted{color:var(--muted);}
 .ccHint{font-size:12px; color:var(--muted); margin-top:6px; line-height:1.7;}

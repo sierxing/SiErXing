@@ -1,13 +1,13 @@
 {
-  "version": "1.5.4",
-  "buildVer": "332f30269e75",
-  "payload": "release/payload-1.5.4.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.5.4.sxar?ref=main",
+  "version": "1.5.5",
+  "buildVer": "68c6dc086c23",
+  "payload": "release/payload-1.5.5.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.5.5.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
-  "sha256": "34cf856b239219dee5ff3727d199072ff5520f5e94a1a2f5e2af9873eb05df42",
-  "size": 500521,
-  "unpackedSize": 1910044,
-  "publishedAt": "2026-10-05T03:51:59.775Z",
-  "notes": "opencode免费款403给两条明路（space-bunny-free直选或走Zen连接）；Agent卡没选模型时不再发注定失败的请求",
+  "sha256": "75d12b55a6177e52d0785263582d05a8140265b8661ac078b68805cdcd71e47f",
+  "size": 501398,
+  "unpackedSize": 1912707,
+  "publishedAt": "2026-10-05T04:00:03.919Z",
+  "notes": "每个已选模型可单独测试连通（小片上点测，结果标在片上）；整卡测试逐个测并列明细",
   "exeRequired": false
 }

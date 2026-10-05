@@ -6312,7 +6312,9 @@ function modelButtonsHTML(models, sel) {
 function chosenChipsHTML(models, sel) {
   const s = sel || [];
   if (!s.length) return '<div class="hint" style="padding:4px 2px;">还没选模型 —— 点上面的模型按钮加入。</div>';
-  return `<div class="mChips">${s.map(m => `<span class="mChip" data-chip="${esc(m)}">${esc(m)}<i title="移除">×</i></span>`).join('')}</div>`;
+  /* 每个小片自带「测」：点一下只测这一个模型，结果直接标在小片上（✅/❌ + 原因）。
+     注意：data-chip 留在外层 span，data-mtest 在按钮上，点「测」不能触发移除。 */
+  return `<div class="mChips">${s.map(m => `<span class="mChip" data-chip="${esc(m)}">${esc(m)}<button type="button" class="mT" data-mtest="${esc(m)}" title="只测试这个模型能否联通">测</button><i title="移除">×</i></span>`).join('')}</div>`;
 }
 
 /** 地址栏只留主机名当副标题：https://api.deepseek.com/v1 → api.deepseek.com */
@@ -6840,6 +6842,30 @@ async function renderSettings() {
       redrawCardModels(card, sel);
       return;
     }
+    /* 只测这一个模型：结果标在小片上，不动其它。必须放移除分支前面，
+       否则点「测」会被当成点小片而删掉模型。 */
+    const mt = e.target.closest('[data-mtest]');
+    if (mt) {
+      const card = mt.closest('.connCard');
+      const m = mt.getAttribute('data-mtest');
+      const cid = card.getAttribute('data-conn');
+      mt.disabled = true; mt.textContent = '…';
+      try {
+        const r = await api('/api/ai/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connId: cid, modelName: m }) });
+        const chip = card.querySelector(`[data-chip="${CSS.escape(m)}"]`);
+        mt.textContent = r.ok ? '✓' : '!';
+        if (chip) {
+          chip.classList.remove('ok', 'bad');
+          chip.classList.add(r.ok ? 'ok' : 'bad');
+          chip.title = r.ok ? ('联通正常' + (r.sample ? ' · 回复：' + r.sample : '')) : ('连不通：' + (r.message || ''));
+        }
+        toast(r.ok ? m + ' 联通正常' : m + ' 连不通');
+      } catch (err) {
+        mt.textContent = '!';
+        toast('测试失败：' + err.message);
+      } finally { mt.disabled = false; if (mt.textContent === '…') mt.textContent = '测'; }
+      return;
+    }
     /* 点已选小片的 × → 移除 */
     const chip = e.target.closest('[data-chip]');
     if (chip) {
@@ -6905,8 +6931,9 @@ async function renderSettings() {
       return;
     }
     if (act === 'test') {
-      /* 测这一条（不是第一条）：先存下去，再按 连接::首选模型 打一句最短的请求。
-         Agent 卡没选模型时不发请求 —— 不带 -m 会命中 CLI 默认模型，
+      /* 测这一条（不是第一条）：先存下去，把已选模型逐个打一遍最短请求，
+         每个的结果都列出来 —— 免得第一个不通就停了，用户不知道第二个其实是通的。
+         Agent 卡没选模型时不发请求：不带 -m 会命中 CLI 默认模型，
          而默认的免费款 403（只能在 OpenCode 内用），发了也是白白报错。 */
       const kind = card.getAttribute('data-kind') || 'api';
       const sel0 = cardSel(card);
@@ -6919,16 +6946,26 @@ async function renderSettings() {
       const hint = card.querySelector('[data-role="msghint"]');
       const oldT = btn.textContent;
       btn.disabled = true; btn.textContent = '测试中…';
-      if (hint) hint.textContent = '正在用这条连接请求一次…';
       try {
         await api('/api/ai/connections', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connections: readConns() }) });
         const cid = card.getAttribute('data-conn');
-        const sel = cardSel(card);
-        const r = await api('/api/ai/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connId: cid, modelName: sel[0] || '' }) });
-        if (hint) hint.innerHTML = r.ok
-          ? `✅ <b>连通正常</b> · 模型 ${esc(r.model)}<br>模型回复：${esc(r.sample || '')}`
-          : `❌ <b>连不通</b>：${esc(r.message || '未知错误')}`;
-        toast(r.ok ? '这条连接正常' : '连不通，见卡片内说明');
+        const models = cardSel(card);
+        const queue = models.length ? models : [''];
+        const rows = [];
+        let okN = 0;
+        for (let i = 0; i < queue.length; i++) {
+          const m = queue[i];
+          if (hint) hint.innerHTML = rows.join('<br>') + `<br>正在测 ${i + 1}/${queue.length}：${esc(m || '(默认模型)')}…`;
+          try {
+            const r = await api('/api/ai/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connId: cid, modelName: m }) });
+            if (r.ok) { okN++; rows.push(`✅ <b>${esc(m || '(默认模型)')}</b> · 回复：${esc(r.sample || '')}`); }
+            else rows.push(`❌ <b>${esc(m || '(默认模型)')}</b>：${esc(r.message || '未知错误')}`);
+          } catch (err) {
+            rows.push(`❌ <b>${esc(m || '(默认模型)')}</b>：${esc(err.message)}`);
+          }
+        }
+        if (hint) hint.innerHTML = rows.join('<br>');
+        toast(okN === queue.length ? '全部 ' + queue.length + ' 个模型都通' : '通 ' + okN + '/' + queue.length + ' 个，见卡片内明细');
       } catch (err) {
         if (hint) hint.textContent = '❌ 测试失败：' + err.message;
       } finally { btn.disabled = false; btn.textContent = oldT; }
