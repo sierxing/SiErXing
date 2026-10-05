@@ -1887,6 +1887,18 @@ body{padding-left:78px;}
 .npSrc .npsrcDel{position:absolute; right:0; top:0;}
 /* 文件夹资料行：路径用等宽小字，继承来的只读 */
 .npFolder .npSrcNote.mono{font-family:var(--mono,ui-monospace,Consolas,monospace); font-size:11px; word-break:break-all; color:var(--muted);}
+/* 教程对话框：正文滚、按钮钉底 —— 不然源码清单一展开，生成按钮就被顶出屏幕 */
+.tutDialog{max-height:calc(100vh - 80px); display:flex; flex-direction:column; top:40px; transform:translateX(-50%);}
+.tdBody{flex:1 1 auto; min-height:0; overflow-y:auto;}
+.tdFoot{
+  flex:none; display:flex; gap:10px; padding:12px 16px;
+  border-top:1px solid var(--border); background:var(--bg);
+  border-radius:0 0 var(--r-lg) var(--r-lg);
+}
+/* 挂载文件夹的文件分组（排在本程序源码清单前面） */
+.tdFolderGrp{margin-bottom:10px;}
+.tdFolderGrp:last-child{margin-bottom:0;}
+.tdFolderHd{display:flex; align-items:center; gap:7px; font-size:12.5px; font-weight:700; margin-bottom:6px; flex-wrap:wrap;}
 /* 教程对话框里的文件夹提示行 */
 .tdFolders{font-size:12.5px; line-height:1.7; margin:2px 0 10px; color:var(--muted);}
 .tdFolderCheck{display:flex; align-items:flex-start; gap:7px; cursor:pointer; color:var(--text);}

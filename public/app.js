@@ -2375,21 +2375,28 @@ function showTutorialDialog(nodeId) {
       <details class="tdCode" id="tdCodeBox">
         <summary>📂 结合项目源码讲解（可选，只读；data/.env/.git 等不会列出）</summary>
         <div class="tdCodeBody">
-          <input id="tdCodeSearch" placeholder="🔍 筛选文件（敲文件名关键字）" autocomplete="off">
+          <input id="tdCodeSearch" placeholder="🔍 筛选文件（敲文件名关键字，挂载的文件夹和本程序都筛）" autocomplete="off">
           <div class="tdCodeHint muted">勾选后教程会对照真实代码讲（类名/调用链要对得上）。单文件最多 24KB，共最多 60KB。</div>
+          <div id="tdFolderFiles"></div>
           <div class="tdCodeList" id="tdCodeList"><span class="muted">展开后加载…</span></div>
           <div class="tdCodeSel muted" id="tdCodeSel"></div>
         </div>
       </details>
-      <div class="toolbarRow" style="margin-top:10px;">
-        <button class="btn primary" id="tdHtml">生成 HTML 图文教程</button>
-        <button class="btn" id="tdMd">生成 Markdown 教程</button>
-      </div>
+    </div>
+    <div class="tdFoot">
+      <button class="btn primary" id="tdHtml">生成 HTML 图文教程</button>
+      <button class="btn" id="tdMd">生成 Markdown 教程</button>
     </div>`;
   document.body.appendChild(div);
   const close = () => div.remove();
   const note = () => (document.getElementById('tdNote').value || '').trim();
-  const codeFiles = () => Array.from(div.querySelectorAll('[data-codefile]:checked')).map(x => x.getAttribute('data-codefile'));
+  /* 收集器：本程序文件回传路径字符串；挂载文件夹的文件回传 {root, path}，
+     服务端会校验 root 确实是本节点挂载过的文件夹（防客户端伪造 root 读任意目录） */
+  const codeFiles = () => Array.from(div.querySelectorAll('[data-codefile]:checked')).map(x => {
+    const root = x.getAttribute('data-coderoot') || '';
+    const p = x.getAttribute('data-codefile') || '';
+    return root ? { root, path: p } : p;
+  });
   // 源码清单懒加载 + 本地筛选（只进过一次网络）
   let codeLoaded = false;
   const codeBox = div.querySelector('#tdCodeBox');
@@ -2405,9 +2412,44 @@ function showTutorialDialog(nodeId) {
       div.querySelector('#tdCodeSel').textContent = n ? `已选 ${n} 个文件` : '';
     }));
   };
+  /* 挂载文件夹的文件：按夹分组排在本程序清单前面，同样走 data-codefile 复选 */
+  const fmtKB2 = n => n > 1048576 ? (n / 1048576).toFixed(1) + 'MB' : Math.max(1, Math.round(n / 1024)) + 'KB';
+  const paintFolderFiles = (groups) => {
+    const host = div.querySelector('#tdFolderFiles');
+    if (!host) return;
+    const q = ((div.querySelector('#tdCodeSearch') || {}).value || '').trim().toLowerCase();
+    host.innerHTML = groups.map(g => {
+      const show = g.files.filter(f => !q || f.path.toLowerCase().includes(q)).slice(0, 300);
+      return `<div class="tdFolderGrp"><div class="tdFolderHd">📁 ${esc(g.name)}<span class="muted">（${g.files.length} 个可读文件${g.files.length > 300 ? '，只列前 300，用上面搜索框筛' : ''}）</span></div>
+        <div class="tdCodeList">${show.length ? show.map(f =>
+          `<label class="tdCodeItem"><input type="checkbox" data-codefile="${esc(f.path)}" data-coderoot="${esc(g.root)}"><span class="tdCodeName">${esc(f.path)}</span><span class="muted">${fmtKB2(f.size)}</span></label>`
+        ).join('') : '<span class="muted">没有匹配的文件，换个关键字试试。</span>'}</div></div>`;
+    }).join('');
+    host.querySelectorAll('[data-codefile]').forEach(c => c.addEventListener('change', () => {
+      const n = codeFiles().length;
+      div.querySelector('#tdCodeSel').textContent = n ? `已选 ${n} 个文件` : '';
+    }));
+  };
+  const loadFolderFiles = async () => {
+    let groups = [];
+    try {
+      const r = await api('/api/nodes/' + nodeId + '/folders');
+      const fs2 = (r.folders || []).filter(f => !f.missing);
+      groups = [];
+      for (const f of fs2) {
+        try {
+          const fr = await api('/api/node-folders/files?path=' + encodeURIComponent(f.path));
+          groups.push({ name: f.name + (f.inherited ? '‹继承›' : ''), root: fr.dir, files: fr.files || [] });
+        } catch (e) { groups.push({ name: f.name + '（读不出来：' + e.message + '）', root: f.path, files: [] }); }
+      }
+      state.tdFolderFiles = groups;
+    } catch (e) { state.tdFolderFiles = []; }
+    paintFolderFiles(state.tdFolderFiles || []);
+  };
   codeBox.addEventListener('toggle', async () => {
     if (!codeBox.open || codeLoaded) return;
     codeLoaded = true;
+    loadFolderFiles();
     const box = div.querySelector('#tdCodeList');
     try {
       const r = await api('/api/code/files');
@@ -2416,7 +2458,7 @@ function showTutorialDialog(nodeId) {
     } catch (e) { box.innerHTML = '<span class="muted">清单加载失败：' + esc(e.message) + '</span>'; }
   });
   const codeSearch = div.querySelector('#tdCodeSearch');
-  if (codeSearch) codeSearch.addEventListener('input', () => paintCodeList(state.tdCodeFiles || []));
+  if (codeSearch) codeSearch.addEventListener('input', () => { paintCodeList(state.tdCodeFiles || []); paintFolderFiles(state.tdFolderFiles || []); });
   div.querySelector('#tdHtml').addEventListener('click', () => { const v = note(), cf = codeFiles(); close(); startTutorial(nodeId, 'html', v, cf, withFolders()); });
   div.querySelector('#tdMd').addEventListener('click', () => { const v = note(), cf = codeFiles(); close(); startTutorial(nodeId, 'md', v, cf, withFolders()); });
   div.querySelector('#tdX').addEventListener('click', close);

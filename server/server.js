@@ -2996,7 +2996,7 @@ function cleanTutorialText(txt, format) {
   }
   return s.trim();
 }
-function streamTutorial(req, res, node, format, note, codeFiles, withFolders) {
+function streamTutorial(req, res, node, format, note, codeFiles, withFolders, folderFiles) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   const model = currentModel();
   const tk = tasks.begin({ type: 'tutorial', title: '生成教程：' + (node ? node.title : ''), goalId: node ? node.goal_id : 0, nodeId: node ? node.id : 0, note: note || '' });
@@ -3015,13 +3015,38 @@ function streamTutorial(req, res, node, format, note, codeFiles, withFolders) {
           send({ status: `已载入 ${files.length} 个源码文件作为讲解依据…` });
         }
       } catch (e) { console.log('[tutorial] 源码载入失败:', e.message); }
-      /* 结合文件夹资料源：本节点 + 祖先挂的文件夹自动带上（除非调用方明确关掉）。
+      /* 结合文件夹资料源：
+           1) 用户在对话框里亲手勾的文件（folderFiles，root 已校验过是挂载过的夹）优先；
+           2) 没勾或不够时，本节点 + 祖先挂的文件夹自动补上（除非调用方明确关掉）。
          RAGFlow 这类场景就靠它 —— 挂一次，全家（本节点及子节点）的教程都能读到。 */
+      const pickedRoots = new Set();
+      if (Array.isArray(folderFiles) && folderFiles.length) {
+        try {
+          const byRoot = new Map();
+          for (const f of folderFiles) {
+            if (!byRoot.has(f.root)) byRoot.set(f.root, []);
+            byRoot.get(f.root).push(f.path);
+          }
+          for (const [root, rels] of byRoot) {
+            const files = readCodeFiles(root, rels);
+            if (files.length) {
+              codeBlock += (codeBlock ? '\n\n' : '') + '【文件夹资料（用户亲手勾的）：' + root + '】\n'
+                + files.map(f => '--- ' + f.path + (f.truncated ? '（过长已截断）' : '') + ' ---\n' + f.text).join('\n');
+              for (const f of files) { codeList.push({ root, path: f.path }); pickedRoots.add(root); }
+              send({ status: `已载入亲手勾的 ${files.length} 个文件…` });
+            }
+          }
+        } catch (e) { console.log('[tutorial] 勾选文件载入失败:', e.message); }
+      }
       if (withFolders !== false) {
         try {
           const entries = nodeFolders.collectFolderEntries(db, Number(node.id));
+          /* 用户亲手勾过的夹就不再自动补一遍（省预算，也免得同一文件读两次）。
+             比路径时两边都解软链：挂载时存的是解开后的，但多一层保险不花钱。 */
+          const realOf = p => { try { return fs.realpathSync(p); } catch (e) { return path.resolve(p); } };
+          const rest = entries.filter(e => !e.missing && !pickedRoots.has(realOf(e.path)));
           const room = Math.max(5000, 60000 - codeBlock.length);
-          const g = nodeFolders.gatherFolderCode(entries.filter(e => !e.missing), room);
+          const g = nodeFolders.gatherFolderCode(rest, room);
           if (g.list.length) {
             codeBlock += (codeBlock ? '\n\n' : '') + g.block;
             for (const f of g.list) codeList.push({ root: f.root, path: f.path });
@@ -3700,15 +3725,37 @@ function redactText(raw) {
   if (tutGenMatch && method === 'POST') {
     const n = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(tutGenMatch[1]));
     if (!n) return sendJSON(res, 404, { error: '节点不存在' });
-    let format = 'md', note = '', codeFiles = [], withFolders = true;
+    let format = 'md', note = '', codeFiles = [], withFolders = true, folderFiles = [];
     try {
       const b = await readBody(req);
       format = b.format === 'html' ? 'html' : 'md';
       note = String(b.note || '').trim().slice(0, 500);
-      if (Array.isArray(b.codeFiles)) codeFiles = b.codeFiles.map(x => String(x || '').slice(0, 160)).filter(Boolean).slice(0, 12);
+      if (Array.isArray(b.codeFiles)) {
+        /* 字符串 = 本程序文件；{root, path} = 挂载文件夹里勾的。
+           root 必须确实是本节点（或祖先）挂载过的文件夹 ——
+           否则客户端伪造一个 root 就能读服务器上任意目录。 */
+        let allowed = [];
+        try {
+          allowed = nodeFolders.collectFolderEntries(db, n.id).filter(f => !f.missing).map(f => {
+            try { return fs.realpathSync(f.path); } catch (e) { return path.resolve(f.path); }
+          });
+        } catch (e) {}
+        for (const x of b.codeFiles) {
+          if (typeof x === 'string') { const s = x.slice(0, 160); if (s) codeFiles.push(s); }
+          else if (x && typeof x === 'object') {
+            const rt = String(x.root || ''), rel = String(x.path || '').slice(0, 160);
+            if (!rt || !rel || rel.includes('..')) continue;
+            let real = '';
+            try { real = fs.realpathSync(rt); } catch (e) { continue; }
+            if (!allowed.includes(real)) continue;
+            folderFiles.push({ root: real, path: rel });
+          }
+          if (codeFiles.length + folderFiles.length >= 24) break;
+        }
+      }
       if (b.withFolders === false) withFolders = false;
     } catch (e) {}
-    return streamTutorial(req, res, n, format, note, codeFiles, withFolders);
+    return streamTutorial(req, res, n, format, note, codeFiles, withFolders, folderFiles);
   }
   const tutEditMatch = p.match(/^\/api\/tutorials\/(\d+)\/edit$/);
   if (tutEditMatch && method === 'POST') {
@@ -4033,6 +4080,17 @@ function extractEbookPrefFromAnswers(answers) {
       top: files.slice(0, 30),
       hasReadme: files.some(f => /(^|\/)readme/i.test(f.path))
     });
+  }
+  if (p === '/api/node-folders/files' && method === 'GET') {
+    /* 教程对话框里勾选用：返回完整可读清单（前端只渲染前 300，靠搜索筛）。
+       同样走挂载校验 —— 没挂过的目录不给列。 */
+    const chk = nodeFolders.validateAttachFolder(u.searchParams.get('path'), { appDir: APP_DIR, dataDir: DATA_DIR });
+    if (!chk.ok) return sendJSON(res, 400, { error: chk.error });
+    let files = [];
+    try { files = listCodeFiles(chk.dir); } catch (e) {
+      return sendJSON(res, 500, { error: '列不出来：' + (e.message || e) });
+    }
+    return sendJSON(res, 200, { dir: chk.dir, files });
   }
 
   if (p === '/api/component-pins' && method === 'GET') {
