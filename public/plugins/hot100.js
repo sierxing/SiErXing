@@ -51,6 +51,11 @@ function statementHTML(raw) {
   return fencesToPre(s);   // 已是 HTML：顺带把混在里面的 ``` 围栏也转成代码块
 }
 const DIFF_CHIP = { EASY: ['简单', 'ok'], MEDIUM: ['中等', 'warn'], HARD: ['困难', 'danger'] };
+/* 本地今天（YYYY-MM-DD），复习到期判断用 */
+function todayStr() {
+  const t = new Date();
+  return t.getFullYear() + '-' + String(t.getMonth() + 1).padStart(2, '0') + '-' + String(t.getDate()).padStart(2, '0');
+}
 function diffChipHTML(d) {
   const c = DIFF_CHIP[d] || ['未知', 'gray'];
   return `<span class="chip ${c[1]}">${c[0]}</span>`;
@@ -90,19 +95,24 @@ function probRowHTML(p) {
 async function renderDailyPage() {
   const g = state.goal;
   app.innerHTML = '<p class="muted">加载刷题数据…</p>';
-  const [list, daily] = await Promise.all([
+  const [list, daily, due] = await Promise.all([
     api('/api/problems'),
-    api('/api/goals/' + g.id + '/daily')
+    api('/api/goals/' + g.id + '/daily'),
+    api('/api/reviews/due').catch(() => ({ due: [] }))
   ]);
   state.problems = list.problems || [];
   state.problemGroups = list.groups || [];
   state.daily = daily;
+  state.due = due;
   drawDailyPage();
 }
 function drawDailyPage() {
   /* 先记住当前哪些分组是展开的，再重绘 —— 否则改一次完成状态就把列表全收起了 */
   rememberOpenGroups();
   const g = state.goal;
+  const du = state.due || {};
+  const dueList = du.due || [];
+  const upcoming = du.upcoming || null;
   const d = state.daily || { items: [], stats: {}, hasProblems: false };
   const st = d.stats || {};
   const items = d.items || [];
@@ -135,6 +145,24 @@ function drawDailyPage() {
     <div class="statCard"><div class="scNum">${st.solved || 0}<span class="scOf">/${st.total || 0}</span></div><div class="scLabel">累计通过</div></div>
     <div class="statCard"><div class="scNum">${st.streak || 0}<span class="scOf"> 天</span></div><div class="scLabel">连续打卡</div></div>
     <div class="statCard"><div class="scNum">${st.attempts || 0}</div><div class="scLabel">累计作答</div></div>
+  </div>
+  <div class="secCard">
+    <div class="secHead"><span>🔁 今日复习</span><span class="chip gray">艾宾浩斯</span><div class="spacer"></div>
+      <span class="muted" style="font-size:12px;">${dueList.length ? '到期 ' + dueList.length + ' 道' : (upcoming ? '下次 ' + esc(upcoming.date) + '（' + upcoming.count + ' 道）' : '还没加入复习')}</span></div>
+    ${dueList.length ? `<div class="dailyItems">${dueList.map(d => {
+      const p = d.problem || {};
+      return `<div class="dailyItem">
+        <span class="diIdx">🔁</span>
+        <div class="diMain">
+          <a class="diTitle" href="#/p/${p.id}"><b>${p.fid}.</b> ${esc(p.title || '')}</a>
+          <div class="diMeta">${diffChipHTML(p.difficulty)}<span class="chip gray">第 ${d.stage + 1} 轮 · 隔 ${d.interval} 天</span>${d.mind && d.mind.hasApproach ? '' : '<span class="chip warn">思路未写</span>'}</div>
+        </div>
+        <a class="btn tiny" href="#/p/${p.id}">去复习</a>
+        <button class="btn tiny ok" data-grade="${p.id}:remembered" title="记得很牢，进下一轮">✓ 记住了</button>
+        <button class="btn tiny" data-grade="${p.id}:fuzzy" title="有点模糊，退一格">🤔 模糊</button>
+        <button class="btn tiny danger" data-grade="${p.id}:forgotten" title="完全想不起来，明天再来">❌ 忘了</button>
+      </div>`;
+    }).join('')}</div>` : `<div class="muted" style="padding:12px 2px;">${upcoming ? '今天没有到期的复习，好好保持 🎉' : '做对一道题会自动加入复习（1 / 2 / 4 / 7 / 15 / 30 / 60 天），到期了这里会提醒你。'}</div>`}
   </div>
   <div class="secCard">
     <div class="secHead"><span>📌 今日任务</span><span class="chip gray">${esc(d.date || '')}</span><div class="spacer"></div>
@@ -188,6 +216,7 @@ function drawDailyPage() {
       const l = await api('/api/problems');
       state.problems = l.problems; state.problemGroups = l.groups;
       state.daily = await api('/api/goals/' + g.id + '/daily');
+      state.due = await api('/api/reviews/due').catch(() => ({ due: [] }));
       drawDailyPage();
       toast(done ? '已完成 ✓' : '已取消');
     } catch (e) { toast(e.message); }
@@ -200,8 +229,23 @@ function drawDailyPage() {
       const l = await api('/api/problems');
       state.problems = l.problems; state.problemGroups = l.groups;
       state.daily = await api('/api/goals/' + g.id + '/daily');
+      state.due = await api('/api/reviews/due').catch(() => ({ due: [] }));
       drawDailyPage();
       toast(done ? '已标记完成 ✓' : '已取消完成');
+    } catch (e) { toast(e.message); }
+  }));
+  app.querySelectorAll('[data-grade]').forEach(b => b.addEventListener('click', async () => {
+    const [pid, result] = (b.getAttribute('data-grade') || '').split(':');
+    try {
+      const r = await api('/api/reviews/' + Number(pid) + '/grade', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ result }) });
+      const l = await api('/api/problems');
+      state.problems = l.problems; state.problemGroups = l.groups;
+      state.daily = await api('/api/goals/' + g.id + '/daily');
+      state.due = await api('/api/reviews/due').catch(() => ({ due: [] }));
+      state.due = await api('/api/reviews/due').catch(() => ({ due: [] }));
+      drawDailyPage();
+      const tips = { remembered: '很好，间隔拉长了 ✓', fuzzy: '退回上一轮，多见一次', forgotten: '没关系，明天再来一次' };
+      toast(tips[result] || '已记录');
     } catch (e) { toast(e.message); }
   }));
   app.querySelectorAll('[data-ide]').forEach(b => b.addEventListener('click', () => openProblemInIDE(Number(b.getAttribute('data-ide')))));
@@ -274,14 +318,20 @@ async function openProblemInIDE(pid) {
 }
 async function renderProblemPage(pid) {
   app.innerHTML = '<p class="muted">加载题目…</p>';
-  const d = await api('/api/problems/' + pid);
+  const [d, mind] = await Promise.all([
+    api('/api/problems/' + pid),
+    api('/api/problems/' + pid + '/mind').catch(() => ({ approach: '', pitfalls: '', review: null }))
+  ]);
   state.problem = d;
+  state.mind = mind;
   drawProblemPage(pid);
 }
 function drawProblemPage(pid) {
   const d = state.problem || {};
   const p = d.problem || {};
   const recs = d.records || [];
+  const mind = state.mind || {};
+  const rev = mind.review || null;
   const passedCount = recs.filter(r => r.passed).length;
   app.innerHTML = `<div class="probPage">
     <div class="probHead">
@@ -301,12 +351,30 @@ function drawProblemPage(pid) {
         : (recs.length ? '<span class="chip warn">未通过（已作答 ' + recs.length + ' 次）</span>' : '<span class="chip gray">未作答</span>')}
       <span class="muted">知识点：${(p.groups || []).join(' / ') || '—'}</span>
       ${p.done_manual >= 0 ? '<span class="chip gray" title="当前完成状态是手动指定的，不随作答记录变化">手动状态</span>' : ''}
+      ${rev
+        ? `<span class="chip gray" title="按 1 / 2 / 4 / 7 / 15 / 30 / 60 天复习">🔁 复习第 ${rev.stage + 1} 轮 · ${rev.next_due <= todayStr() ? '今天到期' : rev.next_due + ' 再见'}</span>`
+        : ''}
       ${d.notice ? `<span class="chip danger">题面获取提示：${esc(d.notice)}</span>` : ''}
     </div>
     <div class="probCols">
       <div class="secCard probStmtCard">
         <div class="secHead"><span>📄 题目描述</span><div class="spacer"></div>${p.statement_at ? `<span class="muted" style="font-size:11.5px;">缓存于 ${esc(fmtDate(p.statement_at))}</span>` : ''}</div>
         <div class="lcStatement">${statementHTML(p.statement)}</div>
+      </div>
+      <div class="secCard probRecCard">
+        <div class="secHead"><span>🧠 解题思路（用自己的话）</span><div class="spacer"></div><button class="btn tiny" id="polishBtn" title="把草稿整理成：关键洞察 / 步骤 / 复杂度 / 记忆钩子">✨ AI 帮我梳理</button><button class="btn tiny primary" id="mindSaveBtn">保存</button></div>
+        <div class="field"><textarea id="mindApproach" placeholder="做出来之后，用自己的话写下来：关键洞察是什么？分几步？为什么这样是对的？&#10;写不出来 = 还没真懂；能写出来，下次才做得出来。">${esc(mind.approach || '')}</textarea></div>
+        <div class="field"><label style="font-size:12px;color:var(--muted);">⚠️ 我的易错点（下次复习先看这里）</label><textarea id="mindPitfalls" rows="3" placeholder="比如：边界条件漏了 n=0；哈希表 key 写反了；复杂度算错了…">${esc(mind.pitfalls || '')}</textarea></div>
+        <div class="toolbarRow">
+          ${rev
+            ? `<span class="chip gray">🔁 第 ${rev.stage + 1} 轮 · ${esc(rev.next_due)}</span>
+               <button class="btn tiny ok" data-pgrade="remembered">✓ 记住了</button>
+               <button class="btn tiny" data-pgrade="fuzzy">🤔 模糊</button>
+               <button class="btn tiny danger" data-pgrade="forgotten">❌ 忘了</button>
+               <button class="btn tiny" id="unenqueueBtn">移出复习</button>`
+            : `<button class="btn tiny" id="enqueueBtn">＋ 加入复习（1 / 2 / 4 / 7 / 15 / 30 / 60 天）</button>`}
+        </div>
+        <div class="hint" id="mindMsg" style="margin-top:6px;"></div>
       </div>
       <div class="secCard probRecCard">
         <div class="secHead"><span>📝 我的作答记录（${recs.length}）</span><div class="spacer"></div><button class="btn tiny primary" id="addRecBtn">＋ 记录一次作答</button></div>
@@ -335,6 +403,62 @@ function drawProblemPage(pid) {
     try { const nd = await api('/api/problems/' + pid + '?refresh=1'); state.problem = nd; drawProblemPage(pid); toast('题面已更新'); } catch (e) { toast(e.message); drawProblemPage(pid); }
   });
   document.getElementById('addRecBtn').addEventListener('click', () => showRecordForm(pid));
+  /* 思路内化：保存思路 + 易错点 */
+  const mindSave = document.getElementById('mindSaveBtn');
+  if (mindSave) mindSave.addEventListener('click', async () => {
+    const msg = document.getElementById('mindMsg');
+    try {
+      await api('/api/problems/' + pid + '/mind', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+        approach: document.getElementById('mindApproach').value,
+        pitfalls: document.getElementById('mindPitfalls').value
+      }) });
+      state.mind = await api('/api/problems/' + pid + '/mind').catch(() => state.mind);
+      drawProblemPage(pid);
+      toast('思路已保存 ✓');
+    } catch (e) { if (msg) msg.textContent = '保存失败：' + e.message; else toast(e.message); }
+  });
+  /* AI 梳理：把草稿整理成结构，填回输入框由用户确认保存（不直接覆盖存档） */
+  const polish = document.getElementById('polishBtn');
+  if (polish) polish.addEventListener('click', async () => {
+    const msg = document.getElementById('mindMsg');
+    const draft = document.getElementById('mindApproach').value;
+    if (!draft.trim()) { toast('先写几句自己的思路，AI 才好帮你梳理'); return; }
+    polish.disabled = true; polish.textContent = '梳理中…';
+    try {
+      const lastCode = (recs.length && recs[0].code) || '';
+      const r = await api('/api/problems/' + pid + '/mind/polish', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ draft, code: lastCode }) });
+      document.getElementById('mindApproach').value = r.text || draft;
+      if (msg) msg.textContent = '已按"关键洞察 / 步骤 / 复杂度 / 记忆钩子"整理好，检查一下再点保存。';
+      toast('已梳理，确认后点保存');
+    } catch (e) { if (msg) msg.textContent = '梳理失败：' + e.message; else toast(e.message); }
+    finally { polish.disabled = false; polish.textContent = '✨ AI 帮我梳理'; }
+  });
+  /* 复习流：加入 / 移出 / 打分 */
+  const refreshMind = async () => {
+    state.problem = await api('/api/problems/' + pid);
+    state.mind = await api('/api/problems/' + pid + '/mind').catch(() => state.mind);
+    drawProblemPage(pid);
+  };
+  const eq = document.getElementById('enqueueBtn');
+  if (eq) eq.addEventListener('click', async () => {
+    try {
+      await api('/api/reviews/' + pid + '/enqueue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ goal_id: state.goal ? state.goal.id : 0 }) });
+      await refreshMind();
+      toast('已加入复习，明天见 ✓');
+    } catch (e) { toast(e.message); }
+  });
+  const uq = document.getElementById('unenqueueBtn');
+  if (uq) uq.addEventListener('click', async () => {
+    if (!confirm('移出复习流？思路和易错点会保留，只是以后不再提醒。')) return;
+    try { await api('/api/reviews/' + pid, { method: 'DELETE' }); await refreshMind(); toast('已移出复习'); } catch (e) { toast(e.message); }
+  });
+  app.querySelectorAll('[data-pgrade]').forEach(b => b.addEventListener('click', async () => {
+    try {
+      await api('/api/reviews/' + pid + '/grade', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ result: b.getAttribute('data-pgrade') }) });
+      await refreshMind();
+      toast({ remembered: '很好，间隔拉长了 ✓', fuzzy: '退回上一轮，多见一次', forgotten: '没关系，明天再来一次' }[b.getAttribute('data-pgrade')] || '已记录');
+    } catch (e) { toast(e.message); }
+  }));
   app.querySelectorAll('[data-pdone]').forEach(b => b.addEventListener('click', async () => {
     const done = b.getAttribute('data-done') !== '1';
     try {

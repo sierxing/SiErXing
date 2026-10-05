@@ -57,6 +57,23 @@ CREATE TABLE IF NOT EXISTS daily_plans (
   items TEXT NOT NULL DEFAULT '[]',
   created_at TEXT NOT NULL,
   UNIQUE(goal_id, date)
+);
+/* 艾宾浩斯复习卡：一题一行。stage 是 REVIEW_STEPS 的下标，
+   next_due 是下次该复习的日期（YYYY-MM-DD）。 */
+CREATE TABLE IF NOT EXISTS review_cards (
+  problem_id INTEGER PRIMARY KEY,
+  goal_id INTEGER NOT NULL DEFAULT 0,
+  stage INTEGER NOT NULL DEFAULT 0,
+  next_due TEXT NOT NULL DEFAULT '',
+  last_result TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT ''
+);
+/* 思路内化：用户自己的话写的解题思路 + 易错点，一题一行 */
+CREATE TABLE IF NOT EXISTS problem_mind (
+  problem_id INTEGER PRIMARY KEY,
+  approach TEXT NOT NULL DEFAULT '',
+  pitfalls TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT ''
 );`;
 
 module.exports = {
@@ -102,7 +119,9 @@ module.exports = {
     return {
       problems: ctx.db.prepare('SELECT id,fid,slug,title,difficulty,link,groups,tags,sort_index,done_manual,synced_at FROM problems').all(),
       records: ctx.db.prepare('SELECT * FROM practice_records').all(),
-      plans: ctx.db.prepare('SELECT * FROM daily_plans').all()
+      plans: ctx.db.prepare('SELECT * FROM daily_plans').all(),
+      reviews: ctx.db.prepare('SELECT * FROM review_cards').all(),
+      minds: ctx.db.prepare('SELECT * FROM problem_mind').all()
     };
   },
   importData(data, ctx) {
@@ -122,6 +141,10 @@ module.exports = {
       .run(x.id, x.problem_id, x.goal_id, x.date, x.passed, x.language, x.code, x.notes, x.minutes, x.created_at);
     for (const x of (data.plans || [])) db.prepare('INSERT OR REPLACE INTO daily_plans (id,goal_id,date,items,created_at) VALUES (?,?,?,?,?)')
       .run(x.id, x.goal_id, x.date, x.items, x.created_at);
+    for (const x of (data.reviews || [])) db.prepare('INSERT OR REPLACE INTO review_cards (problem_id,goal_id,stage,next_due,last_result,updated_at) VALUES (?,?,?,?,?,?)')
+      .run(x.problem_id, x.goal_id || 0, x.stage || 0, x.next_due || '', x.last_result || '', x.updated_at || '');
+    for (const x of (data.minds || [])) db.prepare('INSERT OR REPLACE INTO problem_mind (problem_id,approach,pitfalls,updated_at) VALUES (?,?,?,?)')
+      .run(x.problem_id, x.approach || '', x.pitfalls || '', x.updated_at || '');
   },
   clearAll(ctx) {
     ctx.db.exec('DELETE FROM practice_records; DELETE FROM daily_plans;');
@@ -209,6 +232,8 @@ module.exports = {
            * 若记的是「未通过」而当天任务已勾选，也要取消 —— 否则题目标成未通过、
            * 今日任务却还打勾，两处状态永远对不上（用户报的「不同步」有一半是这个）。 */
           syncDailyItem(goalId, date, pid, rid, passed ? true : null);
+          /* 通过 = 值得记住：自动加入艾宾浩斯复习（已在复习流里就不动） */
+          if (passed) { try { enqueueReview(pid, goalId); } catch (e) {} }
           return sendJSON(res, 201, { id: rid });
         }
     }
@@ -236,6 +261,8 @@ module.exports = {
             .run(date, passed, language, code, notes, minutes, goalId, rid);
           /* 通过状态变了才动当日任务，避免只是改个笔记就把勾去掉了 */
           if (passed !== old.passed) syncDailyItem(goalId, date, old.problem_id, rid, passed ? true : false);
+          /* 改成通过也算"做出来了"，同样进复习流 */
+          if (passed && !old.passed) { try { enqueueReview(old.problem_id, goalId); } catch (e) {} }
           return sendJSON(res, 200, { ok: true, id: rid });
         }
     }
@@ -275,6 +302,114 @@ module.exports = {
           }
           const full = problemWithStatus().find(x => x.id === pid) || null;
           return sendJSON(res, 200, { ok: true, done_manual: v, problem: full, stats: practiceStats() });
+        }
+    }
+  },
+  /* ---- 思路内化 + 艾宾浩斯复习 ---- */
+  {
+    method: 'GET', path: '/api/reviews/due',
+    handler: async (req, res, u, ctx) => {
+      const p = u.pathname, method = req.method;
+        if (p === '/api/reviews/due' && method === 'GET') {
+          return sendJSON(res, 200, dueReviews());
+        }
+    }
+  },
+  {
+    method: 'POST', pattern: /^\/api\/reviews\/(\d+)\/enqueue$/,
+    handler: async (req, res, u, ctx) => {
+      const p = u.pathname, method = req.method;
+        const m = p.match(/^\/api\/reviews\/(\d+)\/enqueue$/);
+        if (m && method === 'POST') {
+          const pid = Number(m[1]);
+          if (!db.prepare('SELECT id FROM problems WHERE id = ?').get(pid)) return sendJSON(res, 404, { error: '题目不存在' });
+          let body = {};
+          try { body = await readBody(req); } catch (e) {}
+          enqueueReview(pid, Number(body.goal_id) || 0);
+          return sendJSON(res, 200, { ok: true, card: db.prepare('SELECT * FROM review_cards WHERE problem_id = ?').get(pid) });
+        }
+    }
+  },
+  {
+    method: 'POST', pattern: /^\/api\/reviews\/(\d+)\/grade$/,
+    handler: async (req, res, u, ctx) => {
+      const p = u.pathname, method = req.method;
+        const m = p.match(/^\/api\/reviews\/(\d+)\/grade$/);
+        if (m && method === 'POST') {
+          const pid = Number(m[1]);
+          const body = await readBody(req);
+          const result = String((body && body.result) || '');
+          if (!['remembered', 'fuzzy', 'forgotten'].includes(result)) return sendJSON(res, 400, { error: 'result 只能是 remembered / fuzzy / forgotten' });
+          const card = gradeReview(pid, result);
+          if (!card) return sendJSON(res, 404, { error: '这道题不在复习流里' });
+          return sendJSON(res, 200, { ok: true, card });
+        }
+    }
+  },
+  {
+    method: 'DELETE', pattern: /^\/api\/reviews\/(\d+)$/,
+    handler: async (req, res, u, ctx) => {
+      const p = u.pathname, method = req.method;
+        const m = p.match(/^\/api\/reviews\/(\d+)$/);
+        if (m && method === 'DELETE') {
+          db.prepare('DELETE FROM review_cards WHERE problem_id = ?').run(Number(m[1]));
+          return sendJSON(res, 200, { ok: true });
+        }
+    }
+  },
+  {
+    method: 'GET', pattern: /^\/api\/problems\/(\d+)\/mind$/,
+    handler: async (req, res, u, ctx) => {
+      const p = u.pathname, method = req.method;
+        const m = p.match(/^\/api\/problems\/(\d+)\/mind$/);
+        if (m && method === 'GET') {
+          const pid = Number(m[1]);
+          if (!db.prepare('SELECT id FROM problems WHERE id = ?').get(pid)) return sendJSON(res, 404, { error: '题目不存在' });
+          const row = db.prepare('SELECT * FROM problem_mind WHERE problem_id = ?').get(pid) || {};
+          const card = db.prepare('SELECT * FROM review_cards WHERE problem_id = ?').get(pid) || null;
+          return sendJSON(res, 200, { approach: row.approach || '', pitfalls: row.pitfalls || '', review: card });
+        }
+    }
+  },
+  {
+    method: 'POST', pattern: /^\/api\/problems\/(\d+)\/mind$/,
+    handler: async (req, res, u, ctx) => {
+      const p = u.pathname, method = req.method;
+        const m = p.match(/^\/api\/problems\/(\d+)\/mind$/);
+        if (m && method === 'POST') {
+          const pid = Number(m[1]);
+          if (!db.prepare('SELECT id FROM problems WHERE id = ?').get(pid)) return sendJSON(res, 404, { error: '题目不存在' });
+          const body = await readBody(req);
+          /* 思路和易错点是用户自己的话，长度只做上限保护，不做内容改写 */
+          const approach = String((body && body.approach) || '').slice(0, 20000);
+          const pitfalls = String((body && body.pitfalls) || '').slice(0, 20000);
+          db.prepare('INSERT INTO problem_mind (problem_id,approach,pitfalls,updated_at) VALUES (?,?,?,?) ON CONFLICT(problem_id) DO UPDATE SET approach=excluded.approach, pitfalls=excluded.pitfalls, updated_at=excluded.updated_at')
+            .run(pid, approach, pitfalls, nowISO());
+          return sendJSON(res, 200, { ok: true });
+        }
+    }
+  },
+  {
+    method: 'POST', pattern: /^\/api\/problems\/(\d+)\/mind\/polish$/,
+    handler: async (req, res, u, ctx) => {
+      const p = u.pathname, method = req.method;
+        const m = p.match(/^\/api\/problems\/(\d+)\/mind\/polish$/);
+        if (m && method === 'POST') {
+          const pid = Number(m[1]);
+          const prob = db.prepare('SELECT * FROM problems WHERE id = ?').get(pid);
+          if (!prob) return sendJSON(res, 404, { error: '题目不存在' });
+          const body = await readBody(req);
+          const draft = String((body && body.draft) || '').slice(0, 8000);
+          if (!draft.trim()) return sendJSON(res, 400, { error: '先写几句自己的思路，AI 才好帮你梳理' });
+          if (typeof aiText !== 'function') return sendJSON(res, 500, { error: '当前环境没有可用 AI' });
+          const code = String((body && body.code) || '').slice(0, 8000);
+          const prompt = '一道 LeetCode 题目【' + prob.fid + '.' + prob.title + '】，用户刚做出来，写了份口语化的解题思路草稿。请帮他整理成"关键洞察 / 解题步骤（分条） / 复杂度 / 一句话记忆钩子"的结构。要求：不改变他的原意，不堆砌套话；他写错的地方要指出来。\n\n【用户草稿】\n' + draft + (code ? '\n\n【他的代码（仅供参考）】\n' + code : '');
+          try {
+            const text = await aiText(prompt, (currentModel && currentModel()) || '', 120000);
+            return sendJSON(res, 200, { ok: true, text: String(text || '') });
+          } catch (e) {
+            return sendJSON(res, 500, { error: e.message || 'AI 梳理失败' });
+          }
         }
     }
   },
@@ -574,6 +709,59 @@ function syncDailyItem(goalId, date, pid, rid, done) {
     changed = true;
   }
   if (changed) db.prepare('UPDATE daily_plans SET items = ? WHERE id = ?').run(JSON.stringify(items), plan.id);
+}
+/** 艾宾浩斯复习间隔（天）：通过后第 1 天首次复习，一路拉长到 60 天。
+ *  记住了进一格，模糊退一格，忘记回到第 0 格（明天再见）。 */
+const REVIEW_STEPS = [1, 2, 4, 7, 15, 30, 60];
+function addDays(dateStr, n) {
+  const d = new Date(String(dateStr).slice(0, 10) + 'T00:00:00');
+  d.setDate(d.getDate() + n);
+  const p2 = x => String(x).padStart(2, '0');
+  return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
+}
+/** 通过后自动加入复习（幂等：已在复习流里就不动，复习进度只认打分）。 */
+function enqueueReview(pid, goalId) {
+  const has = db.prepare('SELECT problem_id FROM review_cards WHERE problem_id = ?').get(pid);
+  if (has) return has;
+  const t = nowISO();
+  db.prepare('INSERT INTO review_cards (problem_id,goal_id,stage,next_due,last_result,updated_at) VALUES (?,?,?,?,?,?)')
+    .run(pid, goalId || 0, 0, addDays(todayStr(), REVIEW_STEPS[0]), '', t);
+  return { problem_id: pid, stage: 0 };
+}
+/** 打分推进。返回更新后的卡（顺手把更新时间一起写了）。 */
+function gradeReview(pid, result) {
+  const card = db.prepare('SELECT * FROM review_cards WHERE problem_id = ?').get(pid);
+  if (!card) return null;
+  const max = REVIEW_STEPS.length - 1;
+  let stage = Number(card.stage) || 0;
+  if (result === 'remembered') stage = Math.min(stage + 1, max);
+  else if (result === 'fuzzy') stage = Math.max(stage - 1, 0);
+  else stage = 0;
+  const next = addDays(todayStr(), REVIEW_STEPS[stage]);
+  db.prepare('UPDATE review_cards SET stage=?, next_due=?, last_result=?, updated_at=? WHERE problem_id=?')
+    .run(stage, next, result, nowISO(), pid);
+  return { ...card, stage, next_due: next, last_result: result };
+}
+/** 今天到期的复习（带题信息 + 有没有写思路），按到期先后排 */
+function dueReviews() {
+  const today = todayStr();
+  const cards = db.prepare('SELECT * FROM review_cards WHERE next_due <= ? ORDER BY next_due, problem_id').all(today);
+  if (!cards.length) return { due: [], upcoming: null };
+  const probs = {};
+  for (const p of problemWithStatus()) probs[p.id] = p;
+  const minds = {};
+  try { for (const m of db.prepare('SELECT problem_id, approach, pitfalls FROM problem_mind').all()) minds[m.problem_id] = { hasApproach: !!(m.approach || '').trim(), hasPitfalls: !!(m.pitfalls || '').trim() }; } catch (e) {}
+  const due = cards.map(c => ({
+    ...c, interval: REVIEW_STEPS[Math.min(Number(c.stage) || 0, REVIEW_STEPS.length - 1)],
+    problem: probs[c.problem_id] ? { id: probs[c.problem_id].id, fid: probs[c.problem_id].fid, title: probs[c.problem_id].title, difficulty: probs[c.problem_id].difficulty } : null,
+    mind: minds[c.problem_id] || { hasApproach: false, hasPitfalls: false }
+  }));
+  let upcoming = null;
+  try {
+    const nx = db.prepare('SELECT next_due, COUNT(*) AS n FROM review_cards WHERE next_due > ? GROUP BY next_due ORDER BY next_due LIMIT 1').get(today);
+    if (nx) upcoming = { date: nx.next_due, count: nx.n };
+  } catch (e) {}
+  return { due, upcoming };
 }
 function problemWithStatus() {
   const stat = {};
