@@ -171,7 +171,61 @@ function dibsOfIco(ico) {
   return out;
 }
 
-module.exports = { decodePngRGBA, toDib, convertIco, dibsOfIco, isPng, isDib };
+/* 标准 CRC-32（PNG 分块校验用），查表法 */
+let CRC_TABLE = null;
+function crc32(buf) {
+  if (!CRC_TABLE) {
+    CRC_TABLE = new Int32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+      CRC_TABLE[n] = c;
+    }
+  }
+  let c = -1;
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ -1) >>> 0;
+}
+
+/** DIB（BGRA，自下而上）→ PNG。
+ *  用途：把 exe 里**真正嵌的那张**图标导出成能看的图片。
+ *  因为 Linux 的 GNOME 文件管理器**不读 PE 图标**（只看共享 MIME 里的通用/wine 图标），
+ *  在本机文件管理器上根本看不出 exe 嵌得对不对 —— 导出成 PNG 才能自己核对。 */
+function dibToPng(dib) {
+  const w = dib.readInt32LE(4), h2 = dib.readInt32LE(8);
+  if (h2 % 2 !== 0) throw new Error('biHeight 应为偶数（颜色图+掩码），当前 ' + h2);
+  const h = h2 / 2, xorOff = 40;
+  const raw = Buffer.alloc((w * 4 + 1) * h);
+  for (let y = 0; y < h; y++) {
+    const o = y * (w * 4 + 1);
+    raw[o] = 0;                                     // 行过滤器：None
+    const s = (h - 1 - y) * w * 4;                  // DIB 自下而上 → PNG 自上而下
+    for (let x = 0; x < w; x++) {
+      const sp = s + x * 4, dp = o + 1 + x * 4;
+      raw[dp] = dib[xorOff + sp + 2];                // R
+      raw[dp + 1] = dib[xorOff + sp + 1];            // G
+      raw[dp + 2] = dib[xorOff + sp];                // B
+      raw[dp + 3] = dib[xorOff + sp + 3];            // A
+    }
+  }
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    const td = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(td));
+    return Buffer.concat([len, td, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4);
+  ihdr[8] = 8; ihdr[9] = 6;                          // 8 位 RGBA
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', zlib.deflateSync(raw, { level: 9 })),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+module.exports = { decodePngRGBA, toDib, dibToPng, convertIco, dibsOfIco, isPng, isDib };
 
 if (require.main === module) {
   const file = process.argv[2];

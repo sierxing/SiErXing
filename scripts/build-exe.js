@@ -56,10 +56,12 @@ const argOf = name => {
   return hit ? hit.slice(name.length + 3) : '';
 };
 const hasFlag = name => argv.includes('--' + name);
-const NODE_VER = argOf('node') || DEFAULT_NODE;
-const OUT_NAME = argOf('out') || EXE_NAME;
-const NOTES = argOf('notes') || '';
 const REL = String(require(path.join(ROOT, 'package.json')).version || '0.0.0');
+const NODE_VER = argOf('node') || DEFAULT_NODE;
+/* 产物名带版本号：换文件名能绕开 Windows / GNOME 侧的图标缓存（同一个路径覆盖过去时，
+   资源管理器常常还拿着旧图标不放），顺带让 release 附件一眼能看出对应哪个版本。 */
+const OUT_NAME = argOf('out') || ('SiErXing-' + REL + '.exe');
+const NOTES = argOf('notes') || '';
 
 function log(...a) { console.log('[build-exe]', ...a); }
 function die(msg) { console.error('[build-exe] ✗ ' + msg); process.exit(1); }
@@ -370,6 +372,20 @@ function setExeIcon(exePath) {
   res.outputResource(pe);
   fs.writeFileSync(exePath, Buffer.from(pe.generate()));
   log('已换图标：' + dibs.length + ' 种尺寸（' + dibs.map(d => d.width).join('/') + '），已确保是 DIB 格式');
+
+  /* 把 exe 里真正嵌的那张 256 图标导出成 PNG 放在旁边。
+     原因：**GNOME 文件管理器不读 PE 图标**，只看共享 MIME 里的通用/wine 图标，
+     所以在 Linux 上打开 dist 看到的图标跟 exe 嵌了什么毫无关系。
+     导出这张图就是在本机核对「exe 里到底嵌了啥」的唯一办法。 */
+  try {
+    const big = dibs.reduce((a, b) => (b.width > (a ? a.width : 0) ? b : a), null);
+    if (big) {
+      const png = require('./png-ico-to-dib.js').dibToPng(big.bin);
+      const out = exePath.replace(/\.exe$/i, '.icon.png');
+      fs.writeFileSync(out, png);
+      log('已导出实际嵌入的图标 → ' + path.basename(out) + '（' + big.width + 'x' + big.width + '，可直接打开核对）');
+    }
+  } catch (e) { log('（图标导出失败，不影响 exe：' + ((e && e.message) || e) + '）'); }
 }
 
 /* ---------------- main ---------------- */
