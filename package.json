@@ -1,6 +1,6 @@
 {
   "name": "sierxing",
-  "version": "1.5.3",
+  "version": "1.5.4",
   "description": "思而行 —— 目标规划助手：先问卷确认、再拆成可执行路径。支持任意 OpenAI 兼容接口（也可选 opencode CLI），零依赖本地运行。",
   "main": "server/server.js",
   "scripts": {

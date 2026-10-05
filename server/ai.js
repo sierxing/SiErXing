@@ -745,6 +745,13 @@ function opencodeStdioError(out) {
     const msg = String(d.error.message || '');
     if (/agent/i.test(msg) && /(not found|不存在|unknown|无效|invalid)/i.test(msg)) return '';  // 代理问题走重试，不在这里报
     if (/auth|login|401|403|FreeTier|forbidden|unauthorized/i.test(et + ' ' + msg)) {
+      /* 实测：CLI 下只有 space-bunny-free 能通，其余免费款都报这个 403。
+         直接告诉用户，别让他一个个试。 */
+      if (/freetier/i.test(et + ' ' + msg)) {
+        return '这个免费模型只能在 OpenCode 内用，CLI 调不动。两条路：'
+          + '① Agent 卡里选 opencode/space-bunny-free（当前实测 CLI 可通）；'
+          + '② 其余免费款走「OpenCode Zen」API 连接（key 去 opencode.ai/auth 拿）。';
+      }
       return 'opencode 本机登录不可用：' + (msg || et) + '（先在终端执行 `opencode auth login` 登录或配好 Key，再点测试）';
     }
     if (/quota|429|insufficient.*fund|UsageLimit|limit exceeded/i.test(et + ' ' + msg)) {

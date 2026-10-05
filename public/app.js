@@ -6905,7 +6905,17 @@ async function renderSettings() {
       return;
     }
     if (act === 'test') {
-      /* 测这一条（不是第一条）：先存下去，再按 连接::首选模型 打一句最短的请求 */
+      /* 测这一条（不是第一条）：先存下去，再按 连接::首选模型 打一句最短的请求。
+         Agent 卡没选模型时不发请求 —— 不带 -m 会命中 CLI 默认模型，
+         而默认的免费款 403（只能在 OpenCode 内用），发了也是白白报错。 */
+      const kind = card.getAttribute('data-kind') || 'api';
+      const sel0 = cardSel(card);
+      if (kind === 'agent' && !sel0.length) {
+        const hint0 = card.querySelector('[data-role="msghint"]');
+        if (hint0) hint0.innerHTML = '先选一个模型再测（当前实测 CLI 可通的是 <code>opencode/space-bunny-free</code>）。';
+        toast('先选一个模型再测');
+        return;
+      }
       const hint = card.querySelector('[data-role="msghint"]');
       const oldT = btn.textContent;
       btn.disabled = true; btn.textContent = '测试中…';

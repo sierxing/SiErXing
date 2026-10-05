@@ -1,13 +1,13 @@
 {
-  "version": "1.5.3",
-  "buildVer": "492390885174",
-  "payload": "release/payload-1.5.3.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.5.3.sxar?ref=main",
+  "version": "1.5.4",
+  "buildVer": "332f30269e75",
+  "payload": "release/payload-1.5.4.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.5.4.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
-  "sha256": "51697ae3d396bd5e8cd32f85b1d36ffd7d40f7656748e60621abe23322978d6d",
-  "size": 500008,
-  "unpackedSize": 1908944,
-  "publishedAt": "2026-10-05T03:47:55.357Z",
-  "notes": "新增OpenCode Zen服务商预设：官方AI网关直调，免费模型以-free结尾，列表公开可取",
+  "sha256": "34cf856b239219dee5ff3727d199072ff5520f5e94a1a2f5e2af9873eb05df42",
+  "size": 500521,
+  "unpackedSize": 1910044,
+  "publishedAt": "2026-10-05T03:51:59.775Z",
+  "notes": "opencode免费款403给两条明路（space-bunny-free直选或走Zen连接）；Agent卡没选模型时不再发注定失败的请求",
   "exeRequired": false
 }
