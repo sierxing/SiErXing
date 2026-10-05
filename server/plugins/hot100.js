@@ -104,6 +104,10 @@ CREATE TABLE IF NOT EXISTS mind_sessions (
   /* 当前正在等学员回答的那一问（还没被回答，所以还进不了 steps）。
      不存它的话「开口问的第一句」会在页面上凭空消失 —— 打开浮层只剩空盒子。 */
   pending TEXT NOT NULL DEFAULT '',
+  /* 一题可以有多次提炼（用户提的：清空当前对话 / 开新对话，历史留着）。
+     title 为空 = 用日期自动命名；named=1 = 用户自己改过名，之后不再自动覆盖。 */
+  title TEXT NOT NULL DEFAULT '',
+  named INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -171,6 +175,9 @@ module.exports = {
       if (!mc.includes('reference_code')) db.exec("ALTER TABLE problem_mind ADD COLUMN reference_code TEXT NOT NULL DEFAULT '';");
       const sc = db.prepare('PRAGMA table_info(mind_sessions)').all().map(c => c.name);
       if (sc.length && !sc.includes('pending')) db.exec("ALTER TABLE mind_sessions ADD COLUMN pending TEXT NOT NULL DEFAULT '';");
+      /* 1.9.0 之后一题可以有多次提炼，会话要能重命名 */
+      if (sc.length && !sc.includes('title')) db.exec("ALTER TABLE mind_sessions ADD COLUMN title TEXT NOT NULL DEFAULT '';");
+      if (sc.length && !sc.includes('named')) db.exec('ALTER TABLE mind_sessions ADD COLUMN named INTEGER NOT NULL DEFAULT 0;');
       /* record_id：易错卡片按「哪一次作答」区分，1.9.0 加的 */
       const rc2 = db.prepare('PRAGMA table_info(recall_tests)').all().map(c => c.name);
       if (rc2.length && !rc2.includes('record_id')) db.exec('ALTER TABLE recall_tests ADD COLUMN record_id INTEGER NOT NULL DEFAULT 0;');
@@ -261,8 +268,9 @@ module.exports = {
     for (const x of (data.minds || [])) db.prepare('INSERT OR REPLACE INTO problem_mind (problem_id,approach,pitfalls,reference_code,updated_at) VALUES (?,?,?,?,?)')
       .run(x.problem_id, x.approach || '', x.pitfalls || '', x.reference_code || '', x.updated_at || '');
     /* 下面三张表是 1.8.0 才有的，老备份里没有对应字段 —— 全部容错 */
-    for (const x of (data.mindSessions || [])) db.prepare('INSERT OR REPLACE INTO mind_sessions (id,problem_id,goal_id,status,steps,summary,pending,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)')
-      .run(x.id, x.problem_id, x.goal_id || 0, x.status || 'active', x.steps || '[]', x.summary || '', x.pending || '', x.created_at || '', x.updated_at || '');
+    for (const x of (data.mindSessions || [])) db.prepare('INSERT OR REPLACE INTO mind_sessions (id,problem_id,goal_id,status,steps,summary,pending,title,named,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+      .run(x.id, x.problem_id, x.goal_id || 0, x.status || 'active', x.steps || '[]', x.summary || '',
+        x.pending || '', x.title || '', x.named || 0, x.created_at || '', x.updated_at || '');
     for (const x of (data.recalls || [])) db.prepare('INSERT OR REPLACE INTO recall_tests (id,problem_id,goal_id,record_id,ref_code,my_code,report,score,verdict,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
       .run(x.id, x.problem_id, x.goal_id || 0, x.record_id || 0, x.ref_code || '', x.my_code || '', x.report || '', x.score || 0, x.verdict || '', x.created_at || '');
     for (const x of (data.pitfalls || [])) db.prepare('INSERT OR REPLACE INTO pitfall_cards (id,problem_id,goal_id,record_id,tag,title,detail,advice,hits,weight,status,source_test,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
@@ -449,15 +457,18 @@ module.exports = {
           if (!prob) return sendJSON(res, 404, { error: '题目不存在' });
           const row = db.prepare('SELECT * FROM problem_mind WHERE problem_id = ?').get(pid) || {};
           let sess = null;
+          const curS = currentSession(pid);
           try {
-            const s = db.prepare("SELECT * FROM mind_sessions WHERE problem_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1").get(pid);
-            if (s) {
+            if (curS) {
               let steps = [], pending = null;
-              try { steps = safeParse(s.steps) || []; } catch (e) {}
-              try { pending = safeParse(s.pending) || null; } catch (e) {}
-              sess = { id: s.id, steps, pending, summary: s.summary || '', updated_at: s.updated_at };
+              try { steps = safeParse(curS.steps) || []; } catch (e) {}
+              try { pending = safeParse(curS.pending) || null; } catch (e) {}
+              sess = { id: curS.id, steps, pending, summary: curS.summary || '', title: curS.title || '', named: !!curS.named, created_at: curS.created_at, updated_at: curS.updated_at };
             }
           } catch (e) {}
+          /* 一题多次提炼：历史都在，用户可以清空当前对话或另开一���，旧的留着 */
+          let sessions = [];
+          try { sessions = sessionList(pid, curS ? curS.id : 0); } catch (e) {}
           const card = db.prepare('SELECT * FROM review_cards WHERE problem_id = ?').get(pid) || null;
           const recalls = db.prepare('SELECT id,record_id,score,verdict,report,created_at FROM recall_tests WHERE problem_id = ? ORDER BY id DESC LIMIT 20').all(pid);
           const cands = reviewCandidates(card && card.goal_id ? card.goal_id : 0);
@@ -468,6 +479,7 @@ module.exports = {
             approach: row.approach || '',
             reference_code: row.reference_code || '',
             session: sess,
+            sessions,
             dims: coachDims(),
             /* 已经掌握的维度：历次 AI 判断的累积 + 当前那一问刚判的（还没被回答，
                但它已经告诉用户「你讲到哪了」，清单要立刻跟上，不能等回答完才打勾） */
@@ -531,23 +543,90 @@ module.exports = {
           const refCode = body.reference_code === undefined ? (cur.reference_code || '') : String(body.reference_code || '').slice(0, 20000);
           db.prepare('INSERT INTO problem_mind (problem_id,approach,pitfalls,reference_code,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(problem_id) DO UPDATE SET approach=excluded.approach, reference_code=excluded.reference_code, updated_at=excluded.updated_at')
             .run(pid, approach, cur.pitfalls || '', refCode, nowISO());
-          /* 思路卡定了就收掉这次会话（session 里 summary 还能翻，但不再是 active） */
-          if (approach && (cur.approach || '') !== approach) {
-            db.prepare("UPDATE mind_sessions SET status='done', updated_at=? WHERE problem_id=? AND status='active'").run(nowISO(), pid);
-          }
           return sendJSON(res, 200, { ok: true, approach, reference_code: refCode });
         }
     }
   },
   {
-    /* 丢掉当前引导会话，从头再来（思路卡和易错卡不受影响） */
+    /* 清空当前对话的问答（只清问答，思路卡与易错卡不受影响）。
+       想留着历史就别用这个，用「开新对话」。 */
     method: 'POST', pattern: /^\/api\/problems\/(\d+)\/mind\/reset$/,
     handler: async (req, res, u, ctx) => {
       const p = u.pathname, method = req.method;
         const m = p.match(/^\/api\/problems\/(\d+)\/mind\/reset$/);
         if (m && method === 'POST') {
-          db.prepare("DELETE FROM mind_sessions WHERE problem_id = ? AND status = 'active'").run(Number(m[1]));
-          return sendJSON(res, 200, { ok: true });
+          const pid = Number(m[1]);
+          let body = {};
+          try { body = await readBody(req); } catch (e) {}
+          const sid = Number(body.session_id) || 0;
+          const row = sid ? db.prepare('SELECT * FROM mind_sessions WHERE id = ? AND problem_id = ?').get(sid, pid) : currentSession(pid);
+          if (!row) return sendJSON(res, 200, { ok: true, cleared: 0 });
+          const n = (safeParse(row.steps) || []).length;
+          db.prepare("UPDATE mind_sessions SET steps='[]', summary='', pending='', status='active', updated_at=? WHERE id=?").run(nowISO(), row.id);
+          return sendJSON(res, 200, { ok: true, cleared: n, sessionId: row.id });
+        }
+    }
+  },
+  {
+    /* 开新对话：历史一条都不动 */
+    method: 'POST', pattern: /^\/api\/problems\/(\d+)\/mind\/sessions$/,
+    handler: async (req, res, u, ctx) => {
+      const p = u.pathname, method = req.method;
+        const m = p.match(/^\/api\/problems\/(\d+)\/mind\/sessions$/);
+        if (m && method === 'POST') {
+          const pid = Number(m[1]);
+          if (!db.prepare('SELECT id FROM problems WHERE id = ?').get(pid)) return sendJSON(res, 404, { error: '题目不存在' });
+          let body = {};
+          try { body = await readBody(req); } catch (e) {}
+          const id = newSession(pid);
+          /* 用户点名要的（「本次易错重做」这种），否则默认按日期 */
+          const t = String(body.title || '').trim().slice(0, 40);
+          if (t) db.prepare('UPDATE mind_sessions SET title=?, named=1 WHERE id=?').run(t, id);
+          return sendJSON(res, 200, { ok: true, sessionId: id, sessions: sessionList(pid, id) });
+        }
+    }
+  },
+  {
+    /* 重命名对话 / 切到某次对话继续聊 */
+    method: 'POST', pattern: /^\/api\/problems\/(\d+)\/mind\/sessions\/(\d+)$/,
+    handler: async (req, res, u, ctx) => {
+      const p = u.pathname, method = req.method;
+        const m = p.match(/^\/api\/problems\/(\d+)\/mind\/sessions\/(\d+)$/);
+        if (m && method === 'POST') {
+          const pid = Number(m[1]), sid = Number(m[2]);
+          const row = db.prepare('SELECT * FROM mind_sessions WHERE id = ? AND problem_id = ?').get(sid, pid);
+          if (!row) return sendJSON(res, 404, { error: '这次对话不存在' });
+          const body = await readBody(req);
+          /* 传 title 才改名（named=1，之后不再被自动标题覆盖）；只传 active 就是切过去接着聊 */
+          if (body.title !== undefined) {
+            const t = String(body.title || '').trim().slice(0, 40);
+            db.prepare('UPDATE mind_sessions SET title=?, named=?, updated_at=? WHERE id=?').run(t, t ? 1 : 0, nowISO(), sid);
+          }
+          /* 不改名就是「切过去接着聊」—— 得真的挪当前指针，否则切了也白切 */
+          switchSession(pid, sid);
+          return sendJSON(res, 200, { ok: true, sessions: sessionList(pid, sid) });
+        }
+    }
+  },
+  {
+    /* 删掉一次对话（整条历史都没了，所以要二次确认） */
+    method: 'DELETE', pattern: /^\/api\/problems\/(\d+)\/mind\/sessions\/(\d+)$/,
+    handler: async (req, res, u, ctx) => {
+      const p = u.pathname, method = req.method;
+        const m = p.match(/^\/api\/problems\/(\d+)\/mind\/sessions\/(\d+)$/);
+        if (m && method === 'DELETE') {
+          const pid = Number(m[1]), sid = Number(m[2]);
+          const row = db.prepare('SELECT * FROM mind_sessions WHERE id = ? AND problem_id = ?').get(sid, pid);
+          if (!row) return sendJSON(res, 404, { error: '这次对话不存在' });
+          const wasCurrent = row.status === 'active';
+          db.prepare('DELETE FROM mind_sessions WHERE id = ?').run(sid);
+          /* 删掉的正好是当前对话 → 指针落到剩下的最新那条上，不然就没「当前」了 */
+          if (wasCurrent) {
+            const rest = db.prepare('SELECT id FROM mind_sessions WHERE problem_id = ? ORDER BY id DESC LIMIT 1').get(pid);
+            if (rest) switchSession(pid, rest.id);
+          }
+          const cur = currentSession(pid);
+          return sendJSON(res, 200, { ok: true, sessions: sessionList(pid, cur ? cur.id : 0) });
         }
     }
   },
@@ -1306,6 +1385,55 @@ function normTurn(j) {
   };
 }
 const dimOf = k => COACH_DIMS.find(d => d.key === k) || COACH_REFINE;
+/* ===== 提炼会话管理（一题多次，历史留着） ===== */
+/** 默认名字：同一天多次开聊要分得开，所以带时分 */
+function sessionTitle(iso) {
+  const d = new Date(String(iso || ''));
+  if (isNaN(d.getTime()) || !String(iso || '').slice(0, 10)) return '未命名对话';
+  return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+/** 列表项：标题（没起名就用日期 / 已有思路卡就用首句）、轮数、有没有整理好、有没有待答的问题 */
+function sessionBrief(r) {
+  let steps = [];
+  try { steps = safeParse(r.steps) || []; } catch (e) {}
+  const talked = steps.filter(s => String(s.a || '').trim() && s.probe).length;
+  const title = (r.named || r.title) ? (r.title || sessionTitle(r.created_at)) : ((String(r.summary || '').split(/\\n|。|，/)[0] || '').replace(/^【[^】]*】/, '').trim().slice(0, 18) || sessionTitle(r.created_at));
+  return {
+    id: r.id, title, named: !!r.named,
+    turns: talked, hasSummary: !!String(r.summary || '').trim(),
+    hasPending: !!String(r.pending || '').trim(),
+    isCurrent: !!r.isCurrent,
+    created_at: r.created_at || '', updated_at: r.updated_at || ''
+  };
+}
+function sessionList(pid, currentId) {
+  return db.prepare('SELECT * FROM mind_sessions WHERE problem_id = ? ORDER BY id DESC').all(pid)
+    .map(r => sessionBrief({ ...r, isCurrent: r.id === currentId }));
+}
+/** 当前对话 = 这道题 status='active' 的那条（一个题只有一条）。
+ *  早先只有一条会话所以没这个概念；有了「开新对话 / 切回旧对话」就必须有个指针，
+ *  否则「当前对话」恒等于 id 最大那条，用户切回去根本切不动。 */
+function currentSession(pid) {
+  const act = db.prepare("SELECT * FROM mind_sessions WHERE problem_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1").get(pid);
+  if (act) return act;
+  /* 老库（1.9.0 之前建的会话 status 可能不是 active）：取最新那条并顺手标成当前 */
+  const last = db.prepare('SELECT * FROM mind_sessions WHERE problem_id = ? ORDER BY id DESC LIMIT 1').get(pid);
+  if (!last) return null;
+  db.prepare("UPDATE mind_sessions SET status='active' WHERE id=?").run(last.id);
+  return { ...last, status: 'active' };
+}
+/** 切到某一次对话接着聊 */
+function switchSession(pid, sid) {
+  db.prepare("UPDATE mind_sessions SET status='done', updated_at=? WHERE problem_id=?").run(nowISO(), pid);
+  db.prepare("UPDATE mind_sessions SET status='active', updated_at=? WHERE id=? AND problem_id=?").run(nowISO(), sid, pid);
+}
+/** 开一个新对话（历史一条都不动） */
+function newSession(pid) {
+  db.prepare("UPDATE mind_sessions SET status='done', updated_at=? WHERE problem_id=?").run(nowISO(), pid);
+  const t = nowISO();
+  const r = db.prepare("INSERT INTO mind_sessions (problem_id,goal_id,status,steps,summary,pending,title,named,created_at,updated_at) VALUES (?,0,'active','[]','','','',0,?,?)").run(pid, t, t);
+  return Number(r.lastInsertRowid);
+}
 /** 题面给 AI 的摘要：题目正文是 HTML，太长且噪声大，先剥掉 */
 function statementBrief(prob, max) {
   let s = String(prob.statement || '');
@@ -1347,7 +1475,7 @@ const RECALL_RULE = [
 async function coachAsk(pid, answer, hint, draft) {
   const prob = db.prepare('SELECT * FROM problems WHERE id = ?').get(pid);
   if (!prob) throw new Error('题目不存在');
-  let sess = db.prepare("SELECT * FROM mind_sessions WHERE problem_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1").get(pid);
+  let sess = currentSession(pid);
   const t = nowISO();
   let steps = [];
   if (sess) { try { steps = safeParse(sess.steps) || []; } catch (e) { steps = []; } }
@@ -1355,8 +1483,8 @@ async function coachAsk(pid, answer, hint, draft) {
   if (sess) { try { pending = safeParse(sess.pending) || null; } catch (e) {} }
 
   if (!sess) {
-    const r = db.prepare('INSERT INTO mind_sessions (problem_id,goal_id,status,steps,summary,pending,created_at,updated_at) VALUES (?,?,\'active\',\'[]\',\'\',\'\',?,?)').run(pid, 0, t, t);
-    sess = db.prepare('SELECT * FROM mind_sessions WHERE id = ?').get(Number(r.lastInsertRowid));
+    const nid = newSession(pid);
+    sess = db.prepare('SELECT * FROM mind_sessions WHERE id = ?').get(nid);
   }
 
   /* 用户回答了：把「刚才那一问」和这个回答配成一步。
@@ -1459,7 +1587,7 @@ function coachDims() {
 }
 /** 把对话整理成思路卡（不直接覆盖已有卡，写进会话 summary 由用户确认） */
 async function coachFinish(pid) {
-  const sess = db.prepare("SELECT * FROM mind_sessions WHERE problem_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1").get(pid);
+  const sess = currentSession(pid);
   if (!sess) throw new Error('还没有提炼过，先和 AI 聊几句');
   let steps = [];
   try { steps = safeParse(sess.steps) || []; } catch (e) {}
@@ -1476,8 +1604,12 @@ async function coachFinish(pid) {
   ].join('\n');
   const text = String(await aiText(prompt, (currentModel && currentModel()) || '', 120000) || '').trim();
   if (!text) throw new Error('AI 没整理出来，换个模型再试');
-  db.prepare("UPDATE mind_sessions SET summary = ?, updated_at = ? WHERE id = ?").run(text, nowISO(), sess.id);
-  return { summary: text, sessionId: sess.id, turns: useful.length };
+  /* 用户没自己起过名的话，用思路卡第一句当标题（比一串时间戳好认）；
+     起过名的绝不覆盖 —— 用户自己写的名字是ta的判断。 */
+  const head = String(text).split(/\n|。|，/)[0].replace(/^【[^】]*】/, '').trim().slice(0, 18);
+  const autoTitle = (sess.named || sess.title) ? (sess.title || '') : (head || sessionTitle(sess.created_at));
+  db.prepare('UPDATE mind_sessions SET summary = ?, title = ?, updated_at = ? WHERE id = ?').run(text, autoTitle, nowISO(), sess.id);
+  return { summary: text, sessionId: sess.id, turns: useful.length, title: autoTitle };
 }
 /** 盲写对照：把两份代码交给 AI，产出判定 + 易错卡片 */
 async function recallCheck(pid, myCode, refCode, goalId, recordId) {

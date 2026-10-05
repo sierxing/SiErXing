@@ -130,6 +130,28 @@
 }
 .pfFoot .spacer{flex:1;}
 
+/* ---- 会话栏（一题多次提炼） ---- */
+.pfSessBar{display:flex; align-items:center; gap:8px; margin-bottom:12px; flex-wrap:wrap;}
+.pfSessCur{
+  display:inline-flex; align-items:center; gap:6px; max-width:100%;
+  border:1.5px solid var(--border); background:var(--bg); color:var(--text);
+  border-radius:999px; padding:4px 13px; font-size:12px; font-weight:600;
+  font-family:inherit; cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.pfSessCur:hover{border-color:var(--accent); color:var(--accent); background:var(--accent-soft);}
+.pfSessCur.none{cursor:default; color:var(--muted); border-style:dashed;}
+/* 会话列表（切换 / 重命名 / 删除） */
+.pfSessList{display:flex; flex-direction:column; gap:9px;}
+.pfSessItem{
+  display:flex; align-items:center; gap:11px; flex-wrap:wrap;
+  border:1.5px solid var(--border); border-radius:12px; padding:10px 13px; background:var(--bg);
+}
+.pfSessItem.cur{border-color:var(--accent); background:var(--accent-soft);}
+.pfSessInfo{flex:1; min-width:150px;}
+.pfSessT{font-size:13.2px; font-weight:700; line-height:1.6; word-break:break-word;}
+.pfSessM{font-size:11.5px; color:var(--muted); margin-top:2px; line-height:1.6;}
+.pfSessBtns{display:flex; align-items:center; gap:6px; flex-wrap:wrap;}
+
 /* ---- 导师问答流 ---- */
 /* 覆盖清单：不是顺序剧本，是「值得覆盖到」的检查表。
    ✓ = AI 判断你已经讲到；高亮 = AI 这一轮选中的关注点。 */

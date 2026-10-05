@@ -657,6 +657,73 @@ function openRecallView(pid) {
   };
   paint();
 }
+/** 一次题目的所有提炼对话：切换 / 重命名 / 删除。默认按日期命名。 */
+function openSessionList(pid) {
+  const prob = (state.problem && state.problem.problem) || {};
+  const L = openLayer('💬 提炼对话', esc((prob.fid || '') + '. ' + (prob.title || '')), { narrow: true });
+  const paint = () => {
+    const sesss = ((state.mind || {}).sessions) || [];
+    L.body.innerHTML = sesss.length
+      ? '<div class="pfSessList">' + sesss.map(s => '<div class="pfSessItem' + (s.isCurrent ? ' cur' : '') + '" data-sid="' + s.id + '">'
+        + '<div class="pfSessInfo">'
+        + '<div class="pfSessT">' + esc(s.title) + (s.named ? '' : ' <span class="pfChip gray">默认名</span>') + '</div>'
+        + '<div class="pfSessM">已聊 ' + s.turns + ' 轮' + (s.hasSummary ? ' · 已整理成思路卡' : '') + (s.hasPending ? ' · 有一问等你答' : '')
+        + ' · ' + esc(String(s.created_at || '').slice(5, 16).replace('T', ' ')) + '</div></div>'
+        + '<div class="pfSessBtns">'
+        + (s.isCurrent ? '<span class="pfChip tag">正在聊</span>'
+          : '<button class="pfBtn sm" data-go="' + s.id + '">继续聊</button>')
+        + '<button class="pfBtn sm" data-rename="' + s.id + '">重命名</button>'
+        + '<button class="pfBtn sm ghost danger" data-del="' + s.id + '">删除</button>'
+        + '</div></div>').join('') + '</div>'
+      : '<div class="pfEmpty"><span class="pfEi">💬</span>还没有提炼过。<br>点下面「开一次新的」开始。</div>';
+    L.foot.innerHTML = '<span class="pfSub">默认按日期命名；重命名后不会再被自动覆盖</span><div class="spacer"></div>'
+      + '<button class="pfBtn sm" data-close>关闭</button>'
+      + '<button class="pfBtn sm go" data-new2>＋ 开一次新的</button>';
+    L.body.querySelectorAll('[data-go]').forEach(b => b.addEventListener('click', async () => {
+      try {
+        await api('/api/problems/' + pid + '/mind/sessions/' + b.getAttribute('data-go'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+        state.mind = await api('/api/problems/' + pid + '/mind');
+        L.close();
+        openCoach(pid);
+      } catch (e) { toast(e.message); }
+    }));
+    L.body.querySelectorAll('[data-rename]').forEach(b => b.addEventListener('click', async () => {
+      const sid = Number(b.getAttribute('data-rename'));
+      const cur = sesss.find(x => x.id === sid) || {};
+      const name = (prompt('这次对话叫什么？（留空=恢复默认日期名）', cur.title || '') || '').trim().slice(0, 40);
+      if (name === (cur.title || '')) return;
+      try {
+        await api('/api/problems/' + pid + '/mind/sessions/' + sid, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: name }) });
+        state.mind = await api('/api/problems/' + pid + '/mind');
+        paint();
+        toast(name ? '已改名' : '已恢复默认日期名');
+      } catch (e) { toast(e.message); }
+    }));
+    L.body.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async () => {
+      const sid = Number(b.getAttribute('data-del'));
+      const cur = sesss.find(x => x.id === sid) || {};
+      if (!confirm('删掉「' + cur.title + '」这次对话？\\n\\n这里的问答记录会没掉，收不回来。思路卡、易错卡片不受影响。')) return;
+      try {
+        await api('/api/problems/' + pid + '/mind/sessions/' + sid, { method: 'DELETE' });
+        state.mind = await api('/api/problems/' + pid + '/mind');
+        paint();
+        toast('已删除');
+      } catch (e) { toast(e.message); }
+    }));
+    const c = L.foot.querySelector('[data-close]'); if (c) c.addEventListener('click', L.close);
+    const n2 = L.foot.querySelector('[data-new2]');
+    if (n2) n2.addEventListener('click', async () => {
+      try {
+        await api('/api/problems/' + pid + '/mind/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+        state.mind = await api('/api/problems/' + pid + '/mind');
+        L.close();
+        openCoach(pid);
+        setTimeout(() => toast('开了一次新对话，之前的都留着'), 200);
+      } catch (e) { toast(e.message); }
+    });
+  };
+  paint();
+}
 /** 复习状态弹窗：风险、进度、进入/移出复习流 */
 function openRevView(pid) {
   const prob = (state.problem && state.problem.problem) || {};
@@ -772,7 +839,8 @@ async function openCoach(pid, restart) {
     const focusKey = pend ? String(pend.focus || 'refine') : 'refine';
     const talked = steps.filter(s => String(s.a || '').trim() && s.probe).length;
     const allDone = !!(pend && pend.done) || talked >= 10;
-    L.body.innerHTML = '<div class="pfRail" id="pfRail"></div>'
+    L.body.innerHTML = '<div class="pfSessBar" id="pfSessBar"></div>'
+      + '<div class="pfRail" id="pfRail"></div>'
       + '<div class="pfThread" id="pfThread"></div>'
       + '<div class="pfStepLbl"><b>你</b><span>'
       + (allDone ? '聊得差不多了，可以整理成思路卡'
@@ -830,12 +898,24 @@ async function openCoach(pid, restart) {
         + '点下面「整理成思路卡」，AI 会把你说的整理成一张能背下来的卡。</div>';
     }
     L.body.querySelector('#pfThread').innerHTML = th;
+    /* 会话栏：默认按日期命名，可切到历史继续聊 / 重命名 / 删 / 清空当前 */
+    const sesss = (state.mind && state.mind.sessions) || [];
+    const cur = sesss[0];
+    const bar = L.body.querySelector('#pfSessBar');
+    bar.innerHTML = sesss.length > 1 || (cur && cur.turns)
+      ? '<button class="pfSessCur" data-switch title="查看这次题目的所有提炼对话">💬 '
+        + esc(cur ? cur.title : '') + (cur && cur.turns ? '　·　已聊 ' + cur.turns + ' 轮' : '')
+        + (sesss.length > 1 ? '　（共 ' + sesss.length + ' 次）' : '') + '</button>'
+      : '<span class="pfSessCur none">💬 新的一次提炼　·　默认按日期命名</span>';
+    const sw = bar.querySelector('[data-switch]');
+    if (sw) sw.addEventListener('click', () => openSessionList(pid));
     const sayEl = L.body.querySelector('#pfSay');
     if (sayEl) { sayEl.value = keepDraft == null ? '' : keepDraft; keepDraft = null; }
     L.body.scrollTop = L.body.scrollHeight;
     L.foot.innerHTML = '<span class="pfSub" id="pfStep">聊了 ' + talked + ' 轮'
       + (dimName(focusKey) ? ' · 当前关注「' + esc(dimName(focusKey)) + '」' : '') + '</span><div class="spacer"></div>'
-      + ((state.mind && state.mind.approach) ? '<button class="pfBtn sm" data-clear>从头再聊</button>' : '')
+      + '<button class="pfBtn sm" data-new title="另开一次提炼，这次的问答留着（默认按日期命名）">＋ 新对话</button>'
+      + '<button class="pfBtn sm ghost" data-clear title="清空这次对话的问答（历史不动，思路卡与易错卡也不受影响）">清空</button>'
       + ((allDone && !(sess && sess.summary)) ? '' : '<button class="pfBtn sm" data-hint title="不给答案，只把方向指出来">💡 卡住了，提示我</button>')
       + ((allDone && !(sess && sess.summary)) ? '' : '<button class="pfBtn sm" data-ask>下一问 →</button>')
       + '<button class="pfBtn sm go" data-finish title="把聊出来的内容整理成一张思路卡">整理成思路卡</button>'
@@ -857,8 +937,27 @@ async function openCoach(pid, restart) {
     });
     const clr = L.foot.querySelector('[data-clear]');
     if (clr) clr.addEventListener('click', async () => {
-      try { await api('/api/problems/' + pid + '/mind/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); state.mind = await api('/api/problems/' + pid + '/mind'); render(); toast('已清空，重新开始'); }
-      catch (e) { toast(e.message); }
+      const cur = ((state.mind || {}).sessions || [])[0];
+      if (!cur) return toast('当前没有对话');
+      if (!confirm('清空「' + cur.title + '」这次对话的问答？\n\n思路卡、易错卡片都不受影响。想保留问答就别清，用「＋ 新对话」另开一次。')) return;
+      try {
+        await api('/api/problems/' + pid + '/mind/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: cur.id }) });
+        state.mind = await api('/api/problems/' + pid + '/mind');
+        render();
+        toast(cur.turns ? '已清空 ' + cur.turns + ' 轮问答' : '这次对话本来就是空的');
+      } catch (e) { toast(e.message); }
+    });
+    const nw = L.foot.querySelector('[data-new]');
+    if (nw) nw.addEventListener('click', async () => {
+      nw.disabled = true;
+      try {
+        await api('/api/problems/' + pid + '/mind/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+        state.mind = await api('/api/problems/' + pid + '/mind');
+        keepDraft = '';
+        render();
+        setTimeout(() => askNext(true, false), 0);
+        toast('开了一次新对话，之前的都留着');
+      } catch (e) { toast(e.message); nw.disabled = false; }
     });
   };
   const setAsk = (on, hint) => {

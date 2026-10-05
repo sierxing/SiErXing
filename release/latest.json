@@ -1,14 +1,14 @@
 {
-  "version": "1.9.0",
-  "buildVer": "7fa2036b636c",
-  "payload": "release/payload-1.9.0.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.9.0.sxar?ref=main",
+  "version": "1.9.1",
+  "buildVer": "dc935b72c240",
+  "payload": "release/payload-1.9.1.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.9.1.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "684527d58cf57c798197baba874df5fd1b5b2c84776cd36828c61029899f4d06",
-  "size": 547793,
-  "unpackedSize": 2064936,
-  "publishedAt": "2026-10-05T10:33:37.255Z",
-  "notes": "单题页改吸顶收藏栏+三个模块弹窗（思路卡/易错卡片/复习状态/盲写考核记录）；易错卡片按「是哪一次提交」分组；引导提炼改成 AI 覆盖清单自由判断（不再固定五步），提示带上输入框草稿，提交后自己的话立刻上屏",
+  "sha256": "5c4cff1dd61b6cf18db2af9f8f7a601336e399bb8bad960b95d824a1a9b540e9",
+  "size": 551596,
+  "unpackedSize": 2080423,
+  "publishedAt": "2026-10-05T11:02:06.688Z",
+  "notes": "引导提炼支持多次对话：默认按日期命名、可重命名、可切换继续聊、可删除、可清空当前对话（历史留着）",
   "exeRequired": false
 }
