@@ -1,14 +1,14 @@
 {
-  "version": "1.10.4",
-  "buildVer": "69a265dcc378",
-  "payload": "release/payload-1.10.4.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.4.sxar?ref=main",
+  "version": "1.10.5",
+  "buildVer": "15a3486887be",
+  "payload": "release/payload-1.10.5.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.5.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "59c4d65f0b19ad8870302fc5dcb71bd894bc1e8cf125af37206eb5006c36f3a5",
-  "size": 582141,
-  "unpackedSize": 2174813,
-  "publishedAt": "2026-10-05T15:49:38.871Z",
-  "notes": "教程生成时AI自动挑要读的源码文件（不勾选也行）",
+  "sha256": "439140fa081ac45217ee85973fac608ae257c5d0eb72ce9f41b25479dd5bae01",
+  "size": 582587,
+  "unpackedSize": 2177007,
+  "publishedAt": "2026-10-05T16:00:49.084Z",
+  "notes": "拆分节点时也能读挂载文件夹源码：沿代码真实结构拆",
   "exeRequired": false
 }

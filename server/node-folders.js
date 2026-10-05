@@ -209,6 +209,43 @@ function readStoredCodeFiles(stored) {
   return out;
 }
 
+/* ============ 给 AI 准备节点文件夹代码（教程 / 拆分共用） ============
+ * 流程：收敛有效文件夹 → AI 看清单挑文件 → 读挑中的。
+ * 哪一步失败都回落到启发式（README + 小文件），再失败就返回空 ——
+ * 调用方（教程/拆分）照常往下走，不卡死。send 可选，用来刷状态行。 */
+async function prepareNodeCode(o) {
+  const empty = { block: '', list: [] };
+  const { aiText, model, db, nodeId, title, detail } = o || {};
+  if (typeof aiText !== 'function' || !db || !nodeId) return empty;
+  const send = typeof o.send === 'function' ? o.send : () => {};
+  const budget = Math.max(5000, Math.min(60000, Number(o.budget) || 30000));
+  const skipRoots = o.skipRoots instanceof Set ? o.skipRoots : new Set();
+  const realOf = p => { try { return fs.realpathSync(p); } catch (e) { return path.resolve(p); } };
+  let entries = [];
+  try {
+    entries = collectFolderEntries(db, Number(nodeId))
+      .filter(e => !e.missing && !skipRoots.has(realOf(e.path)));
+  } catch (e) { return empty; }
+  if (!entries.length) return empty;
+  /* 先让 AI 挑；挑不出来（没给 JSON / 全不在清单里 / 超时）再启发式兜底 */
+  try {
+    send({ status: 'AI 正在看文件清单，挑这次要读的源码…' });
+    const sel = buildSelectionList(entries, 1200);
+    const picked = await selectFilesWithAI(aiText, model,
+      { title, detail, listText: sel.text, allow: sel.allow, timeoutMs: 120000 });
+    const g = readSelectedFiles(picked.picked, budget);
+    if (g.list.length) {
+      send({ status: `AI 挑了 ${g.list.length} 个文件：${picked.picked.slice(0, 3).map(x => String(x.path).split('/').pop()).join('、')}${g.list.length > 3 ? '…' : ''}` });
+      return g;
+    }
+  } catch (err) {
+    console.log('[node-folders] AI 选文件失败，回落启发式:', err.message);
+  }
+  try {
+    return gatherFolderCode(entries, budget);
+  } catch (e) { return empty; }
+}
+
 /* ================= AI 自动挑文件 =================
  * 用户不勾选时，教程生成前先让 AI 看一眼文件清单，自己挑最相关的读。
  * 比写死的「README + 小文件」准：比如学 RAG 架构，AI 会去挑
@@ -344,5 +381,5 @@ function readSelectedFiles(picks, budget) {
 module.exports = {
   validateAttachFolder, parseNodeSources, collectFolderEntries,
   folderBodyForPrompt, gatherFolderCode, readStoredCodeFiles,
-  buildSelectionList, selectFilesWithAI, readSelectedFiles, DENY_HOME_NAMES
+  buildSelectionList, selectFilesWithAI, readSelectedFiles, prepareNodeCode, DENY_HOME_NAMES
 };

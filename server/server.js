@@ -1984,7 +1984,7 @@ function nodeTutorialBlock(node) {
   }
   return lines.join('\n');
 }
-function buildExpandPrompt(goal, node, sources) {
+function buildExpandPrompt(goal, node, sources, folderCode) {
   const levelName = { 0: '阶段', 1: '小目标', 2: '任务', 3: '子任务', 4: '步骤', 5: '步骤' }[node.level] || '节点';
   const lines = [];
   lines.push('你是资深职业路径规划师。请把下面这个节点拆成更细、可直接执行的任务（5-8 个，**最多 10 个**）。');
@@ -1999,6 +1999,11 @@ function buildExpandPrompt(goal, node, sources) {
   if (node.artifact) lines.push('节点产出物：' + node.artifact);
   lines.push(digestsBlock(goal));
   lines.push(nodeSourcesBlock(goal, node, 1100));
+  if (folderCode) {
+    lines.push('');
+    lines.push('【挂载文件夹的源码节选（只读讲解依据，不要复述整段代码）】');
+    lines.push(String(folderCode).slice(0, 15000));
+  }
   lines.push(nodeTutorialBlock(node));
   lines.push(sourcesIndexBlock(goal, 16));
   lines.push(askBlock(node.ask_round || 0, '该节点的拆分'));
@@ -2016,6 +2021,7 @@ function buildExpandPrompt(goal, node, sources) {
   lines.push('4. 只输出一个 JSON 对象（不要其他文字或代码块标记）：');
   lines.push('{"tasks":[{"title":"","detail":"","artifact":"","acceptance":"","hours":"","sources":[{"name":"","note":""}]}]}');
   lines.push('5. 若按「关键机制」需要先提问，则只输出 {"questions":[...]}，不要输出 tasks。');
+  lines.push('6. 如果上面给了挂载文件夹的源码节选：拆分必须沿代码的真实模块/目录结构走（每个子任务对应到具体的包、文件或组件），不要拍脑袋编阶段；detail 里点出要读哪几个文件。');
   return lines.join('\n');
 }
 /* 按用户意见修改已有教程 */
@@ -2088,7 +2094,7 @@ function buildTutorialPrompt(goal, node, format, note, codeBlock) {
   }
   return lines.join('\n');
 }
-function buildRefineNodePrompt(goal, node, kids, feedback) {
+function buildRefineNodePrompt(goal, node, kids, feedback, folderCode) {
   const levelName = { 0: '阶段', 1: '小目标', 2: '任务', 3: '子任务', 4: '步骤', 5: '步骤' }[node.level] || '节点';
   const lines = [];
   lines.push('你是资深职业路径规划师。用户对某个节点的子任务划分提出了意见，请严格按意见调整。');
@@ -2107,6 +2113,11 @@ function buildRefineNodePrompt(goal, node, kids, feedback) {
   lines.push('【用户反馈（最高优先级，必须采纳）】' + feedback);
   lines.push(digestsBlock(goal));
   lines.push(nodeSourcesBlock(goal, node, 1000));
+  if (folderCode) {
+    lines.push('');
+    lines.push('【挂载文件夹的源码节选（只读讲解依据，不要复述整段代码）】');
+    lines.push(String(folderCode).slice(0, 15000));
+  }
   lines.push(nodeTutorialBlock(node));
   lines.push(sourcesIndexBlock(goal, 12));
   lines.push('');
@@ -3040,34 +3051,16 @@ function streamTutorial(req, res, node, format, note, codeFiles, withFolders, fo
       }
       if (withFolders !== false) {
         try {
-          const entries = nodeFolders.collectFolderEntries(db, Number(node.id));
-          /* 用户亲手勾过的夹就不再自动补一遍（省预算，也免得同一文件读两次）。
-             比路径时两边都解软链：挂载时存的是解开后的，但多一层保险不花钱。 */
-          const realOf = p => { try { return fs.realpathSync(p); } catch (e) { return path.resolve(p); } };
-          const rest = entries.filter(e => !e.missing && !pickedRoots.has(realOf(e.path)));
           const room = Math.max(5000, 60000 - codeBlock.length);
-          /* 用户一个都没勾：让 AI 看着文件清单自己挑（比写死的 README+小文件准）。
-             失败就回落到启发式，教程照样生成，不卡死。 */
-          let g = { block: '', list: [] };
-          if (!pickedRoots.size && rest.length) {
-            try {
-              send({ status: 'AI 正在看文件清单，挑这次要讲的源码…' });
-              const sel = nodeFolders.buildSelectionList(rest, 1200);
-              const picked = await nodeFolders.selectFilesWithAI(
-                aiText, (currentModel && currentModel()) || '',
-                { title: node.title, detail: node.detail, listText: sel.text, allow: sel.allow, timeoutMs: 120000 });
-              g = nodeFolders.readSelectedFiles(picked.picked, room);
-              if (g.list.length) send({ status: `AI 挑了 ${g.list.length} 个文件：${picked.picked.slice(0, 3).map(x => x.path.split('/').pop()).join('、')}${g.list.length > 3 ? '…' : ''}（${picked.why || '按需精读'}）` });
-            } catch (err) {
-              console.log('[tutorial] AI 选文件失败，回落启发式:', err.message);
-              g = { block: '', list: [] };
-            }
-          }
-          if (!g.list.length) g = nodeFolders.gatherFolderCode(rest, room);
-          if (g.list.length) {
-            codeBlock += (codeBlock ? '\n\n' : '') + g.block;
-            for (const f of g.list) codeList.push({ root: f.root, path: f.path });
-            send({ status: `已载入文件夹资料 ${g.list.length} 个文件作为讲解依据…` });
+          const auto = await nodeFolders.prepareNodeCode({
+            aiText, model: (currentModel && currentModel()) || '',
+            db, nodeId: Number(node.id), title: node.title, detail: node.detail,
+            budget: room, skipRoots: pickedRoots, send
+          });
+          if (auto.list.length) {
+            codeBlock += (codeBlock ? '\n\n' : '') + auto.block;
+            for (const f of auto.list) codeList.push({ root: f.root, path: f.path });
+            send({ status: `已载入文件夹资料 ${auto.list.length} 个文件作为讲解依据…` });
           }
         } catch (e) { console.log('[tutorial] 文件夹资料载入失败:', e.message); }
       }
@@ -3561,11 +3554,28 @@ function redactText(raw) {
           n = db.prepare('SELECT * FROM nodes WHERE id = ?').get(id);
         }
         const reason = feedback ? ('按意见调整：' + n.title) : ('节点拆分：' + n.title);
+        /* 挂载文件夹的源码：拆分也要读 —— 否则 AI 只能拍脑袋编阶段。
+           走共用的 prepareNodeCode（AI 先看清单挑，再读），失败就当没挂，照常拆。 */
+        let expandCode = '';
+        try {
+          const hasFolders = nodeFolders.collectFolderEntries(db, Number(id)).filter(e => !e.missing);
+          if (hasFolders.length) {
+            send({ status: '正在读挂载文件夹的源码，拆分会沿代码真实结构走…' });
+            const g = await nodeFolders.prepareNodeCode({
+              aiText, model, db, nodeId: Number(id),
+              title: n.title, detail: n.detail, budget: 15000
+            });
+            if (g.block) {
+              expandCode = g.block;
+              send({ status: `已读入挂载文件夹的 ${g.list.length} 个源码文件，拆分会沿代码真实结构走…` });
+            }
+          }
+        } catch (e) { console.log('[expand] 文件夹代码载入失败:', e.message); }
         if (feedback) {
           // 带用户意见调整现有子任务
           send({ status: '正在根据你的意见调整划分…' });
           const kids = db.prepare('SELECT title, detail, status FROM nodes WHERE parent_id = ? ORDER BY sort_order, id').all(n.id);
-          const txt = await aiText(buildRefineNodePrompt(goal, n, kids, feedback), model, 300000);
+          const txt = await aiText(buildRefineNodePrompt(goal, n, kids, feedback, expandCode), model, 300000);
           const data = extractJSON(txt);
           if (data && Array.isArray(data.questions) && data.questions.length) {
             saveNodeQuestions(n.id, data, feedback);
@@ -3605,7 +3615,7 @@ function redactText(raw) {
           }
           send({ status: '开始制定拆分计划…' });
           var vid = beginVersion(goal.id, reason);
-          const txt = await aiText(buildExpandPrompt(goal, n, null), model, 300000);
+          const txt = await aiText(buildExpandPrompt(goal, n, null, expandCode), model, 300000);
           const data = extractJSON(txt);
           if (data && Array.isArray(data.questions) && data.questions.length) {
             saveNodeQuestions(n.id, data, feedback);
