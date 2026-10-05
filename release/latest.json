@@ -1,13 +1,13 @@
 {
-  "version": "1.4.1",
-  "buildVer": "501051fe47af",
-  "payload": "release/payload-1.4.1.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.4.1.sxar?ref=main",
+  "version": "1.4.3",
+  "buildVer": "2741ee0bd63e",
+  "payload": "release/payload-1.4.3.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.4.3.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
-  "sha256": "8824670f9bdffd8a7e5eb17e7b4e2ca0ad3e0cd08f9aa29fc51dd5cad9384f92",
-  "size": 491095,
-  "unpackedSize": 1881405,
-  "publishedAt": "2026-10-05T02:36:43.675Z",
-  "notes": "设置页签改成整页切换：点一个只显示一块，不再全挤在一起",
+  "sha256": "9d1b8c04b6541e22ac9ffd05fc09701d85e2df3e94f4dcc73968261c95efd2ef",
+  "size": 494465,
+  "unpackedSize": 1890089,
+  "publishedAt": "2026-10-05T02:49:18.651Z",
+  "notes": "修AI卡片一堆点不动（事件被吞/选中态丢失）+ 卡片可折叠 + 同步保存不再闪刷整页",
   "exeRequired": false
 }

@@ -1061,6 +1061,8 @@ body.aiOpen .nodePanel{right:calc(var(--ai-w, 440px) + 26px);}
 .connCard{border:1px solid var(--border); border-radius:12px; background:var(--soft); padding:12px 14px; margin-bottom:11px;}
 .connCard:last-child{margin-bottom:0;}
 .ccHead{display:flex; align-items:center; gap:9px; flex-wrap:wrap; margin-bottom:10px;}
+.foldBtn{flex:none; border:0; background:none; cursor:pointer; font-size:14px; color:var(--muted); padding:2px 6px; border-radius:6px;}
+.foldBtn:hover{color:var(--accent); background:var(--bg);}
 .ccBrand{display:inline-flex; align-items:center; justify-content:center; width:30px; height:30px; flex:none;
   border-radius:9px; background:var(--accent); color:#fff; font-size:12px; font-weight:800; letter-spacing:.5px;}
 .ccTitle{font-size:14px; font-weight:700;}
@@ -1102,6 +1104,10 @@ body.aiOpen .nodePanel{right:calc(var(--ai-w, 440px) + 26px);}
 .mBtn{padding:5px 11px; border:1px solid var(--border); border-radius:20px; background:var(--soft); cursor:pointer; font-size:12px; font-family:var(--mono,ui-monospace,Consolas,monospace); color:var(--text); word-break:break-all;}
 .mBtn:hover{border-color:var(--accent);}
 .mBtn.on{border-color:var(--accent); background:var(--accent-soft); color:var(--accent); font-weight:600;}
+/* 手动输入模型名：名单没更新、官方出新模型时用户自己加 */
+.mAddRow{display:flex; gap:7px; margin-top:8px;}
+.mAddRow .inWrap{flex:1;}
+.mAddRow .btn{flex:none; align-self:center;}
 /* 已选模型小片：点 × 移除 */
 .mChips{display:flex; flex-wrap:wrap; gap:7px; min-height:28px;}
 .mChip{display:inline-flex; align-items:center; gap:6px; padding:4px 6px 4px 11px; border:1px solid var(--accent-border); background:var(--accent-soft); color:var(--accent); border-radius:20px; font-size:12px; font-family:var(--mono,ui-monospace,Consolas,monospace);}

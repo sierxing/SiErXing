@@ -6,13 +6,13 @@ const app = document.getElementById('app');
    取不到时服务端会退回各服务商的常用模型（见 server/ai.js 的 PROVIDERS）。
    这里只保留「引导页快速填一份」的最小集合。 */
 const AI_PRESETS = [
-  { name: 'DeepSeek', base: 'https://api.deepseek.com/v1', model: 'deepseek-chat', vision: '' },
+  { name: 'DeepSeek', base: 'https://api.deepseek.com/v1', model: 'deepseek-flash', vision: '' },
   { name: '通义千问', base: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', vision: 'qwen-vl-max' },
-  { name: 'Kimi', base: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k', vision: '' },
-  { name: '智谱 GLM', base: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-plus', vision: 'glm-4v-plus' },
-  { name: '硅基流动', base: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V3', vision: '' },
-  { name: 'OpenAI', base: 'https://api.openai.com/v1', model: 'gpt-4o-mini', vision: 'gpt-4o' },
-  { name: '本地 Ollama', base: 'http://localhost:11434/v1', model: 'qwen2.5:14b', vision: '', key: 'ollama' }
+  { name: 'Kimi', base: 'https://api.moonshot.cn/v1', model: 'kimi-k3', vision: '' },
+  { name: '智谱 GLM', base: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-5.3', vision: 'glm-4.6v' },
+  { name: '硅基流动', base: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V3.2', vision: '' },
+  { name: 'OpenAI', base: 'https://api.openai.com/v1', model: 'gpt-5.4-mini', vision: 'gpt-4o' },
+  { name: '本地 Ollama', base: 'http://localhost:11434/v1', model: 'qwen3:8b', vision: '', key: 'ollama' }
 ];
 
 const state = { goals: [], goal: null, sources: [], planning: false, collecting: false, collectStatus: '', expanded: {}, filter: '', models: [], model: '', showNew: false, showEdit: false, mapScale: 1, mapTx: 40, mapTy: 40, _drag: null, _suppressClick: false };
@@ -5085,7 +5085,7 @@ const GUIDE_STEPS = [
       <div class="gmRow"><span class="gmLabel">服务商</span><span class="gmInput gmPicker">OpenAI 兼容接口 ▾　（也可选 opencode CLI）</span></div>
       <div class="gmRow"><span class="gmLabel">API 地址</span><span class="gmInput gmTypingBox"><span class="gmTyping">https://api.deepseek.com/v1</span></span></div>
       <div class="gmRow"><span class="gmLabel">API 密钥</span><span class="gmInput">••••••••••••<span class="gmCaret"></span></span></div>
-      <div class="gmRow"><span class="gmLabel">模型</span><span class="gmInput">deepseek-chat</span></div>
+      <div class="gmRow"><span class="gmLabel">模型</span><span class="gmInput">deepseek-flash</span></div>
       <div class="gmCliHint">选 <b>opencode CLI</b>：地址与密钥留空，模型填 <code>provider/model</code>（如 opencode-go/deepseek-v4-flash），由本机已登录的 CLI 提供能力</div>
       <div class="gmRowEnd">
         <span class="gmBtn gmBtnClick">测试连接</span>
@@ -5104,7 +5104,7 @@ const GUIDE_STEPS = [
           <input id="gdAiBase" placeholder="API 地址，如 https://api.deepseek.com/v1">
           <div class="gdSyncRow2">
             <input id="gdAiKey" type="password" placeholder="API 密钥（本地 Ollama 可随便填）">
-            <input id="gdAiModel" placeholder="模型，如 deepseek-chat">
+            <input id="gdAiModel" placeholder="模型，如 deepseek-flash">
           </div>
         </div>
         <div id="gdOpencodeBox" hidden>
@@ -6134,10 +6134,19 @@ function bindSyncSection() {
       await save();
       const t = await api('/api/sync/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       if (box) box.innerHTML = t.ok
-        ? '✅ 已保存，仓库可访问' + (t.branches && t.branches.length ? '（分支：' + esc(t.branches.join('、')) + '）' : '（仓库还是空的，点「立即上传」创建首个快照）')
-        : '❌ 已保存，但连接失败：' + esc(t.message || '');
-      toast(t.ok ? '同步已保存' : '已保存，但连接失败');
-      renderSettings();
+        ? '✅ <b>已保存，仓库可访问</b>' + (t.branches && t.branches.length ? '（分支：' + esc(t.branches.join('、')) + '）' : '（仓库还是空的，点「立即上传」创建首个快照）') + '<br>自动上传 / 拉取按上面的开关生效'
+        : '❌ <b>已保存，但仓库连不上</b>：' + esc(t.message || '');
+      toast(t.ok ? '同步已保存，仓库可访问' : '已保存，但仓库连不上');
+      /* 原地刷新回显，不整页重绘 —— 以前调 renderSettings()，页面闪一下不说，
+         刚显示的测试结果当场被清空，滚动位置也丢了。 */
+      try {
+        const fresh = await api('/api/sync/status');
+        state.syncStatus = fresh;
+        const tk = document.getElementById('syncToken');
+        if (tk) { tk.value = ''; tk.placeholder = fresh.hasToken ? '已保存（留空则不修改）' : '粘贴访问令牌'; }
+        const ur = document.getElementById('syncUser');
+        if (ur && fresh.user) ur.value = fresh.user;
+      } catch (e) {}
     } catch (e) { toast(e.message); if (box) box.innerHTML = '❌ ' + esc(e.message); }
     finally { sv.disabled = false; sv.textContent = '保存并测试连接'; }
   });
@@ -6255,15 +6264,17 @@ function openSyncConflictDialog(c) {
 /* 服务商预设。优先用服务端 /api/ai/providers（那边是唯一来源，模型建议值会更新），
    取不到时退回这份内置表，保证设置页至少还能选服务商、填地址。
    模型建议值刻意保守 —— 真正的权威列表是「获取可用模型」向该地址现取的。 */
+/* 兜底表：/api/ai/providers 取不到时才用，平时以服务端为准。
+   内容与 server/ai.js 的 PROVIDERS 保持一致（2026-10 核对过官方文档）。 */
 const AI_PROVIDERS_FALLBACK = [
-  { id: 'deepseek', name: 'DeepSeek', brand: 'DS', baseUrl: 'https://api.deepseek.com', models: ['deepseek-chat', 'deepseek-reasoner'], vision: '' },
-  { id: 'qwen', name: '通义千问', brand: 'QW', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen-max', 'qwen-plus', 'qwen-turbo'], vision: 'qwen-vl-max' },
-  { id: 'moonshot', name: 'Kimi', brand: 'KM', baseUrl: 'https://api.moonshot.cn/v1', models: ['moonshot-v1-8k', 'kimi-k2-turbo-preview'], vision: '' },
-  { id: 'zhipu', name: '智谱 GLM', brand: 'GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4-plus', 'glm-4-flash'], vision: 'glm-4v-plus' },
-  { id: 'siliconflow', name: '硅基流动', brand: 'SF', baseUrl: 'https://api.siliconflow.cn/v1', models: ['deepseek-ai/DeepSeek-V3'], vision: '' },
-  { id: 'openai', name: 'OpenAI', brand: 'OA', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4o', 'gpt-4o-mini'], vision: 'gpt-4o' },
-  { id: 'openrouter', name: 'OpenRouter', brand: 'OR', baseUrl: 'https://openrouter.ai/api/v1', models: [], vision: '' },
-  { id: 'ollama', name: '本地 Ollama', brand: 'OL', baseUrl: 'http://localhost:11434/v1', models: ['qwen2.5:14b'], vision: '', noKey: true },
+  { id: 'deepseek', name: 'DeepSeek', brand: 'DS', baseUrl: 'https://api.deepseek.com', models: ['deepseek-flash', 'deepseek-v4-pro'], vision: 'deepseek-flash' },
+  { id: 'qwen', name: '通义千问', brand: 'QW', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen3-max', 'qwen-plus', 'qwen-turbo', 'qwen-max'], vision: 'qwen-vl-max' },
+  { id: 'moonshot', name: 'Kimi', brand: 'KM', baseUrl: 'https://api.moonshot.cn/v1', models: ['kimi-k3', 'kimi-k2.6', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed'], vision: 'kimi-k3' },
+  { id: 'zhipu', name: '智谱 GLM', brand: 'GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-5.3', 'glm-5.2', 'glm-5', 'glm-4.7', 'glm-4.6', 'glm-4.5'], vision: 'glm-4.6v' },
+  { id: 'siliconflow', name: '硅基流动', brand: 'SF', baseUrl: 'https://api.siliconflow.cn/v1', models: ['deepseek-ai/DeepSeek-V3.2', 'deepseek-ai/DeepSeek-V4-Flash'], vision: '' },
+  { id: 'openai', name: 'OpenAI', brand: 'OA', baseUrl: 'https://api.openai.com/v1', models: ['gpt-5.4', 'gpt-4o', 'gpt-4o-mini'], vision: 'gpt-4o' },
+  { id: 'openrouter', name: 'OpenRouter', brand: 'OR', baseUrl: 'https://openrouter.ai/api/v1', models: ['anthropic/claude-sonnet-4.6', 'google/gemini-3.8-flash'], vision: '' },
+  { id: 'ollama', name: '本地 Ollama', brand: 'OL', baseUrl: 'http://localhost:11434/v1', models: ['qwen3:8b', 'llama3.1:8b', 'deepseek-r1:8b'], vision: 'gemma3:4b', noKey: true },
   { id: 'custom', name: '其他 / 自填', brand: '···', baseUrl: '', models: [], vision: '' },
   { id: 'opencode', name: 'opencode CLI', brand: 'OC', baseUrl: '', models: [], vision: '', isOpencode: true }
 ];
@@ -6302,6 +6313,10 @@ function shortHost(base) {
   if (!s) return '';
   try { return new URL(s).hostname; } catch (e) { return s.replace(/^https?:\/\//, '').split('/')[0]; }
 }
+/** 连接卡折叠状态（localStorage，只记折起来的 id；新卡默认展开） */
+function connFolded(id) {
+  try { return !!(JSON.parse(localStorage.getItem('sierxing-conn-fold') || '{}')[id]); } catch (e) { return false; }
+}
 function connCardHTML(c, provs, ctx) {
   const pid = c.providerId || '';
   const p = (provs || []).find(x => x.id === pid);
@@ -6316,9 +6331,11 @@ function connCardHTML(c, provs, ctx) {
      之前那个「连接名称」输入框用户根本不知道填什么 —— 它确实没有意义。 */
   const dispName = c.name || (p ? p.name : '自定义连接');
   const host = isOC ? '本机 CLI' : (shortHost(c.baseUrl) || (p ? shortHost(p.baseUrl) : '') || '未填地址');
+  const folded = connFolded(c.id);
 
   return `<div class="connCard" data-conn="${esc(c.id)}" data-prov="${esc(pid)}">
     <div class="ccHead">
+      <button type="button" class="foldBtn" data-act="fold" title="折叠 / 展开">${folded ? '▸' : '▾'}</button>
       <span class="ccBrand" data-role="brand">${esc((p && p.brand) || '···')}</span>
       <span class="ccTitle" data-role="title">${esc(dispName)}</span>
       <span class="ccUrl" data-role="host">${esc(host)}</span>
@@ -6326,6 +6343,7 @@ function connCardHTML(c, provs, ctx) {
       <label class="sw" title="启用 / 停用这条连接"><input type="checkbox" data-f="enabled" ${c.enabled !== false ? 'checked' : ''}><i></i></label>
       <button class="btn tiny danger" data-act="del">删除</button>
     </div>
+    <div class="ccBody" data-role="body"${folded ? ' hidden' : ''}>
 
     <div class="ccBlock">
       <div class="ccLabel">① 选择服务商<span class="hint">点一下自动填好官方地址</span></div>
@@ -6348,8 +6366,9 @@ function connCardHTML(c, provs, ctx) {
 
     <div class="ccBlock">
       <div class="ccLabel">③ 选择模型
-        <span class="hint">${isOC ? '先检测本机 opencode，再列出它可用的模型' : (avail.length ? '点模型按钮加入，可多选' : '点右侧按钮获取该地址实际支持的模型')}</span>
+        <span class="hint">${isOC ? '先检测本机 opencode，再列出它可用的模型' : (avail.length ? '点按钮加入，可多选；列表里没有就下面手填' : '点右侧按钮获取该地址实际支持的模型，列表里没有就下面手填')}</span>
         <div class="spacer"></div>
+        <button class="btn tiny" data-act="test">测试连通</button>
         <button class="btn tiny" data-act="models">${isOC ? '🔄 检测并获取模型' : '🔄 获取可用模型'}</button>
       </div>
       ${isOC ? `<div class="ocProbe" data-role="ocprobe">${ocOK
@@ -6357,6 +6376,10 @@ function connCardHTML(c, provs, ctx) {
         : (ocState ? `<span class="bad">✗ ${esc(ocState.hint || '未检测到 opencode')}</span>`
                    : '<span class="muted">点上面的按钮检测本机 opencode 并列出可用模型</span>')}</div>` : ''}
       <div data-role="availBox">${modelButtonsHTML(avail, sel)}</div>
+      <div class="mAddRow">
+        <span class="inWrap"><i>⌨️</i><input data-role="mCustom" placeholder="手动输入模型名，回车加入（官方出新模型、名单没更新时用这个）" spellcheck="false"></span>
+        <button type="button" class="btn tiny" data-act="madd">添加</button>
+      </div>
       <div class="ccLabel" style="margin-top:10px;"><span data-role="selCount">已选模型（${sel.length}）</span><span class="hint">保存后才会出现在对话栏</span></div>
       <div data-role="chosenBox">${chosenChipsHTML(avail, sel)}</div>
       <div class="ccHint" data-role="msghint"></div>
@@ -6367,6 +6390,7 @@ function connCardHTML(c, provs, ctx) {
           </label>
         </div>
       </details>
+    </div>
     </div>
   </div>`;
 }
@@ -6532,10 +6556,12 @@ async function renderSettings() {
     if (chips.length) return chips;
     return Array.from(card.querySelectorAll('[data-mbtn].on')).map(x => x.getAttribute('data-mbtn'));
   };
-  /* 刷新一张卡的按钮区：可选模型排成按钮，已选的排成小片 */
-  const redrawCardModels = card => {
+  /* 刷新一张卡的按钮区：可选模型排成按钮，已选的排成小片。
+     ⚠️ sel 必须由调用方传进来 —— 点模型按钮时要先改选中态再重绘，
+     如果重绘里再从 DOM 反读，会把刚点的那一下丢掉（点不动的 bug 就是这么来的）。 */
+  const redrawCardModels = (card, sel) => {
     const avail = Array.from(card.querySelectorAll('[data-mbtn]')).map(x => x.getAttribute('data-mbtn'));
-    const sel = cardSel(card);
+    sel = sel || cardSel(card);
     const box = card.querySelector('[data-role="availBox"]');
     const chosen = card.querySelector('[data-role="chosenBox"]');
     if (box) box.innerHTML = modelButtonsHTML(avail, sel);
@@ -6587,12 +6613,14 @@ async function renderSettings() {
      点一次按钮触发 N 次请求。 */
   if (window.__aiSetClickH) app.removeEventListener('click', window.__aiSetClickH);
   window.__aiSetClickH = async e => {
-    const pb = e.target.closest('[data-prov]');
+    /* ⚠️ 必须限定 button：卡片根节点自己也带 data-prov（存当前服务商），
+       不限定会把卡片里删除/模型/获取列表等所有点击都当成"切换服务商"吞掉。 */
+    const pb = e.target.closest('button[data-prov]');
     if (pb && pb.closest('.connCard')) {
       const card = pb.closest('.connCard');
       const pid = pb.getAttribute('data-prov');
       card.setAttribute('data-prov', pid);
-      card.querySelectorAll('[data-prov]').forEach(x => x.classList.toggle('on', x === pb));
+      card.querySelectorAll('button[data-prov]').forEach(x => x.classList.toggle('on', x === pb));
       const p = (provs || []).find(x => x.id === pid);
       const g = f => card.querySelector('[data-f="' + f + '"]');
       if (p) {
@@ -6610,7 +6638,7 @@ async function renderSettings() {
       }
       if (pid === 'opencode') {
         card.setAttribute('data-prov', 'opencode');
-        card.querySelectorAll('[data-prov]').forEach(x => x.classList.toggle('on', x === pb));
+        card.querySelectorAll('button[data-prov]').forEach(x => x.classList.toggle('on', x === pb));
         const probe = card.querySelector('[data-role="ocprobe"]');
         if (probe) probe.innerHTML = '<span class="muted">正在检测本机 opencode…</span>';
         try {
@@ -6646,7 +6674,7 @@ async function renderSettings() {
       const sel = cardSel(card);
       const i = sel.indexOf(m);
       if (i >= 0) sel.splice(i, 1); else sel.push(m);
-      redrawCardModels(card);
+      redrawCardModels(card, sel);
       return;
     }
     /* 点已选小片的 × → 移除 */
@@ -6686,6 +6714,62 @@ async function renderSettings() {
       if (inp) { inp.type = inp.type === 'password' ? 'text' : 'password'; btn.textContent = inp.type === 'password' ? '👁' : '🙈'; }
       return;
     }
+    if (act === 'madd') {
+      /* 手动加模型：名单更新不及时、官方出新模型时用户自己填。
+         加进可选列表并选中；保存后进库，重绘也不丢（靠已选小片 + 服务端 models）。 */
+      const inp = card.querySelector('[data-role="mCustom"]');
+      const m = ((inp && inp.value) || '').trim();
+      if (!m) { toast('先输入模型名'); if (inp) inp.focus(); return; }
+      const cid = card.getAttribute('data-conn');
+      let avail = Array.from(card.querySelectorAll('[data-mbtn]')).map(x => x.getAttribute('data-mbtn'));
+      if (avail.indexOf(m) < 0) avail.push(m);
+      aiCtx.avail[cid] = avail;
+      const sel = cardSel(card);
+      if (sel.indexOf(m) < 0) sel.push(m);
+      const box = card.querySelector('[data-role="availBox"]');
+      if (box) box.innerHTML = modelButtonsHTML(avail, sel);
+      const chosen = card.querySelector('[data-role="chosenBox"]');
+      if (chosen) chosen.innerHTML = chosenChipsHTML(avail, sel);
+      const lbl = card.querySelector('[data-role="selCount"]');
+      if (lbl) lbl.textContent = '已选模型（' + sel.length + '）';
+      inp.value = '';
+      toast('已加入：' + m + '（记得点「保存设置」）');
+      return;
+    }
+    if (act === 'test') {
+      /* 测这一条（不是第一条）：先存下去，再按 连接::首选模型 打一句最短的请求 */
+      const hint = card.querySelector('[data-role="msghint"]');
+      const oldT = btn.textContent;
+      btn.disabled = true; btn.textContent = '测试中…';
+      if (hint) hint.textContent = '正在用这条连接请求一次…';
+      try {
+        await api('/api/ai/connections', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connections: readConns() }) });
+        const cid = card.getAttribute('data-conn');
+        const sel = cardSel(card);
+        const r = await api('/api/ai/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connId: cid, modelName: sel[0] || '' }) });
+        if (hint) hint.innerHTML = r.ok
+          ? `✅ <b>连通正常</b> · 模型 ${esc(r.model)}<br>模型回复：${esc(r.sample || '')}`
+          : `❌ <b>连不通</b>：${esc(r.message || '未知错误')}`;
+        toast(r.ok ? '这条连接正常' : '连不通，见卡片内说明');
+      } catch (err) {
+        if (hint) hint.textContent = '❌ 测试失败：' + err.message;
+      } finally { btn.disabled = false; btn.textContent = oldT; }
+      return;
+    }
+    /* 卡片折叠：只做显隐 + 记住状态，不重绘（重绘会丢输入框里没保存的内容） */
+    if (act === 'fold') {
+      const body = card.querySelector('[data-role="body"]');
+      const cid = card.getAttribute('data-conn');
+      if (body) body.hidden = !body.hidden;
+      btn.textContent = (body && body.hidden) ? '▸' : '▾';
+      try {
+        const k = 'sierxing-conn-fold';
+        const m = JSON.parse(localStorage.getItem(k) || '{}');
+        if (body && body.hidden) m[cid] = 1; else delete m[cid];
+        localStorage.setItem(k, JSON.stringify(m));
+      } catch (e) {}
+      return;
+    }
     if (act === 'del') {
       const n = (card.querySelector('[data-role="title"]') || {}).textContent || '这条连接';
       if (!confirm('删除「' + n + '」？对话栏里选它的模型也会一并失效。')) return;
@@ -6717,6 +6801,18 @@ async function renderSettings() {
     }
   };
   app.addEventListener('click', window.__aiSetClickH);
+  /* 手动输入框回车即添加（同上面的叠加监听问题，先解绑再绑定） */
+  if (window.__aiSetKeyH) app.removeEventListener('keydown', window.__aiSetKeyH);
+  window.__aiSetKeyH = e => {
+    if (e.key !== 'Enter') return;
+    const inp = e.target && e.target.closest ? e.target.closest('[data-role="mCustom"]') : null;
+    if (!inp) return;
+    e.preventDefault();
+    const card = inp.closest('.connCard');
+    const btn = card && card.querySelector('[data-act="madd"]');
+    if (btn) btn.click();
+  };
+  app.addEventListener('keydown', window.__aiSetKeyH);
   document.getElementById('saveSettings').addEventListener('click', async () => {
     try {
       await save();

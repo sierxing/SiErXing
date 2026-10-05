@@ -43,18 +43,31 @@ function log(...a) { try { console.log(...a); } catch (e) {} }
 /* ---------------- 常用服务商的官方地址与模型 ---------------- */
 /* 选服务商 → 自动填好 Base URL，用户不用手打；模型列表则在填好地址与密钥后
    向该地址的 /models 现取，取不到就退回这里的建议值。 */
+/* 各家可调用的模型名（2026-10 核对过官方文档）。
+   说明：① 这只是「点服务商后立刻能点的」种子；填好密钥点「获取可用模型」
+   会向该地址的 /models 现取最新列表，取不到才用这里。② 每张卡另有手动输入框，
+   官方改名/出新模型时用户可自己加，不会被这份名单卡住。 */
 const PROVIDERS = [
-  { id: 'deepseek', name: 'DeepSeek', brand: 'DS', baseUrl: 'https://api.deepseek.com', models: ['deepseek-chat', 'deepseek-reasoner'], vision: '', docs: 'https://platform.deepseek.com/api_keys' },
-  { id: 'qwen', name: '通义千问', brand: 'QW', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen-max', 'qwen-plus', 'qwen-turbo', 'qwen3-max'], vision: 'qwen-vl-max', docs: 'https://bailian.console.aliyun.com/' },
-  { id: 'moonshot', name: 'Kimi', brand: 'KM', baseUrl: 'https://api.moonshot.cn/v1', models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k', 'kimi-k2-turbo-preview'], vision: '', docs: 'https://platform.moonshot.cn/console/api-keys' },
-  { id: 'zhipu', name: '智谱 GLM', brand: 'GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4-plus', 'glm-4-flash', 'glm-4-air', 'glm-4v-plus'], vision: 'glm-4v-plus', docs: 'https://open.bigmodel.cn/usercenter/apikeys' },
-  { id: 'siliconflow', name: '硅基流动', brand: 'SF', baseUrl: 'https://api.siliconflow.cn/v1', models: ['deepseek-ai/DeepSeek-V3', 'deepseek-ai/DeepSeek-R1', 'Qwen/Qwen2.5-72B-Instruct', 'THUDM/glm-4-9b-chat'], vision: '', docs: 'https://cloud.siliconflow.cn/account/ak' },
-  { id: 'openai', name: 'OpenAI', brand: 'OA', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'o3-mini'], vision: 'gpt-4o', docs: 'https://platform.openai.com/api-keys' },
-  { id: 'openrouter', name: 'OpenRouter', brand: 'OR', baseUrl: 'https://openrouter.ai/api/v1', models: ['anthropic/claude-sonnet-4', 'google/gemini-2.5-pro', 'deepseek/deepseek-chat'], vision: '', docs: 'https://openrouter.ai/keys' },
-  { id: 'baidu', name: '百度千帆', brand: 'BD', baseUrl: 'https://qianfan.baidubce.com/v2', models: ['ernie-4.5-turbo-128k', 'ernie-4.5-8k-preview', 'deepseek-v3'], vision: '', docs: 'https://console.bce.baidu.com/qianfan/ais/console/apikey' },
-  { id: 'volcengine', name: '火山方舟', brand: 'VE', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', models: ['doubao-pro-256k', 'doubao-lite-32k', 'deepseek-v3-250324'], vision: '', docs: 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey' },
-  { id: 'tencent', name: '腾讯混元', brand: 'HY', baseUrl: 'https://api.hunyuan.cloud.tencent.com/v1', models: ['hunyuan-turbos-latest', 'hunyuan-t1-latest'], vision: '', docs: 'https://cloud.tencent.com/document/product/1729' },
-  { id: 'ollama', name: '本地 Ollama', brand: 'OL', baseUrl: 'http://localhost:11434/v1', models: ['qwen2.5:14b', 'qwen3:8b', 'llama3.1:8b'], vision: '', noKey: true, docs: 'https://ollama.com' },
+  /* 已亲手核对 https://api-docs.deepseek.com/quick_start/pricing/：
+     现只有 deepseek-flash（V4.1-Flash，支持视觉）与 deepseek-v4-pro（不支持视觉）。
+     老的 deepseek-chat / deepseek-reasoner 已不在定价页。 */
+  { id: 'deepseek', name: 'DeepSeek', brand: 'DS', baseUrl: 'https://api.deepseek.com', models: ['deepseek-flash', 'deepseek-v4-pro'], vision: 'deepseek-flash', docs: 'https://platform.deepseek.com/api_keys' },
+  { id: 'qwen', name: '通义千问', brand: 'QW', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen3-max', 'qwen-plus', 'qwen-turbo', 'qwen-max'], vision: 'qwen-vl-max', docs: 'https://bailian.console.aliyun.com/' },
+  /* 已亲手核对 https://platform.kimi.com/docs/models：
+     moonshot-v1-* 全系 2026-08-31 下线；现为 kimi-k3 系列。地址仍是 api.moonshot.cn/v1。 */
+  { id: 'moonshot', name: 'Kimi', brand: 'KM', baseUrl: 'https://api.moonshot.cn/v1', models: ['kimi-k3', 'kimi-k2.6', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed'], vision: 'kimi-k3', docs: 'https://platform.kimi.com/console/api-keys' },
+  /* 已亲手核对 https://docs.bigmodel.cn/cn/guide/start/model-overview：
+     API 侧用小写 id（glm-5.3 等）。 */
+  { id: 'zhipu', name: '智谱 GLM', brand: 'GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-5.3', 'glm-5.2', 'glm-5', 'glm-4.7', 'glm-4.6', 'glm-4.5', 'glm-4.5-air', 'glm-4.5-flash'], vision: 'glm-4.6v', docs: 'https://open.bigmodel.cn/usercenter/apikeys' },
+  { id: 'siliconflow', name: '硅基流动', brand: 'SF', baseUrl: 'https://api.siliconflow.cn/v1', models: ['deepseek-ai/DeepSeek-V3.2', 'deepseek-ai/DeepSeek-V4-Flash', 'Qwen/Qwen3.5-122B-A10B', 'moonshotai/Kimi-K2.6', 'zai-org/GLM-5.2'], vision: '', docs: 'https://cloud.siliconflow.cn/account/ak' },
+  { id: 'openai', name: 'OpenAI', brand: 'OA', baseUrl: 'https://api.openai.com/v1', models: ['gpt-5.4', 'gpt-5.4-mini', 'gpt-4o', 'gpt-4o-mini', 'gpt-4.1'], vision: 'gpt-4o', docs: 'https://platform.openai.com/api-keys' },
+  /* 已用公开接口 https://openrouter.ai/api/v1/models 实测（466 个），取各家旗舰做种子 */
+  { id: 'openrouter', name: 'OpenRouter', brand: 'OR', baseUrl: 'https://openrouter.ai/api/v1', models: ['anthropic/claude-sonnet-4.6', 'google/gemini-3.8-flash', 'deepseek/deepseek-v4.1-flash', 'z-ai/glm-5.3-flash'], vision: '', docs: 'https://openrouter.ai/keys' },
+  { id: 'baidu', name: '百度千帆', brand: 'BD', baseUrl: 'https://qianfan.baidubce.com/v2', models: ['ernie-5.1', 'ernie-5.0', 'ernie-4.5-turbo-128k', 'ernie-4.5-turbo-32k'], vision: 'ernie-4.5-turbo-vl-32k', docs: 'https://console.bce.baidu.com/qianfan/ais/console/apikey' },
+  { id: 'volcengine', name: '火山方舟', brand: 'VE', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', models: ['doubao-seed-2-1-pro-260915', 'doubao-seed-2-1-lite-260915', 'deepseek-v4-1-flash-260910', 'deepseek-v3-250324'], vision: 'doubao-seed-2-1-pro-260915', docs: 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey' },
+  { id: 'tencent', name: '腾讯混元', brand: 'HY', baseUrl: 'https://api.hunyuan.cloud.tencent.com/v1', models: ['hunyuan-turbos-latest', 'hunyuan-t1-latest', 'hunyuan-a13b'], vision: 'hunyuan-vision', docs: 'https://cloud.tencent.com/document/product/1729' },
+  /* 已亲手核对 https://ollama.com/library（按 Pulls 排序，tag 为模型页实际标签） */
+  { id: 'ollama', name: '本地 Ollama', brand: 'OL', baseUrl: 'http://localhost:11434/v1', models: ['qwen3:8b', 'llama3.1:8b', 'deepseek-r1:8b', 'qwen2.5:7b', 'gemma3:4b', 'mistral:7b', 'gpt-oss:20b', 'llava:7b'], vision: 'gemma3:4b', noKey: true, docs: 'https://ollama.com' },
   { id: 'lmstudio', name: 'LM Studio', brand: 'LM', baseUrl: 'http://localhost:1234/v1', models: [], vision: '', noKey: true, docs: 'https://lmstudio.ai' },
   { id: 'custom', name: '其他 / 自填', brand: '···', baseUrl: '', models: [], vision: '', docs: '' },
   /* opencode 也放进服务商列表：前端按服务商按钮统一渲染，
@@ -471,25 +484,42 @@ async function openaiModels(c) {
  *  opencode：跑 `opencode models`
  *  传临时参数（还没保存的地址/密钥）也能取，供设置页「填完先试一下」用。 */
 async function fetchModelsFor(target) {
-  const list = connections();
+  target = target || {};
+  /* 已保存的连接优先按 id 取 —— opencode 连接没有 baseUrl，
+     以前掉进 cfg(id) 被当成裸模型名，永远取不到opencode 的列表。 */
+  const saved = target.id ? findConn(target.id) : null;
+  const provider = target.provider || (saved && saved.provider) || 'openai';
+  const providerId = target.providerId || (saved && saved.providerId) || '';
   let c;
-  if (target && target.baseUrl) {
+  if (provider === 'opencode') {
+    c = normalizeConn({
+      id: (saved && saved.id) || 'draft',
+      name: (saved && saved.name) || 'opencode',
+      provider: 'opencode',
+      providerId: providerId || 'opencode',
+      baseUrl: '', apiKey: '',
+      models: (saved && saved.models) || [],
+      defaultModel: (saved && saved.defaultModel) || '',
+      visionModel: (saved && saved.visionModel) || ''
+    });
+  } else if (target.baseUrl) {
     /* 未保存的草稿：用调用方给的地址/密钥，但模型勾选仍取已保存的那条（如果有） */
-    const saved = target.id ? findConn(target.id) : null;
-    const p = target.providerId ? providerById(target.providerId) : null;
+    const p = providerId ? providerById(providerId) : null;
     c = normalizeConn({
       id: (saved && saved.id) || 'draft',
       name: (saved && saved.name) || (p ? p.name : '草稿'),
-      provider: target.provider || (saved && saved.provider) || 'openai',
-      providerId: target.providerId || (saved && saved.providerId) || '',
+      provider,
+      providerId,
       baseUrl: target.baseUrl,
       apiKey: target.apiKey || (saved && saved.apiKey) || '',
       models: (saved && saved.models) || [],
       defaultModel: (saved && saved.defaultModel) || '',
       visionModel: (saved && saved.visionModel) || (p ? p.vision : '')
     });
+  } else if (saved) {
+    c = saved;
   } else {
-    c = cfg(target && target.id ? target.id : undefined);
+    c = cfg(undefined);
   }
 
   if (c.provider === 'opencode') {
