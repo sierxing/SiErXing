@@ -342,31 +342,34 @@ function getBuildTool(name) { return require(ensureTool(name)); }
    用的就是 public/icon.ico —— 和 Linux 桌面图标（service.js 建 .desktop 时引用的
    icon.svg / icon.png / icon.ico）是同一套源，所以任务栏、资源管理器、开始菜单
    看到的图标与桌面上一致。
-   node.exe 自带的图标在 .rsrc 段里，要用 resedit 改写整份 PE 资源。三个注意点：
+   node.exe 自带的图标在 .rsrc 段里，要用 resedit 改写整份 PE 资源。四个注意点：
      · NtExecutable.from(bin, {ignoreCert:true})：node.exe 带 Authenticode 签名，
        不给这个参数会直接抛 "Parsing signed executable binary is not allowed"。
        反正 postject 注入时签名已失效，这里顺手清掉。
      · 传进去的必须是 new Uint8Array(buf)（byteOffset=0）。直接传 Buffer 有可能
        落在 Node 的内存池里、offset 不为 0，解析出来的 PE 全是错的。
-     · outputResource(exe) 不返回值，最后要从 exe 上 generate() 拿字节。 */
+     · outputResource(exe) 不返回值，最后要从 exe 上 generate() 拿字节。
+     · **图标数据必须是 DIB，不能是 PNG**：.ico 文件允许内嵌 PNG，但 PE 的
+       RT_ICON 资源只认 BITMAPINFOHEADER。把 .ico 里的 PNG 原样塞进去，Windows
+       会当成坏资源 → 图标不显示。所以统一走 dibsOfIco() 转一道。 */
 function setExeIcon(exePath) {
   const icoPath = path.join(ROOT, 'public', 'icon.ico');
   if (!fs.existsSync(icoPath)) { log('（没有 public/icon.ico，跳过换图标）'); return; }
   // resedit v3 主入口是 ESM，但自带 CJS 版；用 createRequire 从它的目录解析
   const dir = ensureTool('resedit');
   const R = require('module').createRequire(path.join(dir, 'x.js'))('resedit');
-  const { icons } = R.Data.IconFile.from(fs.readFileSync(icoPath));
+  const dibs = require('./png-ico-to-dib.js').dibsOfIco(fs.readFileSync(icoPath));
   const pe = R.NtExecutable.from(new Uint8Array(fs.readFileSync(exePath)), { ignoreCert: true });
   const res = R.NtExecutableResource.from(pe, true);
   const groups = res.entries.filter(e => e.type === 14);   // 14 = RT_GROUP_ICON
   const g = groups[0];
-  // 沿用已有组的 id/lang，等于「替换」；没有就新建一个
-  R.Resource.IconGroupEntry.replaceIconsForResource(res.entries, g ? g.id : 1, g ? g.lang : 1033,
-    // IconFile.from 给的是包装对象，真正的 RT_ICON 数据在 .data（RawIconItem）上
-    icons.map(i => i.data));
+  // 沿用已有组的 id/lang，等于「替换」；没有就新建一个。
+  // dibs 已经是 DIB，这里喂 resedit 的「非 IconItem」那条分支（isIcon() 返回假）。
+  const items = dibs.map(d => ({ width: d.width, height: d.height, bitCount: 32, bin: d.bin, isIcon: () => false }));
+  R.Resource.IconGroupEntry.replaceIconsForResource(res.entries, g ? g.id : 1, g ? g.lang : 1033, items);
   res.outputResource(pe);
   fs.writeFileSync(exePath, Buffer.from(pe.generate()));
-  log('已换图标：' + icons.length + ' 种尺寸（' + icons.map(i => (i.width || 256)).join('/') + '）');
+  log('已换图标：' + dibs.length + ' 种尺寸（' + dibs.map(d => d.width).join('/') + '），已确保是 DIB 格式');
 }
 
 /* ---------------- main ---------------- */
