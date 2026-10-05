@@ -38,6 +38,65 @@
 .pfBtn.ghost:hover{background:var(--soft); color:var(--accent);}
 .pfBtn.danger:hover{border-color:var(--danger); color:var(--danger);}
 
+/* ============ 吸顶工具栏 + 收藏栏 ============ */
+/* 单题页的工具键全部走这条吸顶栏：卡片一多（一百条易错卡？）正文就会被撑爆，
+   所以正文只留题目和作答记录，其余全在弹窗里。栏本身用宿主的 tutFavBar 样式
+   （拖拽 / 收藏夹 / ⋯ 收纳都是现成的）。 */
+.probSticky{
+  position:sticky; top:0; z-index:30; background:var(--bg);
+  padding:2px 0 8px; margin-bottom:10px;
+  box-shadow:0 6px 12px -10px rgba(23,26,43,.22);
+}
+:root[data-theme="dark"] .probSticky{box-shadow:0 6px 12px -10px rgba(0,0,0,.6);}
+.probSticky .probHead{margin-bottom:8px;}
+.probSticky .tutFavBar{margin-bottom:0;}
+/* 顶栏按钮上的计数徽标（易错卡片待攻克数） */
+.probSticky [data-tbtn]{position:relative;}
+
+/* 右栏比较窄，作答记录那一行的按钮容易挤到换行 —— 让它整块换行，别半截卡在行尾 */
+.recTop{flex-wrap:wrap; row-gap:7px;}
+.recTop .spacer{min-width:12px;}
+
+/* 每条作答记录上方的易错点小片：只显示所属那一次栽的跟脚 */
+.recPitTop{display:flex; flex-wrap:wrap; gap:6px; margin-bottom:7px;}
+.pfPitTag{
+  font-size:11px; font-weight:600; line-height:1.6; padding:2px 9px; cursor:pointer;
+  border-radius:999px; border:1px solid var(--border); background:var(--soft); color:var(--muted);
+  font-family:inherit; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.pfPitTag:hover{border-color:var(--accent); color:var(--accent); background:var(--accent-soft);}
+.pfPitTag.t-边界, .pfPitTag.t-逻辑, .pfPitTag.t-下标{color:var(--danger); border-color:rgba(224,36,36,.3);}
+.pfPitTag.t-复杂度{color:var(--warn); border-color:rgba(217,119,6,.32);}
+
+/* 弹窗里的分组标题 + 折叠组 */
+.pfSecLbl{
+  font-size:11.5px; font-weight:800; color:var(--muted); letter-spacing:.4px;
+  margin:0 0 9px; display:flex; align-items:center; gap:8px;
+}
+.pfSecLbl:after{content:''; flex:1; height:1px; background:var(--border);}
+/* 易错卡片按「是哪一次提交栽的」分组：一组 = 一次提交 */
+.pfGrp{margin-bottom:18px;}
+.pfGrp:last-child{margin-bottom:0;}
+.pfGrpHd{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:10px;}
+.pfGrpHd:after{content:''; flex:1; min-width:12px; height:1px; background:var(--border);}
+.pfGrpHd .pfSub{white-space:nowrap;}
+
+/* 作答记录上那行「这次栽的 N」 */
+.recPitLbl{font-size:11px; font-weight:700; color:var(--muted); align-self:center;}
+.pfFold{
+  border:1.5px solid var(--border); border-radius:13px; padding:9px 13px; margin-top:13px; background:var(--bg);
+}
+.pfFold summary{
+  cursor:pointer; font-size:12.5px; font-weight:700; color:var(--muted); list-style:none;
+  display:flex; align-items:center; gap:6px;
+}
+.pfFold summary::-webkit-details-marker{display:none;}
+.pfFold summary:before{content:'▸'; font-size:10px; transition:transform .15s;}
+.pfFold[open] summary:before{transform:rotate(90deg);}
+.pfFold summary:hover{color:var(--accent);}
+.pfFold .pfPits{margin-top:11px;}
+.pfFold .pfPit{background:var(--card);}
+
 /* ============ 浮层：提炼 / 盲写 ============ */
 .pfMask{
   position:fixed; inset:0; z-index:980; background:rgba(14,16,24,.46);
@@ -72,21 +131,36 @@
 .pfFoot .spacer{flex:1;}
 
 /* ---- 导师问答流 ---- */
-/* 五步台阶进度条：让「引导」看得见 —— 知道自己站在第几步、还剩几步 */
-.pfRail{display:flex; align-items:center; gap:0; margin-bottom:18px; flex-wrap:wrap;}
-.pfRailStep{display:flex; align-items:center; gap:6px; font-size:11.5px; color:var(--muted); white-space:nowrap;}
-.pfRailStep b{
-  width:19px; height:19px; border-radius:50%; flex:none; display:flex; align-items:center; justify-content:center;
-  font-size:10.5px; font-weight:800; background:var(--soft); color:var(--muted); border:1.5px solid var(--border);
+/* 覆盖清单：不是顺序剧本，是「值得覆盖到」的检查表。
+   ✓ = AI 判断你已经讲到；高亮 = AI 这一轮选中的关注点。 */
+.pfRail{
+  border:1px solid var(--border); border-radius:12px; background:var(--bg);
+  padding:9px 12px; margin:0 0 14px;
+  /* 在对话区里吸顶：往下聊的时候一直看得见「AI 现在在关注什么」 */
+  position:sticky; top:0; z-index:3;
 }
-.pfRailStep.on{color:var(--ok);}
-.pfRailStep.on b{background:rgba(14,159,110,.14); border-color:var(--ok); color:var(--ok);}
-.pfRailStep.cur{color:var(--accent); font-weight:800;}
-.pfRailStep.cur b{
-  background:var(--accent); border-color:var(--accent); color:#fff;
-  box-shadow:0 0 0 4px var(--accent-soft);
+.pfRailHd{display:flex; align-items:center; gap:9px; flex-wrap:wrap; margin-bottom:9px;}
+.pfRailHd > span:first-child{font-size:12px; font-weight:800; letter-spacing:.3px;}
+.pfRailHd .pfSub{flex:1; text-align:right;}
+.pfDims{display:flex; flex-wrap:wrap; gap:6px;}
+.pfDim{
+  font-size:11px; line-height:1.6; padding:2px 9px; border-radius:999px;
+  border:1px solid var(--border); background:var(--card); color:var(--muted); white-space:nowrap;
 }
-.pfRailLine{flex:1; min-width:8px; height:1.5px; background:var(--border); margin:0 6px;}
+.pfDim.on{color:var(--ok); border-color:rgba(14,159,110,.35); background:rgba(14,159,110,.08); font-weight:600;}
+.pfDim.refine{border-style:dashed;}
+.pfDim.cur{
+  color:var(--accent); border-color:var(--accent); background:var(--accent-soft); font-weight:800;
+  box-shadow:0 0 0 3px var(--accent-soft);
+}
+/* 气泡本体是普通块排版；pre-wrap 只作用在 .pfTxt 上，
+   免得模板里的换行缩进被当成真实空白渲染出一大片空隙。 */
+.pfBubble .pfTxt{white-space:pre-wrap;}
+.pfBubble.hint{background:rgba(217,119,6,.09); border-color:rgba(217,119,6,.3);}
+.pfBubble.hint .pfLabel{color:var(--warn);}
+.pfBubble.hint .pfTxt+.pfTxt{margin-top:5px; padding-top:5px; border-top:1px dashed rgba(217,119,6,.3);}
+.pfBubble .pfQ{white-space:pre-wrap; margin-top:6px; font-weight:600;}
+.pfBubble .pfQ:before{content:'问　'; font-size:10.5px; font-weight:700; color:var(--accent);}
 .pfThread{display:flex; flex-direction:column; gap:14px; margin-bottom:16px;}
 .pfTurn{display:flex; gap:11px; align-items:flex-start;}
 .pfAv{
@@ -96,15 +170,20 @@
 .pfTurn.me{flex-direction:row-reverse;}
 .pfTurn.me .pfAv{background:rgba(14,159,110,.13); color:var(--ok);}
 .pfBubble{
-  max-width:82%; background:var(--soft); border:1px solid var(--border);
+  max-width:84%; background:var(--soft); border:1px solid var(--border);
   border-radius:4px 13px 13px 13px; padding:10px 13px; font-size:13.4px; line-height:1.8;
-  white-space:pre-wrap; word-break:break-word;
+  word-break:break-word; overflow-wrap:anywhere;
 }
 .pfTurn.me .pfBubble{
   background:var(--accent-soft); border-color:var(--accent-border); border-radius:13px 4px 13px 13px;
 }
-.pfBubble .pfLabel{font-size:10.5px; font-weight:800; color:var(--accent); display:block; margin-bottom:3px; letter-spacing:.4px;}
+.pfBubble .pfLabel{font-size:10.5px; font-weight:800; color:var(--accent); margin-bottom:5px; letter-spacing:.3px; line-height:1.6;}
 .pfTurn.me .pfBubble .pfLabel{color:var(--ok); text-align:right;}
+.pfBubble .pfTxt{color:var(--text);}
+/* 标签栏那一行：span 要能占满剩余宽度，否则 flex 会把它压成一条竖排的细柱 */
+/* 标签栏那一行：span 要能占满剩余宽度，否则 flex 会把它压成一条竖排的细柱 */
+.pfStepLbl > span{flex:1; min-width:0; line-height:1.7;}
+.pfStepLbl > span > i{font-style:normal; color:var(--text); font-weight:700;}
 .pfTyping{display:flex; gap:4px; padding:4px 2px;}
 .pfTyping i{width:6px; height:6px; border-radius:50%; background:var(--accent); animation:pfBl 1.05s infinite;}
 .pfTyping i:nth-child(2){animation-delay:.16s;} .pfTyping i:nth-child(3){animation-delay:.32s;}
@@ -140,7 +219,9 @@
   display:flex; align-items:center; gap:8px; font-size:12.5px; font-weight:800;
   color:var(--muted); letter-spacing:.3px; margin:0 0 8px;
 }
-.pfStepLbl b{
+/* ⚠️ 圆圈样式只能作用在直接子级的那个「你」头像上。写成 `.pfStepLbl b` 会把标签栏里嵌套的强调文字
+   也套成 20px 圆圈，一整句话被挤成竖排 —— 用户报过的那个「巨大空白」同源。 */
+.pfStepLbl > b{
   width:20px; height:20px; border-radius:50%; background:var(--accent); color:#fff;
   font-size:11px; display:flex; align-items:center; justify-content:center; flex:none;
 }

@@ -1,14 +1,14 @@
 {
-  "version": "1.8.1",
-  "buildVer": "b34275950e49",
-  "payload": "release/payload-1.8.1.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.8.1.sxar?ref=main",
+  "version": "1.9.0",
+  "buildVer": "7fa2036b636c",
+  "payload": "release/payload-1.9.0.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.9.0.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "63d8f86acf0da75f9eb60adefe543f920d2e2df4d287863c4a1b4dfb1eb8bbc9",
-  "size": 538187,
-  "unpackedSize": 2036011,
-  "publishedAt": "2026-10-05T06:48:25.512Z",
-  "notes": "修：①刷新后接口不存在（3213 未重启时前端已更新、后端还是旧路由）；②引导提炼改成可见的五步台阶（进度条+每步标签+AI 先复述你的话），开场就自动问第一句，另加「卡住了，提示我」",
+  "sha256": "684527d58cf57c798197baba874df5fd1b5b2c84776cd36828c61029899f4d06",
+  "size": 547793,
+  "unpackedSize": 2064936,
+  "publishedAt": "2026-10-05T10:33:37.255Z",
+  "notes": "单题页改吸顶收藏栏+三个模块弹窗（思路卡/易错卡片/复习状态/盲写考核记录）；易错卡片按「是哪一次提交」分组；引导提炼改成 AI 覆盖清单自由判断（不再固定五步），提示带上输入框草稿，提交后自己的话立刻上屏",
   "exeRequired": false
 }

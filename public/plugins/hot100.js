@@ -365,17 +365,40 @@ function drawProblemPage(pid) {
   const openPits = allPits.filter(x => x.status === 'open').length;
   const rv0 = rev && rev.last_review_at;
   const passedCount = recs.filter(r => r.passed).length;
+  /* 易错卡片按「是哪一次提交栽的」分组：record_id 是服务端精确记下的
+     practice_records.id（不是靠时间猜的），所以一次提交对应一组卡，不同提交不会串。
+     没有 record_id 的老卡片归到「未归属」组，弹窗里单独一栏。 */
+  const pitByRec = {};
+  for (const c of allPits) {
+    const rid = Number(c.record_id) || 0;
+    if (!rid) continue;
+    (pitByRec[rid] = pitByRec[rid] || []).push(c);
+  }
+  for (const k of Object.keys(pitByRec)) pitByRec[k].sort((a, b) => (b.weight || 0) - (a.weight || 0));
+  const orphanPits = allPits.filter(c => !Number(c.record_id));
+  const pitCount = (rid) => (pitByRec[rid] || []).filter(c => c.status === 'open').length;
   app.innerHTML = `<div class="probPage">
-    <div class="probHead">
-      <a class="back" href="${state.goal ? '#/g/' + state.goal.id + '/hot100' : '#/'}">← 每日刷题</a>
-      <h2 class="probTitle">${p.fid}. ${esc(p.title || '')}</h2>
-      ${diffChipHTML(p.difficulty)}
-      ${(p.tags || []).map(t => `<span class="chip gray">${esc(t)}</span>`).join('')}
-      <div class="spacer"></div>
-      ${doneToggleHTML({ id: p.id, done: d.done, done_manual: p.done_manual })}
-      <button class="btn small primary" id="ideBtn">💻 在 VSCode 中作答</button>
-      <a class="btn small" href="${esc(p.link || '#')}" target="_blank" rel="noopener">打开 LeetCode</a>
-      <button class="btn small" id="refreshStmt">↻ 刷新题面</button>
+    <div class="probSticky">
+      <div class="probHead">
+        <a class="back" href="${state.goal ? '#/g/' + state.goal.id + '/hot100' : '#/'}">← 每日刷题</a>
+        <h2 class="probTitle">${p.fid}. ${esc(p.title || '')}</h2>
+        ${diffChipHTML(p.difficulty)}
+        ${(p.tags || []).map(t => `<span class="chip gray">${esc(t)}</span>`).join('')}
+        <div class="spacer"></div>
+        ${doneToggleHTML({ id: p.id, done: d.done, done_manual: p.done_manual })}
+        <button class="btn small primary" id="ideBtn">💻 在 VSCode 中作答</button>
+        <a class="btn small" href="${esc(p.link || '#')}" target="_blank" rel="noopener">打开 LeetCode</a>
+        <button class="btn small" id="refreshStmt">↻ 刷新题面</button>
+        <button class="btn small" id="probMoreBtn" data-morebtn-of="prob" hidden>⋯</button>
+        <button class="btn small" data-tbtn id="probPitBtn" title="易错卡片：AI 从每次盲写的差距里提炼出来的老毛病，按「是哪一次提交栽的」分组，可攻克/删">⚠️ 易错卡片${allPits.length ? ' ' + allPits.length : ''}</button>
+        <button class="btn small" data-tbtn id="probMindBtn" title="思路卡：用你自己的话说清楚这道题，AI 帮你整理">🧭 思路卡</button>
+        <button class="btn small" data-tbtn id="probRevBtn" title="复习状态：遗忘风险、上次判定、AI 排期">🔁 复习状态</button>
+        <button class="btn small" data-tbtn id="probRecallBtn" title="历次盲写考核的判定与当时的记忆钩子">📈 盲写考核记录${(mind.recallTests || []).length ? ' ' + mind.recallTests.length : ''}</button>
+        <button class="btn small" data-tbtn id="probCoachBtn" title="AI 读你写的，自己判断还缺哪一块，只补那一块">🎓 引导提炼思路</button>
+        ${rev ? '<button class="btn small danger" data-tbtn id="probOutBtn" title="移出复习流（思路卡、易错卡片、盲写记录都保留）">移出复习流</button>'
+          : '<button class="btn small" data-tbtn id="probEnqBtn" title="加入复习流，做对时会自动进来">＋ 加入复习流</button>'}
+      </div>
+      <div class="tutFavBar" id="probFavBar" hidden></div>
     </div>
     <div class="probMeta">
       ${p.done
@@ -395,12 +418,19 @@ function drawProblemPage(pid) {
       </div>
       <div class="secCard probRecCard">
         <div class="secHead"><span>📝 我的作答记录（${recs.length}）</span><div class="spacer"></div>
-          <button class="btn tiny" id="coachBtn" title="AI 一次问你一个问题，帮你把思路一步步说清楚">🧭 AI 引导提炼思路</button>
           <button class="btn tiny primary" id="addRecBtn">＋ 记录一次作答</button></div>
-        <div class="pfSub" style="padding:9px 2px 0;">每条记录都可以点「尝试重做」：遮住代码凭记忆重敲一遍，AI 对照后帮你把老毛病做成易错卡片。</div>
+        <div class="pfSub" style="padding:9px 2px 0;">每条记录上方可以「看这次的易错点」，也可以「尝试重做」：遮住代码凭记忆重敲一遍，AI 对照后把这次的跟脚做成易错卡片。</div>
         <div id="recFormBox"></div>
         <div class="recList">
-          ${recs.length ? recs.map(r => `<div class="recItem">
+          ${recs.length ? recs.map(r => {
+            /* 每条作答记录各自的易错点（recallTests 带 problem_id，这里按时间就近配）——
+               不同题目的错点不通用，所以按记录归属而不是混成一个大列表 */
+            const mine = pitByRec[r.id] || [];
+            return `<div class="recItem">
+            ${mine.length ? `<div class="recPitTop">
+              <span class="recPitLbl">这次栽的 ${mine.length}</span>
+              ${mine.map(c => `<button class="pfPitTag t-${esc(c.tag || '其它')}" data-openpit="${c.id}" title="${esc(c.title)}（点开看全文）">${esc(c.tag || '其它')}·${esc(c.title)}</button>`).join('')}
+            </div>` : ''}
             <div class="recTop">
               <span class="chip ${r.passed ? 'ok' : 'warn'}">${r.passed ? '通过' : '未通过'}</span>
               <span class="recDate">${esc(r.date)}</span>
@@ -414,43 +444,10 @@ function drawProblemPage(pid) {
             ${!r.code ? '<div class="pfRedoHint">这次没存代码 —— 想用它当重做基准的话，点「编辑」把代码补上。</div>' : ''}
             ${r.notes ? `<div class="recNotes">${esc(r.notes)}</div>` : ''}
             ${r.code ? `<details class="recCode"><summary>查看代码（${r.code.split('\\n').length} 行）</summary><pre class="mdCode"><code>${esc(r.code)}</code></pre></details>` : ''}
-          </div>`).join('') : '<div class="muted" style="padding:10px 2px;font-size:13px;">还没有记录。做完一道就记一条：是否通过、用时、代码和笔记 —— 有了代码才能「尝试重做」。</div>'}
+          </div>`;
+          }).join('') : '<div class="muted" style="padding:10px 2px;font-size:13px;">还没有记录。做完一道就记一条：是否通过、用时、代码和笔记 —— 有了代码才能「尝试重做」。</div>'}
         </div>
       </div>
-      <div class="secCard probRecCard">
-        <div class="secHead"><span>🧭 思路卡</span><div class="spacer"></div>
-          ${mind.approach ? `<button class="btn tiny" id="coachAgainBtn">重新提炼</button><button class="btn tiny" id="mindEditBtn">编辑</button>`
-            : '<button class="btn tiny" id="coachStartBtn">🧭 和 AI 聊出思路</button>'}</div>
-        ${mind.approach
-          ? `<div class="pfPitWrap"><div class="pfCardBox"><div class="pfCt">说出来才算会</div>${esc(mind.approach)}</div>
-             <div class="pfPitFoot"><span class="pfSub">更新于 ${esc(fmtDate(mind.updated_at || ''))}</span><div class="spacer"></div>
-             ${!mind.reference_code ? '<button class="pfBtn sm" id="refSetBtn">用我做对的代码当重做基准</button>' : '<span class="pfChip tag">已存重做基准</span>'}</div></div>`
-          : '<div class="pfEmpty"><span class="pfEi">🧭</span>还没有思路卡。<br>做出来之后点上面的「AI 引导提炼思路」，<br>AI 会一次问一个问题，帮你把思路说清楚。</div>'}
-      </div>
-      <div class="secCard probRecCard">
-        <div class="secHead"><span>⚠️ 易错卡片（${openPits} 张待攻克）</span><div class="spacer"></div>
-          ${allPits.length ? `<span class="pfSub" title="每次盲写栽的跟脚AI 都会算成同一个点，这里按「犯过几次 × 严重度」排">共 ${allPits.length} 张 · 已攻克 ${allPits.length - openPits}</span>` : ''}</div>
-        ${allPits.length ? `<div class="pfPitWrap"><div class="pfPits">${allPits.map(pitCardHTML).join('')}</div></div>`
-          : '<div class="pfEmpty"><span class="pfEi">⚠️</span>还没有易错卡片。<br>做一次「尝试重做」，AI 会把你这次栽的跟脚提炼成卡片。</div>'}
-      </div>
-      ${rev ? `<div class="secCard probRecCard">
-        <div class="secHead"><span>🔁 复习状态</span><div class="spacer"></div><button class="btn tiny danger" id="unenqueueBtn">移出复习流</button></div>
-        <div class="pfPitWrap">
-          <div style="display:flex; align-items:center; gap:11px; flex-wrap:wrap;">
-            <span class="pfChip risk ${riskClass(rev.risk)}">遗忘风险 ${rev.risk}/100</span>
-            <span class="pfSub">复习过 ${rev.reviews || 0} 次${rev.last_review_at ? ' · 上次 ' + esc(String(rev.last_review_at).slice(0, 10)) : ''}${rev.last_verdict ? ' · 上次' + verdictName(rev.last_verdict) : ''}</span>
-            <div class="spacer"></div>
-            <span class="pfSub">AI 会按这个风险分排每天练哪几道</span>
-          </div>
-          ${(rev.why || []).length ? `<div class="pfTaskWhy" style="margin-top:8px;">风险来自：${esc(rev.why.join('、'))}</div>` : ''}
-        </div>
-      </div>` : `<div class="secCard probRecCard">
-        <div class="secHead"><span>🔁 复习状态</span></div>
-        <div class="pfPitWrap" style="display:flex; align-items:center; gap:11px; flex-wrap:wrap;">
-          <span class="pfSub">这道题不在复习流里。</span><div class="spacer"></div>
-          <button class="pfBtn sm" id="enqueueBtn">＋ 加入复习流</button>
-        </div>
-      </div>`}
     </div>
   </div>`;
   document.getElementById('ideBtn').addEventListener('click', () => openProblemInIDE(pid));
@@ -465,28 +462,23 @@ function drawProblemPage(pid) {
     state.mind = await api('/api/problems/' + pid + '/mind').catch(() => state.mind);
     drawProblemPage(pid);
   };
-  /* 引导提炼：作答记录栏的按钮 / 思路卡栏的两个按钮都走这里 */
-  const coachBtn = document.getElementById('coachBtn');
-  if (coachBtn) coachBtn.addEventListener('click', () => openCoach(pid));
-  const csb = document.getElementById('coachStartBtn');
-  if (csb) csb.addEventListener('click', () => openCoach(pid));
-  const cag = document.getElementById('coachAgainBtn');
-  if (cag) cag.addEventListener('click', () => openCoach(pid, true));
-  /* 思路卡直接手改（用户可能想自己补几句，不必再过一遍 AI） */
-  const meb = document.getElementById('mindEditBtn');
-  if (meb) meb.addEventListener('click', () => openMindEditor(pid));
-  /* 用最新一条通过的记录当重做基准，省得再粘一次 */
-  const rsb = document.getElementById('refSetBtn');
-  if (rsb) rsb.addEventListener('click', async () => {
-    const withCode = recs.filter(r => r.passed && r.code);
-    if (!withCode.length) return toast('没有带代码的通过记录 —— 先在某条记录上点「编辑」把代码补上');
-    rsb.disabled = true;
-    try {
-      await api('/api/problems/' + pid + '/mind', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reference_code: withCode[0].code }) });
-      await refreshMind();
-      toast('已用 ' + withCode[0].date + ' 的代码当基准');
-    } catch (e) { toast(e.message); rsb.disabled = false; }
+  /* ---- 顶栏（吸顶收藏栏）上的功能键：三个模块都是弹窗，不占正文 ---- */
+  const onTop = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
+  onTop('probPitBtn', () => openPitView(pid));
+  onTop('probRecallBtn', () => openRecallView(pid));
+  onTop('probMindBtn', () => openMindView(pid));
+  onTop('probRevBtn', () => openRevView(pid));
+  onTop('probCoachBtn', () => openCoach(pid, !!(mind.approach)));
+  onTop('probEnqBtn', async () => {
+    try { await api('/api/reviews/' + pid + '/enqueue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ goal_id: state.goal ? state.goal.id : 0 }) }); await refreshMind(); toast('已加入复习流 ✓'); }
+    catch (e) { toast(e.message); }
   });
+  onTop('probOutBtn', async () => {
+    if (!confirm('移出复习流？思路卡、易错卡片、盲写记录都保留，只是以后不再被排进今天的清单。')) return;
+    try { await api('/api/reviews/' + pid, { method: 'DELETE' }); await refreshMind(); toast('已移出复习'); } catch (e) { toast(e.message); }
+  });
+  /* 收藏栏：钉选 + 收藏夹 + 拖拽排序，用宿主那套现成实现（ns='prob'） */
+  if (typeof applyBarOverflow === 'function') { try { applyBarOverflow('prob'); } catch (e) { console.warn('题目页收藏栏：' + e.message); } }
   /* 每条作答记录上的「尝试重做」 */
   app.querySelectorAll('[data-redo]').forEach(b => b.addEventListener('click', () => {
     const rec = recs.find(r => r.id === Number(b.getAttribute('data-redo')));
@@ -494,34 +486,8 @@ function drawProblemPage(pid) {
     if (!String(rec.code || '').trim()) return toast('这条记录没存代码 —— 点「编辑」把代码补上才能当重做基准');
     openRecall(pid, rec);
   }));
-  /* 易错卡：攻克 / 删 */
-  app.querySelectorAll('[data-pitfix]').forEach(b => b.addEventListener('click', async () => {
-    const id = Number(b.getAttribute('data-pitfix'));
-    try {
-      const card = (state.mind.pitfalls || []).find(x => x.id === id) || {};
-      await api('/api/pitfalls/' + id, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: card.status === 'fixed' ? 'open' : 'fixed' }) });
-      await refreshMind();
-      toast(card.status === 'fixed' ? '重新放回待攻克' : '标为已攻克 ✓ 以后优先练别的');
-    } catch (e) { toast(e.message); }
-  }));
-  app.querySelectorAll('[data-pitdel]').forEach(b => b.addEventListener('click', async () => {
-    if (!confirm('删掉这张易错卡片？')) return;
-    try { await api('/api/pitfalls/' + b.getAttribute('data-pitdel'), { method: 'DELETE' }); await refreshMind(); toast('已删除'); } catch (e) { toast(e.message); }
-  }));
-  /* 复习流：加入 / 移出 */
-  const eq = document.getElementById('enqueueBtn');
-  if (eq) eq.addEventListener('click', async () => {
-    try {
-      await api('/api/reviews/' + pid + '/enqueue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ goal_id: state.goal ? state.goal.id : 0 }) });
-      await refreshMind();
-      toast('已加入复习流 ✓');
-    } catch (e) { toast(e.message); }
-  });
-  const uq = document.getElementById('unenqueueBtn');
-  if (uq) uq.addEventListener('click', async () => {
-    if (!confirm('移出复习流？思路卡、易错卡片、盲写记录都保留，只是以后不再被排进今天的清单。')) return;
-    try { await api('/api/reviews/' + pid, { method: 'DELETE' }); await refreshMind(); toast('已移出复习'); } catch (e) { toast(e.message); }
-  });
+  /* 每条作答记录上方那枚易错点小片：点开只看这一张（不同题目的错点不通用，不跳走上下文） */
+  app.querySelectorAll('[data-openpit]').forEach(b => b.addEventListener('click', () => openPitView(pid, b.getAttribute('data-openpit'))));
   app.querySelectorAll('[data-pdone]').forEach(b => b.addEventListener('click', async () => {
     const done = b.getAttribute('data-done') !== '1';
     try {
@@ -543,6 +509,193 @@ function drawProblemPage(pid) {
 }
 /* ================= 掌握闭环：AI 引导提炼 / 盲写重做 / 易错卡片 ================= */
 function riskClass(r) { const n = Number(r) || 0; return n >= 60 ? '' : n >= 35 ? 'mid' : 'low'; }
+/* ---- 三个模块都做成弹窗：卡片一多（一百条易错卡？）页面会被撑爆，
+       而弹窗里能滚动、能排序、还能顺手操作，页面只留题目和作答记录。 ---- */
+/** 思路卡弹窗：成品 + 参考代码基准 */
+function openMindView(pid) {
+  const mind = state.mind || {};
+  const prob = (state.problem && state.problem.problem) || {};
+  const L = openLayer('🧭 思路卡', esc((prob.fid || '') + '. ' + (prob.title || '')), { narrow: true });
+  const paint = () => {
+    const m = state.mind || {};
+    L.body.innerHTML = m.approach
+      ? `<div class="pfCardBox"><div class="pfCt">说出来才算会</div>${esc(m.approach)}</div>
+         <div class="pfSub" style="margin-top:9px;">更新于 ${esc(fmtDate(m.updated_at || ''))}</div>`
+      : '<div class="pfEmpty"><span class="pfEi">🧭</span>还没有思路卡。<br>做出来之后点下面的「AI 引导提炼思路」，<br>它一次问你一个问题，帮你把思路说清楚。</div>';
+    const ref = (m.reference_code || '').trim();
+    /* 参考代码不再单设按钮：点「尝试重做」时用的就是那次提交的代码当基准，
+       再摆一个「设基准」只会让人以为要先配置才能用。 */
+    L.foot.innerHTML = `${m.approach ? '<span class="pfSub">更新于 ' + esc(fmtDate(m.updated_at || '')) + '</span>'
+      : '<span class="pfSub">盲写基准直接取那次提交的代码，不用单独设</span>'}
+      <div class="spacer"></div>
+      ${m.approach ? '<button class="pfBtn sm" data-edit>编辑</button><button class="pfBtn sm" data-coach>重新提炼</button>' : ''}
+      <button class="pfBtn sm go" data-coach>🎓 AI 引导提炼思路</button>`;
+    L.foot.querySelectorAll('[data-coach]').forEach(b => b.addEventListener('click', () => { L.close(); openCoach(pid, !!m.approach); }));
+    const eb = L.foot.querySelector('[data-edit]');
+    if (eb) eb.addEventListener('click', () => { L.close(); openMindEditor(pid); });
+    void ref;
+  };
+  paint();
+}
+/** 重画题目页（思路卡 / 易错卡 / 复习状态都跟着变） */
+async function refreshMindView(pid) {
+  state.problem = await api('/api/problems/' + pid);
+  state.mind = await api('/api/problems/' + pid + '/mind').catch(() => state.mind);
+  drawProblemPage(pid);
+}
+/** 易错卡片弹窗：按权重排序，可攻克/放回/删 */
+function openPitView(pid, only) {
+  const prob = (state.problem && state.problem.problem) || {};
+  const L = openLayer('⚠️ 易错卡片', esc((prob.fid || '') + '. ' + (prob.title || '')));
+  const paint = () => {
+    const all = (state.mind && state.mind.pitfalls) || [];
+    /* only: 从某条作答记录点进来的 → 只看那张卡的全文（不跳走上下文） */
+    if (only) {
+      const one = all.find(c => c.id === Number(only));
+      L.body.innerHTML = one ? pitCardHTML(one)
+        : '<div class="pfEmpty"><span class="pfEi">🔍</span>这张卡已经不在了。</div>';
+      L.foot.innerHTML = '<span class="pfSub">从某次作答记录点进来的，只看这一张</span><div class="spacer"></div><button class="pfBtn sm" data-all>看全部卡片</button>';
+      L.foot.querySelector('[data-all]').addEventListener('click', () => { L.close(); openPitView(pid); });
+    } else {
+      /* 按「是哪一次提交栽的」分组 —— 不同提交的错点不通用，混在一起看不出改进了没有 */
+      const recs = (state.problem && state.problem.records) || [];
+      const byRec = {};
+      for (const c of all) { const k = Number(c.record_id) || 0; (byRec[k] = byRec[k] || []).push(c); }
+      const order = { 边界: 0, 下标: 1, 逻辑: 2, 复杂度: 3, 算法选择: 4, 状态定义: 5, 语法: 6, 其它: 7 };
+      const byWeight = (a, b) => (order[a.tag] ?? 8) - (order[b.tag] ?? 8) || (b.weight || 0) - (a.weight || 0);
+      /* 分组按作答记录的时间顺序排（新的在上面），每组内按权重 */
+      const keys = Object.keys(byRec).map(Number).sort((a, b) => {
+        const ra = recs.find(r => r.id === a), rb = recs.find(r => r.id === b);
+        return String(rb ? rb.created_at || rb.date : '').localeCompare(String(ra ? ra.created_at || ra.date : '')) || (b - a);
+      });
+      const groupHTML = k => {
+        const list = byRec[k].slice().sort(byWeight);
+        const rec = k ? recs.find(r => r.id === k) : null;
+        const openN = list.filter(c => c.status === 'open').length;
+        const head = k
+          ? `<div class="pfGrpHd"><span class="pfChip ${rec && rec.passed ? 'ok' : 'warn'}">${esc(rec ? rec.date : '第 ' + k + ' 次提交')}</span>
+             ${rec && rec.language ? `<span class="pfChip tag">${esc(rec.language)}</span>` : ''}
+             <span class="pfSub">${openN ? openN + ' 张待攻克' : '都攻克了'} · 共 ${list.length} 张</span></div>`
+          : '<div class="pfGrpHd"><span class="pfSub">早期做的盲写（没记归属）</span></div>';
+        const open = list.filter(c => c.status === 'open');
+        const rest = list.filter(c => c.status !== 'open');
+        return `<section class="pfGrp">${head}
+            ${open.length ? `<div class="pfPits">${open.map(pitCardHTML).join('')}</div>` : ''}
+            ${rest.length ? `<details class="pfFold"><summary>已攻克 / 已忽略 · ${rest.length} 张</summary><div class="pfPits">${rest.map(pitCardHTML).join('')}</div></details>` : ''}
+          </section>`;
+      };
+      const totalOpen = all.filter(c => c.status === 'open').length;
+      L.body.innerHTML = all.length
+        ? `${totalOpen ? '' : '<div class="pfEmpty" style="padding:16px 8px;"><span class="pfEi">🎉</span>这道题的坑你都攻克了。</div>'}
+           ${keys.map(groupHTML).join('')}`
+        : '<div class="pfEmpty"><span class="pfEi">⚠️</span>还没有易错卡片。<br>在下面任意一条作答记录上点「↻ 尝试重做」，<br>AI 会把你这次栽的跟脚提炼成卡片。</div>';
+      L.foot.innerHTML = `<span class="pfSub">按提交分组 · 组内按「类别 → 犯过几次 × 严重度」排</span><div class="spacer"></div>
+        <button class="pfBtn sm go" data-redo>↻ 去做一次盲写考核</button>`;
+      const rb = L.foot.querySelector('[data-redo]');
+      if (rb) rb.addEventListener('click', () => {
+        const rec = ((state.problem && state.problem.records) || []).filter(r => String(r.code || '').trim())[0];
+        if (!rec) return toast('还没有存代码的作答记录 —— 先记录一次并把代码贴进去');
+        L.close(); openRecall(pid, rec);
+      });
+    }
+    L.foot.insertAdjacentHTML('afterend', '');
+    /* 易错卡按钮在弹窗里也要能用 */
+    L.body.querySelectorAll('[data-pitfix]').forEach(b => b.addEventListener('click', async () => {
+      const id = Number(b.getAttribute('data-pitfix'));
+      const card = ((state.mind || {}).pitfalls || []).find(x => x.id === id) || {};
+      b.disabled = true;
+      try {
+        await api('/api/pitfalls/' + id, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: card.status === 'fixed' ? 'open' : 'fixed' }) });
+        state.mind = await api('/api/problems/' + pid + '/mind').catch(() => state.mind);
+        paint();
+        if (state.problem) { const l = await api('/api/problems/' + pid); state.problem = l; }
+        drawProblemPage(pid);
+        toast(card.status === 'fixed' ? '放回待攻克' : '标为已攻克 ✓');
+      } catch (e) { toast(e.message); b.disabled = false; }
+    }));
+    L.body.querySelectorAll('[data-pitdel]').forEach(b => b.addEventListener('click', async () => {
+      if (!confirm('删掉这张易错卡片？')) return;
+      try { await api('/api/pitfalls/' + b.getAttribute('data-pitdel'), { method: 'DELETE' }); state.mind = await api('/api/problems/' + pid + '/mind').catch(() => state.mind); paint(); toast('已删除'); }
+      catch (e) { toast(e.message); }
+    }));
+  };
+  paint();
+}
+/** 盲写考核记录弹窗：历次判定 + 当时的记忆钩子，按时间倒序 */
+function openRecallView(pid) {
+  const prob = (state.problem && state.problem.problem) || {};
+  const L = openLayer('📈 盲写考核记录', esc((prob.fid || '') + '. ' + (prob.title || '')), { narrow: true });
+  const paint = () => {
+    const tests = ((state.mind || {}).recallTests) || [];
+    const recs = (state.problem && state.problem.records) || [];
+    const verb = s => ({ pass: '思路完整，细节没漏', fuzzy: '思路在，细节漏了', forgotten: '没想出核心思路' }[s] || s || '');
+    L.body.innerHTML = tests.length
+      ? '<div class="pfPits">' + tests.map(t => {
+        const rec = t.record_id ? recs.find(r => r.id === Number(t.record_id)) : null;
+        const rep = safeParse(t.report, {}) || {};
+        const cls = t.score >= 85 ? 'fixed' : t.score >= 55 ? 'hit mid' : 'hit';
+        return '<div class="pfPit" style="border-style:dashed;">'
+          + '<div class="pfPitTop">'
+          + '<span class="pfChip ' + cls + '">一致度 ' + t.score + '%</span>'
+          + '<span class="pfPitTitle" style="font-weight:600;">' + esc(verb(t.verdict)) + '</span>'
+          + '<div class="spacer"></div>'
+          + '<span class="pfSub">' + esc(String(t.created_at || '').slice(0, 10)) + '</span></div>'
+          + (rec ? '<div class="pfPitDetail">对照基准：' + esc(rec.date) + ' 那次提交的代码' + (rec.language ? '（' + esc(rec.language) + '）' : '') + '</div>' : '')
+          + ((rep.got || []).length ? '<div class="pfPitAdv"><b>想起来了：</b>' + esc((rep.got || []).join('；')) + '</div>' : '')
+          + ((rep.missed || []).length ? '<div class="pfPitAdv"><b>漏了：</b>' + esc((rep.missed || []).map(m => m.what).join('；')) + '</div>' : '')
+          + (rep.hint ? '<div class="pfPitAdv"><b>当时的钩子：</b>' + esc(rep.hint) + '</div>' : '')
+          + '</div>';
+      }).join('') + '</div>'
+      : '<div class="pfEmpty"><span class="pfEi">📈</span>还没做过盲写考核。<br>在「作答记录」里任意一条上点「↻ 尝试重做」。<br><br>遮住代码凭记忆重敲一遍，AI 对照后告诉你漏了什么。</div>';
+    const withCode = recs.filter(r => String(r.code || '').trim());
+    L.foot.innerHTML = '<span class="pfSub">共 ' + tests.length + ' 次 · 与「易错卡片」按提交一一对应</span><div class="spacer"></div>'
+      + '<button class="pfBtn sm" data-cancel>关闭</button>'
+      + (withCode.length ? '<button class="pfBtn sm go" data-redo>↻ 再做一次</button>' : '');
+    const c = L.foot.querySelector('[data-cancel]'); if (c) c.addEventListener('click', L.close);
+    const r = L.foot.querySelector('[data-redo]');
+    if (r) r.addEventListener('click', () => { const rec = withCode[0]; L.close(); openRecall(pid, rec); });
+  };
+  paint();
+}
+/** 复习状态弹窗：风险、进度、进入/移出复习流 */
+function openRevView(pid) {
+  const prob = (state.problem && state.problem.problem) || {};
+  const L = openLayer('🔁 复习状态', esc((prob.fid || '') + '. ' + (prob.title || '')), { narrow: true });
+  const paint = () => {
+    const rev = (state.mind || {}).review;
+    if (!rev) {
+      L.body.innerHTML = '<div class="pfEmpty"><span class="pfEi">🔁</span>这道题不在复习流里。<br>加入之后 AI 会按遗忘风险，帮你排「今天该练哪几道」。</div>';
+      L.foot.innerHTML = '<div class="spacer"></div><button class="pfBtn sm" data-cancel>关闭</button><button class="pfBtn sm go" data-enq>＋ 加入复习流</button>';
+    } else {
+      L.body.innerHTML = `
+        <div style="display:flex; align-items:center; gap:11px; flex-wrap:wrap;">
+          <span class="pfChip risk ${riskClass(rev.risk)}">遗忘风险 ${rev.risk}/100</span>
+          <div class="pfBar ${riskClass(rev.risk)}" style="max-width:180px;"><i style="width:${Math.max(4, Math.min(100, Number(rev.risk) || 0))}%"></i></div>
+        </div>
+        ${(rev.why || []).length ? `<div class="pfPitAdv" style="margin-top:11px;"><b>风险来自：</b>${esc(rev.why.join('、'))}</div>` : ''}
+        <ul class="pfLst good" style="margin-top:13px;">
+          <li>复习过 <b>${rev.reviews || 0}</b> 次</li>
+          <li>上次复习：<b>${rev.last_review_at ? esc(String(rev.last_review_at).slice(0, 10)) : '还没复习过'}</b>${rev.last_verdict ? '（' + verdictName(rev.last_verdict) + '）' : ''}</li>
+          <li>最近盲写：<b>${rev.last_score >= 0 ? rev.last_score + '%' : '还没盲写验证过'}</b></li>
+        </ul>
+        <div class="pfSub" style="margin-top:12px;">复习进度由「盲写重做」的 AI 判定自动更新，不需要手动打分。</div>`;
+      L.foot.innerHTML = '<div class="spacer"></div><button class="pfBtn sm" data-cancel>关闭</button><button class="pfBtn sm danger" data-out>移出复习流</button>';
+    }
+    const c = L.foot.querySelector('[data-cancel]'); if (c) c.addEventListener('click', L.close);
+    const e = L.foot.querySelector('[data-enq]');
+    if (e) e.addEventListener('click', async () => {
+      try { await api('/api/reviews/' + pid + '/enqueue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ goal_id: state.goal ? state.goal.id : 0 }) }); await refreshMindView(pid); L.close(); toast('已加入复习流 ✓'); }
+      catch (err) { toast(err.message); }
+    });
+    const o = L.foot.querySelector('[data-out]');
+    if (o) o.addEventListener('click', async () => {
+      if (!confirm('移出复习流？思路卡、易错卡片、盲写记录都保留，只是以后不再被排进今天的清单。')) return;
+      try { await api('/api/reviews/' + pid, { method: 'DELETE' }); await refreshMindView(pid); L.close(); toast('已移出复习'); }
+      catch (err) { toast(err.message); }
+    });
+  };
+  paint();
+}
 function verdictName(v) { return { pass: '通过', fuzzy: '写得不完整', forgotten: '没写出来' }[v] || v || ''; }
 /** 易错卡片（一行/一张） */
 function pitCardHTML(c) {
@@ -601,51 +754,96 @@ function openLayer(title, sub, opts) {
 async function openCoach(pid, restart) {
   const prob = (state.problem && state.problem.problem) || {};
   const L = openLayer('🧭 AI 引导提炼思路', esc(prob.fid + '. ' + (prob.title || '')), { narrow: true });
+  /* 维度 key → 中文名。检查表、打标、提示词三处都要用，集中在这一处免得各写一份。 */
+  const dimName = k => { const d = ((state.mind || {}).dims || []).find(x => x.key === k); return d ? d.name : ''; };
+  /* render 会整块重建 #pfSay，不保住的话用户在输入框里写了一半的内容会被清空
+     （点一次「下一问」或收到 AI 回包都会触发重绘）。
+     keepDraft：null = 沿用输入框现值；'' = 提交过了，主动清空。 */
+  let keepDraft = null;
   const render = () => {
+    const prev = L.body.querySelector('#pfSay');
+    if (keepDraft === null) keepDraft = prev ? prev.value : '';
     const sess = (state.mind && state.mind.session) || null;
     const steps = sess ? (sess.steps || []) : [];
-    const stages = (state.mind && state.mind.stages) || [];
-    const done = steps.filter(s => String(s.a || '').trim() && s.q).length;
-    const cur = Math.min(done, (stages.length || 5) - 1);
-    const allDone = done >= (stages.length || 5);
+    const dims = (state.mind && state.mind.dims) || [];
+    const hitAll = (state.mind && state.mind.hit) || [];
     /* pending = 当前正在等回答的那一问（还没配对成一步，所以要单独画出来） */
     const pend = sess && sess.pending ? sess.pending : null;
-    const stepNow = (pend && pend.stageKey) ? stages.findIndex(s => s.key === pend.stageKey) : cur;
-    L.body.innerHTML = `<div class="pfRail" id="pfRail"></div>
-      <div class="pfThread" id="pfThread"></div>
-      ${allDone ? '' : `<div class="pfStepLbl"><b>你</b><span>${stages[stepNow] ? '第 ' + (stepNow + 1) + ' 步「' + esc(stages[stepNow].name) + '」—— ' + esc(stages[stepNow].hint) : '我怎么想就怎么说'}</span></div>
-      <textarea class="pfSay" id="pfSay" placeholder="比如：我就是觉得两层循环太慢，想能不能只走一遍…"></textarea>`}`;
-    /* 台阶进度条：用户能看见自己在第几步、还剩几步 */
+    const focusKey = pend ? String(pend.focus || 'refine') : 'refine';
+    const talked = steps.filter(s => String(s.a || '').trim() && s.probe).length;
+    const allDone = !!(pend && pend.done) || talked >= 10;
+    L.body.innerHTML = '<div class="pfRail" id="pfRail"></div>'
+      + '<div class="pfThread" id="pfThread"></div>'
+      + '<div class="pfStepLbl"><b>你</b><span>'
+      + (allDone ? '聊得差不多了，可以整理成思路卡'
+        : (pend && pend.read ? 'AI 判断你<i>' + esc(pend.read) + '</i>，现在补这一块' : '我怎么想就怎么说，不用组织语言'))
+      + '</span></div>'
+      + '<textarea class="pfSay" id="pfSay" placeholder="比如：我就是觉得两层循环太慢，想能不能只走一遍…"></textarea>';
+    /* 覆盖清单：不是顺序剧本，是「值得覆盖到」的检查表 ——
+       ✓ = AI 判断你已经讲到；高亮 = AI 这一轮选中的关注点。 */
     const rail = L.body.querySelector('#pfRail');
-    rail.innerHTML = stages.map((s, i) => `<div class="pfRailStep ${i < done ? 'on' : i === stepNow ? 'cur' : ''}">
-        <b>${i < done ? '✓' : (i + 1)}</b><span>${esc(s.name)}</span></div>`).join('<i class="pfRailLine"></i>');
-    /* i 是从 0 起的台阶下标 */
-const turnHTML = (s, i) => `<div class="pfTurn"><div class="pfAv">🎓</div><div class="pfBubble">
-        <span class="pfLabel">第 ${(i + 1) + ' 步 · ' + esc(s.stageName || '引导')}${s.echo ? '　—　你说的是：' + esc(s.echo) : ''}</span>${esc(s.q)}</div></div>`;
-    const meHTML = s => `<div class="pfTurn me"><div class="pfAv">我</div><div class="pfBubble"><span class="pfLabel">我说</span>${esc(s.a)}</div></div>`;
+    rail.innerHTML = '<div class="pfRailHd"><span>覆盖清单</span><span class="pfSub">' + hitAll.length + '/' + dims.length
+      + ' 已讲到 · AI 自己挑下一个问什么</span></div>'
+      + '<div class="pfDims">' + dims.map(d => {
+        const on = hitAll.indexOf(d.key) >= 0;
+        return '<span class="pfDim' + (on ? ' on' : '') + (d.key === focusKey ? ' cur' : '')
+          + '" title="' + esc(d.ask || d.name) + '">' + (on ? '✓ ' : '') + esc(d.name) + '</span>';
+      }).join('')
+      /* 「打磨」不是清单里的一格（它不是维度，是状态），但 AI 选它时也得有东西可高亮，
+         否则用户看不到「它现在要干什么」 */
+      + (focusKey === 'refine' ? '<span class="pfDim cur refine" title="他已经把核心思路讲成型了 —— 这一轮改问能让思路更扎实的东西，而不是继续走清单">✦ 打磨</span>' : '')
+      + '</div>';
+    /* ⚠️ 气泡不能一边 pre-wrap 一边在模板里为了排版留换行缩进 ——
+       那些空白会被原样渲染成一大片空隙（用户报过的「输出上方有巨大空白」）。
+       所以 pre-wrap 只作用在 .pfTxt 这一层，气泡本身按普通块排版（跟 restate 组件一致）。 */
+    const hintHTML = s => (s.hintText
+      ? '<div class="pfTurn"><div class="pfAv">💡</div><div class="pfBubble hint">'
+        + '<div class="pfLabel">只给方向，不给答案</div>'
+        + (s.hintSay ? '<div class="pfTxt">' + esc(s.hintSay) + '</div>' : '')
+        + '<div class="pfTxt">' + esc(s.hintText) + '</div></div></div>' : '');
+    const turnHTML = s => {
+      const d = dimName(s.focus) || '打磨';
+      const hitTxt = (s.hit || []).map(k => dimName(k) || k).join('、');
+      return '<div class="pfTurn"><div class="pfAv">🎓</div><div class="pfBubble">'
+        + '<div class="pfLabel">关注「' + esc(d) + '」' + (hitTxt ? '　·　你已讲到：' + esc(hitTxt) : '') + '</div>'
+        + (s.say ? '<div class="pfTxt">' + esc(s.say) + '</div>' : '')
+        + '<div class="pfQ">' + esc(s.probe || '') + '</div>'
+        + hintHTML(s)
+        + '</div></div>';
+    };
+    /* 用户气泡不写「我说」那行：它会在气泡上方多撑出一条空白横杠，看着像多了个空行 */
+    const meHTML = s => '<div class="pfTurn me"><div class="pfAv">我</div><div class="pfBubble">'
+      + '<div class="pfTxt">' + esc(s.a) + '</div></div></div>';
     let th = '';
     if (sess && sess.summary) {
-      th = `<div class="pfCardBox"><div class="pfCt">整理好的思路卡（还没存进存档）</div>${esc(sess.summary)}</div>`;
+      th = '<div class="pfCardBox"><div class="pfCt">整理好的思路卡（还没存进存档）</div>' + esc(sess.summary) + '</div>';
     } else if (!steps.length && !pend) {
-      th = '<div class="pfEmpty" style="padding:18px 10px;"><span class="pfEi">🎓</span>AI 会带你走五步：<br>说清要什么 → 先想最笨的办法 → 找关键跳跃 → 落地成步骤 → 记住它。<br>它一次只问一个具体问题，答之前会先复述你说的话。<br><br>如果第一句还没出来，点「下一问」。</div>';
+      th = '<div class="pfEmpty" style="padding:18px 10px;"><span class="pfEi">🎓</span>'
+        + 'AI 会读你写的，自己判断还缺哪一块，然后<b>只补那一块</b>。<br>'
+        + '你已经说清楚的地方，它不会再让你重说一遍。<br><br>如果第一句还没出来，点「下一问」。</div>';
     } else {
-      th = steps.map((s, i) => (s.q ? turnHTML(s, i) : '') + meHTML(s)).join('')
-        + (pend ? turnHTML({ q: pend.q, echo: pend.echo, stageName: pend.stageName }, stepNow) : '');
+      th = steps.map(s => (s.probe ? turnHTML(s) : '') + meHTML(s)).join('')
+        + (pend && pend.probe ? turnHTML(pend) : '');
     }
     if (allDone && sess && !sess.summary) {
-      th += '<div class="pfEmpty" style="padding:14px 10px;"><span class="pfEi">🎉</span>五步都走完了。<br>点下面「整理成思路卡」，AI 会把你说的整理成一张能背下来的卡。</div>';
+      th += '<div class="pfEmpty" style="padding:14px 10px;"><span class="pfEi">🎉</span>聊得差不多了。<br>'
+        + '点下面「整理成思路卡」，AI 会把你说的整理成一张能背下来的卡。</div>';
     }
     L.body.querySelector('#pfThread').innerHTML = th;
+    const sayEl = L.body.querySelector('#pfSay');
+    if (sayEl) { sayEl.value = keepDraft == null ? '' : keepDraft; keepDraft = null; }
     L.body.scrollTop = L.body.scrollHeight;
-    L.foot.innerHTML = `<span class="pfSub" id="pfStep">${done}/${stages.length || 5} 步</span><div class="spacer"></div>
-      ${(state.mind && state.mind.approach) ? '<button class="pfBtn sm" data-clear>从头再聊</button>' : ''}
-      ${allDone && !(sess && sess.summary) ? '' : '<button class="pfBtn sm" data-hint title="不给答案，只把方向指出来">💡 卡住了，提示我</button>'}
-      ${allDone && !(sess && sess.summary) ? '' : '<button class="pfBtn sm" data-ask>下一问 →</button>'}
-      <button class="pfBtn sm go" data-finish title="把聊出来的内容整理成一张思路卡">整理成思路卡</button>
-      ${sess && sess.summary ? '<button class="pfBtn sm go" data-save>💾 存进思路卡</button>' : ''}`;
+    L.foot.innerHTML = '<span class="pfSub" id="pfStep">聊了 ' + talked + ' 轮'
+      + (dimName(focusKey) ? ' · 当前关注「' + esc(dimName(focusKey)) + '」' : '') + '</span><div class="spacer"></div>'
+      + ((state.mind && state.mind.approach) ? '<button class="pfBtn sm" data-clear>从头再聊</button>' : '')
+      + ((allDone && !(sess && sess.summary)) ? '' : '<button class="pfBtn sm" data-hint title="不给答案，只把方向指出来">💡 卡住了，提示我</button>')
+      + ((allDone && !(sess && sess.summary)) ? '' : '<button class="pfBtn sm" data-ask>下一问 →</button>')
+      + '<button class="pfBtn sm go" data-finish title="把聊出来的内容整理成一张思路卡">整理成思路卡</button>'
+      + ((sess && sess.summary) ? '<button class="pfBtn sm go" data-save>💾 存进思路卡</button>' : '');
     const ab = L.foot.querySelector('[data-ask]');
     if (ab) ab.addEventListener('click', () => askNext(false, false));
-    L.foot.querySelector('[data-hint]').addEventListener('click', () => askNext(false, true));
+    const hb2 = L.foot.querySelector('[data-hint]');
+    if (hb2) hb2.addEventListener('click', () => askNext(false, true));
     const fin = L.foot.querySelector('[data-finish]');
     fin.addEventListener('click', () => finishCoach(L, pid));
     const sv = L.foot.querySelector('[data-save]');
@@ -677,6 +875,20 @@ const turnHTML = (s, i) => `<div class="pfTurn"><div class="pfAv">🎓</div><div
     if (say) say.disabled = on;
     L.body.scrollTop = L.body.scrollHeight;
   };
+  /* 乐观上屏：点「下一问」的瞬间就把用户这句话显示出来（AI 还在想，它的话随后补上）。
+     等 AI 回完再一起渲染的话，用户会以为自己没点上 —— 十几秒的空白期体验很差。 */
+  const showOwnNow = txt => {
+    const th = L.body.querySelector('#pfThread');
+    if (!th) return;
+    th.querySelectorAll('.pfPending').forEach(n => n.remove());
+    th.insertAdjacentHTML('beforeend', '<div class="pfTurn me pfPending"><div class="pfAv">我</div><div class="pfBubble">'
+      + '<div class="pfTxt">' + esc(txt) + '</div></div></div>');
+    L.body.scrollTop = L.body.scrollHeight;
+  };
+  const dropOwnNow = () => {
+    const th = L.body.querySelector('#pfThread');
+    if (th) th.querySelectorAll('.pfPending').forEach(n => n.remove());
+  };
   const askNext = async (forceNew, hint) => {
     const say = L.body.querySelector('#pfSay');
     const ans = say ? say.value.trim() : '';
@@ -684,16 +896,19 @@ const turnHTML = (s, i) => `<div class="pfTurn"><div class="pfAv">🎓</div><div
     const hasSteps = !!(sessNow && (sessNow.steps || []).length) || !!(sessNow && sessNow.pending);
     /* 提示不用先回答（他可能就是卡在回答之前）；提问要有话可说，或已经有那一问等着 */
     if (!forceNew && !hint && !ans && !hasSteps) return toast('先说说你怎么想的');
+    /* 只有真的提交了回答才先上屏；点「提示我」不消费输入框里的字，它还要留着 */
+    if (!hint && !forceNew && ans) { showOwnNow(ans); keepDraft = ''; if (say) say.value = ''; }
     setAsk(true, hint);
     try {
-      const body = forceNew ? { hint: false } : (hint ? { hint: true } : { answer: ans });
+      /* 点「提示我」时把输入框里已写的那半句也发过去 —— 他多半就是卡在这句上 */
+      const body = forceNew ? { hint: false } : (hint ? { hint: true, draft: ans } : { answer: ans });
       await api('/api/problems/' + pid + '/mind/ask', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      if (!forceNew && !hint && say) say.value = '';
       state.mind = await api('/api/problems/' + pid + '/mind');
       setAsk(false);
+      dropOwnNow();
       render();
       const s = L.body.querySelector('#pfSay'); if (s && !hint) s.focus();
-    } catch (e) { setAsk(false); toast(e.message); }
+    } catch (e) { setAsk(false); dropOwnNow(); toast(e.message); }
   };
   const finishCoach = async (ly, xpid) => {
     const b = ly.foot.querySelector('[data-finish]');
@@ -784,7 +999,8 @@ function openRecall(pid, rec) {
     try {
       const r = await api('/api/problems/' + pid + '/recall/check', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ my_code: code, ref_code: ref, goal_id: state.goal ? state.goal.id : 0 })
+        /* record_id 让 AI 提炼出的易错卡片能精确挂到「是哪一次提交」上 */
+        body: JSON.stringify({ my_code: code, ref_code: ref, record_id: Number(rec.id) || 0, goal_id: state.goal ? state.goal.id : 0 })
       });
       state.mind = await api('/api/problems/' + pid + '/mind');
       clearInterval(timer);

@@ -233,7 +233,13 @@ document.addEventListener('contextmenu', e => {
   showCtxMenu(e.clientX, e.clientY, Number(el.getAttribute('data-node-id')));
 });
 document.addEventListener('click', e => {
-  if (!e.target.closest('.ctxMenu')) document.querySelectorAll('.ctxMenu').forEach(m => m.remove());
+  if (!e.target.closest('.ctxMenu')) {
+    /* 必须豁免所有"点开式"按钮（[data-morebtn] 组件入口 ⋯ 与各条收藏栏的 ⋯）。
+       少豁免一个，它点开的菜单就会在同一个 click 里被这句收掉 ——
+       表现为「菜单闪一下就没了」，点开式按钮看起来像坏的。 */
+    if (e.target.closest && (e.target.closest('[data-morebtn]') || e.target.closest('[data-morebtn-of]'))) return;
+    document.querySelectorAll('.ctxMenu').forEach(m => m.remove());
+  }
 });
 window.addEventListener('scroll', () => document.querySelectorAll('.ctxMenu').forEach(m => m.remove()), true);
 window.addEventListener('mousemove', e => {
@@ -2506,6 +2512,9 @@ function mdToHTML(text) {
    每条栏按 ns（命名空间）分开存，互不干扰：
      ns='tut'  → 教程页，键 sierxing-tutbar-v5
      ns='goal' → 路线图（目标）页，键 sierxing-goalbar-v1
+     ns='prob' → 单题页（刷题组件），键 sierxing-probbar-v1
+   组件页面直接复用这一套：在自己页面里渲染 id=xxxFavBar 的容器 + 带 data-tbtn
+   的按钮，渲染完调一次 applyBarOverflow(自己的 ns) 即可（拖拽/收藏夹/⋯ 收纳全都现成）。
    数据结构：
      seen    顶栏出现过的按钮 id。按钮受组件开关控制，可能这次不渲染；记下来才不会丢。
      off     用户明确"取消钉选"的按钮 id（收进 ⋯）
@@ -2517,6 +2526,7 @@ function mdToHTML(text) {
 const BAR_NS = {
   tut:  { key: 'sierxing-tutbar-v5',  old: 'sierxing-tutbar-v4', bar: 'tutFavBar',  more: 'tutMoreBtn' },
   goal: { key: 'sierxing-goalbar-v1', old: '',                  bar: 'goalFavBar', more: 'goalMoreBtn' },
+  prob: { key: 'sierxing-probbar-v1', old: '',                  bar: 'probFavBar', more: 'probMoreBtn', alwaysMore: true },
 };
 let BAR_DRAG = null;        // 当前拖的东西：{k:'b'|'f', id, ns}
 let BAR_DROP_MARK = null;   // 横向排序的插入位置指示线
@@ -2680,13 +2690,21 @@ function applyBarOverflow(ns) {
   });
   const rest = ids.filter(id => !placed.has(id) && !barFolderOf(st, id));
   bar.hidden = !(placed.size || st.folders.length || rest.length);
-  if (!rest.length) { more.hidden = true; }
+  /* alwaysMore 的栏（按钮少、默认全都摆得下）也要留 ⋯：
+     「新建收藏夹 / 自定义工具栏」都从这个菜单进，全摆下时一并藏了就再也建不了夹子。 */
+  if (cfg.alwaysMore) {
+    more.hidden = false;
+    more.textContent = rest.length ? `⋯ (${rest.length})` : (st.folders.length ? '⋯' : '⋯ ⚙');
+    more.title = st.folders.length ? '打开收藏夹 / 自定义工具栏' : '新建收藏夹 / 自定义工具栏';
+  } else if (!rest.length) { more.hidden = true; }
   else { more.hidden = false; more.textContent = `⋯ (${rest.length})`; }
   more.onclick = () => {
     if (document.querySelector('.moreMenu')) { document.querySelectorAll('.moreMenu').forEach(x => x.remove()); return; }
     const items = rest.map(id => ({ icon: '', label: byId[id].textContent.trim(), target: id }));
     if (st.folders.length) for (const f of st.folders) items.push({ icon: '📂', label: `打开「${f.name}」`, cmd: ns + ':folder-open:' + f.id });
-    items.push({ icon: '📌', label: '全部钉回收藏栏', cmd: ns + ':pin-all' });
+    /* 没有可收纳的按钮时，「新建收藏夹」是这条菜单里唯一能起手的事，得放在最上面 */
+    if (cfg.alwaysMore) items.unshift({ icon: '📂+', label: '新建收藏夹', cmd: ns + ':folder-new' });
+    if (rest.length) items.push({ icon: '📌', label: '全部钉回收藏栏', cmd: ns + ':pin-all' });
     items.push({ icon: '⚙', label: '自定义工具栏…', cmd: ns + ':customize' });
     void openMoreMenu(more, items);
   };

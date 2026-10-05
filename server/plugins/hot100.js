@@ -113,6 +113,9 @@ CREATE TABLE IF NOT EXISTS recall_tests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   problem_id INTEGER NOT NULL,
   goal_id INTEGER NOT NULL DEFAULT 0,
+  /* 来源是哪一条作答记录（practice_records.id）。易错卡片按「哪一次提交」分开展示，
+     所以这个归属必须精确存下来，不能靠时间就近猜。 */
+  record_id INTEGER NOT NULL DEFAULT 0,
   ref_code TEXT NOT NULL DEFAULT '',
   my_code TEXT NOT NULL DEFAULT '',
   report TEXT NOT NULL DEFAULT '',
@@ -126,6 +129,8 @@ CREATE TABLE IF NOT EXISTS pitfall_cards (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   problem_id INTEGER NOT NULL,
   goal_id INTEGER NOT NULL DEFAULT 0,
+  /* 最近一次是跟着哪条作答记录栽的（合并同坑时以最新那次为准） */
+  record_id INTEGER NOT NULL DEFAULT 0,
   tag TEXT NOT NULL DEFAULT '',
   title TEXT NOT NULL DEFAULT '',
   detail TEXT NOT NULL DEFAULT '',
@@ -166,6 +171,11 @@ module.exports = {
       if (!mc.includes('reference_code')) db.exec("ALTER TABLE problem_mind ADD COLUMN reference_code TEXT NOT NULL DEFAULT '';");
       const sc = db.prepare('PRAGMA table_info(mind_sessions)').all().map(c => c.name);
       if (sc.length && !sc.includes('pending')) db.exec("ALTER TABLE mind_sessions ADD COLUMN pending TEXT NOT NULL DEFAULT '';");
+      /* record_id：易错卡片按「哪一次作答」区分，1.9.0 加的 */
+      const rc2 = db.prepare('PRAGMA table_info(recall_tests)').all().map(c => c.name);
+      if (rc2.length && !rc2.includes('record_id')) db.exec('ALTER TABLE recall_tests ADD COLUMN record_id INTEGER NOT NULL DEFAULT 0;');
+      const pc = db.prepare('PRAGMA table_info(pitfall_cards)').all().map(c => c.name);
+      if (pc.length && !pc.includes('record_id')) db.exec('ALTER TABLE pitfall_cards ADD COLUMN record_id INTEGER NOT NULL DEFAULT 0;');
     } catch (e) {}
     /* review_cards 在 1.8.0 从固定艾宾浩斯曲线改成「遗忘风险 + AI 排期」，
        老列 stage/next_due/last_result 是曲线下标、没有直接对应物。
@@ -253,10 +263,10 @@ module.exports = {
     /* 下面三张表是 1.8.0 才有的，老备份里没有对应字段 —— 全部容错 */
     for (const x of (data.mindSessions || [])) db.prepare('INSERT OR REPLACE INTO mind_sessions (id,problem_id,goal_id,status,steps,summary,pending,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)')
       .run(x.id, x.problem_id, x.goal_id || 0, x.status || 'active', x.steps || '[]', x.summary || '', x.pending || '', x.created_at || '', x.updated_at || '');
-    for (const x of (data.recalls || [])) db.prepare('INSERT OR REPLACE INTO recall_tests (id,problem_id,goal_id,ref_code,my_code,report,score,verdict,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
-      .run(x.id, x.problem_id, x.goal_id || 0, x.ref_code || '', x.my_code || '', x.report || '', x.score || 0, x.verdict || '', x.created_at || '');
-    for (const x of (data.pitfalls || [])) db.prepare('INSERT OR REPLACE INTO pitfall_cards (id,problem_id,goal_id,tag,title,detail,advice,hits,weight,status,source_test,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
-      .run(x.id, x.problem_id, x.goal_id || 0, x.tag || '', x.title || '', x.detail || '', x.advice || '',
+    for (const x of (data.recalls || [])) db.prepare('INSERT OR REPLACE INTO recall_tests (id,problem_id,goal_id,record_id,ref_code,my_code,report,score,verdict,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+      .run(x.id, x.problem_id, x.goal_id || 0, x.record_id || 0, x.ref_code || '', x.my_code || '', x.report || '', x.score || 0, x.verdict || '', x.created_at || '');
+    for (const x of (data.pitfalls || [])) db.prepare('INSERT OR REPLACE INTO pitfall_cards (id,problem_id,goal_id,record_id,tag,title,detail,advice,hits,weight,status,source_test,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(x.id, x.problem_id, x.goal_id || 0, x.record_id || 0, x.tag || '', x.title || '', x.detail || '', x.advice || '',
         x.hits || 1, x.weight || 0, x.status || 'open', x.source_test || 0, x.created_at || '', x.updated_at || '');
     /* 复习排期是「今天练哪几道」，跨设备没什么意义（各人作息不同），照样同步但不覆盖别人的当天清单 */
     for (const x of (data.plansReview || [])) {
@@ -449,7 +459,7 @@ module.exports = {
             }
           } catch (e) {}
           const card = db.prepare('SELECT * FROM review_cards WHERE problem_id = ?').get(pid) || null;
-          const recalls = db.prepare('SELECT id,score,verdict,report,created_at FROM recall_tests WHERE problem_id = ? ORDER BY id DESC LIMIT 8').all(pid);
+          const recalls = db.prepare('SELECT id,record_id,score,verdict,report,created_at FROM recall_tests WHERE problem_id = ? ORDER BY id DESC LIMIT 20').all(pid);
           const cands = reviewCandidates(card && card.goal_id ? card.goal_id : 0);
           const self = cands.find(c => c.problem_id === pid) || null;
           const steps = sess ? sess.steps : [];
@@ -458,8 +468,13 @@ module.exports = {
             approach: row.approach || '',
             reference_code: row.reference_code || '',
             session: sess,
-            stages: coachStages(),
-            stepIndex: Math.min(steps.filter(s => String(s.a || '').trim()).length, COACH_STAGES.length - 1),
+            dims: coachDims(),
+            /* 已经掌握的维度：历次 AI 判断的累积 + 当前那一问刚判的（还没被回答，
+               但它已经告诉用户「你讲到哪了」，清单要立刻跟上，不能等回答完才打勾） */
+            hit: [...new Set([
+              ...steps.flatMap(x => (Array.isArray(x.hit) ? x.hit : [])),
+              ...((sess && sess.pending && Array.isArray(sess.pending.hit)) ? sess.pending.hit : [])
+            ])],
             pitfalls: problemPitfalls(pid),
             recallTests: recalls,
             review: card ? { ...card, risk: self ? self.risk : 0, why: self ? self.why : [] } : null
@@ -480,7 +495,7 @@ module.exports = {
           let body = {};
           try { body = await readBody(req); } catch (e) {}
           try {
-            return sendJSON(res, 200, await coachAsk(pid, body.answer === undefined ? undefined : String(body.answer), !!body.hint));
+            return sendJSON(res, 200, await coachAsk(pid, body.answer === undefined ? undefined : String(body.answer), !!body.hint, body.draft));
           } catch (e) { return sendJSON(res, 500, { error: e.message || 'AI 没能问出问题' }); }
         }
     }
@@ -550,7 +565,7 @@ module.exports = {
           let ref = String(body.ref_code || '');
           if (!ref.trim()) ref = String((db.prepare('SELECT reference_code FROM problem_mind WHERE problem_id = ?').get(pid) || {}).reference_code || '');
           try {
-            const out = await recallCheck(pid, body.my_code, ref, Number(body.goal_id) || 0);
+            const out = await recallCheck(pid, body.my_code, ref, Number(body.goal_id) || 0, Number(body.record_id) || 0);
             /* 重做之后顺手刷新参考代码（有更好的实现就更新基准），只在用户显式传 ref_code 时不覆盖 */
             if (!body.ref_code && out.report.verdict === 'pass' && out.report.score >= 90 && String(body.my_code || '').trim()) {
               db.prepare('INSERT INTO problem_mind (problem_id,approach,pitfalls,reference_code,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(problem_id) DO UPDATE SET reference_code=excluded.reference_code, updated_at=excluded.updated_at')
@@ -1155,7 +1170,7 @@ function similarTitle(a, b) {
 const PITFALL_TAGS = ['边界', '逻辑', '复杂度', '语法', '算法选择', '状态定义', '下标', '其它'];
 /** 易错卡落库：AI 说重复就并进老卡；没说重复也用相似度兜一遍
  *  （用户每次写错的地方措辞略有不同，AI 不一定认得出来，但骨架往往是同一句）。 */
-function upsertPitfall(pid, goalId, e, sourceTest) {
+function upsertPitfall(pid, goalId, e, sourceTest, recordId) {
   const title = String(e && e.title || '').trim().slice(0, 120);
   if (!title) return null;
   const tag = PITFALL_TAGS.includes(String(e.tag)) ? String(e.tag) : '其它';
@@ -1174,54 +1189,132 @@ function upsertPitfall(pid, goalId, e, sourceTest) {
     /* 合并：老卡的描述保留（第一次犯的语境最有价值），次数 +1，权重按新严重度抬 */
     const hits = (Number(target.hits) || 1) + 1;
     const weight = hits * 5 + sev * 3;
-    db.prepare('UPDATE pitfall_cards SET hits=?, weight=?, advice=?, tag=?, status=?, source_test=?, updated_at=? WHERE id=?')
-      .run(hits, weight, String(e.advice || target.advice || '').slice(0, 500), tag, 'open', sourceTest || target.source_test || 0, t, target.id);
+    /* 合并同坑时以「最新那次」为准：用户关心的是「我又栽在这次」，不是最早那次 */
+    db.prepare('UPDATE pitfall_cards SET hits=?, weight=?, advice=?, tag=?, status=?, record_id=?, source_test=?, updated_at=? WHERE id=?')
+      .run(hits, weight, String(e.advice || target.advice || '').slice(0, 500), tag, 'open',
+        Number(recordId) || Number(target.record_id) || 0, sourceTest || target.source_test || 0, t, target.id);
     return { ...db.prepare('SELECT * FROM pitfall_cards WHERE id = ?').get(target.id), merged: true };
   }
   const weight = 1 * 5 + sev * 3;
-  const r = db.prepare('INSERT INTO pitfall_cards (problem_id,goal_id,tag,title,detail,advice,hits,weight,status,source_test,created_at,updated_at) VALUES (?,?,?,?,?,?,1,?,\'open\',?,?,?)')
-    .run(pid, goalId || 0, tag, title, String(e.detail || '').slice(0, 1000), String(e.advice || '').slice(0, 500), weight, sourceTest || 0, t, t);
+  const r = db.prepare('INSERT INTO pitfall_cards (problem_id,goal_id,record_id,tag,title,detail,advice,hits,weight,status,source_test,created_at,updated_at) VALUES (?,?,?,?,?,?,?,1,?,\'open\',?,?,?)')
+    .run(pid, goalId || 0, Number(recordId) || 0, tag, title, String(e.detail || '').slice(0, 1000), String(e.advice || '').slice(0, 500), weight, sourceTest || 0, t, t);
   return { ...db.prepare('SELECT * FROM pitfall_cards WHERE id = ?').get(Number(r.lastInsertRowid)), merged: false };
 }
 function problemPitfalls(pid) {
   return db.prepare("SELECT * FROM pitfall_cards WHERE problem_id = ? ORDER BY status = 'fixed', weight DESC, updated_at DESC").all(pid);
 }
 /* --- 提示词 --- */
-/** 引导五步：把「提炼思路」拆成有名字的台阶，让用户看得见自己在第几步。
- *  只靠提示词求模型「引导性强」是不可控的（换个模型就变味），所以台阶由服务端钉死，
- *  AI 只负责针对当前台阶、结合用户原话问出一个具体问题。 */
-const COACH_STAGES = [
-  { key: 'say', name: '说清要什么', hint: '用自己的话讲讲这题要你做什么', ask: '让用户用自己的话把这题要他做的事复述一遍（给了什么、要交什么）', probe: '他复述得含糊就追问某个具体名词：输入到底是几个东西、输出是什么形状' },
-  { key: 'naive', name: '先想最笨的办法', hint: '你第一反应会怎么写？为什么不行', ask: '让他说第一反应会怎么写，并说清为什么这么写不行（慢？错？）', probe: '他如果说「超时了」，就追问「慢多少倍」，逼出一个具体的量级概念' },
-  { key: 'insight', name: '找关键跳跃', hint: '从笨办法到好办法的那一下是什么', ask: '从笨办法推到好办法的那一下是什么？要多记住什么、少算几遍？', probe: '这是最容易卡的一步。若他说不出，换切口问「如果只能走一遍，你会先记下什么」，再问「记下来之后怎么找到答案」' },
-  { key: 'steps', name: '落地成步骤', hint: '一步步怎么走，边界怎么办', ask: '让他把刚才的思路说成一步步的顺序，并交代遍历顺序和边界怎么处理', probe: '顺序反了就问「为什么先记后查、先查后记会不一样」，逼他自己发现' },
-  { key: 'hook', name: '记住它', hint: '一句话钩子 + 复杂度', ask: '收尾：让他用一句自己在考场能想起来的话概括这题，并说时间空间大概多少', probe: '他给不出钩子就举一个同类的坏钩子让他否定，逼出好的' }
+/** 维度清单：不是顺序剧本，是一份「值得覆盖到」的检查表。
+ *  早先这里是一串固定台阶（说清要什么 → 先想最笨的办法 → 找关键跳跃…），
+ *  结果用户明明已经把完整思路说出来了，AI 还在逼他答「你第一反应会怎么写」——
+ *  引导就变成了填表。改成清单 + 让 AI 自己判断缺哪个才问哪个。 */
+const COACH_DIMS = [
+  { key: 'ask', name: '说清要什么', ask: '这题给你什么、要你交什么（输入几个量、输出什么形状）', probe: '他讲得含糊就追问某个具体名词：输入到底是几个东西、返回的数组装什么' },
+  { key: 'naive', name: '笨办法为什么不行', ask: '朴素做法长什么样、慢或错在哪', probe: '注意：他已经想出正解时不要硬拉回这一条，改问「你这个做法比笨办法省了什么」' },
+  { key: 'insight', name: '关键跳跃', ask: '为什么想到这个做法、要记住什么才能少算几遍', probe: '最容易卡的一步。换切口问「如果只允许走一遍，你会先记下什么」，再问「记下来之后怎么找到答案」' },
+  { key: 'structure', name: '用了什么结构、为什么是它', ask: '具体选了什么数据结构/算法，凭什么选它而不是另一个', probe: '他只说得出名字说不出理由，就问他「换个做法会在哪一点变差」' },
+  { key: 'order', name: '步骤顺序', ask: '一步步怎么走、为什么是这个先后（先记后查还是先查后记）', probe: '顺序反了就问「为什么先记后查和先查后记结果一样/不一样」，逼他自己发现' },
+  { key: 'edge', name: '边界与陷阱', ask: '哪个输入会让这份代码挂：空输入、无解、越界、重复元素', probe: '给一个具体的小例子让他自己判断会不会挂，不要直接说会挂' },
+  { key: 'complexity', name: '复杂度', ask: '时间和空间大概多少、瓶颈在哪一步', probe: '他只会说 O(n) 就追问「哪个操作是那个 n 次的来源」' },
+  { key: 'hook', name: '记忆钩子', ask: '一句在考场上能立刻想起这招的话', probe: '他给不出就举一个同类的坏钩子让他否定，逼出好的' }
 ];
+/** 打磨态：他已经讲成型了，此时该问的不是「还缺什么」，而是「怎么讲得更扎实」 */
+const COACH_REFINE = {
+  key: 'refine', name: '把思路讲扎实',
+  asks: [
+    '把他那一大段话压缩成 3 步有序步骤（他自己拆，不是你替他拆）',
+    '指出他描述里最含糊的一个词，问清那个词到底指什么',
+    '问他这段描述在哪个输入下会失效，让他自己举一个会挂的例子',
+    '问他这个做法和另一个直觉做法比，在哪一点更差 —— 让他自己说出权衡',
+    '让他用一句话给这题一个考场上的钩子，然后问他为什么这句能管用',
+    '让他假设时间倒回做之前 5 分钟，问他第一步会先干什么'
+  ]
+};
 const COACH_RULE = [
-  '你是一位耐心的算法私教，正在带学员把一道做过的题真正搞懂 —— 目标是让他能讲给别人听、下次不看答案也能自己写出来。',
+  '你是一位耐心的算法私教。用户刚做完一道题，你的任务是帮他把思路真正内化 —— 能讲给别人听、下次不看答案也能自己写出来。',
   '',
-  '现在要做的是「一问一答」：你**只问一个问题**，等学员回答了再问下一个。',
+  '你**一次只问一个问题**，等他回答了再问下一个。',
   '',
-  '硬规矩：',
-  '1. 每次输出前先用一句话**复述他刚才说的话**，证明你真的在跟着他走（放在 echo 字段）。不要泛泛地说「很好」。',
-  '2. 你这一问必须针对本轮指定的「当前台阶」，不要提前问后面台阶的内容。',
-  '3. 只问一个具体问题，2~3 句话。不要列编号、不要给选项、不要一口气抛多个问题。',
-  '4. 绝对不给答案、不给代码、不给伪码。他明确说「别引导了直接告诉我」时才破例，而且只讲思路不给代码。',
-  '5. 他说「不会 / 不知道 / 卡住」时，**不要重复原问题、不要给答案**，换到 probe 里写的小切口，或让他去试一个最小例子。',
-  '6. 他答错了：先在 echo 里指出他哪一句不对（客气但明确），再用 probe 里的方式让他自己撞一次。',
-  '7. 已问过的内容不要重复。每个台阶只问一到两次，别在原地打转。',
+  '【最重要：不要按清单顺序从头问】',
+  '下面给的是一份「值得覆盖到」的检查表，**不是剧本**。你必须先读他刚说的话，自己判断：',
+  '- 他已经讲到的维度，**跳过，不要再问一遍**（这是最招人烦的错：用户明明已经把完整思路说清楚了，你还逼他回答「你第一反应会怎么写」）；',
+  '- 只补他**真正还没说清的那一个**维度；',
+  '- 如果他已经把核心思路讲成形的（这种情况很常见，因为他刚做完），把 focus 填 "refine"，改问能把他的思路讲得更扎实的东西（见下面的打磨清单），比如让他把自己那一大段话压缩成有序步骤、指出他描述里最含糊的词、问他哪���输入下会挂、问他为什么这个做法比另一个更好；',
+  '- 如果他的表述有明显错误或含糊到会影响代码，先纠这一处，别急着往下走。',
   '',
-  '输出格式（严格）：只输出一个 JSON 对象，不要代码围栏、不要任何多余文字：',
-  '{"echo":"一句话复述他刚才说的话（40 字内）", "q":"你这一个具体的问题（2~3 句）"}',
+  '【别的硬规矩】',
+  '1. hit 只填你**确实在他这段话里听到了**的维度，别因为他提到了就乐观给分。',
+  '2. 绝对不给答案、不给代码、不给伪码。他说「别引导了直接告诉我」才破例，而且只讲思路不给代码。',
+  '3. 他说「不会 / 不知道 / 卡住」时，不要重复原问题、不要给答案，换到该维度的 probe 里那个更小的切口，或让他去试一个最小例子。',
+  '4. probe 要具体到能一句话回答。不要列编号、不要一次抛好几个问题、不要给选项。',
+  '5. say 用平实的话肯定他刚才**说的那一个具体点**，不要空泛夸（「很好」是废话）。',
+  '6. 若他这一轮把剩下的维度都覆盖到了，done 填 true。',
   '',
-  '台阶清单（只用来对照你现在处于哪一步，不要把台阶名字告诉学员）：'
-].concat(COACH_STAGES.map((s, i) => (i + 1) + '. ' + s.key + '｜' + s.name + '：要问到的是' + s.ask + '｜他答不上来时改问：' + s.probe)).join('\n');
+  '【输出格式：只输出一个 JSON 对象，不要代码围栏、不要任何多余文字】',
+  '{"read":"一句话说他现在懂到哪了（40 字内）",',
+  ' "hit":["他已经讲到的维度 key"],',
+  ' "focus":"这一轮要补的那个维度 key，或 refine",',
+  ' "say":"两三句回应：先点出他讲对的具体那一点（顺带纠错就说错在哪），再自然地引出下面的问题",',
+  ' "probe":"你这一个问题（2~3 句）",',
+  ' "done":false}','',
+  '【维度清单（key｜名称｜问到什么）】'
+].concat(COACH_DIMS.map(d => '- ' + d.key + '｜' + d.name + '｜' + d.ask + '｜他答不上来时改问：' + d.probe))
+  .concat(['- refine｜' + COACH_REFINE.name + '｜他核心已经成型，从这些里挑一个最能让思路变扎实的：' + COACH_REFINE.asks.join('；')])
+  .join('\n');
 const COACH_HINT_RULE = [
-  '学员在当前台阶卡住了，你要给一个**提示**（不是答案，也不是新的问题）。',
-  '要求：先复述他卡在哪，再用一句更小的话把方向指出来，让他自己走完那一步。',
+  '学员卡住了。给他一个**提示**：先复述他卡在哪，再用一句更小的话把方向指出来，让他自己走完那一步。',
   '绝对不能出现完整解法、代码或伪码，不能直接把答案给他。',
-  '只输出一个 JSON 对象：{"echo":"一句话点出他卡在哪", "q":"一个提示（1~2 句）"}'
+  '只输出一个 JSON 对象：{"read":"一句话点出他卡在哪","hit":[],"focus":"refine","say":"一句安抚 + 提示","probe":"一个提示（1~2 句）","done":false}'
 ].join('\n');
+/** 让 AI 出一轮引导。返回 {read,hit,focus,say,probe,done}；模型不听话就重试一次，仍不行退回纯文本。 */
+async function coachTurn(basePrompt, timeoutMs) {
+  let raw = '';
+  const ask = async (extra) => {
+    const r = await aiText(basePrompt + (extra || ''), (currentModel && currentModel()) || '', timeoutMs || 120000);
+    raw = String(r == null ? '' : r).trim();
+    return raw;
+  };
+  try {
+    await ask('');
+    const j = firstJSONObject(raw);
+    if (j && String(j.probe || j.q || '').trim()) return normTurn(j);
+  } catch (e) { raw = raw || ('ERR ' + (e.message || e)); }
+  /* 模型没给 JSON：再试一次，并把它的原话怼回去让它自己改格式 */
+  try {
+    await ask('\n\n【注意】你上一次的输出不是合法 JSON，只输出 {"read":"…","hit":[…],"focus":"…","say":"…","probe":"…","done":false} 这个对象本身。');
+    const j2 = firstJSONObject(raw);
+    if (j2 && String(j2.probe || j2.q || '').trim()) return normTurn(j2);
+  } catch (e) { /* 两次都不听话就用第一次的原话 */ }
+  const plain = String(raw || '').replace(/^```[a-z]*\s*/i, '').replace(/```$/, '').trim();
+  if (!plain) throw new Error('AI 没有给出问题，换个模型再试');
+  /* 兜底：至少还能显示成一句话，不至于让用户对着空白 */
+  return { read: '', hit: [], focus: 'refine', say: '', probe: plain.slice(0, 800), done: false, raw: true };
+}
+const DIM_KEYS = COACH_DIMS.map(d => d.key);
+function normTurn(j) {
+  const probe = String(j.probe || j.q || '').trim().slice(0, 900);
+  const hit = Array.isArray(j.hit) ? j.hit.map(String).filter(k => DIM_KEYS.includes(k)) : [];
+  const focus = String(j.focus || '').trim();
+  return {
+    read: String(j.read || '').trim().slice(0, 200),
+    hit,
+    /* 只认清单里的维度，模型编的名字一律当成 refine（不能让它把用户带跑偏） */
+    focus: DIM_KEYS.includes(focus) ? focus : (focus === 'refine' ? 'refine' : 'refine'),
+    say: String(j.say || '').trim().slice(0, 600),
+    probe,
+    done: !!j.done
+  };
+}
+const dimOf = k => COACH_DIMS.find(d => d.key === k) || COACH_REFINE;
+/** 题面给 AI 的摘要：题目正文是 HTML，太长且噪声大，先剥掉 */
+function statementBrief(prob, max) {
+  let s = String(prob.statement || '');
+  s = s.replace(/<pre[\s\S]*?<\/pre>/gi, ' [代码] ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
+  s = s.replace(/\s+/g, ' ').trim();
+  return s.length > (max || 700) ? s.slice(0, max) + '…' : s;
+}
 const SUMMARY_RULE = [
   '把这段师生对话整理成一张「思路卡」。要求：',
   '- 开头用学员自己的措辞和直觉，不要换成教科书腔。',
@@ -1250,37 +1343,8 @@ const RECALL_RULE = [
   ' "errors": [{"tag":"边界|逻辑|复杂度|语法|算法选择|状态定义|下标|其它","title":"一句话点出错在哪（可复用）","detail":"对照两段代码具体说差在哪","advice":"下次怎么避免","severity":1到3,"dupOf": 该错点若已存在于已有易错卡片则填那条卡片的 id，否则填 0}],',
   ' "hint": "一句话钩子，下次动笔前先想起这件事"}'
 ].join('\n');
-/** 题面给 AI 的摘要：题目正文是 HTML，太长且噪声大，先剥掉 */
-function statementBrief(prob, max) {
-  let s = String(prob.statement || '');
-  s = s.replace(/<pre[\s\S]*?<\/pre>/gi, ' [代码] ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
-  s = s.replace(/\s+/g, ' ').trim();
-  return s.length > (max || 700) ? s.slice(0, max) + '…' : s;
-}
-/** 让 AI 出一句引导。返回 {echo, q}；模型不听话就重试一次，仍不行退回纯文本。 */
-async function coachTurn(basePrompt, timeoutMs) {
-  let raw = '';
-  try {
-    raw = String(await aiText(basePrompt, (currentModel && currentModel()) || '', timeoutMs || 120000) || '').trim();
-    const j = firstJSONObject(raw);
-    if (j && String(j.q || '').trim()) return { echo: String(j.echo || '').trim().slice(0, 200), q: String(j.q).trim().slice(0, 800) };
-  } catch (e) { raw = raw || ('ERR ' + (e.message || e)); }
-  /* 模型没给 JSON：再试一次，并把它的原话怼回去让它自己改格式 */
-  try {
-    const again = String(await aiText(basePrompt + '\n\n【注意】你上一次的输出不是合法 JSON，只输出 {"echo":"…","q":"…"} 这个对象本身。',
-      (currentModel && currentModel()) || '', (timeoutMs || 120000)) || '').trim();
-    const j2 = firstJSONObject(again);
-    if (j2 && String(j2.q || '').trim()) return { echo: String(j2.echo || '').trim().slice(0, 200), q: String(j2.q).trim().slice(0, 800) };
-    raw = again;
-  } catch (e) { /* 两次都不听话就用第一次的原话 */ }
-  const plain = String(raw || '').replace(/^```[a-z]*\s*/i, '').replace(/```$/, '').trim();
-  if (!plain) throw new Error('AI 没有给出问题，换个模型再试');
-  return { echo: '', q: plain.slice(0, 800) };
-}
-/** 引导式提炼：按五步台阶往下走。hint=true 时只给提示，不推进台阶。 */
-async function coachAsk(pid, answer, hint) {
+/** 引导式提炼：每轮让 AI 自己判断缺哪个维度才问哪个。hint=true 时只给提示。 */
+async function coachAsk(pid, answer, hint, draft) {
   const prob = db.prepare('SELECT * FROM problems WHERE id = ?').get(pid);
   if (!prob) throw new Error('题目不存在');
   let sess = db.prepare("SELECT * FROM mind_sessions WHERE problem_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1").get(pid);
@@ -1295,77 +1359,103 @@ async function coachAsk(pid, answer, hint) {
     sess = db.prepare('SELECT * FROM mind_sessions WHERE id = ?').get(Number(r.lastInsertRowid));
   }
 
-  const answered = steps.filter(s => String(s.a || '').trim()).length;
-  /* 这一轮要问的是第几步（从 0 起）。答满五步还继续聊就钉在最后一步，不越界到不存在的第六步。 */
-  let idx = Math.min(answered, COACH_STAGES.length - 1);
-  /* 收尾提示：五步都答过了还点「下一问」，就别再问了，直接提示可以整理成思路卡 */
-  if (!hint && answered >= COACH_STAGES.length) {
-    return {
-      sessionId: sess.id, question: '', echo: '', hint: false, finished: true,
-      stageKey: COACH_STAGES[COACH_STAGES.length - 1].key,
-      stageName: COACH_STAGES[COACH_STAGES.length - 1].name,
-      stageIndex: COACH_STAGES.length - 1, stageTotal: COACH_STAGES.length, stepCount: answered
-    };
-  }
-
   /* 用户回答了：把「刚才那一问」和这个回答配成一步。
      那一问问的时候还没人答，进不了 steps，所以先存在 pending 里（否则第一问会在页面上凭空消失）。 */
   if (answer !== undefined && String(answer).trim()) {
     steps.push({
-      q: pending ? String(pending.q || '') : '',
-      echo: pending ? String(pending.echo || '') : '',
+      probe: pending ? String(pending.probe || '') : '',
+      say: pending ? String(pending.say || '') : '',
+      read: pending ? String(pending.read || '') : '',
+      hit: pending && Array.isArray(pending.hit) ? pending.hit : [],
+      focus: pending ? String(pending.focus || 'refine') : 'refine',
       a: String(answer).slice(0, 4000),
-      stageKey: pending ? String(pending.stageKey || COACH_STAGES[idx].key) : COACH_STAGES[idx].key,
-      stageName: pending ? String(pending.stageName || COACH_STAGES[idx].name) : COACH_STAGES[idx].name,
       at: t
     });
     pending = null;
-    idx = Math.min(steps.length, COACH_STAGES.length - 1);
     db.prepare('UPDATE mind_sessions SET steps = ?, pending = \'\', updated_at = ? WHERE id = ?').run(JSON.stringify(steps), t, sess.id);
-  } else if (pending) {
-    /* 只是重问（模型抽风、或用户点了「重新问」）：沿用原来那一问的台阶，别把用户拽回上一步 */
-    const pi = COACH_STAGES.findIndex(s => s.key === pending.stageKey);
-    if (pi >= 0) idx = pi;
+  } else if (pending && !hint) {
+    /* 只是重问（模型抽风、或用户又点了一次「下一问」）：沿用原来那一问，别把对话搅乱。
+       ⚠️ 提示（hint=true）不能走这个分支 —— 点了「卡住了，提示我」必须真的去要一个提示，
+       否则用户点了跟没点一样。 */
+    /* 聊够 10 轮就收口：把还没答的那一问丢掉（已问过的都留在 steps 里），
+       让前端提示去整理，而不是把第十一个问题又甩回给用户。 */
+    const capped = steps.length >= 10;
+    if (capped) db.prepare('UPDATE mind_sessions SET pending = \'\', updated_at = ? WHERE id = ?').run(nowISO(), sess.id);
+    return {
+      sessionId: sess.id,
+      question: capped ? '' : pending.probe, probe: capped ? '' : pending.probe, say: capped ? '' : (pending.say || ''),
+      read: capped ? '' : (pending.read || ''), hit: pending.hit || [], focus: pending.focus || 'refine',
+      hint: !!pending.hint, done: (!!pending.done || capped), stepCount: steps.length,
+      dims: COACH_DIMS.map(d => ({ key: d.key, name: d.name }))
+    };
   }
-  const stage = COACH_STAGES[idx];
 
-  const turns = steps.map((s, i) =>
-    '【第 ' + (i + 1) + ' 步 · ' + (s.stageName || '') + '】\n学员：' + s.a).join('\n\n');
-  const base = [
+  /* 已经聊得够多了就别再问，提示可以去整理了（省一次调用，也避免没完没了） */
+  if (!hint && !answer && steps.length >= 10) {
+    db.prepare('UPDATE mind_sessions SET pending = \'\', updated_at = ? WHERE id = ?').run(nowISO(), sess.id);
+    const hitAll = [...new Set(steps.flatMap(x => (Array.isArray(x.hit) ? x.hit : [])))];
+    return {
+      sessionId: sess.id, question: '', probe: '', say: '', read: '', hit: hitAll, focus: 'refine',
+      hint: false, done: true, stepCount: steps.length, dims: COACH_DIMS.map(d => ({ key: d.key, name: d.name }))
+    };
+  }
+
+  const turns = steps.map((s, i) => {
+    const d = dimOf(s.focus);
+    return '【第 ' + (i + 1) + ' 轮 · 当时关注 ' + d.name + '】\n学员：' + s.a;
+  }).join('\n\n');
+  /* 学员可能已经在输入框里写了一半才点「提示我」——那半句是最重要的上下文，必须带上，
+     否则 AI 只能对着一个空白的当前问题瞎猜方向。 */
+  const typed = String(draft == null ? '' : draft).trim().slice(0, 2000);
+  const baseLines = [
     '=== 题目 ===',
     '题号：' + prob.fid + '. ' + prob.title + '（难度 ' + (prob.difficulty || '未知') + '）',
     (() => { try { const g = safeParse(prob.groups) || []; return g.length ? '知识点：' + g.join(' / ') : ''; } catch (e) { return ''; } })(),
     '题面：' + (statementBrief(prob, 700) || '（未缓存）'),
     /* 提炼阶段故意不给参考代码：给了学员就会照抄，练习就废了 */
     '',
-    turns ? '=== 学员已经说过的（不要重复问） ===\n' + turns : '=== 学员还没开口 ===',
+    turns ? '=== 学员已经说过的（这些内容不要重复问） ===\n' + turns : '=== 学员还没开口 ===',
     '',
-    '=== 本轮要问的台阶 ===',
-    '当前第 ' + (idx + 1) + ' / ' + COACH_STAGES.length + ' 步：' + stage.key + '｜' + stage.name,
-    '这一步要问到的是：' + stage.ask,
-    '他答不上来时改问：' + stage.probe,
-    '（他前面已经答过 ' + steps.length + ' 步）',
-    ''
-  ].join('\n');
+    (hint ? '学员刚才说卡住了。' : '') + '现在判断：他讲到位了吗？还缺哪**一个**维度？'
+  ];
+  if (typed) {
+    baseLines.push('');
+    baseLines.push('=== 学员在输入框里已经写了、但还没提交的话（他大概就是卡在这儿） ===');
+    baseLines.push(typed);
+    if (hint) baseLines.push('针对他这句写不下去的话给提示，不要重复问一遍他已经答过的。');
+  }
+  const base = baseLines.join('\n');
 
-  const out = await coachTurn((hint ? COACH_HINT_RULE + '\n\n' : COACH_RULE + '\n\n') + base
-    + (hint ? '\n学员刚才说卡住了，给个提示（不推进台阶）。' : '\n现在问他这一个问题。'), 120000);
-  /* 新的这一问存 pending，等下一次用户回答时再配成一步 */
-  const np = { q: out.q, echo: out.echo, stageKey: stage.key, stageName: stage.name, at: nowISO(), hint: !!hint };
+  const out = await coachTurn((hint ? COACH_HINT_RULE + '\n\n' : COACH_RULE + '\n\n') + base, 120000);
+  /* 已经掌握的维度 = 历次 AI 判断的累积（含这一轮刚判的，否则回答之前看不到） */
+  const hitAll = [...new Set([...steps.flatMap(s => (Array.isArray(s.hit) ? s.hit : [])), ...(out.hit || [])])];
+  if (hint) {
+    /* 提示**不覆盖**正在等回答的那一问：原问题、已覆盖维度、判断全都留着，
+       只把提示挂在 hintText 上，用户照常回答原问题。
+       ⚠️ 这里必须以 pending 为基底再补字段 —— 早先只改了 pending 对象却存了 out，
+       改动当场丢掉，表现为「点了提示我什么都没发生」。 */
+    const np = (pending && typeof pending === 'object')
+      ? { ...pending, hintText: out.probe, hintSay: out.say, hintAt: nowISO() }
+      : { ...out, at: nowISO(), hint: true, hintText: out.probe, hintSay: out.say };
+    db.prepare('UPDATE mind_sessions SET pending = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(np), nowISO(), sess.id);
+    return {
+      sessionId: sess.id, question: out.probe, probe: out.probe, say: out.say, read: out.read,
+      hit: hitAll, focus: out.focus, hint: true, done: false, stepCount: steps.length,
+      dims: COACH_DIMS.map(d => ({ key: d.key, name: d.name }))
+    };
+  }
+  const np = { ...out, at: nowISO(), hint: false };
   db.prepare('UPDATE mind_sessions SET pending = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(np), nowISO(), sess.id);
   return {
     sessionId: sess.id,
-    question: out.q,
-    echo: out.echo,
-    hint: !!hint,
-    stageKey: stage.key, stageName: stage.name,
-    stageIndex: idx, stageTotal: COACH_STAGES.length,
-    stepCount: steps.length
+    question: out.probe, probe: out.probe, say: out.say, read: out.read,
+    hit: hitAll, focus: out.focus, hint: false, done: out.done,
+    stepCount: steps.length, dims: COACH_DIMS.map(d => ({ key: d.key, name: d.name }))
   };
 }
-/** 引导流程的结构（给前端画进度条用，省得两边各写一份） */
-function coachStages() {
-  return COACH_STAGES.map((s, i) => ({ i: i + 1, key: s.key, name: s.name, hint: s.hint }));
+/** 维度清单（给前端画检查表用，省得两边各写一份） */
+function coachDims() {
+  return COACH_DIMS.map((d, i) => ({ i: i + 1, key: d.key, name: d.name, ask: d.ask, refine: d.key === 'refine' ? COACH_REFINE.asks : null }));
 }
 /** 把对话整理成思路卡（不直接覆盖已有卡，写进会话 summary 由用户确认） */
 async function coachFinish(pid) {
@@ -1373,10 +1463,11 @@ async function coachFinish(pid) {
   if (!sess) throw new Error('还没有提炼过，先和 AI 聊几句');
   let steps = [];
   try { steps = safeParse(sess.steps) || []; } catch (e) {}
-  const useful = steps.filter(s => String(s.a || '').trim() && s.q);
-  if (useful.length < 3) throw new Error('至少走完 3 步再整理（现在 ' + useful.length + ' 步），走得太少整理出来也是碎的');
+  const useful = steps.filter(s => String(s.a || '').trim() && s.probe);
+  if (useful.length < 3) throw new Error('至少聊 3 轮再整理（现在 ' + useful.length + ' 轮），聊得太少整理出来也是碎的');
   const prob = db.prepare('SELECT * FROM problems WHERE id = ?').get(pid);
-  const turns = useful.map((s, i) => '【第 ' + (i + 1) + ' 步 · ' + (s.stageName || '') + '】\n学员：' + s.a).join('\n\n');
+  /* 带上 AI 每轮的判断，整理时才知道哪些是他真讲到的、哪些只是提了一嘴 */
+  const turns = useful.map((s, i) => '【第 ' + (i + 1) + ' 轮 · 当时关注 ' + (dimOf(s.focus).name) + '（AI 判断他已讲到：' + ((s.hit || []).map(k => (dimOf(k) || {}).name || k).join('、') || '无') + '）】\n学员：' + s.a).join('\n\n');
   const prompt = [
     SUMMARY_RULE, '',
     '题目：' + prob.fid + '. ' + prob.title,
@@ -1389,7 +1480,7 @@ async function coachFinish(pid) {
   return { summary: text, sessionId: sess.id, turns: useful.length };
 }
 /** 盲写对照：把两份代码交给 AI，产出判定 + 易错卡片 */
-async function recallCheck(pid, myCode, refCode, goalId) {
+async function recallCheck(pid, myCode, refCode, goalId, recordId) {
   const prob = db.prepare('SELECT * FROM problems WHERE id = ?').get(pid);
   if (!prob) throw new Error('题目不存在');
   const mine = String(myCode || '').trim();
@@ -1417,7 +1508,7 @@ async function recallCheck(pid, myCode, refCode, goalId) {
   const score = Math.max(0, Math.min(100, Math.round(Number(j.score) || 0)));
   const verdict = ['pass', 'fuzzy', 'forgotten'].includes(j.verdict) ? j.verdict : (score >= 85 ? 'pass' : score >= 55 ? 'fuzzy' : 'forgotten');
   const errors = Array.isArray(j.errors) ? j.errors.slice(0, 6) : [];
-  const made = errors.map(e => upsertPitfall(pid, goalId, e || {}, 0)).filter(Boolean);
+  const made = errors.map(e => upsertPitfall(pid, goalId, e || {}, 0, recordId)).filter(Boolean);
   /* 再跑一遍合并：upsertPitfall 里每张都做了相似度兜底，这里只统计结果 */
   const inserted = made.filter(x => !x.merged).length;
   const merged = made.filter(x => x.merged).length;
@@ -1427,8 +1518,8 @@ async function recallCheck(pid, myCode, refCode, goalId) {
     missed: (Array.isArray(j.missed) ? j.missed : []).slice(0, 5).map(m => ({ what: String(m.what || ''), why: String(m.why || ''), fix: String(m.fix || '') })).filter(m => m.what),
     hint: String(j.hint || '').slice(0, 300)
   };
-  const r = db.prepare('INSERT INTO recall_tests (problem_id,goal_id,ref_code,my_code,report,score,verdict,created_at) VALUES (?,?,?,?,?,?,?,?)')
-    .run(pid, goalId || 0, ref.slice(0, 12000), mine.slice(0, 12000), JSON.stringify(report), score, verdict, t);
+  const r = db.prepare('INSERT INTO recall_tests (problem_id,goal_id,record_id,ref_code,my_code,report,score,verdict,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+    .run(pid, goalId || 0, Number(recordId) || 0, ref.slice(0, 12000), mine.slice(0, 12000), JSON.stringify(report), score, verdict, t);
   const testId = Number(r.lastInsertRowid);
   /* 易错卡指向这次考核（上面 upsert 时还不知道 id，补一次） */
   for (const m of made) db.prepare('UPDATE pitfall_cards SET source_test = ? WHERE id = ? AND source_test = 0').run(testId, m.id);
