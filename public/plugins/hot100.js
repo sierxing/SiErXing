@@ -604,29 +604,48 @@ async function openCoach(pid, restart) {
   const render = () => {
     const sess = (state.mind && state.mind.session) || null;
     const steps = sess ? (sess.steps || []) : [];
-    L.body.innerHTML = `<div class="pfThread" id="pfThread"></div>
-      <div class="pfStepLbl"><b>你</b><span>我怎么想就怎么说，不用组织语言 —— AI 会顺着往下问</span></div>
-      <textarea class="pfSay" id="pfSay" placeholder="比如：我就是觉得两层循环太慢，想能不能只走一遍…"></textarea>
-      <div class="pfSub" style="margin-top:8px;">回车换行，点「下一问」发给 AI</div>`;
-    const th = L.body.querySelector('#pfThread');
+    const stages = (state.mind && state.mind.stages) || [];
+    const done = steps.filter(s => String(s.a || '').trim() && s.q).length;
+    const cur = Math.min(done, (stages.length || 5) - 1);
+    const allDone = done >= (stages.length || 5);
+    /* pending = 当前正在等回答的那一问（还没配对成一步，所以要单独画出来） */
+    const pend = sess && sess.pending ? sess.pending : null;
+    const stepNow = (pend && pend.stageKey) ? stages.findIndex(s => s.key === pend.stageKey) : cur;
+    L.body.innerHTML = `<div class="pfRail" id="pfRail"></div>
+      <div class="pfThread" id="pfThread"></div>
+      ${allDone ? '' : `<div class="pfStepLbl"><b>你</b><span>${stages[stepNow] ? '第 ' + (stepNow + 1) + ' 步「' + esc(stages[stepNow].name) + '」—— ' + esc(stages[stepNow].hint) : '我怎么想就怎么说'}</span></div>
+      <textarea class="pfSay" id="pfSay" placeholder="比如：我就是觉得两层循环太慢，想能不能只走一遍…"></textarea>`}`;
+    /* 台阶进度条：用户能看见自己在第几步、还剩几步 */
+    const rail = L.body.querySelector('#pfRail');
+    rail.innerHTML = stages.map((s, i) => `<div class="pfRailStep ${i < done ? 'on' : i === stepNow ? 'cur' : ''}">
+        <b>${i < done ? '✓' : (i + 1)}</b><span>${esc(s.name)}</span></div>`).join('<i class="pfRailLine"></i>');
+    /* i 是从 0 起的台阶下标 */
+const turnHTML = (s, i) => `<div class="pfTurn"><div class="pfAv">🎓</div><div class="pfBubble">
+        <span class="pfLabel">第 ${(i + 1) + ' 步 · ' + esc(s.stageName || '引导')}${s.echo ? '　—　你说的是：' + esc(s.echo) : ''}</span>${esc(s.q)}</div></div>`;
+    const meHTML = s => `<div class="pfTurn me"><div class="pfAv">我</div><div class="pfBubble"><span class="pfLabel">我说</span>${esc(s.a)}</div></div>`;
+    let th = '';
     if (sess && sess.summary) {
-      th.innerHTML = `<div class="pfCardBox"><div class="pfCt">整理好的思路卡（还没存进存档）</div>${esc(sess.summary)}</div>`;
-    } else if (!steps.length) {
-      th.innerHTML = '<div class="pfEmpty" style="padding:18px 10px;"><span class="pfEi">🎓</span>AI 一次只问你一个问题。<br>先从「这题要你做的事，用一句话怎么说」开始，<br>它会顺着你的回答一层层往下挖。</div>';
+      th = `<div class="pfCardBox"><div class="pfCt">整理好的思路卡（还没存进存档）</div>${esc(sess.summary)}</div>`;
+    } else if (!steps.length && !pend) {
+      th = '<div class="pfEmpty" style="padding:18px 10px;"><span class="pfEi">🎓</span>AI 会带你走五步：<br>说清要什么 → 先想最笨的办法 → 找关键跳跃 → 落地成步骤 → 记住它。<br>它一次只问一个具体问题，答之前会先复述你说的话。<br><br>如果第一句还没出来，点「下一问」。</div>';
     } else {
-      th.innerHTML = steps.map((s, i) => {
-        const me = `<div class="pfTurn me"><div class="pfAv">我</div><div class="pfBubble"><span class="pfLabel">我说</span>${esc(s.a)}</div></div>`;
-        if (!s.q) return me;
-        return `<div class="pfTurn"><div class="pfAv">🎓</div><div class="pfBubble"><span class="pfLabel">AI 问</span>${esc(s.q)}</div></div>` + me;
-      }).join('');
+      th = steps.map((s, i) => (s.q ? turnHTML(s, i) : '') + meHTML(s)).join('')
+        + (pend ? turnHTML({ q: pend.q, echo: pend.echo, stageName: pend.stageName }, stepNow) : '');
     }
-    th.scrollIntoView ? L.body.scrollTo({ top: L.body.scrollHeight }) : 0;
-    L.foot.innerHTML = `<span class="pfSub" id="pfStep"></span><div class="spacer"></div>
+    if (allDone && sess && !sess.summary) {
+      th += '<div class="pfEmpty" style="padding:14px 10px;"><span class="pfEi">🎉</span>五步都走完了。<br>点下面「整理成思路卡」，AI 会把你说的整理成一张能背下来的卡。</div>';
+    }
+    L.body.querySelector('#pfThread').innerHTML = th;
+    L.body.scrollTop = L.body.scrollHeight;
+    L.foot.innerHTML = `<span class="pfSub" id="pfStep">${done}/${stages.length || 5} 步</span><div class="spacer"></div>
       ${(state.mind && state.mind.approach) ? '<button class="pfBtn sm" data-clear>从头再聊</button>' : ''}
-      <button class="pfBtn sm" data-ask>下一问 →</button>
+      ${allDone && !(sess && sess.summary) ? '' : '<button class="pfBtn sm" data-hint title="不给答案，只把方向指出来">💡 卡住了，提示我</button>'}
+      ${allDone && !(sess && sess.summary) ? '' : '<button class="pfBtn sm" data-ask>下一问 →</button>'}
       <button class="pfBtn sm go" data-finish title="把聊出来的内容整理成一张思路卡">整理成思路卡</button>
       ${sess && sess.summary ? '<button class="pfBtn sm go" data-save>💾 存进思路卡</button>' : ''}`;
-    L.foot.querySelector('[data-ask]').addEventListener('click', () => askNext(restart));
+    const ab = L.foot.querySelector('[data-ask]');
+    if (ab) ab.addEventListener('click', () => askNext(false, false));
+    L.foot.querySelector('[data-hint]').addEventListener('click', () => askNext(false, true));
     const fin = L.foot.querySelector('[data-finish]');
     fin.addEventListener('click', () => finishCoach(L, pid));
     const sv = L.foot.querySelector('[data-save]');
@@ -643,36 +662,37 @@ async function openCoach(pid, restart) {
       try { await api('/api/problems/' + pid + '/mind/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); state.mind = await api('/api/problems/' + pid + '/mind'); render(); toast('已清空，重新开始'); }
       catch (e) { toast(e.message); }
     });
-    if (restart) askNext(true);
   };
-  const setAsk = on => {
+  const setAsk = (on, hint) => {
     const b = L.foot.querySelector('[data-ask]');
-    if (!b) return;
-    b.disabled = on;
-    b.textContent = on ? 'AI 想问题中…' : '下一问 →';
+    const hb = L.foot.querySelector('[data-hint]');
+    if (b) { b.disabled = on; b.textContent = on && hint ? '给提示中…' : on ? 'AI 想问题中…' : '下一问 →'; }
+    if (hb) hb.disabled = on;
     const t = L.foot.querySelector('#pfStep');
-    if (t && on) t.textContent = '';
+    if (t && on) t.textContent = hint ? '💡 只给方向，不给答案…' : '';
     const th = L.body.querySelector('#pfThread');
-    const tip = th && th.lastElementChild && th.lastElementChild.classList.contains('pfTurn') ? null : null;
     if (on && th) th.insertAdjacentHTML('beforeend', '<div class="pfTurn" id="pfWait"><div class="pfAv">🎓</div><div class="pfBubble pfTyping"><i></i><i></i><i></i></div></div>');
     if (!on && th) { const w = th.querySelector('#pfWait'); if (w) w.remove(); }
     const say = L.body.querySelector('#pfSay');
     if (say) say.disabled = on;
+    L.body.scrollTop = L.body.scrollHeight;
   };
-  const askNext = async (forceNew) => {
+  const askNext = async (forceNew, hint) => {
     const say = L.body.querySelector('#pfSay');
     const ans = say ? say.value.trim() : '';
-    if (!forceNew && !ans && !(state.mind && state.mind.session && (state.mind.session.steps || []).length)) return toast('先说说你怎么想的');
-    setAsk(true);
-    L.body.scrollTo({ top: L.body.scrollHeight });
+    const sessNow = state.mind && state.mind.session;
+    const hasSteps = !!(sessNow && (sessNow.steps || []).length) || !!(sessNow && sessNow.pending);
+    /* 提示不用先回答（他可能就是卡在回答之前）；提问要有话可说，或已经有那一问等着 */
+    if (!forceNew && !hint && !ans && !hasSteps) return toast('先说说你怎么想的');
+    setAsk(true, hint);
     try {
-      const body = forceNew ? {} : { answer: ans };
+      const body = forceNew ? { hint: false } : (hint ? { hint: true } : { answer: ans });
       await api('/api/problems/' + pid + '/mind/ask', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      if (!forceNew && say) say.value = '';
+      if (!forceNew && !hint && say) say.value = '';
       state.mind = await api('/api/problems/' + pid + '/mind');
       setAsk(false);
       render();
-      const s = L.body.querySelector('#pfSay'); if (s) s.focus();
+      const s = L.body.querySelector('#pfSay'); if (s && !hint) s.focus();
     } catch (e) { setAsk(false); toast(e.message); }
   };
   const finishCoach = async (ly, xpid) => {
@@ -685,11 +705,15 @@ async function openCoach(pid, restart) {
       toast('整理好了，确认后点「存进思路卡」');
     } catch (e) { toast(e.message); b.disabled = false; b.textContent = '整理成思路卡'; }
   };
+  /* 开场就问第一句 —— 打开浮层只看到一个空盒子，正是「看不出引导在哪」的最直接原因。
+   已经有会话在聊的就不重问（重开会把上次的话冲掉）。 */
+  const fresh = !((state.mind && state.mind.session && (state.mind.session.steps || []).length)
+    || (state.mind && state.mind.session && state.mind.session.summary));
   render();
-  if (restart) setTimeout(() => askNext(true), 0);
+  if (restart || fresh) setTimeout(() => askNext(true, false), 0);
   const say = L.body.querySelector('#pfSay');
   if (say) {
-    say.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) askNext(false); });
+    say.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) askNext(false, false); });
     say.focus();
   }
 }

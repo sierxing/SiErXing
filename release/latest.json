@@ -1,14 +1,14 @@
 {
-  "version": "1.8.0",
-  "buildVer": "fc4d24777f4c",
-  "payload": "release/payload-1.8.0.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.8.0.sxar?ref=main",
+  "version": "1.8.1",
+  "buildVer": "b34275950e49",
+  "payload": "release/payload-1.8.1.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.8.1.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "c75f0b31ddf865bf3209518172861f84a51318986e6c12762a86e4a033b23dbb",
-  "size": 534222,
-  "unpackedSize": 2025286,
-  "publishedAt": "2026-10-05T06:24:49.912Z",
-  "notes": "刷题改成掌握闭环：①作答记录栏加「AI 引导提炼思路」，AI一次问一个问题帮你把思路说清楚，整理成思路卡；②每条作答记录加「尝试重做」，遮住代码凭记忆重敲，AI对照后把这次的跟脚做成易错卡片（同坑自动合并、按犯过几次排序）；③复习不再死板套艾宾浩斯曲线，改按遗忘风险现算、当天由AI排该练哪几道",
+  "sha256": "63d8f86acf0da75f9eb60adefe543f920d2e2df4d287863c4a1b4dfb1eb8bbc9",
+  "size": 538187,
+  "unpackedSize": 2036011,
+  "publishedAt": "2026-10-05T06:48:25.512Z",
+  "notes": "修：①刷新后接口不存在（3213 未重启时前端已更新、后端还是旧路由）；②引导提炼改成可见的五步台阶（进度条+每步标签+AI 先复述你的话），开场就自动问第一句，另加「卡住了，提示我」",
   "exeRequired": false
 }

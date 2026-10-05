@@ -101,6 +101,9 @@ CREATE TABLE IF NOT EXISTS mind_sessions (
   status TEXT NOT NULL DEFAULT 'active',
   steps TEXT NOT NULL DEFAULT '[]',
   summary TEXT NOT NULL DEFAULT '',
+  /* 当前正在等学员回答的那一问（还没被回答，所以还进不了 steps）。
+     不存它的话「开口问的第一句」会在页面上凭空消失 —— 打开浮层只剩空盒子。 */
+  pending TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -161,6 +164,8 @@ module.exports = {
     try {
       const mc = db.prepare('PRAGMA table_info(problem_mind)').all().map(c => c.name);
       if (!mc.includes('reference_code')) db.exec("ALTER TABLE problem_mind ADD COLUMN reference_code TEXT NOT NULL DEFAULT '';");
+      const sc = db.prepare('PRAGMA table_info(mind_sessions)').all().map(c => c.name);
+      if (sc.length && !sc.includes('pending')) db.exec("ALTER TABLE mind_sessions ADD COLUMN pending TEXT NOT NULL DEFAULT '';");
     } catch (e) {}
     /* review_cards 在 1.8.0 从固定艾宾浩斯曲线改成「遗忘风险 + AI 排期」，
        老列 stage/next_due/last_result 是曲线下标、没有直接对应物。
@@ -246,8 +251,8 @@ module.exports = {
     for (const x of (data.minds || [])) db.prepare('INSERT OR REPLACE INTO problem_mind (problem_id,approach,pitfalls,reference_code,updated_at) VALUES (?,?,?,?,?)')
       .run(x.problem_id, x.approach || '', x.pitfalls || '', x.reference_code || '', x.updated_at || '');
     /* 下面三张表是 1.8.0 才有的，老备份里没有对应字段 —— 全部容错 */
-    for (const x of (data.mindSessions || [])) db.prepare('INSERT OR REPLACE INTO mind_sessions (id,problem_id,goal_id,status,steps,summary,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)')
-      .run(x.id, x.problem_id, x.goal_id || 0, x.status || 'active', x.steps || '[]', x.summary || '', x.created_at || '', x.updated_at || '');
+    for (const x of (data.mindSessions || [])) db.prepare('INSERT OR REPLACE INTO mind_sessions (id,problem_id,goal_id,status,steps,summary,pending,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)')
+      .run(x.id, x.problem_id, x.goal_id || 0, x.status || 'active', x.steps || '[]', x.summary || '', x.pending || '', x.created_at || '', x.updated_at || '');
     for (const x of (data.recalls || [])) db.prepare('INSERT OR REPLACE INTO recall_tests (id,problem_id,goal_id,ref_code,my_code,report,score,verdict,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
       .run(x.id, x.problem_id, x.goal_id || 0, x.ref_code || '', x.my_code || '', x.report || '', x.score || 0, x.verdict || '', x.created_at || '');
     for (const x of (data.pitfalls || [])) db.prepare('INSERT OR REPLACE INTO pitfall_cards (id,problem_id,goal_id,tag,title,detail,advice,hits,weight,status,source_test,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
@@ -436,17 +441,25 @@ module.exports = {
           let sess = null;
           try {
             const s = db.prepare("SELECT * FROM mind_sessions WHERE problem_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1").get(pid);
-            if (s) { let steps = []; try { steps = safeParse(s.steps) || []; } catch (e) {} sess = { id: s.id, steps, summary: s.summary || '', updated_at: s.updated_at }; }
+            if (s) {
+              let steps = [], pending = null;
+              try { steps = safeParse(s.steps) || []; } catch (e) {}
+              try { pending = safeParse(s.pending) || null; } catch (e) {}
+              sess = { id: s.id, steps, pending, summary: s.summary || '', updated_at: s.updated_at };
+            }
           } catch (e) {}
           const card = db.prepare('SELECT * FROM review_cards WHERE problem_id = ?').get(pid) || null;
           const recalls = db.prepare('SELECT id,score,verdict,report,created_at FROM recall_tests WHERE problem_id = ? ORDER BY id DESC LIMIT 8').all(pid);
           const cands = reviewCandidates(card && card.goal_id ? card.goal_id : 0);
           const self = cands.find(c => c.problem_id === pid) || null;
+          const steps = sess ? sess.steps : [];
           return sendJSON(res, 200, {
             problem: prob,
             approach: row.approach || '',
             reference_code: row.reference_code || '',
             session: sess,
+            stages: coachStages(),
+            stepIndex: Math.min(steps.filter(s => String(s.a || '').trim()).length, COACH_STAGES.length - 1),
             pitfalls: problemPitfalls(pid),
             recallTests: recalls,
             review: card ? { ...card, risk: self ? self.risk : 0, why: self ? self.why : [] } : null
@@ -467,7 +480,7 @@ module.exports = {
           let body = {};
           try { body = await readBody(req); } catch (e) {}
           try {
-            return sendJSON(res, 200, await coachAsk(pid, body.answer === undefined ? undefined : String(body.answer)));
+            return sendJSON(res, 200, await coachAsk(pid, body.answer === undefined ? undefined : String(body.answer), !!body.hint));
           } catch (e) { return sendJSON(res, 500, { error: e.message || 'AI 没能问出问题' }); }
         }
     }
@@ -1174,16 +1187,40 @@ function problemPitfalls(pid) {
   return db.prepare("SELECT * FROM pitfall_cards WHERE problem_id = ? ORDER BY status = 'fixed', weight DESC, updated_at DESC").all(pid);
 }
 /* --- 提示词 --- */
+/** 引导五步：把「提炼思路」拆成有名字的台阶，让用户看得见自己在第几步。
+ *  只靠提示词求模型「引导性强」是不可控的（换个模型就变味），所以台阶由服务端钉死，
+ *  AI 只负责针对当前台阶、结合用户原话问出一个具体问题。 */
+const COACH_STAGES = [
+  { key: 'say', name: '说清要什么', hint: '用自己的话讲讲这题要你做什么', ask: '让用户用自己的话把这题要他做的事复述一遍（给了什么、要交什么）', probe: '他复述得含糊就追问某个具体名词：输入到底是几个东西、输出是什么形状' },
+  { key: 'naive', name: '先想最笨的办法', hint: '你第一反应会怎么写？为什么不行', ask: '让他说第一反应会怎么写，并说清为什么这么写不行（慢？错？）', probe: '他如果说「超时了」，就追问「慢多少倍」，逼出一个具体的量级概念' },
+  { key: 'insight', name: '找关键跳跃', hint: '从笨办法到好办法的那一下是什么', ask: '从笨办法推到好办法的那一下是什么？要多记住什么、少算几遍？', probe: '这是最容易卡的一步。若他说不出，换切口问「如果只能走一遍，你会先记下什么」，再问「记下来之后怎么找到答案」' },
+  { key: 'steps', name: '落地成步骤', hint: '一步步怎么走，边界怎么办', ask: '让他把刚才的思路说成一步步的顺序，并交代遍历顺序和边界怎么处理', probe: '顺序反了就问「为什么先记后查、先查后记会不一样」，逼他自己发现' },
+  { key: 'hook', name: '记住它', hint: '一句话钩子 + 复杂度', ask: '收尾：让他用一句自己在考场能想起来的话概括这题，并说时间空间大概多少', probe: '他给不出钩子就举一个同类的坏钩子让他否定，逼出好的' }
+];
 const COACH_RULE = [
-  '你是一位耐心的算法私教，目标只有一个：让学员把一道题的思路真正内化 —— 能讲给别人听，下次不看答案也能自己写出来。',
-  '铁律：',
-  '1. 一次只问一个问题。不要列 1/2/3/4，不要一口气抛一堆，不要给选项。',
-  '2. 先不给答案。只有学员明确说「直接告诉我」才给思路，而且只讲思路、绝不给代码。',
-  '3. 顺序：先问「这题要你做的事，一句话怎么说」→ 追问「你为什么想到这个」→ 逼出「要存什么、怎么查」→ 最后确认复杂度意识。',
-  '4. 学员答得含糊就追到具体那一步（是哪个量？存在哪？为什么够用？）；答错了先指出，再用一个更小的反例让他自己撞一次。',
-  '5. 学员说「不会」「不知道」时，换个更小的切口问，不要重复原问题，也不要直接给答案。',
-  '6. 已经聊过的内容不要重复提问。学员讲清楚了某个层次就顺着往下问下一层。',
-  '输出格式（严格）：只输出这一个问题本身，2~4 句话。开头可以先肯定他刚才说的那一小步。禁止输出 JSON、标题、编号、选项列表或任何括号补充说明。'
+  '你是一位耐心的算法私教，正在带学员把一道做过的题真正搞懂 —— 目标是让他能讲给别人听、下次不看答案也能自己写出来。',
+  '',
+  '现在要做的是「一问一答」：你**只问一个问题**，等学员回答了再问下一个。',
+  '',
+  '硬规矩：',
+  '1. 每次输出前先用一句话**复述他刚才说的话**，证明你真的在跟着他走（放在 echo 字段）。不要泛泛地说「很好」。',
+  '2. 你这一问必须针对本轮指定的「当前台阶」，不要提前问后面台阶的内容。',
+  '3. 只问一个具体问题，2~3 句话。不要列编号、不要给选项、不要一口气抛多个问题。',
+  '4. 绝对不给答案、不给代码、不给伪码。他明确说「别引导了直接告诉我」时才破例，而且只讲思路不给代码。',
+  '5. 他说「不会 / 不知道 / 卡住」时，**不要重复原问题、不要给答案**，换到 probe 里写的小切口，或让他去试一个最小例子。',
+  '6. 他答错了：先在 echo 里指出他哪一句不对（客气但明确），再用 probe 里的方式让他自己撞一次。',
+  '7. 已问过的内容不要重复。每个台阶只问一到两次，别在原地打转。',
+  '',
+  '输出格式（严格）：只输出一个 JSON 对象，不要代码围栏、不要任何多余文字：',
+  '{"echo":"一句话复述他刚才说的话（40 字内）", "q":"你这一个具体的问题（2~3 句）"}',
+  '',
+  '台阶清单（只用来对照你现在处于哪一步，不要把台阶名字告诉学员）：'
+].concat(COACH_STAGES.map((s, i) => (i + 1) + '. ' + s.key + '｜' + s.name + '：要问到的是' + s.ask + '｜他答不上来时改问：' + s.probe)).join('\n');
+const COACH_HINT_RULE = [
+  '学员在当前台阶卡住了，你要给一个**提示**（不是答案，也不是新的问题）。',
+  '要求：先复述他卡在哪，再用一句更小的话把方向指出来，让他自己走完那一步。',
+  '绝对不能出现完整解法、代码或伪码，不能直接把答案给他。',
+  '只输出一个 JSON 对象：{"echo":"一句话点出他卡在哪", "q":"一个提示（1~2 句）"}'
 ].join('\n');
 const SUMMARY_RULE = [
   '把这段师生对话整理成一张「思路卡」。要求：',
@@ -1222,51 +1259,113 @@ function statementBrief(prob, max) {
   s = s.replace(/\s+/g, ' ').trim();
   return s.length > (max || 700) ? s.slice(0, max) + '…' : s;
 }
-/** 引导式提炼：AI 一次问一个问题，返回下一个问题 */
-async function coachAsk(pid, answer) {
+/** 让 AI 出一句引导。返回 {echo, q}；模型不听话就重试一次，仍不行退回纯文本。 */
+async function coachTurn(basePrompt, timeoutMs) {
+  let raw = '';
+  try {
+    raw = String(await aiText(basePrompt, (currentModel && currentModel()) || '', timeoutMs || 120000) || '').trim();
+    const j = firstJSONObject(raw);
+    if (j && String(j.q || '').trim()) return { echo: String(j.echo || '').trim().slice(0, 200), q: String(j.q).trim().slice(0, 800) };
+  } catch (e) { raw = raw || ('ERR ' + (e.message || e)); }
+  /* 模型没给 JSON：再试一次，并把它的原话怼回去让它自己改格式 */
+  try {
+    const again = String(await aiText(basePrompt + '\n\n【注意】你上一次的输出不是合法 JSON，只输出 {"echo":"…","q":"…"} 这个对象本身。',
+      (currentModel && currentModel()) || '', (timeoutMs || 120000)) || '').trim();
+    const j2 = firstJSONObject(again);
+    if (j2 && String(j2.q || '').trim()) return { echo: String(j2.echo || '').trim().slice(0, 200), q: String(j2.q).trim().slice(0, 800) };
+    raw = again;
+  } catch (e) { /* 两次都不听话就用第一次的原话 */ }
+  const plain = String(raw || '').replace(/^```[a-z]*\s*/i, '').replace(/```$/, '').trim();
+  if (!plain) throw new Error('AI 没有给出问题，换个模型再试');
+  return { echo: '', q: plain.slice(0, 800) };
+}
+/** 引导式提炼：按五步台阶往下走。hint=true 时只给提示，不推进台阶。 */
+async function coachAsk(pid, answer, hint) {
   const prob = db.prepare('SELECT * FROM problems WHERE id = ?').get(pid);
   if (!prob) throw new Error('题目不存在');
   let sess = db.prepare("SELECT * FROM mind_sessions WHERE problem_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1").get(pid);
   const t = nowISO();
   let steps = [];
   if (sess) { try { steps = safeParse(sess.steps) || []; } catch (e) { steps = []; } }
-  const ref = db.prepare('SELECT reference_code FROM problem_mind WHERE problem_id = ?').get(pid) || {};
-  const refCode = String(ref.reference_code || '').trim();
+  let pending = null;
+  if (sess) { try { pending = safeParse(sess.pending) || null; } catch (e) {} }
 
-  const ctxLines = [
-    '题目：' + prob.fid + '. ' + prob.title + '（难度 ' + (prob.difficulty || '未知') + '）',
-    (() => { try { const g = safeParse(prob.groups) || []; return g.length ? '知识点：' + g.join(' / ') : ''; } catch (e) { return ''; } })(),
-    '题面：' + (statementBrief(prob, 700) || '（未缓存）')
-  ].filter(Boolean);
-  /* 提炼阶段故意不给参考代码：给了学员就会照抄，恰恰毁掉这个练习的目的。 */
-
-  if (answer !== undefined && String(answer).trim()) {
-    if (!sess) {
-      /* 只有第一次调用且带了回答 —— 不该发生，但别把用户的字吞掉 */
-      const r = db.prepare('INSERT INTO mind_sessions (problem_id,goal_id,status,steps,summary,created_at,updated_at) VALUES (?,?,\'active\',\'[]\',\'\',?,?)').run(pid, 0, t, t);
-      sess = db.prepare('SELECT * FROM mind_sessions WHERE id = ?').get(Number(r.lastInsertRowid));
-    }
-    steps.push({ q: steps.length ? '（继续）' : '', a: String(answer).slice(0, 4000), at: t });
-    db.prepare('UPDATE mind_sessions SET steps = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(steps), t, sess.id);
-  } else if (!sess) {
-    const r = db.prepare('INSERT INTO mind_sessions (problem_id,goal_id,status,steps,summary,created_at,updated_at) VALUES (?,?,\'active\',\'[]\',\'\',?,?)').run(pid, 0, t, t);
+  if (!sess) {
+    const r = db.prepare('INSERT INTO mind_sessions (problem_id,goal_id,status,steps,summary,pending,created_at,updated_at) VALUES (?,?,\'active\',\'[]\',\'\',\'\',?,?)').run(pid, 0, t, t);
     sess = db.prepare('SELECT * FROM mind_sessions WHERE id = ?').get(Number(r.lastInsertRowid));
   }
 
-  const turns = steps.map((s, i) => '学员' + (i + 1) + '：' + s.a).join('\n');
-  const prompt = [
-    COACH_RULE, '', '=== 题目 ===', ...ctxLines, '',
-    turns ? '=== 学员已经说过的（不要重复问） ===\n' + turns + '\n' : '',
-    '现在问下一个问题。'
-  ].filter(x => x !== '').join('\n');
-  const text = await aiText(prompt, (currentModel && currentModel()) || '', 120000);
-  const q = String(text || '').trim();
-  if (!q) throw new Error('AI 没有给出问题，换个模型再试');
-  if (steps.length && !steps[steps.length - 1].q) {
-    steps[steps.length - 1].q = q;
-    db.prepare('UPDATE mind_sessions SET steps = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(steps), nowISO(), sess.id);
+  const answered = steps.filter(s => String(s.a || '').trim()).length;
+  /* 这一轮要问的是第几步（从 0 起）。答满五步还继续聊就钉在最后一步，不越界到不存在的第六步。 */
+  let idx = Math.min(answered, COACH_STAGES.length - 1);
+  /* 收尾提示：五步都答过了还点「下一问」，就别再问了，直接提示可以整理成思路卡 */
+  if (!hint && answered >= COACH_STAGES.length) {
+    return {
+      sessionId: sess.id, question: '', echo: '', hint: false, finished: true,
+      stageKey: COACH_STAGES[COACH_STAGES.length - 1].key,
+      stageName: COACH_STAGES[COACH_STAGES.length - 1].name,
+      stageIndex: COACH_STAGES.length - 1, stageTotal: COACH_STAGES.length, stepCount: answered
+    };
   }
-  return { sessionId: sess.id, question: q, stepCount: steps.length };
+
+  /* 用户回答了：把「刚才那一问」和这个回答配成一步。
+     那一问问的时候还没人答，进不了 steps，所以先存在 pending 里（否则第一问会在页面上凭空消失）。 */
+  if (answer !== undefined && String(answer).trim()) {
+    steps.push({
+      q: pending ? String(pending.q || '') : '',
+      echo: pending ? String(pending.echo || '') : '',
+      a: String(answer).slice(0, 4000),
+      stageKey: pending ? String(pending.stageKey || COACH_STAGES[idx].key) : COACH_STAGES[idx].key,
+      stageName: pending ? String(pending.stageName || COACH_STAGES[idx].name) : COACH_STAGES[idx].name,
+      at: t
+    });
+    pending = null;
+    idx = Math.min(steps.length, COACH_STAGES.length - 1);
+    db.prepare('UPDATE mind_sessions SET steps = ?, pending = \'\', updated_at = ? WHERE id = ?').run(JSON.stringify(steps), t, sess.id);
+  } else if (pending) {
+    /* 只是重问（模型抽风、或用户点了「重新问」）：沿用原来那一问的台阶，别把用户拽回上一步 */
+    const pi = COACH_STAGES.findIndex(s => s.key === pending.stageKey);
+    if (pi >= 0) idx = pi;
+  }
+  const stage = COACH_STAGES[idx];
+
+  const turns = steps.map((s, i) =>
+    '【第 ' + (i + 1) + ' 步 · ' + (s.stageName || '') + '】\n学员：' + s.a).join('\n\n');
+  const base = [
+    '=== 题目 ===',
+    '题号：' + prob.fid + '. ' + prob.title + '（难度 ' + (prob.difficulty || '未知') + '）',
+    (() => { try { const g = safeParse(prob.groups) || []; return g.length ? '知识点：' + g.join(' / ') : ''; } catch (e) { return ''; } })(),
+    '题面：' + (statementBrief(prob, 700) || '（未缓存）'),
+    /* 提炼阶段故意不给参考代码：给了学员就会照抄，练习就废了 */
+    '',
+    turns ? '=== 学员已经说过的（不要重复问） ===\n' + turns : '=== 学员还没开口 ===',
+    '',
+    '=== 本轮要问的台阶 ===',
+    '当前第 ' + (idx + 1) + ' / ' + COACH_STAGES.length + ' 步：' + stage.key + '｜' + stage.name,
+    '这一步要问到的是：' + stage.ask,
+    '他答不上来时改问：' + stage.probe,
+    '（他前面已经答过 ' + steps.length + ' 步）',
+    ''
+  ].join('\n');
+
+  const out = await coachTurn((hint ? COACH_HINT_RULE + '\n\n' : COACH_RULE + '\n\n') + base
+    + (hint ? '\n学员刚才说卡住了，给个提示（不推进台阶）。' : '\n现在问他这一个问题。'), 120000);
+  /* 新的这一问存 pending，等下一次用户回答时再配成一步 */
+  const np = { q: out.q, echo: out.echo, stageKey: stage.key, stageName: stage.name, at: nowISO(), hint: !!hint };
+  db.prepare('UPDATE mind_sessions SET pending = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(np), nowISO(), sess.id);
+  return {
+    sessionId: sess.id,
+    question: out.q,
+    echo: out.echo,
+    hint: !!hint,
+    stageKey: stage.key, stageName: stage.name,
+    stageIndex: idx, stageTotal: COACH_STAGES.length,
+    stepCount: steps.length
+  };
+}
+/** 引导流程的结构（给前端画进度条用，省得两边各写一份） */
+function coachStages() {
+  return COACH_STAGES.map((s, i) => ({ i: i + 1, key: s.key, name: s.name, hint: s.hint }));
 }
 /** 把对话整理成思路卡（不直接覆盖已有卡，写进会话 summary 由用户确认） */
 async function coachFinish(pid) {
@@ -1274,10 +1373,10 @@ async function coachFinish(pid) {
   if (!sess) throw new Error('还没有提炼过，先和 AI 聊几句');
   let steps = [];
   try { steps = safeParse(sess.steps) || []; } catch (e) {}
-  const useful = steps.filter(s => String(s.a || '').trim());
-  if (useful.length < 2) throw new Error('至少说两句再整理，不然整理出来也是空的');
+  const useful = steps.filter(s => String(s.a || '').trim() && s.q);
+  if (useful.length < 3) throw new Error('至少走完 3 步再整理（现在 ' + useful.length + ' 步），走得太少整理出来也是碎的');
   const prob = db.prepare('SELECT * FROM problems WHERE id = ?').get(pid);
-  const turns = useful.map((s, i) => '学员' + (i + 1) + '：' + s.a).join('\n');
+  const turns = useful.map((s, i) => '【第 ' + (i + 1) + ' 步 · ' + (s.stageName || '') + '】\n学员：' + s.a).join('\n\n');
   const prompt = [
     SUMMARY_RULE, '',
     '题目：' + prob.fid + '. ' + prob.title,
