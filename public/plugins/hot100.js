@@ -10,6 +10,22 @@
 (function () {
   const { api, esc, toast, go, state, mdToHTML, fmtDate, safeParse } = SiErXing;
 
+  /* 「按知识点练习」里每个 <details> 的展开状态。
+     整页重绘（改完成状态后要重拉数据）会把所有分组折叠掉 —— 用户正操作的那一组
+     突然收起，点一下「标记完成」就得再展开一遍，很跳。
+     用 data-grp 记住哪些组是开的，重绘后按名字还原。 */
+  const openGroups = new Set();
+  /** 重绘前从 DOM 里把当前展开的组名记下来（只在第一次进页面时为空，之后靠 toggle 事件增量维护） */
+  function rememberOpenGroups() {
+    const root = document.querySelector('#app .groupList');
+    if (!root) return;
+    root.querySelectorAll('details.probGroup').forEach(d => {
+      const n = d.getAttribute('data-grp');
+      if (!n) return;
+      if (d.open) openGroups.add(n); else openGroups.delete(n);
+    });
+  }
+
 /* 题面渲染：LeetCode 多数题目给 HTML，部分新题给 Markdown（含 ``` 代码围栏）——
    这里自动识别：Markdown 走 mdToHTML，HTML 直接渲染，混排时把围栏也转成 <pre>。 */
 function escCode(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
@@ -84,6 +100,8 @@ async function renderDailyPage() {
   drawDailyPage();
 }
 function drawDailyPage() {
+  /* 先记住当前哪些分组是展开的，再重绘 —— 否则改一次完成状态就把列表全收起了 */
+  rememberOpenGroups();
   const g = state.goal;
   const d = state.daily || { items: [], stats: {}, hasProblems: false };
   const st = d.stats || {};
@@ -141,7 +159,7 @@ function drawDailyPage() {
   <div class="secCard">
     <div class="secHead"><span>📚 按知识点练习</span><div class="spacer"></div><span class="muted" style="font-size:12px;">共 ${(state.problems || []).length} 题</span></div>
     <div class="groupList">
-      ${(state.problemGroups || []).map(gr => `<details class="probGroup">
+      ${(state.problemGroups || []).map(gr => `<details class="probGroup" data-grp="${esc(gr.name)}"${openGroups.has(gr.name) ? ' open' : ''}>
         <summary><span class="pgName">${esc(gr.name)}</span><span class="pgProg">${gr.solved}/${gr.total}</span><span class="pgBar"><i style="width:${gr.total ? Math.round(gr.solved / gr.total * 100) : 0}%"></i></span></summary>
         <div class="pgList">${gr.problems.map(probRowHTML).join('')}</div>
       </details>`).join('')}

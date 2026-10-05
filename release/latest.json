@@ -1,13 +1,13 @@
 {
-  "version": "1.0.0",
-  "buildVer": "e27c10cca75b",
-  "payload": "release/payload-1.0.0.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.0.0.sxar?ref=main",
+  "version": "1.1.0",
+  "buildVer": "d75791733ea8",
+  "payload": "release/payload-1.1.0.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.1.0.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
-  "sha256": "a0810aa15f84dbeacb44efa0d34628d11d492fbd0d341099366cf34b52d605ca",
-  "size": 467685,
-  "unpackedSize": 1800406,
-  "publishedAt": "2026-10-05T00:13:30.254Z",
-  "notes": "见 CHANGELOG / 提交记录",
+  "sha256": "6385d46c3176f4d110b48077e996cdc4863a787986e84246f27f3ab1db0bffd3",
+  "size": 473339,
+  "unpackedSize": 1817127,
+  "publishedAt": "2026-10-05T01:38:55.688Z",
+  "notes": "每日刷题：修返回跳主页、作答记录可编辑、VSCode 模板用本题代码定义（旧的两数之和会自动重写）、完成状态三处可改且互相同步、分组展开状态不再被重绘收起",
   "exeRequired": false
 }
