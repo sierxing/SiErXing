@@ -95,10 +95,15 @@ function connections() {
   return list;
 }
 function normalizeConn(c) {
+  const pid = String((c && c.providerId) || '');
+  const p = pid ? providerById(pid) : null;
+  const nm = String((c && c.name) || '').trim();
   return {
-    id: String(c.id || newConnId()),
-    name: String(c.name || '未命名'),
-    provider: c.provider === 'opencode' ? 'opencode' : 'openai',
+    id: String((c && c.id) || newConnId()),
+    /* 连接名前端不再让用户填（按服务商自动起）。
+       这里是兜底：名字空了就按服务商补，别让界面上出现「未命名」。 */
+    name: nm || (p ? p.name : '自定义连接'),
+    provider: (c && c.provider) === 'opencode' ? 'opencode' : 'openai',
     providerId: String(c.providerId || ''),
     baseUrl: String(c.baseUrl || '').trim(),
     apiKey: String(c.apiKey || ''),

@@ -297,7 +297,7 @@ async function route() {
     }
     if (r.view === 'tutorial') { if (fab) fab.classList.remove('hidden'); }   // 教程页保留 AI 助手入口
     if (r.view === 'home') { setHeader(r); await renderHome(); }
-    else if (r.view === 'settings') { setHeader(r); await renderSettings(); }
+    else if (r.view === 'settings') { setHeader(r); state.settingsTab = ''; await renderSettings(); }
     else if (r.view === 'guide') { setHeader(r); await renderHome(); showGuide(r.step - 1); }
     else if (r.view === 'components') { setHeader(r); await renderComponentsPage(); }
     else if (r.view === 'versions') { await loadGoal(r.id); setHeader(r); await renderVersionsPage(r.id); }
@@ -5955,7 +5955,7 @@ async function updateSectionHTML() {
           ? '<b style="color:var(--accent)">有新版本 v' + esc(u.latestShort || '') + '</b> · 只下载程序文件 ' + (updSizeText() || '') + '，不会重下整个 exe · ' + esc(u.latestSubject || '')
           : '<b style="color:var(--accent)">有 ' + u.behind + ' 个新提交</b> · 最新：' + esc(u.latestSubject || ''))
         : (isPay ? '已是最新版本' : '已是最新版本' + (u.dirty ? ' · 本地有 ' + u.dirty + ' 个改动文件（更新时会自动暂存）' : ''))));
-  return `<div class="sec">
+  return `<div class="sec" id="set-update">
       <div class="secTitle">版本与更新</div>
       <div class="svcRow">
         <span class="svcLabel">当前版本</span>
@@ -5996,7 +5996,7 @@ async function serviceSectionHTML() {
   try { st = await api('/api/service/status'); } catch (e) { st = {}; }
   state.serviceStatus = st;
   const a = st.autostart || {};
-  return `<div class="sec">
+  return `<div class="sec" id="set-service">
       <div class="secTitle">服务与启动</div>
       <div class="svcRow">
         <span class="svcLabel">访问地址</span>
@@ -6067,14 +6067,19 @@ async function syncSectionHTML() {
   try { st = await api('/api/sync/status'); } catch (e) { st = {}; }
   state.syncStatus = st;
   const snap = st.snapshot;
-  return `<div class="sec">
+  return `<div class="sec" id="set-sync">
       <div class="secTitle">多端同步（Git 仓库）</div>
       <p class="hint" style="line-height:1.85;">
         把数据快照提交到<b>你自己的 Git 仓库</b>（建议私有仓库），实现多台设备同步：<b>改动后自动上传</b>、<b>启动时自动拉取</b>。<br>
         · 密钥类信息（AI API Key、同步令牌、LeetCode 登录态）<b>不会</b>被同步<br>
-        · 冲突策略：以最后保存的设备为准（个人多设备场景足够用）<br>
+        · 两边都有新改动时<b>不会直接覆盖</b>，会停下来让你二选一（用本地 / 用云端）<br>
         · 本机工作副本：<code>data/sync/</code>（已在 .gitignore 中）
       </p>
+      ${st.conflict ? `<div class="syncConflict">
+        <div class="cfTitle">⚠️ 检测到冲突：本地和云端都有新改动</div>
+        <div class="cfSub">为避免丢数据，这次没有自动同步，请二选一：</div>
+        <div class="toolbarRow"><button class="btn primary" id="cfOpen">查看并选择</button></div>
+      </div>` : ''}
       <div class="svcRow"><span class="svcLabel">启用同步</span>${syncSwitch('syncEnabled', st.enabled, '开启后才会自动上传/拉取')}
         <span class="svcVal">${st.enabled ? '已启用' : '未启用'}</span>
         <div class="spacer"></div>
@@ -6136,6 +6141,12 @@ function bindSyncSection() {
     } catch (e) { toast(e.message); if (box) box.innerHTML = '❌ ' + esc(e.message); }
     finally { sv.disabled = false; sv.textContent = '保存并测试连接'; }
   });
+  const cf = document.getElementById('cfOpen');
+  if (cf) cf.addEventListener('click', () => {
+    const c = (state.syncStatus || {}).conflict;
+    if (c) openSyncConflictDialog(c);
+    else toast('冲突信息已过期，点「立即拉取」重新检查');
+  });
   const sp = document.getElementById('syncPush');
   if (sp) sp.addEventListener('click', async () => {
     sp.disabled = true; sp.textContent = '上传中…';
@@ -6143,9 +6154,14 @@ function bindSyncSection() {
     try {
       await save();
       const r = await api('/api/sync/push', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-      const c = r.counts || {};
-      if (box) box.innerHTML = '✅ 上传成功 · ' + (c.goals || 0) + ' 个目标 / ' + (c.nodes || 0) + ' 个节点';
-      toast('已上传到同步仓库');
+      if (r.conflict) {
+        if (box) box.innerHTML = '⚠️ 云端也有新改动，已暂停上传，请二选一。';
+        openSyncConflictDialog(r.conflict);
+      } else {
+        const c = r.counts || {};
+        if (box) box.innerHTML = '✅ 上传成功 · ' + (c.goals || 0) + ' 个目标 / ' + (c.nodes || 0) + ' 个节点';
+        toast('已上传到同步仓库');
+      }
     } catch (e) { toast('上传失败：' + e.message); if (box) box.innerHTML = '❌ 上传失败：' + esc(e.message); }
     finally { sp.disabled = false; sp.textContent = '⬆ 立即上传'; }
   });
@@ -6156,16 +6172,86 @@ function bindSyncSection() {
     try {
       await save();
       const r = await api('/api/sync/pull', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-      if (box) box.innerHTML = r.imported
-        ? '✅ 已导入来自 ' + esc(r.device || '其它设备') + ' 的数据（' + ((r.counts || {}).goals || 0) + ' 个目标），页面即将刷新…'
-        : 'ℹ ' + esc(r.message || '已是最新');
-      toast(r.imported ? '已导入最新数据' : (r.message || '已是最新'));
-      if (r.imported) setTimeout(() => location.reload(), 1200);
+      if (r.conflict) {
+        if (box) box.innerHTML = '⚠️ 本地和云端都有新改动，已暂停同步，请二选一（不会覆盖任何一边）。';
+        openSyncConflictDialog(r.conflict);
+      } else if (r.imported) {
+        if (box) box.innerHTML = '✅ 已导入来自 ' + esc(r.device || '其它设备') + ' 的数据（' + ((r.counts || {}).goals || 0) + ' 个目标），页面即将刷新…';
+        toast('已导入最新数据');
+        setTimeout(() => location.reload(), 1200);
+      } else {
+        if (box) box.innerHTML = 'ℹ ' + esc(r.message || '已是最新');
+        toast(r.message || '已是最新');
+      }
     } catch (e) { toast('拉取失败：' + e.message); if (box) box.innerHTML = '❌ 拉取失败：' + esc(e.message); }
     finally { pl.disabled = false; pl.textContent = '⬇ 立即拉取'; }
   });
 }
 
+/* 同步冲突二选一。对话框列出两边摘要（设备 / 时间 / 数量），用户点哪个走哪个。
+   选云端 = 用云端覆盖本地（服务端导入前已自动 backup）；选本地 = 保留本地并上传。 */
+function openSyncConflictDialog(c) {
+  const old = document.getElementById('cfDialog');
+  if (old) old.remove();
+  const fmtN = n => (n == null ? '—' : n);
+  const r = c.remote || {}, l = c.local || {};
+  const rc = r.counts || {}, lc = l.counts || {};
+  const div = document.createElement('div');
+  div.id = 'cfDialog';
+  div.className = 'tutDialog';
+  div.innerHTML = `<div class="tdHead"><span>⚠️</span><span>同步冲突：用哪边的数据？</span><button class="btn tiny" id="cfX">×</button></div>
+    <div class="tdBody">
+      <p class="hint" style="margin:0 0 10px;">本地和云端<b>都有</b>对方没有的新改动，自动同步已暂停，不会覆盖任何一边。请看完再选：</p>
+      <div class="cfCols">
+        <div class="cfSide local">
+          <div class="cfSideT">💻 本地这台设备</div>
+          <div class="cfMeta">最后改动：${esc(fmtDate(l.changeAt) || '—')}</div>
+          <div class="cfMeta">目标 ${fmtN(lc.goals)} · 路线节点 ${fmtN(lc.nodes)} · 资料 ${fmtN(lc.sources)} · 教程 ${fmtN(lc.tutorials)}</div>
+        </div>
+        <div class="cfSide remote">
+          <div class="cfSideT">☁️ 云端</div>
+          <div class="cfMeta">来自 ${esc(r.device || '其它设备')} · ${esc(fmtDate(r.savedAt) || '—')}</div>
+          <div class="cfMeta">目标 ${fmtN(rc.goals)} · 路线节点 ${fmtN(rc.nodes)} · 资料 ${fmtN(rc.sources)} · 教程 ${fmtN(rc.tutorials)}</div>
+        </div>
+      </div>
+      <p class="hint" style="margin:10px 0 0;">选「用云端」会先自动备份本地（data/backups），万一选错还能找回来。</p>
+      <div class="toolbarRow" style="margin-top:12px;">
+        <button class="btn" id="cfLocal">💻 保留本地并上传</button>
+        <button class="btn primary" id="cfRemote">☁️ 用云端覆盖本地</button>
+      </div>
+      <div class="hint" id="cfMsg" style="margin-top:8px;"></div>
+    </div>`;
+  document.body.appendChild(div);
+  const close = () => div.remove();
+  div.querySelector('#cfX').addEventListener('click', close);
+  const msg = div.querySelector('#cfMsg');
+  const run = async (choice, btn, label) => {
+    btn.disabled = true;
+    msg.textContent = label + '…';
+    try {
+      const res = await api('/api/sync/resolve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ choice }) });
+      if (res.conflict) { msg.textContent = '对方又有新改动，冲突已更新，请重新看一眼再选。'; openSyncConflictDialog(res.conflict); return; }
+      if (choice === 'remote' && res.imported) {
+        msg.textContent = '✅ 已用云端覆盖本地，页面即将刷新…';
+        toast('已用云端数据覆盖本地');
+        setTimeout(() => location.reload(), 1200);
+      } else {
+        msg.textContent = '✅ 已保留本地并上传到云端';
+        toast('已保留本地并上传');
+        close();
+        renderSettings();
+      }
+    } catch (e) { msg.textContent = '❌ ' + e.message; btn.disabled = false; }
+  };
+  div.querySelector('#cfLocal').addEventListener('click', e => {
+    if (!confirm('确定保留本地并上传？云端的新改动会被本地覆盖（云端设备下次同步时会看到冲突提示，可再选回来）。')) return;
+    run('local', e.target, '正在上传本地数据');
+  });
+  div.querySelector('#cfRemote').addEventListener('click', e => {
+    if (!confirm('确定用云端覆盖本地？本地的新改动会被替换（已自动备份，可回滚）。')) return;
+    run('remote', e.target, '正在用云端覆盖本地');
+  });
+}
 /* 服务商预设。优先用服务端 /api/ai/providers（那边是唯一来源，模型建议值会更新），
    取不到时退回这份内置表，保证设置页至少还能选服务商、填地址。
    模型建议值刻意保守 —— 真正的权威列表是「获取可用模型」向该地址现取的。 */
@@ -6210,6 +6296,12 @@ function chosenChipsHTML(models, sel) {
   return `<div class="mChips">${s.map(m => `<span class="mChip" data-chip="${esc(m)}">${esc(m)}<i title="移除">×</i></span>`).join('')}</div>`;
 }
 
+/** 地址栏只留主机名当副标题：https://api.deepseek.com/v1 → api.deepseek.com */
+function shortHost(base) {
+  const s = String(base || '').trim();
+  if (!s) return '';
+  try { return new URL(s).hostname; } catch (e) { return s.replace(/^https?:\/\//, '').split('/')[0]; }
+}
 function connCardHTML(c, provs, ctx) {
   const pid = c.providerId || '';
   const p = (provs || []).find(x => x.id === pid);
@@ -6220,13 +6312,19 @@ function connCardHTML(c, provs, ctx) {
   const avail = (ctx && ctx.avail && ctx.avail[c.id]) || (p ? (p.models || []) : []);
   const ocState = ctx && ctx.ocState;
   const ocOK = ocState && ocState.installed;
+  /* 连接名不让用户填了：直接用服务商名（DeepSeek），重名的自动加序号。
+     之前那个「连接名称」输入框用户根本不知道填什么 —— 它确实没有意义。 */
+  const dispName = c.name || (p ? p.name : '自定义连接');
+  const host = isOC ? '本机 CLI' : (shortHost(c.baseUrl) || (p ? shortHost(p.baseUrl) : '') || '未填地址');
 
   return `<div class="connCard" data-conn="${esc(c.id)}" data-prov="${esc(pid)}">
     <div class="ccHead">
-      <input class="ccName" data-f="name" value="${esc(c.name || '')}" placeholder="连接名称">
-      <label class="ccOn"><input type="checkbox" data-f="enabled" ${c.enabled !== false ? 'checked' : ''}> 启用</label>
+      <span class="ccBrand" data-role="brand">${esc((p && p.brand) || '···')}</span>
+      <span class="ccTitle" data-role="title">${esc(dispName)}</span>
+      <span class="ccUrl" data-role="host">${esc(host)}</span>
       <div class="spacer"></div>
-      <button class="btn tiny danger" data-act="del">删除这条</button>
+      <label class="sw" title="启用 / 停用这条连接"><input type="checkbox" data-f="enabled" ${c.enabled !== false ? 'checked' : ''}><i></i></label>
+      <button class="btn tiny danger" data-act="del">删除</button>
     </div>
 
     <div class="ccBlock">
@@ -6238,11 +6336,11 @@ function connCardHTML(c, provs, ctx) {
       <div class="ccLabel">② ${isOC ? 'opencode 不用填地址与密钥' : '填地址与密钥'}
         <span class="hint">${isOC ? '它自己管登录' : ((p && p.noKey) ? '本地服务，密钥可留空' : '填完才能取到模型列表')}</span></div>
       ${isOC ? '' : `<div class="ccRow">
-        <label class="ccWide">API 地址（Base URL）
-          <input data-f="baseUrl" value="${esc(c.baseUrl || '')}" placeholder="选服务商会自动填好，也可以自己改">
+        <label class="ccWide">API 地址
+          <span class="inWrap"><i>🔗</i><input class="mono" data-f="baseUrl" value="${esc(c.baseUrl || '')}" placeholder="选服务商会自动填好" spellcheck="false"></span>
         </label>
         <label class="ccWide">API 密钥
-          <input type="password" data-f="apiKey" value="" placeholder="${c.hasKey ? '已保存（留空则不修改）' : 'sk-…'}">
+          <span class="inWrap"><i>🔑</i><input type="password" data-f="apiKey" value="" placeholder="${c.hasKey ? '已保存（留空则不修改）' : 'sk-…'}" spellcheck="false"><button type="button" class="peekBtn" data-act="peek" title="显示 / 隐藏">👁</button></span>
         </label>
       </div>
       ${p && p.docs ? `<div class="ccDoc">没密钥？<a href="${esc(p.docs)}" target="_blank" rel="noopener">去 ${esc(p.name)} 控制台申请 →</a></div>` : ''}`}
@@ -6295,7 +6393,7 @@ async function renderSettings() {
   const ocState = await api('/api/ai/opencode-status').catch(() => null);
   const aiCtx = { ocState, avail: {}, agent: s.ai_opencode_agent || 'NoTools' };
 
-  let html = `<div class="page">
+  let html = `<div class="page settingsPage">
     <div class="pageHead"><button class="back js-back" data-back="#/">← 返回</button><h2 class="title" style="margin-left:10px;">设置</h2>
       <div class="spacer"></div>
       <span class="aiBadge ${configured ? 'ok' : 'bad'}">${configured ? '✓ AI 已配置' : '未配置 AI'}</span>
@@ -6307,8 +6405,8 @@ async function renderSettings() {
       <p class="hint" style="margin:0;">思而行的问卷、规划、教程、对话都由 AI 完成，所以需要先接入模型服务。推荐任意 <b>OpenAI 兼容接口</b>（DeepSeek、通义千问、Kimi、智谱、硅基流动、OpenAI、本地 Ollama 都行）。</p>
       <ol class="setupSteps">
         <li>点下面「添加连接」，选一个服务商 —— <b>地址会自动填好，不用手打</b></li>
-        <li>填上 <b>API 密钥</b>（本地 Ollama 可随便填），点「获取模型列表」</li>
-        <li><b>勾选</b>要用的模型（可以多选），保存即可</li>
+        <li>填上 <b>API 密钥</b>（本地 Ollama 可随便填），点「获取可用模型」</li>
+        <li>点<b>模型按钮</b>加入要用的模型（可以多选），保存即可</li>
       </ol>
       <p class="hint" style="margin:0;">没有密钥？也可以先用 <b>本地模型</b>：装好 <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> 后添加「本地 Ollama」连接，无需密钥。</p>
     </div>`;
@@ -6317,9 +6415,21 @@ async function renderSettings() {
   /* AI 连接：一条连接 = 一个服务商 + 一套地址/密钥，下挂多个模型。
      可以加多个 Base URL（同一家不同线路、或不同家并存都行），
      每条连接里多选模型；具体用哪个模型由「AI 助手」对话栏的模型下拉决定。 */
-  html += `<div class="sec">
-      <div class="secTitle">AI 接入方式</div>
-      <p class="hint" style="margin:-4px 0 10px;">添加服务商连接后，在每条连接里<b>勾选</b>要用的模型（可多选）。对话时在 💬 AI 助手的模型下拉里选具体用哪个 —— 可以是不同服务商、不同模型。</p>
+  const SET_TABS = [
+    ['set-ai', '🔌 AI 接入方式'],
+    ['set-sync', '🔄 多端同步'],
+    ['set-service', '🖥 服务与启动'],
+    ['set-update', '⬆ 版本与更新'],
+    ['set-data', '💾 数据备份'],
+    ['set-help', '📖 帮助'],
+    ['set-about', 'ℹ 关于']
+  ];
+  html += `<div class="setTabs" id="setTabs" role="tablist">${SET_TABS.map(([id, label]) =>
+    `<button type="button" class="setTab" data-tab="${id}" role="tab">${label}</button>`).join('')}</div>`;
+  state._setTabs = SET_TABS.map(([id]) => id);
+  html += `<div class="sec aiSec" id="set-ai">
+      <div class="secTitle">AI 接入方式 <span class="secSub">选服务商 → 填密钥 → 点模型按钮加入</span></div>
+      <p class="hint" style="margin:-4px 0 10px;">对话时在 💬 AI 助手的模型下拉里选具体用哪个 —— 可以是不同服务商、不同模型。</p>
       <div class="toolbarRow" style="margin-bottom:12px;">
         <button class="btn primary" id="addConn">＋ 添加连接</button>
       </div>
@@ -6344,11 +6454,12 @@ async function renderSettings() {
         ${st.hint ? '<br><span style="color:var(--warn)">' + esc(st.hint) + '</span>' : ''}
       </div>
     </div>
+    <div class="setGrid">
     ${await serviceSectionHTML()}
     ${await updateSectionHTML()}
     ${await syncSectionHTML()}
-    <div class="sec">
-      <div class="secTitle">数据安全</div>
+    <div class="sec" id="set-data">
+      <div class="secTitle">数据备份</div>
       <div class="toolbarRow">
         <button class="btn" id="backupNow">立即备份</button>
         <a class="btn" href="/api/export/json">导出全部 JSON</a>
@@ -6356,7 +6467,7 @@ async function renderSettings() {
       </div>
       <p class="hint" style="margin-top:10px;">每次改动都会自动备份到 data/backups/（保留最近 30 份）。导入会覆盖现有全部数据（导入前会自动备份）。</p>
     </div>
-    <div class="sec">
+    <div class="sec" id="set-help">
       <div class="secTitle">帮助</div>
       <div class="toolbarRow">
         <button class="btn" id="showGuideBtn">📖 重新查看使用引导</button>
@@ -6364,9 +6475,10 @@ async function renderSettings() {
       </div>
       <p class="hint" style="margin-top:8px;">引导会介绍：如何接入模型、组件是什么、一条目标的完整使用流程。</p>
     </div>
-    <div class="sec">
+    <div class="sec" id="set-about">
       <div class="secTitle">关于</div>
       <p class="muted" style="font-size:13px; line-height:1.8;">思而行 · 你的目标规划助手 · 本地运行 · 零依赖<br>数据文件：data/sierxing.db，所有数据只保存在你自己的电脑上。</p>
+    </div>
     </div>
   </div>`;
   app.innerHTML = html;
@@ -6432,22 +6544,31 @@ async function renderSettings() {
     if (lbl) lbl.textContent = '已选模型（' + sel.length + '）';
   };
   /* 把卡片上的输入读成连接对象。密钥框留空 = 没碰过，不发 apiKey，
-     服务端会保留已存的密钥（否则每次保存都把密钥清成空）。 */
-  const readConns = () => Array.from(app.querySelectorAll('.connCard')).map(card => {
-    const g = f => { const el = card.querySelector('[data-f="' + f + '"]'); return el ? el.value : ''; };
-    const en = card.querySelector('[data-f="enabled"]');
-    return {
-      id: card.getAttribute('data-conn'),
-      name: (g('name') || '').trim(),
-      providerId: card.getAttribute('data-prov') || '',
-      provider: card.getAttribute('data-prov') === 'opencode' ? 'opencode' : 'openai',
-      baseUrl: (g('baseUrl') || '').trim(),
-      apiKey: (g('apiKey') || '').trim(),
-      visionModel: (g('visionModel') || '').trim(),
-      enabled: en ? en.checked : true,
-      models: cardSel(card)
-    };
-  });
+     服务端会保留已存的密钥（否则每次保存都把密钥清成空）。
+     连接名不让用户填：按服务商自动起名，重名的加序号（DeepSeek、DeepSeek 2）。
+     顺序即 DOM 顺序，是稳定的，同一批卡片每次算出来的名字一致。 */
+  const readConns = () => {
+    const seen = {};
+    return Array.from(app.querySelectorAll('.connCard')).map(card => {
+      const g = f => { const el = card.querySelector('[data-f="' + f + '"]'); return el ? el.value : ''; };
+      const en = card.querySelector('[data-f="enabled"]');
+      const pid = card.getAttribute('data-prov') || '';
+      const p = AI_PROVIDERS.find(x => x.id === pid);
+      const base = p ? p.name : '自定义连接';
+      seen[pid] = (seen[pid] || 0) + 1;
+      return {
+        id: card.getAttribute('data-conn'),
+        name: seen[pid] > 1 ? base + ' ' + seen[pid] : base,
+        providerId: pid,
+        provider: pid === 'opencode' ? 'opencode' : 'openai',
+        baseUrl: (g('baseUrl') || '').trim(),
+        apiKey: (g('apiKey') || '').trim(),
+        visionModel: (g('visionModel') || '').trim(),
+        enabled: en ? en.checked : true,
+        models: cardSel(card)
+      };
+    });
+  };
   const save = async () => {
     /* 连接与旧设置分两个接口发：连接整体覆盖，超时/agent 仍走 /api/settings */
     await api('/api/ai/connections', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connections: readConns() }) });
@@ -6461,8 +6582,11 @@ async function renderSettings() {
   };
 
   /* 点服务商按钮 → 自动填官方地址、视觉模型、连接名；并把该服务商的常用模型铺成按钮。
-     opencode 单独一条（放最后），点了先把本机 opencode 探一遍。 */
-  app.addEventListener('click', async e => {
+     opencode 单独一条（放最后），点了先把本机 opencode 探一遍。
+     ⚠️ 必须先解绑上一轮的：renderSettings 每次保存都会重跑，直接 add 会越叠越多，
+     点一次按钮触发 N 次请求。 */
+  if (window.__aiSetClickH) app.removeEventListener('click', window.__aiSetClickH);
+  window.__aiSetClickH = async e => {
     const pb = e.target.closest('[data-prov]');
     if (pb && pb.closest('.connCard')) {
       const card = pb.closest('.connCard');
@@ -6472,10 +6596,17 @@ async function renderSettings() {
       const p = (provs || []).find(x => x.id === pid);
       const g = f => card.querySelector('[data-f="' + f + '"]');
       if (p) {
-        if (g('baseUrl') && p.baseUrl) g('baseUrl').value = p.baseUrl;
+        if (g('baseUrl') && p.baseUrl) {
+          g('baseUrl').value = p.baseUrl;
+          /* 地址变了，卡头副标题跟着变，不然标题和内容对不上 */
+          const host = card.querySelector('[data-role="host"]');
+          if (host) host.textContent = shortHost(p.baseUrl);
+        }
         if (g('visionModel') && p.vision) g('visionModel').value = p.vision;
-        const nm = g('name');
-        if (nm && !nm.value.trim()) nm.value = p.name;
+        const title = card.querySelector('[data-role="title"]');
+        if (title) title.textContent = p.name;
+        const brand = card.querySelector('[data-role="brand"]');
+        if (brand) brand.textContent = p.brand || '···';
       }
       if (pid === 'opencode') {
         card.setAttribute('data-prov', 'opencode');
@@ -6549,8 +6680,14 @@ async function renderSettings() {
     if (!btn) return;
     const card = btn.closest('.connCard');
     const act = btn.getAttribute('data-act');
+    /* 密钥明文开关：只改输入框类型，不动值 */
+    if (act === 'peek') {
+      const inp = btn.closest('.inWrap').querySelector('input');
+      if (inp) { inp.type = inp.type === 'password' ? 'text' : 'password'; btn.textContent = inp.type === 'password' ? '👁' : '🙈'; }
+      return;
+    }
     if (act === 'del') {
-      const n = card.querySelector('[data-f="name"]').value || '这条连接';
+      const n = (card.querySelector('[data-role="title"]') || {}).textContent || '这条连接';
       if (!confirm('删除「' + n + '」？对话栏里选它的模型也会一并失效。')) return;
       card.remove();
       if (!app.querySelector('.connCard')) document.getElementById('connEmpty').hidden = false;
@@ -6578,7 +6715,8 @@ async function renderSettings() {
       await fetchModelsInto(card, pid);
       return;
     }
-  });
+  };
+  app.addEventListener('click', window.__aiSetClickH);
   document.getElementById('saveSettings').addEventListener('click', async () => {
     try {
       await save();
@@ -6608,6 +6746,45 @@ async function renderSettings() {
   bindServiceSection();
   bindUpdateSection();
   bindSyncSection();
+
+  /* 顶栏页签：点一下滚到对应区块；手滚页面时高亮当前区块；保存重绘后回到刚才的位置。
+     不用「一次只显示一块」—— 那样切页签要重绑一堆监听，滚动定位更稳。 */
+  const tabsBox = document.getElementById('setTabs');
+  const tabIds = state._setTabs || [];
+  const markTab = id => tabsBox && tabsBox.querySelectorAll('.setTab').forEach(b =>
+    b.classList.toggle('on', b.getAttribute('data-tab') === id));
+  if (tabsBox) {
+    tabsBox.addEventListener('click', e => {
+      const b = e.target.closest('[data-tab]');
+      if (!b) return;
+      const id = b.getAttribute('data-tab');
+      state.settingsTab = id;
+      markTab(id);
+      const el = document.getElementById(id);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    if (window.__setSpy) window.__setSpy.disconnect();
+    if ('IntersectionObserver' in window) {
+      const spy = new IntersectionObserver(entries => {
+        for (const en of entries) {
+          if (en.isIntersecting) { state.settingsTab = en.target.id; markTab(en.target.id); }
+        }
+      }, { rootMargin: '-30% 0px -60% 0px' });
+      tabIds.forEach(id => { const el = document.getElementById(id); if (el) spy.observe(el); });
+      window.__setSpy = spy;
+    }
+    /* 首次进设置页停在顶部；保存/重绘后回到刚才看的区块 */
+    const back = state.settingsTab;
+    if (back && document.getElementById(back)) {
+      markTab(back);
+      requestAnimationFrame(() => {
+        const el = document.getElementById(back);
+        if (el) el.scrollIntoView({ block: 'start' });
+      });
+    } else {
+      markTab('set-ai');
+    }
+  }
   const sgb = document.getElementById('showGuideBtn');
   if (sgb) sgb.addEventListener('click', () => showGuide(0));
   document.getElementById('backupNow').addEventListener('click', async () => {

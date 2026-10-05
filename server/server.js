@@ -4044,6 +4044,13 @@ function extractEbookPrefFromAnswers(answers) {
     try { return sendJSON(res, 200, await sync.pull()); }
     catch (e) { return sendJSON(res, 500, { error: e.message }); }
   }
+  /* 冲突二选一：choice = remote（用云端覆盖本地）/ local（保留本地并上传） */
+  if (p === '/api/sync/resolve' && method === 'POST') {
+    try {
+      const body = await readBody(req);
+      return sendJSON(res, 200, await sync.resolve(body && body.choice));
+    } catch (e) { return sendJSON(res, 500, { error: e.message }); }
+  }
   if (p === '/api/service/status' && method === 'GET') {
     return sendJSON(res, 200, await service.status());
   }
@@ -4591,7 +4598,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   if (getSetting('ai_provider', 'openai') === 'opencode') ai.ensureOpencodeAgent();
   if (sync && getSetting('sync_enabled', '') === '1' && getSetting('sync_auto_pull', '1') !== '0') {
-    sync.pull().then(r => console.log('[sync] 启动拉取:', r.imported ? ('已导入来自 ' + r.device + ' 的数据') : r.message))
+    sync.pull().then(r => console.log('[sync] 启动拉取:', r.conflict ? '检测到冲突，需在设置页手动二选一' : (r.imported ? ('已导入来自 ' + r.device + ' 的数据') : r.message)))
       .catch(e => console.log('[sync] 启动拉取失败:', e.message));
   }
   update.startAutoCheck();   // 启动后台检查远端是否有新版本（不阻塞、失败静默）

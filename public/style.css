@@ -128,6 +128,49 @@ button.back{background:none; border:0; cursor:pointer; font-size:13px;}
 /* 宽版页面（组件管理）：解除 560px 限制，分类左右并排，不再一竖排 */
 .page.wide{max-width:1280px;}
 .cmpPage .sec{max-width:none;}
+/* ===== 设置页：整面统一风格 =====
+   原来每个 .sec 只有 560px 宽，大屏右侧全空着。
+   现在设置页放宽，AI 整块通栏，下面小块两列排布，顶栏页签吸顶直达。 */
+.settingsPage{max-width:1180px;}
+.settingsPage .sec{max-width:none; scroll-margin-top:110px;}
+.settingsPage .secTitle{display:flex; align-items:baseline; gap:9px;}
+.secSub{font-size:12px; color:var(--muted); font-weight:400;}
+/* 顶栏页签：吸顶，进页面点一下直达，不用滚轮翻到底 */
+.setTabs{position:sticky; top:0; z-index:30; display:flex; gap:7px; flex-wrap:wrap;
+  background:var(--bg); padding:9px 0; margin-bottom:16px; border-bottom:1px solid var(--border);}
+.setTab{padding:6px 13px; border:1px solid var(--border); border-radius:20px; background:var(--card);
+  color:var(--text); font-size:12.5px; cursor:pointer; white-space:nowrap;}
+.setTab:hover{border-color:var(--accent);}
+.setTab.on{border-color:var(--accent); background:var(--accent-soft); color:var(--accent); font-weight:700;}
+/* AI 通栏 + 下面小块两列 */
+.aiSec{background:var(--card); border:1px solid var(--border); border-radius:14px; padding:16px 18px; margin-bottom:18px;}
+.setGrid{display:grid; grid-template-columns:repeat(auto-fit,minmax(330px,1fr)); gap:0 18px; align-items:start;}
+.setGrid .sec{background:var(--card); border:1px solid var(--border); border-radius:14px; padding:15px 17px;}
+.settingsPage .sec .field{max-width:none;}
+/* 设置页的行：标签左、值右、按钮尾，整面统一 */
+.svcRow{display:flex; align-items:center; gap:9px; padding:7px 0; border-bottom:1px dashed var(--border); font-size:13px;}
+.svcRow:last-child{border-bottom:none;}
+.svcLabel{flex:none; min-width:76px; color:var(--muted);}
+.svcVal{min-width:0; overflow:hidden; text-overflow:ellipsis;}
+.svcRow .spacer{flex:1;}
+/* 同步冲突：警告横幅 + 二选一对话框。两边摘要并排，点哪个走哪个。 */
+.syncConflict{border:1px solid var(--warn); background:rgba(217,119,6,.08); border-radius:11px; padding:10px 12px; margin:10px 0;}
+.cfTitle{font-size:13px; font-weight:700; color:var(--warn);}
+.cfSub{font-size:12px; color:var(--muted); margin:3px 0 7px;}
+.cfCols{display:grid; grid-template-columns:1fr 1fr; gap:9px; margin-top:4px;}
+@media (max-width:560px){.cfCols{grid-template-columns:1fr;}}
+.cfSide{border:1px solid var(--border); border-radius:10px; padding:9px 11px; background:var(--bg); font-size:12.5px;}
+.cfSideT{font-weight:700; margin-bottom:5px;}
+.cfSide.local .cfSideT{color:var(--accent);}
+.cfSide.remote .cfSideT{color:var(--ok);}
+.cfMeta{color:var(--muted); line-height:1.7;}
+/* 开关：圆角滑动款（设置页统一用这个，替代裸 checkbox） */
+.sw{position:relative; display:inline-flex; flex:none; width:36px; height:20px; cursor:pointer;}
+.sw input{position:absolute; opacity:0; width:100%; height:100%; margin:0; cursor:pointer;}
+.sw i{position:absolute; inset:0; border-radius:20px; background:var(--border); transition:.15s;}
+.sw i::after{content:""; position:absolute; top:2.5px; left:3px; width:15px; height:15px; border-radius:50%; background:#fff; transition:.15s; box-shadow:0 1px 3px rgba(0,0,0,.25);}
+.sw input:checked + i{background:var(--accent);}
+.sw input:checked + i::after{left:18px;}
 /* 组件页要更宽，否则分类里的卡片一行放不下几张、右侧空一大片。
    用 :has() 只对本页放宽，不影响其它页面的 1080px。 */
 body:has(.cmpPage) .wrap{max-width:1460px;}
@@ -1015,9 +1058,27 @@ body.aiOpen .nodePanel{right:calc(var(--ai-w, 440px) + 26px);}
 /* ===== AI 接入方式：连接卡片 ===== */
 /* 一条连接 = 一个服务商 + 一套地址/密钥 + 多个已选模型。
    服务商与模型都用按钮排成网格：点了服务商自动填地址，点了模型按钮即加入。 */
-.connCard{border:1px solid var(--border); border-radius:12px; background:var(--soft); padding:11px 12px; margin-bottom:11px;}
-.ccHead{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:9px;}
-.ccHead .ccName{flex:1; min-width:150px; font-weight:600; background:var(--bg);}
+.connCard{border:1px solid var(--border); border-radius:12px; background:var(--soft); padding:12px 14px; margin-bottom:11px;}
+.connCard:last-child{margin-bottom:0;}
+.ccHead{display:flex; align-items:center; gap:9px; flex-wrap:wrap; margin-bottom:10px;}
+.ccBrand{display:inline-flex; align-items:center; justify-content:center; width:30px; height:30px; flex:none;
+  border-radius:9px; background:var(--accent); color:#fff; font-size:12px; font-weight:800; letter-spacing:.5px;}
+.ccTitle{font-size:14px; font-weight:700;}
+.ccUrl{font-size:11.5px; color:var(--muted); font-family:var(--mono,ui-monospace,Consolas,monospace);
+  background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:2px 7px;
+  max-width:230px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.ccHead .spacer{flex:1;}
+/* 带图标的输入框：🔗🔑 前缀 + 明文开关，替代光秃秃的 input */
+.inWrap{display:flex; align-items:center; gap:8px; background:var(--bg);
+  border:1.5px solid var(--border); border-radius:10px; padding:0 8px 0 11px; transition:.15s;}
+.inWrap:focus-within{border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft);}
+.inWrap > i{font-style:normal; font-size:13px; flex:none; opacity:.75;}
+.inWrap input{flex:1; min-width:0; border:0; background:none; outline:none;
+  padding:9px 0; font-size:13px; font-family:inherit; color:var(--text);}
+.inWrap input.mono{font-family:var(--mono,ui-monospace,Consolas,monospace); font-size:12.5px;}
+.inWrap input::placeholder{color:var(--muted); opacity:.7;}
+.peekBtn{flex:none; border:0; background:none; cursor:pointer; font-size:13px; padding:4px; opacity:.6;}
+.peekBtn:hover{opacity:1;}
 .ccOn{display:inline-flex; align-items:center; gap:5px; font-size:12.5px; color:var(--muted); white-space:nowrap;}
 .ccRow{display:flex; gap:10px; flex-wrap:wrap; margin-bottom:9px;}
 .ccRow > label{display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); flex:1; min-width:170px;}

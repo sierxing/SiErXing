@@ -10,8 +10,11 @@
  *   · 令牌只保存在本机数据库，不会写进快照
  *   · 本地工作副本在 data/sync/（已在 .gitignore 中）
  *
- * 冲突策略：以「最后保存者为准」（savedAt 较新的一方覆盖另一方），
- *          适合个人多设备场景；同时保留本地备份（push 前自动 backup）。
+ * 冲突策略：两边都有新改动时**停下来让用户二选一**（用本地 / 用云端），
+ *          绝不直接覆盖；只有一边动了才自动同步。
+ *          判断依据是 git 提交（远端 HEAD 变没变）+ 本地改动时间，
+ *          不比较两台设备的时钟 —— 设备间时钟差几分钟很常见，按时间比会误判。
+ *          导入前自动 backup，选错了也能从 data/backups 找回来。
  */
 
 const fs = require('node:fs');
@@ -114,6 +117,104 @@ module.exports = function createSync(ctx) {
   }
   function safeUrl(url) {
     try { const u = new URL(url); if (u.password) u.password = '***'; if (u.username) u.username = u.username + (u.password ? '' : ''); return u.toString(); } catch (e) { return url; }
+  }
+
+  /* ---------------- 冲突检测 ----------------
+     上次成功同步时记两个水位：
+       sync_base_commit  远端同步到的 git 提交（HEAD）
+       sync_base_local   当时本地最后改动时间（localChangeAt，本机时钟自比，不怕设备间时钟差）
+     本次：远端 HEAD 变了 = 云端动过；本地改动时间前进了 = 本地动过。
+     两边都动 = 冲突，停下来让用户选；否则自动走动的那一边。 */
+  const getBase = () => ({ commit: getSetting('sync_base_commit', '') || '', localAt: getSetting('sync_base_local', '') || '' });
+  function setBase(commit, localAt) {
+    setSetting('sync_base_commit', commit || '');
+    setSetting('sync_base_local', localAt || '');
+  }
+  function readConflict() {
+    try { return JSON.parse(getSetting('sync_conflict', '') || 'null'); } catch (e) { return null; }
+  }
+  function writeConflict(c) {
+    if (!c) { setSetting('sync_conflict', ''); return; }
+    setSetting('sync_conflict', JSON.stringify(c));
+  }
+  /** 本地是否有「上次同步之后」的新改动。从没同步过时：库里有任何数据就算动过。 */
+  function localChangedSince(baseLocalAt) {
+    const cur = localChangeAt();
+    if (!cur) return false;
+    if (!baseLocalAt) return true;
+    return cur > baseLocalAt;
+  }
+  function localCounts() {
+    const c = {};
+    for (const t of ['goals', 'nodes', 'sources', 'tutorials']) {
+      try { c[t] = db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n || 0; } catch (e) { c[t] = 0; }
+    }
+    return c;
+  }
+  async function fetchRemote() {
+    const r = await git(['fetch', 'origin', branch()], 90000);
+    return r.ok;
+  }
+  async function remoteHead() {
+    const r = await git(['rev-parse', 'origin/' + branch()], 30000);
+    return r.ok ? (r.out || '').trim() : '';
+  }
+  async function localHead() {
+    const r = await git(['rev-parse', 'HEAD'], 30000);
+    return r.ok ? (r.out || '').trim() : '';
+  }
+  /** 不合并、只看：把远端分支上的快照读出来比对 */
+  async function readRemoteSnapshot() {
+    const r = await git(['show', 'origin/' + branch() + ':' + SNAP_NAME], 30000);
+    if (!r.ok || !r.out) return null;
+    try {
+      const j = JSON.parse(r.out);
+      return (j && j.format === 'sierxing-sync' && j.data) ? j : null;
+    } catch (e) { return null; }
+  }
+  /** 两边状态一次看全。调用前需 ensureRepo + fetchRemote。 */
+  async function analyze() {
+    const base = getBase();
+    const rHead = await remoteHead();
+    const snap = rHead ? await readRemoteSnapshot() : null;
+    const remoteChanged = !!(rHead && rHead !== base.commit);
+    const localChanged = localChangedSince(base.localAt);
+    return {
+      base, rHead, snap,
+      remoteChanged: remoteChanged && !!snap,
+      remoteMoved: !!rHead && rHead !== base.commit,
+      localChanged,
+      conflict: !!(rHead && rHead !== base.commit && snap && localChanged)
+    };
+  }
+  function conflictRecord(rHead, snap) {
+    return {
+      detectedAt: new Date().toISOString(),
+      remoteCommit: rHead,
+      remote: { savedAt: snap.savedAt || '', device: snap.device || '', counts: snap.counts || {} },
+      local: { changeAt: localChangeAt(), counts: localCounts() }
+    };
+  }
+  function markConflicted(rHead, snap) {
+    const c = conflictRecord(rHead, snap);
+    writeConflict(c);
+    setSetting('sync_last_at', new Date().toISOString());
+    setSetting('sync_last_status', '检测到冲突：本地与云端都有新改动，请在「设置 → 多端同步」二选一');
+    log('[sync] conflict: local', c.local.changeAt, 'vs remote', c.remote.savedAt, c.remote.device);
+    return c;
+  }
+  /** 把远端快照落到本地库（调用前必须已确认不冲突或用户选了云端） */
+  function importRemote(snap) {
+    applySnapshot(snap);
+    if (syncImages()) {
+      const src = path.join(WORK_DIR, 'uploads');
+      if (fs.existsSync(src)) {
+        fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+        for (const f of fs.readdirSync(src)) {
+          try { fs.copyFileSync(path.join(src, f), path.join(UPLOAD_DIR, f)); } catch (e) {}
+        }
+      }
+    }
   }
 
   async function ensureRepo() {
@@ -247,13 +348,38 @@ module.exports = function createSync(ctx) {
   let pushing = false;
   let pushTimer = null;
 
-  async function push(reason) {
+  async function push(reason, opts) {
     if (!enabled()) throw new Error('未启用多端同步');
     if (pushing) return { ok: true, skipped: 'busy' };
     pushing = true;
     try {
       await ensureRepo();
-      await git(['pull', '--rebase', '--autostash', 'origin', branch()], 120000);   // 先同步远程，减少冲突
+      await fetchRemote();
+      const st = await analyze();
+      if (st.remoteMoved && !st.snap) {
+        // 远端分支动了但读不出快照（别人传了一半？）：不敢贸然覆盖，先停下
+        throw new Error('远端有新提交但读不到快照文件，暂停上传（先点「立即拉取」看看）');
+      }
+      if (st.conflict && !(opts && opts.force)) {
+        /* 两边都动了：直接 push 会用本地快照把云端文件盖掉，云端数据就没了。
+           以前这里静默覆盖，这正是用户要求改掉的行为 —— 停下来让人选。 */
+        const c = markConflicted(st.rHead, st.snap);
+        return { ok: true, conflict: c };
+      }
+      if (st.remoteChanged && !(opts && opts.force)) {
+        /* 只有云端动了：先把云端合进来再传，避免传上去的快照丢了别人的改动。
+           以前只合文件不合库，合完又直接用本地快照盖掉，等于白合。 */
+        await git(['pull', '--rebase', '--autostash', 'origin', branch()], 120000);
+        const merged = readLocalSnapshot();
+        if (merged) importRemote(merged);
+        writeConflict(null);
+      }
+      if (st.remoteMoved && (opts && opts.force)) {
+        /* 用户亲选了「保留本地」：只合 git 血缘（不然 push 会被远端拒绝），
+           绝不把云端数据合进库 —— 否则刚选"保留"的本地改动当场就没了。 */
+        await git(['pull', '--rebase', '--autostash', 'origin', branch()], 120000);
+        writeConflict(null);
+      }
       const snap = exportSnapshot(reason);
       fs.writeFileSync(path.join(WORK_DIR, SNAP_NAME), JSON.stringify(snap, null, 1), 'utf8');
       if (syncImages() && fs.existsSync(UPLOAD_DIR)) {
@@ -270,6 +396,8 @@ module.exports = function createSync(ctx) {
       }
       const p = await git(['push', '-u', 'origin', branch()], 180000);
       if (!p.ok) throw new Error('推送失败：' + friendlyGitError(p.err || p.out));
+      setBase(await localHead(), localChangeAt());
+      writeConflict(null);
       setSetting('sync_last_at', new Date().toISOString());
       setSetting('sync_last_status', '上传成功 · ' + (snap.counts.goals || 0) + ' 个目标');
       log('[sync] push ok:', snap.counts.goals, 'goals');
@@ -285,34 +413,63 @@ module.exports = function createSync(ctx) {
   async function pull() {
     if (!enabled()) throw new Error('未启用多端同步');
     await ensureRepo();
-    const before = await git(['rev-parse', 'HEAD'], 30000);
+    await fetchRemote();
+    const st = await analyze();
+    if (!st.rHead || !st.snap) {
+      return { ok: true, imported: false, message: '仓库里还没有同步数据（先从一台设备点「立即上传」）' };
+    }
+    if (st.conflict) {
+      /* 两边都动了：以前直接用云端覆盖本地，用户在另一台设备的改动就没了。
+         现在停下来，把两边摘要给前端，让用户二选一。 */
+      const c = markConflicted(st.rHead, st.snap);
+      return { ok: true, imported: false, conflict: c };
+    }
+    if (!st.remoteChanged) {
+      writeConflict(null);
+      setSetting('sync_last_at', new Date().toISOString());
+      setSetting('sync_last_status', st.localChanged ? '云端没有新数据（本地有未上传的改动）' : '已是最新');
+      return { ok: true, imported: false, message: st.localChanged ? '云端没有新数据，本地有未上传的改动（可点「立即上传」）' : '已是最新' };
+    }
+    // 只有云端动了：合进来
     const p = await git(['pull', '--rebase', '--autostash', 'origin', branch()], 180000);
     if (!p.ok && !/Already up to date|Already up-to-date/i.test(p.out + p.err)) {
       setSetting('sync_last_status', '拉取失败：' + friendlyGitError(p.err || p.out));
       throw new Error('拉取失败：' + friendlyGitError(p.err || p.out));
     }
-    const remote = readLocalSnapshot();
-    if (!remote) return { ok: true, imported: false, message: '仓库里还没有同步数据（先从一台设备点「立即上传」）' };
-    const localAt = localChangeAt();
-    if (localAt && remote.savedAt && new Date(remote.savedAt) <= new Date(localAt)) {
-      setSetting('sync_last_at', new Date().toISOString());
-      setSetting('sync_last_status', '已是最新（本地更新）');
-      return { ok: true, imported: false, message: '本地数据更新，无需导入' };
-    }
-    applySnapshot(remote);
-    if (syncImages()) {
-      const src = path.join(WORK_DIR, 'uploads');
-      if (fs.existsSync(src)) {
-        fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-        for (const f of fs.readdirSync(src)) {
-          try { fs.copyFileSync(path.join(src, f), path.join(UPLOAD_DIR, f)); } catch (e) {}
-        }
-      }
-    }
+    const remote = readLocalSnapshot() || st.snap;
+    importRemote(remote);
+    setBase(await localHead(), localChangeAt());
+    writeConflict(null);
     setSetting('sync_last_at', new Date().toISOString());
     setSetting('sync_last_status', '拉取成功 · 来自 ' + (remote.device || '其它设备') + ' · ' + (remote.counts && remote.counts.goals || 0) + ' 个目标');
     log('[sync] pulled from', remote.device, remote.counts);
     return { ok: true, imported: true, savedAt: remote.savedAt, device: remote.device, counts: remote.counts };
+  }
+
+  /** 用户在冲突对话框里二选一。
+   *  remote = 用云端覆盖本地（导入前自动 backup，选错可回滚）
+   *  local  = 保留本地并上传（强制 push，云端以本地为准） */
+  async function resolve(choice) {
+    if (!enabled()) throw new Error('未启用多端同步');
+    if (choice !== 'remote' && choice !== 'local') throw new Error('未知选择');
+    await ensureRepo();
+    await fetchRemote();
+    const st = await analyze();
+    if (choice === 'remote') {
+      const snap = st.snap || readLocalSnapshot();
+      if (!snap) throw new Error('云端没有可用的快照');
+      await git(['pull', '--rebase', '--autostash', 'origin', branch()], 180000);
+      const merged = readLocalSnapshot() || snap;
+      importRemote(merged);
+      setBase(await localHead(), localChangeAt());
+      writeConflict(null);
+      setSetting('sync_last_at', new Date().toISOString());
+      setSetting('sync_last_status', '已用云端覆盖本地 · 来自 ' + (merged.device || '其它设备'));
+      log('[sync] resolved: use remote from', merged.device);
+      return { ok: true, imported: true, savedAt: merged.savedAt, device: merged.device, counts: merged.counts };
+    }
+    writeConflict(null);
+    return push('冲突解决：保留本地', { force: true });
   }
 
   /* 把 git 的凭据类报错翻译成可操作提示 */
@@ -375,6 +532,8 @@ module.exports = function createSync(ctx) {
          state.settingsSyncUser，刷新后用户名输入框永远是空的 —— 用户以为「没保存」。 */
       user: (getSetting('sync_user', '') || '').trim(),
       autoPush: autoPush(), autoPull: autoPull(), images: syncImages(), hasToken: !!token(),
+      /* 未解决的冲突（有则前端弹二选一，不再静默覆盖） */
+      conflict: readConflict(),
       workDir: WORK_DIR, cloned, commit: remoteHead, workState: ahead,
       lastAt: getSetting('sync_last_at', ''), lastStatus: getSetting('sync_last_status', ''),
       snapshot: snap ? { savedAt: snap.savedAt, device: snap.device, counts: snap.counts } : null,
@@ -382,5 +541,5 @@ module.exports = function createSync(ctx) {
     };
   }
 
-  return { status, push, pull, test, schedulePush, exportSnapshot, applySnapshot, gitAvailable, workDir: WORK_DIR };
+  return { status, push, pull, test, resolve, schedulePush, exportSnapshot, applySnapshot, gitAvailable, workDir: WORK_DIR };
 };

@@ -1,13 +1,13 @@
 {
-  "version": "1.3.0",
-  "buildVer": "c3bf61886229",
-  "payload": "release/payload-1.3.0.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.3.0.sxar?ref=main",
+  "version": "1.4.0",
+  "buildVer": "51c8b0186bc0",
+  "payload": "release/payload-1.4.0.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.4.0.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
-  "sha256": "e14ac6ca1a2b888fa170248983940f4f463384d6735cb35e916ef9a99004c3a9",
-  "size": 485440,
-  "unpackedSize": 1859073,
-  "publishedAt": "2026-10-05T02:24:56.798Z",
-  "notes": "AI 设置改成服务商按钮+模型按钮：选服务商自动填官方地址，模型点按钮多选；opencode 先检测本机再列出可用模型；同步用户名刷新不再丢失（令牌本来就在，只是密码框按惯例不回显明文）",
+  "sha256": "87beecd5345fa7e7ff40352cc780ea3baeba7c2a78517545ef137ce3e12fe839",
+  "size": 491257,
+  "unpackedSize": 1881896,
+  "publishedAt": "2026-10-05T02:34:59.444Z",
+  "notes": "设置页顶栏页签+风格统一（AI/同步/服务/更新/备份/帮助/关于，一点直达）；连接名称自动按服务商起，不用再填；同步冲突二选一：两边都有改动时停下来让用户选本地或云端，不再直接覆盖",
   "exeRequired": false
 }
