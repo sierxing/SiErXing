@@ -61,11 +61,14 @@ function listCodeFiles(root) {
         if (denyFile(name)) continue;
         if (!ALLOW_EXT.has(path.extname(name).toLowerCase())) continue;
         if (st.size <= 0 || st.size > MAX_FILE_BYTES) continue;
-        out.push({ path: path.relative(root, p).split(path.sep).join('/'), size: st.size });
+        out.push({ path: path.relative(abs, p).split(path.sep).join('/'), size: st.size });
       }
     }
   };
-  const abs = path.resolve(root);
+  /* root 先 realpath：用户给的路径里可能有软链（如 桌面/Downloads 是软链），
+     不先解开的话，后面 realpath 过的文件永远对不上前缀，整棵树一个都读不出来。 */
+  let abs = path.resolve(root);
+  try { abs = fs.realpathSync(abs); } catch (e) {}
   walk(abs);
   return out;
 }
@@ -93,7 +96,10 @@ function redactSecrets(text) {
 
 /* 读取指定的相对路径（全部校验），返回 [{path, text, truncated}] */
 function readCodeFiles(root, relPaths, opts) {
-  const abs = path.resolve(root);
+  /* root 先 realpath：用户给的路径里可能有软链（如 桌面/Downloads 是软链），
+     不先解开的话，后面 realpath 过的文件永远对不上前缀，整棵树一个都读不出来。 */
+  let abs = path.resolve(root);
+  try { abs = fs.realpathSync(abs); } catch (e) {}
   const perFile = (opts && opts.perFile) || PER_FILE_CHARS;
   const total = (opts && opts.total) || TOTAL_CHARS;
   const out = [];

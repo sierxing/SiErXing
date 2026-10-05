@@ -1,14 +1,14 @@
 {
-  "version": "1.10.1",
-  "buildVer": "28228898106b",
-  "payload": "release/payload-1.10.1.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.1.sxar?ref=main",
+  "version": "1.10.2",
+  "buildVer": "fc36cbd584b0",
+  "payload": "release/payload-1.10.2.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.2.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "1cc1b2bbbdd574e0ce269b7c09bb7452e1d5f94a06d18b2f73fde6586d62e2cc",
-  "size": 577488,
-  "unpackedSize": 2159666,
-  "publishedAt": "2026-10-05T14:57:46.450Z",
-  "notes": "修文件夹对话框一点输入框就关掉节点面板：全局关闭器豁免tutDialog",
+  "sha256": "a31e2293a83e948929e1a81e69cc3addd72dfdf6b3a95b8a2aa7d98a62eaf3a3",
+  "size": 577744,
+  "unpackedSize": 2160525,
+  "publishedAt": "2026-10-05T15:26:58.211Z",
+  "notes": "修文件夹资料源读不出文件：软链路径realpath+README只取3个留名额给代码",
   "exeRequired": false
 }

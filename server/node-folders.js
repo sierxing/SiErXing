@@ -163,9 +163,13 @@ function gatherFolderCode(entries, budget) {
       const ra = /(^|\/)readme/i.test(a.path) ? 0 : 1;
       const rb = /(^|\/)readme/i.test(b.path) ? 0 : 1;
       return (ra - rb) || (a.size - b.size);
-    }).slice(0, 12);
+    });
+    /* README 只取前 3 个讲大局，剩下的名额留给真正的代码文件 ——
+       不然 12 个名额全被各子目录的 README 占满，一行代码都进不去 */
+    const picked = [...ordered.filter(f => /(^|\/)readme/i.test(f.path)).slice(0, 3),
+      ...ordered.filter(f => !/(^|\/)readme/i.test(f.path))].slice(0, 12);
     let got = [];
-    try { got = readCodeFiles(e.path, ordered.map(f => f.path), { perFile: 12000, total: room }); }
+    try { got = readCodeFiles(e.path, picked.map(f => f.path), { perFile: 12000, total: room }); }
     catch (err) { continue; }
     if (!got.length) continue;
     const block = ['【文件夹资料：' + e.name + '（' + e.path + '）】'];
