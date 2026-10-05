@@ -31,6 +31,11 @@ CREATE TABLE IF NOT EXISTS problems (
   statement TEXT NOT NULL DEFAULT '',
   statement_at TEXT NOT NULL DEFAULT '',
   snapshots TEXT NOT NULL DEFAULT '[]',
+  /* 手动完成状态：-1 = 跟随作答记录自动判定；0 = 手动标为未完成；1 = 手动标为已完成。
+     为什么要有它：「按知识点练习」覆盖全部 100 道题，而每日任务只是当天的 3 道，
+     原来的 data-toggle 写的是 daily_plans（非当日任务就没有这一项），所以列表里无处可改。
+     手动值只改这道题的完成状态，不影响其它题，也不伪造一条「通过」记录。 */
+  done_manual INTEGER NOT NULL DEFAULT -1,
   synced_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS practice_records (
@@ -69,6 +74,10 @@ module.exports = {
   init(ctx) {
     bind(ctx);
     db.exec(SCHEMA);
+    /* 老库补列：建表语句只对新建的库生效，已存在的 problems 表不会有 done_manual。
+     写法与 server.js 的迁移一致（先查列名再 ALTER，不要靠 catch 吞 duplicate）。 */
+    const cols = db.prepare('PRAGMA table_info(problems)').all().map(c => c.name);
+    if (!cols.includes('done_manual')) db.exec('ALTER TABLE problems ADD COLUMN done_manual INTEGER NOT NULL DEFAULT -1;');
     // 依赖宿主环境的路径在这里初始化（保证插件可在任意环境加载）
     LC_USER_FILE_DEFAULT = path.join(os.homedir(), '.lc', 'leetcode.cn', 'user.json');
     VSCODE_SETTINGS = path.join(os.homedir(), '.config', 'Code', 'User', 'settings.json');
@@ -91,7 +100,7 @@ module.exports = {
     // 题面正文（statement/snapshots）不参与同步：体积大、且每台设备用本机 LeetCode 登录态自己抓即可，
     // 多设备之间互相覆盖反而容易看到别人的缓存。题目列表、作答记录、每日计划照常同步。
     return {
-      problems: ctx.db.prepare('SELECT id,fid,slug,title,difficulty,link,groups,tags,sort_index,synced_at FROM problems').all(),
+      problems: ctx.db.prepare('SELECT id,fid,slug,title,difficulty,link,groups,tags,sort_index,done_manual,synced_at FROM problems').all(),
       records: ctx.db.prepare('SELECT * FROM practice_records').all(),
       plans: ctx.db.prepare('SELECT * FROM daily_plans').all()
     };
@@ -104,8 +113,10 @@ module.exports = {
       const statement = x.statement === undefined ? (cur.statement || '') : x.statement;
       const statement_at = x.statement === undefined ? (cur.statement_at || '') : (x.statement_at || '');
       const snapshots = x.snapshots === undefined ? (cur.snapshots || '[]') : x.snapshots;
-      db.prepare('INSERT OR REPLACE INTO problems (id,fid,slug,title,difficulty,link,groups,tags,sort_index,statement,statement_at,snapshots,synced_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
-        .run(x.id, x.fid, x.slug, x.title, x.difficulty, x.link, x.groups, x.tags, x.sort_index, statement, statement_at, snapshots, x.synced_at);
+      /* done_manual 缺省为 -1（自动），别让旧备份把别人手动标的完成状态清掉 */
+      const doneManual = x.done_manual === undefined || x.done_manual === null ? -1 : Number(x.done_manual);
+      db.prepare('INSERT OR REPLACE INTO problems (id,fid,slug,title,difficulty,link,groups,tags,sort_index,statement,statement_at,snapshots,done_manual,synced_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(x.id, x.fid, x.slug, x.title, x.difficulty, x.link, x.groups, x.tags, x.sort_index, statement, statement_at, snapshots, doneManual, x.synced_at);
     }
     for (const x of (data.records || [])) db.prepare('INSERT OR REPLACE INTO practice_records (id,problem_id,goal_id,date,passed,language,code,notes,minutes,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
       .run(x.id, x.problem_id, x.goal_id, x.date, x.passed, x.language, x.code, x.notes, x.minutes, x.created_at);
@@ -138,17 +149,7 @@ module.exports = {
       const p = u.pathname, method = req.method;
         if (p === '/api/problems' && method === 'GET') {
           const list = problemWithStatus();
-          const groups = [];
-          for (const pr of list) {
-            for (const g of pr.groups) {
-              let it = groups.find(x => x.name === g);
-              if (!it) { it = { name: g, problems: [], solved: 0, total: 0 }; groups.push(it); }
-              it.problems.push(pr);
-              it.total++;
-              if (pr.passed) it.solved++;
-            }
-          }
-          return sendJSON(res, 200, { problems: list, groups, stats: practiceStats() });
+          return sendJSON(res, 200, { problems: list, groups: groupByProblems(list), stats: practiceStats() });
         }
     }
   },
@@ -172,9 +173,12 @@ module.exports = {
           }
           const records = db.prepare('SELECT * FROM practice_records WHERE problem_id = ? ORDER BY date DESC, id DESC').all(prob.id);
           const st = practiceSettings();
+          const dm = prob.done_manual === undefined || prob.done_manual === null ? -1 : Number(prob.done_manual);
           return sendJSON(res, 200, {
-            problem: { ...prob, groups: safeParse(prob.groups) || [], tags: safeParse(prob.tags) || [], snapshots: [] },
+            problem: { ...prob, done_manual: dm, groups: safeParse(prob.groups) || [], tags: safeParse(prob.tags) || [], snapshots: [] },
             records, notice, settings: st,
+            /* 题目页顶部的「完成状态」按钮要跟着列表一致，所以这里也算一次 */
+            done: dm >= 0 ? !!dm : records.some(r => r.passed),
             langs: Object.keys(LANG_EXT).map(k => ({ id: k, name: LANG_NAME[k] }))
           });
         }
@@ -201,16 +205,38 @@ module.exports = {
           const r = db.prepare('INSERT INTO practice_records (problem_id, goal_id, date, passed, language, code, notes, minutes, created_at) VALUES (?,?,?,?,?,?,?,?,?)')
             .run(pid, goalId, date, passed, language, code, notes, minutes, t);
           const rid = Number(r.lastInsertRowid);
-          if (passed && goalId) {
-            const plan = db.prepare('SELECT * FROM daily_plans WHERE goal_id = ? AND date = ?').get(goalId, date);
-            if (plan) {
-              const items = safeParse(plan.items) || [];
-              let changed = false;
-              for (const it of items) if (Number(it.pid) === pid && !it.done) { it.done = true; it.done_at = t; it.record_id = rid; changed = true; }
-              if (changed) db.prepare('UPDATE daily_plans SET items = ? WHERE id = ?').run(JSON.stringify(items), plan.id);
-            }
-          }
+          /* 记一次「通过」就把当日任务里这道题勾掉。
+           * 若记的是「未通过」而当天任务已勾选，也要取消 —— 否则题目标成未通过、
+           * 今日任务却还打勾，两处状态永远对不上（用户报的「不同步」有一半是这个）。 */
+          syncDailyItem(goalId, date, pid, rid, passed ? true : null);
           return sendJSON(res, 201, { id: rid });
+        }
+    }
+  },
+  {
+    method: 'PUT', pattern: /^\/api\/records\/(\d+)$/,
+    handler: async (req, res, u, ctx) => {
+      const p = u.pathname, method = req.method;
+        const recEditMatch = p.match(/^\/api\/records\/(\d+)$/);
+        if (recEditMatch && method === 'PUT') {
+          const rid = Number(recEditMatch[1]);
+          const old = db.prepare('SELECT * FROM practice_records WHERE id = ?').get(rid);
+          if (!old) return sendJSON(res, 404, { error: '记录不存在' });
+          const body = await readBody(req);
+          /* 只覆盖传了的字段，没传的沿用原值 —— 前端表单只提交可见项，
+             若一律取默认值会把「用时/语言/笔记」抹掉。 */
+          const date = String(body.date === undefined ? old.date : (body.date || '')).trim().slice(0, 10) || todayStr();
+          const passed = body.passed === undefined ? old.passed : (body.passed ? 1 : 0);
+          const language = String(body.language === undefined ? old.language : (body.language || '')).slice(0, 30);
+          const code = String(body.code === undefined ? old.code : (body.code || '')).slice(0, 60000);
+          const notes = String(body.notes === undefined ? old.notes : (body.notes || '')).slice(0, 4000);
+          const minutes = Math.max(0, Math.min(600, Number(body.minutes === undefined ? old.minutes : body.minutes) || 0));
+          const goalId = Number(body.goal_id) || old.goal_id || 0;
+          db.prepare('UPDATE practice_records SET date=?, passed=?, language=?, code=?, notes=?, minutes=?, goal_id=? WHERE id=?')
+            .run(date, passed, language, code, notes, minutes, goalId, rid);
+          /* 通过状态变了才动当日任务，避免只是改个笔记就把勾去掉了 */
+          if (passed !== old.passed) syncDailyItem(goalId, date, old.problem_id, rid, passed ? true : false);
+          return sendJSON(res, 200, { ok: true, id: rid });
         }
     }
   },
@@ -222,6 +248,33 @@ module.exports = {
         if (recordDelMatch && method === 'DELETE') {
           db.prepare('DELETE FROM practice_records WHERE id = ?').run(Number(recordDelMatch[1]));
           return sendJSON(res, 200, { ok: true });
+        }
+    }
+  },
+  /* 手动改「完成状态」。与 daily/toggle 分开：那个只管当日任务的几道题，
+     这里管题库里任何一道题（用户要求能在「按知识点练习」和题目页里直接改）。
+     done 传 true/false；传 'auto' 交回自动判定（按作答记录）。 */
+  {
+    method: 'POST', pattern: /^\/api\/problems\/(\d+)\/done$/,
+    handler: async (req, res, u, ctx) => {
+      const p = u.pathname, method = req.method;
+        const probDoneMatch = p.match(/^\/api\/problems\/(\d+)\/done$/);
+        if (probDoneMatch && method === 'POST') {
+          const pid = Number(probDoneMatch[1]);
+          const prob = db.prepare('SELECT id FROM problems WHERE id = ?').get(pid);
+          if (!prob) return sendJSON(res, 404, { error: '题目不存在' });
+          let body = {};
+          try { body = await readBody(req); } catch (e) {}
+          const raw = body.done;
+          const v = (raw === 'auto' || raw === null || raw === undefined || raw === -1) ? -1 : (raw ? 1 : 0);
+          db.prepare('UPDATE problems SET done_manual = ? WHERE id = ?').run(v, pid);
+          /* 手动标完成时，若这道题正好在今天的任务里，一并勾上，反之亦然 */
+          if (v >= 0) {
+            const gid = Number(body.goal_id) || 0;
+            if (gid) syncDailyItem(gid, todayStr(), pid, 0, !!v);
+          }
+          const full = problemWithStatus().find(x => x.id === pid) || null;
+          return sendJSON(res, 200, { ok: true, done_manual: v, problem: full, stats: practiceStats() });
         }
     }
   },
@@ -336,7 +389,7 @@ module.exports = {
             try { const b = await readBody(req); size = Number(b.size) || 0; } catch (e) {}
             const today = todayStr();
             const problems = problemWithStatus();
-            const unsolved = problems.filter(x => !x.passed);
+            const unsolved = problems.filter(x => !x.done);
             const want = Math.max(1, Math.min(10, size || practiceSettings().daily_size));
             const picks = unsolved.slice(0, want);
             const items = picks.map(x => ({ pid: x.id, done: false, done_at: '', record_id: 0 }));
@@ -498,16 +551,60 @@ function todayStr() {
   const p2 = n => String(n).padStart(2, '0');
   return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
 }
+/** 题目 + 作答状态。
+ *  attempts / passed  来自作答记录（「真的提交通过了几次」），不被人为改动
+ *  done              界面上的「完成状态」= 手动值优先，没有手动值才按记录判定
+ *  done_manual       -1 自动 / 0 手动未完成 / 1 手动完成 */
+/** 把当日任务里某道题的完成状态同步成 done。
+ *  rid>0 表示这次改动来自一条作答记录，null 表示「通过」记录导致的自动勾选，
+ *  0 表示纯手动（不绑定记录）。找不到该题在任务里就直接不动。 */
+function syncDailyItem(goalId, date, pid, rid, done) {
+  if (!goalId) return;
+  const plan = db.prepare('SELECT * FROM daily_plans WHERE goal_id = ? AND date = ?').get(goalId, date);
+  if (!plan) return;
+  const items = safeParse(plan.items) || [];
+  let changed = false;
+  for (const it of items) {
+    if (Number(it.pid) !== pid) continue;
+    if (it.done === !!done && (!done || it.record_id === rid)) continue;
+    it.done = !!done;
+    it.done_at = done ? nowISO() : '';
+    if (done) it.record_id = rid;
+    else if (!rid) it.record_id = 0;
+    changed = true;
+  }
+  if (changed) db.prepare('UPDATE daily_plans SET items = ? WHERE id = ?').run(JSON.stringify(items), plan.id);
+}
 function problemWithStatus() {
   const stat = {};
   for (const r of db.prepare('SELECT problem_id, COUNT(*) AS attempts, SUM(passed) AS passed, MAX(date) AS last_date FROM practice_records GROUP BY problem_id').all()) {
     stat[r.problem_id] = { attempts: r.attempts, passed: r.passed || 0, last_date: r.last_date || '' };
   }
-  const probs = db.prepare("SELECT id, fid, slug, title, difficulty, link, groups, tags, sort_index, (statement <> '') AS has_statement FROM problems ORDER BY sort_index, fid").all();
+  const probs = db.prepare("SELECT id, fid, slug, title, difficulty, link, groups, tags, sort_index, done_manual, (statement <> '') AS has_statement FROM problems ORDER BY sort_index, fid").all();
   return probs.map(p => {
     const st = stat[p.id] || { attempts: 0, passed: 0, last_date: '' };
-    return { ...p, groups: safeParse(p.groups) || [], tags: safeParse(p.tags) || [], attempts: st.attempts, passed: st.passed, last_date: st.last_date };
+    const dm = p.done_manual === undefined || p.done_manual === null ? -1 : Number(p.done_manual);
+    return {
+      ...p, done_manual: dm,
+      groups: safeParse(p.groups) || [], tags: safeParse(p.tags) || [],
+      attempts: st.attempts, passed: st.passed, last_date: st.last_date,
+      done: dm >= 0 ? !!dm : st.passed > 0
+    };
   });
+}
+/** 知识点分组的进度：已解决数按「完成状态」算，与列表上的圆点保持一致 */
+function groupByProblems(list) {
+  const groups = [];
+  for (const pr of list) {
+    for (const g of pr.groups) {
+      let it = groups.find(x => x.name === g);
+      if (!it) { it = { name: g, problems: [], solved: 0, total: 0 }; groups.push(it); }
+      it.problems.push(pr);
+      it.total++;
+      if (pr.done) it.solved++;
+    }
+  }
+  return groups;
 }
 function practiceStats() {
   const total = db.prepare('SELECT COUNT(*) AS n FROM problems').get().n;
@@ -532,7 +629,7 @@ function getDailyPlan(goalId, size) {
   const want = size || st.daily_size;
   if (!plan) {
     const problems = problemWithStatus();
-    const unsolved = problems.filter(p => !p.passed);
+    const unsolved = problems.filter(p => !p.done);   // 按「完成状态」挑，不是只看有没有通过记录
     const picks = unsolved.slice(0, want);
     const items = picks.map(p => ({ pid: p.id, done: false, done_at: '', record_id: 0 }));
     db.prepare('INSERT INTO daily_plans (goal_id, date, items, created_at) VALUES (?,?,?,?)').run(goalId, today, JSON.stringify(items), nowISO());
@@ -540,9 +637,29 @@ function getDailyPlan(goalId, size) {
   }
   return plan;
 }
-function templateFor(lang) {
+/* LeetCode 的 langSlug 与本组件的语言 id 不完全同名，模板匹配前先归一 */
+const LANG_SLUG_ALIAS = { python: 'python3', python3: 'python3', sql: 'mysql', mysql: 'mysql', c: 'c', cpp: 'cpp', java: 'java', golang: 'go', go: 'go', rust: 'rust', csharp: 'csharp', 'c#': 'csharp', kotlin: 'kotlin', swift: 'swift', php: 'php', ruby: 'ruby', scala: 'scala', javascript: 'javascript', typescript: 'typescript' };
+/** 这道题在该语言下的官方起始代码（抓题面时 codeDefinition 一起存进了 snapshots）。
+ *  找不到才退回通用骨架 —— 早先一律退回通用骨架，而那份骨架里写死了 twoSum，
+ *  于是「在 VSCode 里作答」打开任何题都是两数之和。 */
+function codeDefFor(problem, lang) {
+  const want = LANG_SLUG_ALIAS[lang] || lang;
+  const list = safeParse(problem && problem.snapshots) || [];
+  for (const s of list) {
+    const slug = String((s && s.langSlug) || '').trim();
+    if (!slug) continue;
+    if (slug === want || LANG_SLUG_ALIAS[slug] === want) {
+      const code = String((s && s.code) || '');
+      if (code.trim()) return code.replace(/\s+$/, '');
+    }
+  }
+  return '';
+}
+function templateFor(lang, problem) {
+  const def = problem ? codeDefFor(problem, lang) : '';
+  if (def) return def + '\n';
   const L = LANG_NAME[lang] || 'Python3';
-  if (lang === 'python3' || lang === 'python') return 'class Solution:\n    def twoSum(self, nums, target):\n        pass\n';
+  if (lang === 'python3' || lang === 'python') return 'class Solution:\n    pass\n';
   if (lang === 'cpp') return '#include <bits/stdc++.h>\nusing namespace std;\n\nclass Solution {\npublic:\n};\n';
   if (lang === 'java') return 'class Solution {\n}\n';
   if (lang === 'javascript' || lang === 'typescript') return '// ' + L + '\nvar solve = function() {\n};\n';
@@ -607,7 +724,7 @@ function openInIDE(problem, language) {
       lines.push(' */');
     }
     lines.push('');
-    lines.push(templateFor(lang));
+    lines.push(templateFor(lang, problem));
     fs.writeFileSync(file, lines.join('\n'));
     created = true;
   }

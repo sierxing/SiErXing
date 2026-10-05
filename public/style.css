@@ -1005,6 +1005,12 @@ body.aiOpen .nodePanel{right:calc(var(--ai-w, 440px) + 26px);}
 .pdot.done{background:var(--ok);} .pdot.trying{background:var(--warn);}
 .probRow{display:flex; align-items:center; gap:8px; padding:7px 10px; border-radius:9px; font-size:13px;}
 .probRow:hover{background:var(--soft);}
+/* 已完成的行：淡化 + 标题划线，和今日任务的 .dailyItem.done 视觉一致 */
+.probRow.done{opacity:.62;}
+.probRow.done .prTitle{text-decoration:line-through;}
+.btn.tiny.ok{color:var(--ok); border-color:var(--ok);}
+/* 编辑作答记录时的表单标题行 */
+.rfFormHead{display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600; margin-bottom:8px;}
 .prTitle{color:var(--text); text-decoration:none; font-size:13px;}
 .prTitle:hover{color:var(--accent);}
 .prTitle b{color:var(--muted); font-weight:600; margin-right:3px;}

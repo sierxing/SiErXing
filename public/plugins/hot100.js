@@ -40,22 +40,33 @@ function diffChipHTML(d) {
   return `<span class="chip ${c[1]}">${c[0]}</span>`;
 }
 function probStatusDot(p) {
-  if (p.passed) return `<span class="pdot done" title="已通过"></span>`;
+  if (p.done) return `<span class="pdot done" title="已完成${p.done_manual >= 0 ? '（手动标记）' : ''}"></span>`;
   if (p.attempts) return `<span class="pdot trying" title="尝试过 ${p.attempts} 次"></span>`;
   return `<span class="pdot"></span>`;
+}
+/** 「完成状态」切换按钮。列表（按知识点练习）、今日任务、题目页三处共用，
+    所以完成状态在哪都能改，而不是只有今日任务那一处。 */
+function doneToggleHTML(p, cls) {
+  const done = !!p.done;
+  const manual = p.done_manual >= 0;
+  const tip = done
+    ? (manual ? '手动标记为已完成，点一下改回' : '已按作答记录判定为完成，点一下手动改为未完成')
+    : (manual ? '手动标记为未完成，点一下改回自动判定' : '点一下标记为已完成');
+  return `<button class="btn tiny ${done ? 'ok' : ''} ${cls || ''}" data-pdone="${p.id}" data-done="${done ? '1' : '0'}" data-manual="${p.done_manual >= 0 ? '1' : '0'}" title="${esc(tip)}">${done ? '✓ 已完成' : '标记完成'}</button>`;
 }
 function probRowHTML(p) {
   const tags = (p.groups || []).slice(0, 2).map(g => `<span class="chip gray">${esc(g)}</span>`).join('');
   const meta = p.passed
     ? `通过 ${p.passed} 次${p.last_date ? ' · ' + esc(p.last_date) : ''}`
     : (p.attempts ? `作答 ${p.attempts} 次 · 未通过` : '未作答');
-  return `<div class="probRow">
+  return `<div class="probRow ${p.done ? 'done' : ''}">
     ${probStatusDot(p)}
     <a class="prTitle" href="#/p/${p.id}"><b>${p.fid}.</b> ${esc(p.title)}</a>
     ${diffChipHTML(p.difficulty)}
     ${tags}
     <span class="prMeta">${esc(meta)}</span>
     <div class="spacer"></div>
+    ${doneToggleHTML(p)}
     <button class="btn tiny" data-ide="${p.id}" title="在 VSCode 中打开作答文件">VSCode 作答</button>
     <a class="btn tiny" href="#/p/${p.id}">详情</a>
   </div>`;
@@ -112,7 +123,10 @@ function drawDailyPage() {
       <button class="btn tiny" id="regenDaily">换一批</button></div>
     ${items.length ? `<div class="dailyItems">${items.map((it, i) => {
       const p = it.problem || {};
-      return `<div class="dailyItem ${it.done ? 'done' : ''}">
+      /* 今日任务的勾与题目本身的状态取并集：当日勾了、或题目已被标记完成，都显示为已完成。
+         早先这里只看 it.done，导致在题目页标记完成后回到列表又变回未完成（用户报的「不同步」）。 */
+      const isDone = !!it.done || !!(p && p.done);
+      return `<div class="dailyItem ${isDone ? 'done' : ''}">
         <span class="diIdx">${i + 1}</span>
         <div class="diMain">
           <a class="diTitle" href="#/p/${p.id}"><b>${p.fid}.</b> ${esc(p.title || '')}</a>
@@ -120,7 +134,7 @@ function drawDailyPage() {
         </div>
         <button class="btn tiny" data-ide="${p.id}">VSCode</button>
         <a class="btn tiny" href="#/p/${p.id}">作答/记录</a>
-        <button class="btn tiny ${it.done ? '' : 'primary'}" data-toggle="${p.id}" data-done="${it.done ? '1' : '0'}">${it.done ? '✓ 已完成' : '标记完成'}</button>
+        <button class="btn tiny ${isDone ? '' : 'primary'}" data-toggle="${p.id}" data-done="${isDone ? '1' : '0'}">${isDone ? '✓ 已完成' : '标记完成'}</button>
       </div>`;
     }).join('')}</div>` : `<div class="muted" style="padding:12px 2px;">今天没有任务（可能已全部通过 🎉），点「换一批」重新生成。</div>`}
   </div>
@@ -152,9 +166,24 @@ function drawDailyPage() {
     const done = b.getAttribute('data-done') !== '1';
     try {
       await api('/api/goals/' + g.id + '/daily/toggle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pid, done }) });
+      /* 重新拉题库 + 今日任务两份数据：只刷其中一份会出现「圆点变了、任务没变」这种半同步 */
+      const l = await api('/api/problems');
+      state.problems = l.problems; state.problemGroups = l.groups;
       state.daily = await api('/api/goals/' + g.id + '/daily');
       drawDailyPage();
       toast(done ? '已完成 ✓' : '已取消');
+    } catch (e) { toast(e.message); }
+  }));
+  app.querySelectorAll('[data-pdone]').forEach(b => b.addEventListener('click', async () => {
+    const pid = Number(b.getAttribute('data-pdone'));
+    const done = b.getAttribute('data-done') !== '1';
+    try {
+      await api('/api/problems/' + pid + '/done', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ done, goal_id: g.id }) });
+      const l = await api('/api/problems');
+      state.problems = l.problems; state.problemGroups = l.groups;
+      state.daily = await api('/api/goals/' + g.id + '/daily');
+      drawDailyPage();
+      toast(done ? '已标记完成 ✓' : '已取消完成');
     } catch (e) { toast(e.message); }
   }));
   app.querySelectorAll('[data-ide]').forEach(b => b.addEventListener('click', () => openProblemInIDE(Number(b.getAttribute('data-ide')))));
@@ -236,18 +265,22 @@ function drawProblemPage(pid) {
   const passedCount = recs.filter(r => r.passed).length;
   app.innerHTML = `<div class="probPage">
     <div class="probHead">
-      <a class="back" href="${state.goal ? '#/g/' + state.goal.id + '/daily' : '#/'}">← 每日刷题</a>
+      <a class="back" href="${state.goal ? '#/g/' + state.goal.id + '/hot100' : '#/'}">← 每日刷题</a>
       <h2 class="probTitle">${p.fid}. ${esc(p.title || '')}</h2>
       ${diffChipHTML(p.difficulty)}
       ${(p.tags || []).map(t => `<span class="chip gray">${esc(t)}</span>`).join('')}
       <div class="spacer"></div>
+      ${doneToggleHTML({ id: p.id, done: d.done, done_manual: p.done_manual })}
       <button class="btn small primary" id="ideBtn">💻 在 VSCode 中作答</button>
       <a class="btn small" href="${esc(p.link || '#')}" target="_blank" rel="noopener">打开 LeetCode</a>
       <button class="btn small" id="refreshStmt">↻ 刷新题面</button>
     </div>
     <div class="probMeta">
-      ${p.passed ? `<span class="chip ok">已通过 ${passedCount} 次</span>` : (recs.length ? '<span class="chip warn">未通过（已作答 ' + recs.length + ' 次）</span>' : '<span class="chip gray">未作答</span>')}
+      ${p.done
+        ? `<span class="chip ok">${p.passed ? '已通过 ' + passedCount + ' 次' : '已完成'}${p.done_manual >= 0 && !p.passed ? '（手动标记）' : ''}</span>`
+        : (recs.length ? '<span class="chip warn">未通过（已作答 ' + recs.length + ' 次）</span>' : '<span class="chip gray">未作答</span>')}
       <span class="muted">知识点：${(p.groups || []).join(' / ') || '—'}</span>
+      ${p.done_manual >= 0 ? '<span class="chip gray" title="当前完成状态是手动指定的，不随作答记录变化">手动状态</span>' : ''}
       ${d.notice ? `<span class="chip danger">题面获取提示：${esc(d.notice)}</span>` : ''}
     </div>
     <div class="probCols">
@@ -266,6 +299,7 @@ function drawProblemPage(pid) {
               ${r.language ? `<span class="chip gray">${esc(r.language)}</span>` : ''}
               ${r.minutes ? `<span class="muted">${r.minutes} 分钟</span>` : ''}
               <div class="spacer"></div>
+              <button class="btn tiny" data-editrec="${r.id}">编辑</button>
               <button class="btn tiny danger" data-delrec="${r.id}">删除</button>
             </div>
             ${r.notes ? `<div class="recNotes">${esc(r.notes)}</div>` : ''}
@@ -281,31 +315,53 @@ function drawProblemPage(pid) {
     try { const nd = await api('/api/problems/' + pid + '?refresh=1'); state.problem = nd; drawProblemPage(pid); toast('题面已更新'); } catch (e) { toast(e.message); drawProblemPage(pid); }
   });
   document.getElementById('addRecBtn').addEventListener('click', () => showRecordForm(pid));
+  app.querySelectorAll('[data-pdone]').forEach(b => b.addEventListener('click', async () => {
+    const done = b.getAttribute('data-done') !== '1';
+    try {
+      await api('/api/problems/' + pid + '/done', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ done, goal_id: state.goal ? state.goal.id : 0 }) });
+      state.problem = await api('/api/problems/' + pid);
+      if (state.goal) { try { state.daily = await api('/api/goals/' + state.goal.id + '/daily'); } catch (e) {} }
+      drawProblemPage(pid);
+      toast(done ? '已标记完成 ✓' : '已取消完成');
+    } catch (e) { toast(e.message); }
+  }));
+  app.querySelectorAll('[data-editrec]').forEach(b => b.addEventListener('click', () => {
+    const rec = recs.find(r => r.id === Number(b.getAttribute('data-editrec')));
+    if (rec) showRecordForm(pid, rec);
+  }));
   app.querySelectorAll('[data-delrec]').forEach(b => b.addEventListener('click', async () => {
     if (!confirm('删除这条作答记录？')) return;
     try { await api('/api/records/' + b.getAttribute('data-delrec'), { method: 'DELETE' }); state.problem = await api('/api/problems/' + pid); drawProblemPage(pid); toast('已删除'); } catch (e) { toast(e.message); }
   }));
 }
-function showRecordForm(pid) {
+/** 作答记录表单。传 rec 就是编辑那条记录（预填 + 走 PUT），不传是新增。 */
+function showRecordForm(pid, rec) {
   const box = document.getElementById('recFormBox');
   if (!box) return;
+  const editing = !!(rec && rec.id);
   const s = (state.problem && state.problem.settings) || {};
   const langs = (state.problem && state.problem.langs) || [];
   const today = new Date();
   const tstr = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
+  const curLang = editing && rec.language ? rec.language : s.language;
+  const curDate = editing ? String(rec.date || tstr).slice(0, 10) : tstr;
+  const curMin = editing ? Number(rec.minutes) || 0 : 30;
   box.innerHTML = `<div class="recForm">
+    <div class="rfFormHead"><span>${editing ? '✏️ 编辑记录 #' + rec.id : '＋ 新增记录'}</span><div class="spacer"></div>${editing ? '<button class="btn tiny" id="rfToNew">改为新增一条</button>' : ''}</div>
     <div class="rfRow">
-      <label>日期<input type="date" id="rfDate" value="${tstr}"></label>
-      <label>语言<select id="rfLang">${langs.map(l => `<option value="${l.id}" ${l.id === s.language ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}</select></label>
-      <label>用时(分)<input type="number" id="rfMin" min="0" max="600" value="30"></label>
-      <label class="rfPass"><input type="checkbox" id="rfPass"> 通过</label>
+      <label>日期<input type="date" id="rfDate" value="${esc(curDate)}"></label>
+      <label>语言<select id="rfLang">${langs.map(l => `<option value="${esc(l.id)}" ${l.id === curLang ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}</select></label>
+      <label>用时(分)<input type="number" id="rfMin" min="0" max="600" value="${curMin}"></label>
+      <label class="rfPass"><input type="checkbox" id="rfPass" ${editing && rec.passed ? 'checked' : ''}> 通过</label>
     </div>
     <div class="field"><div class="rfCodeHead"><span>代码</span><div class="spacer"></div><button class="btn tiny" id="rfRead">从 VSCode 文件读取</button></div>
-      <textarea id="rfCode" placeholder="粘贴你在 VSCode / LeetCode 里提交的代码（可留空）"></textarea></div>
-    <div class="field"><textarea id="rfNotes" placeholder="笔记：思路 / 卡在哪 / 学到什么（可留空）"></textarea></div>
-    <div class="toolbarRow"><button class="btn primary" id="rfSave">保存记录</button><button class="btn" id="rfCancel">取消</button></div>
+      <textarea id="rfCode" placeholder="粘贴你在 VSCode / LeetCode 里提交的代码（可留空）">${esc(editing ? rec.code : '')}</textarea></div>
+    <div class="field"><textarea id="rfNotes" placeholder="笔记：思路 / 卡在哪 / 学到什么（可留空）">${esc(editing ? rec.notes : '')}</textarea></div>
+    <div class="toolbarRow"><button class="btn primary" id="rfSave">${editing ? '保存修改' : '保存记录'}</button><button class="btn" id="rfCancel">取消</button></div>
   </div>`;
   document.getElementById('rfCancel').addEventListener('click', () => { box.innerHTML = ''; });
+  const toNew = document.getElementById('rfToNew');
+  if (toNew) toNew.addEventListener('click', () => showRecordForm(pid));
   document.getElementById('rfRead').addEventListener('click', async () => {
     try {
       const r = await api('/api/problems/' + pid + '/solution?lang=' + encodeURIComponent(document.getElementById('rfLang').value));
@@ -315,20 +371,23 @@ function showRecordForm(pid) {
     } catch (e) { toast(e.message); }
   });
   document.getElementById('rfSave').addEventListener('click', async () => {
+    const payload = {
+      date: document.getElementById('rfDate').value,
+      language: document.getElementById('rfLang').value,
+      minutes: Number(document.getElementById('rfMin').value) || 0,
+      passed: document.getElementById('rfPass').checked,
+      code: document.getElementById('rfCode').value,
+      notes: document.getElementById('rfNotes').value,
+      goal_id: state.goal ? state.goal.id : 0
+    };
     try {
-      await api('/api/problems/' + pid + '/records', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-        date: document.getElementById('rfDate').value,
-        language: document.getElementById('rfLang').value,
-        minutes: Number(document.getElementById('rfMin').value) || 0,
-        passed: document.getElementById('rfPass').checked,
-        code: document.getElementById('rfCode').value,
-        notes: document.getElementById('rfNotes').value,
-        goal_id: state.goal ? state.goal.id : 0
-      }) });
+      if (editing) await api('/api/records/' + rec.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      else await api('/api/problems/' + pid + '/records', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       state.problem = await api('/api/problems/' + pid);
       if (state.goal) { try { state.daily = await api('/api/goals/' + state.goal.id + '/daily'); } catch (e) {} }
+      box.innerHTML = '';
       drawProblemPage(pid);
-      toast('记录已保存');
+      toast(editing ? '记录已更新' : '记录已保存');
     } catch (e) { toast(e.message); }
   });
 }
