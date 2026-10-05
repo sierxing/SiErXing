@@ -88,28 +88,6 @@ node server/server.js          # 然后打开 http://localhost:3213
 
 ---
 
-## 界面截图
-
-| 首次使用引导 | 目标页：路线图 · 约束 · 下一步 |
-| --- | --- |
-| ![引导](docs/screenshots/03-guide-2.png) | ![目标页](docs/screenshots/06-goal.png) |
-
-| 全屏导图 | 对话改规划 |
-| --- | --- |
-| ![导图](docs/screenshots/07-map.png) | ![对话](docs/screenshots/08-chat.png) |
-
-| 规划前问卷（含水平自测） | 组件中心（开关 / 分类 / 换肤） |
-| --- | --- |
-| ![问卷](docs/screenshots/09-questionnaire.png) | ![组件](docs/screenshots/12-components.png) |
-
-| 版本对比（左旧右新） | 学习教程（真正学会，含练习与自测） |
-| --- | --- |
-| ![对比](docs/screenshots/11-diff.png) | ![教程](docs/screenshots/15-tutorial.png) |
-
-> 更多截图见 [`docs/screenshots/`](docs/screenshots/)
-
----
-
 ## 能做什么
 
 | | 能力 | 说明 |

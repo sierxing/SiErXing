@@ -52,7 +52,7 @@ SiErXing/
 ├── scripts/           install.sh/.bat/.ps1、start.sh/.bat、build-exe.js（打包 Windows exe）
 ├── release/           ★ 在线更新的发布件：latest.json + payload-<版本>.sxar（要提交）
 ├── examples/          示例组件包，可在「组件」页导入体验
-├── docs/screenshots/  README 用截图
+├── docs/              开发期文档（如有）
 ├── data/              ★ 运行时生成（数据库/备份/上传），已 gitignore
 └── package.json       没有 dependencies，scripts 只有 start / start:sqlite / start:port
 ```
