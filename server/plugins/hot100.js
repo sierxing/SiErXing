@@ -478,6 +478,9 @@ module.exports = {
             problem: prob,
             approach: row.approach || '',
             reference_code: row.reference_code || '',
+            /* 思路卡要显示「更新于」—— 之前漏了下发这个字段，前端拿到 undefined，
+               fmtDate 直接返回空串，于是只剩「更新于」两个字没有时间。 */
+            updated_at: row.updated_at || '',
             session: sess,
             sessions,
             dims: coachDims(),

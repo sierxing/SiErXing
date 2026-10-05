@@ -23,7 +23,11 @@ const { readCodeFiles, buildCodeBlock } = require('./code-read');
 const APP_DIR = path.resolve(__dirname, '..');
 /* 前端资源版本戳：启动时对 public 下的 js/css 求哈希，发版后浏览器必取新文件。
    用内容哈希而不用时间戳：只改后端重启时不打扰前端，避免误报“有新版”。 */
-const DATA_DIR = path.join(APP_DIR, 'data');
+/* 数据存放位置可改（设置页 →「数据存储路径」）：默认程序目录下的 data/，
+   改过之后指针写在 APP_DIR/data-location.json（指针不能跟着数据一起挪走）。
+   切换/迁移后必须重启 —— DATA_DIR 在启动时被插件、同步、上传按值捕获。 */
+const dataDir = require('./data-dir');
+const DATA_DIR = dataDir.readPointer(APP_DIR).dir;
 const BACKUP_DIR = path.join(DATA_DIR, 'backups');
 const DB_PATH = path.join(DATA_DIR, 'sierxing.db');
 const PUBLIC_DIR = path.join(APP_DIR, 'public');
@@ -73,6 +77,8 @@ const APP_NAME = '思而行';
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 const LEVEL_NAME = { 0: '阶段', 1: '小目标', 2: '任务' };
 
+/* 指针指向的目录可能已经不存在（比如用户拔了移动硬盘）—— 重建空的，别让程序起不来 */
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) { console.error('数据目录不可用：' + DATA_DIR + '（' + (e.message || e) + '）'); }
 fs.mkdirSync(BACKUP_DIR, { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
@@ -4057,6 +4063,60 @@ function extractEbookPrefFromAnswers(answers) {
   if (p === '/api/sync/status' && method === 'GET') {
     return sendJSON(res, 200, await sync.status());
   }
+
+  /* ===== 数据存放位置（可改 / 可迁移） =====
+     切换后 DATA_DIR 已被各模块按值捕获，所以一律要求重启才生效 ——
+     明确告诉前端 restartRequired，由它决定要不要立刻拉一次重启。 */
+  if (p === '/api/data-location' && method === 'GET') {
+    return sendJSON(res, 200, dataDir.status(APP_DIR));
+  }
+  if (p === '/api/data-location/pick' && method === 'POST') {
+    /* 拉起系统自带的目录选择器（PowerShell / osascript / zenity / kdialog）。
+       弹窗要等用户选，可能挂几分钟，所以异步跑、结果写临时文件，前端轮询。 */
+    if (!dataDir.canPick()) {
+      return sendJSON(res, 400, { error: '这个系统没有可用的图形目录选择器，请直接把路径粘进来' });
+    }
+    const r = dataDir.startPick();
+    return sendJSON(res, r.ok ? 200 : 400, r.ok ? { ok: true, poll: '/api/data-location/pick' } : r);
+  }
+  if (p === '/api/data-location/pick' && method === 'GET') {
+    return sendJSON(res, 200, dataDir.takePick());
+  }
+  if (p === '/api/data-location/progress' && method === 'GET') {
+    /* 几 GB 的复制要几十秒，前端靠这个接口画进度条（不然就一行字干等，像死机） */
+    return sendJSON(res, 200, dataDir.progress());
+  }
+  if (p === '/api/data-location/apply' && method === 'POST') {
+    const body = await readBody(req);
+    const mode = body.mode === 'copy' ? 'copy' : 'move';
+    let r;
+    try {
+      if (body.reset) r = dataDir.resetToDefault(APP_DIR);
+      else if (body.use_existing) r = dataDir.useExisting(APP_DIR, String(body.dir || '').trim());
+      else r = dataDir.migrate(APP_DIR, String(body.dir || '').trim(), mode);
+    } catch (e) { return sendJSON(res, 500, { error: e.message }); }
+    if (!r.ok) return sendJSON(res, 400, r);
+    /* 成功了就顺手打一份备份（备份会落到新目录里，是用户要的） */
+    try { backup('数据目录迁移'); } catch (e) {}
+    return sendJSON(res, 200, r);
+  }
+  if (p === '/api/data-location/restart' && method === 'POST') {
+    /* 迁移完立刻重启，省得用户手动来一下 */
+    try {
+      const r = await update.restartPayload(closeHttpServer);
+      sendJSON(res, 200, r);
+      if (r.restarting) setTimeout(() => process.exit(0), 800);
+      return;
+    } catch (e) { return sendJSON(res, 500, { error: e.message }); }
+  }
+  if (p === '/api/data-location/check' && method === 'POST') {
+    /* 只体检不搬：设置页让用户先看清「这个目录行不行、要多大空间」 */
+    const body = await readBody(req);
+    const dir = String(body.dir || '').trim();
+    if (!dir) return sendJSON(res, 400, { error: '先填一个目录' });
+    const u = dataDir.usage(DATA_DIR);
+    return sendJSON(res, 200, { ...dataDir.checkTarget(dir, u.bytes), need: u.bytes, src: DATA_DIR, srcBytes: u.bytes });
+  }
   if (p === '/api/sync/settings' && method === 'POST') {
     const body = await readBody(req);
     const set = (k, v) => { if (v != null) setSetting(k, String(v).trim()); };
@@ -4661,7 +4721,7 @@ server.listen(PORT, () => {
   }
   update.startAutoCheck();   // 启动后台检查远端是否有新版本（不阻塞、失败静默）
   console.log(`思而行(SiErXing) started: http://localhost:${PORT}`);
-  console.log('数据文件: data/sierxing.db');
+  console.log('数据文件: ' + DB_PATH);
   if (process.env.NO_OPEN) return;
   const url = `http://localhost:${PORT}`;
   if (process.platform === 'win32') { try { execFile('cmd', ['/c', 'start', '', url], () => {}); } catch (e) {} }

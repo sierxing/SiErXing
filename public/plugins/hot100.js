@@ -507,6 +507,73 @@ function drawProblemPage(pid) {
     try { await api('/api/records/' + b.getAttribute('data-delrec'), { method: 'DELETE' }); state.problem = await api('/api/problems/' + pid); drawProblemPage(pid); toast('已删除'); } catch (e) { toast(e.message); }
   }));
 }
+/* ===== 代码框增强：Tab 缩进、换行自动续行、括号引号补全 =====
+   敲代码时 Tab 默认会把焦点跳走，一个字都敲不下去 —— 这在盲写重做里尤其致命，
+   因为你正闭着眼回忆代码，一按 Tab 就丢了焦点。 */
+function bindCodeEditor(ta, opts) {
+  if (!ta || ta.dataset.codeEd === '1') return;
+  ta.dataset.codeEd = '1';
+  const o = opts || {};
+  const INDENT = o.indent || '    ';
+  const PAIRS = { '(': ')', '[': ']', '{': '}', '"': '"', "'": "'", '`': '`' };
+  const insert = (text, sel) => {
+    const s = ta.selectionStart, e = ta.selectionEnd;
+    ta.setRangeText(text, s, e, 'end');
+    if (sel) ta.setSelectionRange(s + sel[0], s + sel[1]);
+    else ta.setSelectionRange(s + text.length, s + text.length);
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  const lineBounds = pos => {
+    const v = ta.value;
+    let a2 = v.lastIndexOf('\n', pos - 1) + 1;
+    let b2 = v.indexOf('\n', pos); if (b2 < 0) b2 = v.length;
+    return [a2, b2];
+  };
+  ta.addEventListener('keydown', ev => {
+    const s = ta.selectionStart, e2 = ta.selectionEnd;
+    if (ev.key === 'Tab') {
+      ev.preventDefault();                       // 不让焦点跑掉
+      if (s === e2 && !ev.shiftKey) {
+        /* 没选中东西 = 插一级缩进。
+           ⚠️ 别去判断「这一行有没有缩进」再决定插多少 —— 行尾没缩进时会算出 0，
+           于是 Tab 什么都不插，敲代码时最难排查的那种「按了没反应」。 */
+        insert(INDENT);
+        return;
+      }
+      /* 选中了多行：整块缩进 / 反缩进 */
+      const [ls, le] = lineBounds(s);
+      const block = ta.value.slice(ls, le);
+      const next = ev.shiftKey
+        ? block.replace(new RegExp('^ {1,' + INDENT.length + '}', 'gm'), '')
+        : block.replace(/^/gm, INDENT);
+      ta.setRangeText(next, ls, le, 'end');
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      return;
+    }
+    if (ev.key === 'Enter' && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
+      /* 回车自动带上当前缩进；若行尾是 { [ ( 就再多一级 */
+      const [ls, le] = lineBounds(s);
+      const cur = ta.value.slice(ls, s);
+      const ind = (cur.match(/^[ \t]*/) || [''])[0];
+      /* 行尾是 { [ ( 就多缩进一级 —— 敲代码时最烦的就是自己敲缩进。
+         用 endsWith 逐个判，不写正则：字符类里嵌方括号容易把正则写坏。 */
+      const tail = cur.replace(/\s+$/, '');
+      const opens = tail.endsWith('{') || tail.endsWith('[') || tail.endsWith('(');
+      const pad = opens ? ind + INDENT : ind;
+      ev.preventDefault();
+      insert('\n' + pad);
+      return;
+    }
+    if (PAIRS[ev.key] && o.brackets !== false && s === e2) {
+      const nx = ta.value[s] || '';
+      /* 右边已经是对应的闭合符就别再补一遍 */
+      if (nx === PAIRS[ev.key] || nx === ')' && ev.key === '(') { ev.preventDefault(); ta.setSelectionRange(s + 1, s + 1); return; }
+      ev.preventDefault();
+      insert(ev.key + PAIRS[ev.key], [1, 1]);
+    }
+  });
+}
+
 /* ================= 掌握闭环：AI 引导提炼 / 盲写重做 / 易错卡片 ================= */
 function riskClass(r) { const n = Number(r) || 0; return n >= 60 ? '' : n >= 35 ? 'mid' : 'low'; }
 /* ---- 三个模块都做成弹窗：卡片一多（一百条易错卡？）页面会被撑爆，
@@ -928,12 +995,12 @@ async function openCoach(pid, restart) {
     fin.addEventListener('click', () => finishCoach(L, pid));
     const sv = L.foot.querySelector('[data-save]');
     if (sv) sv.addEventListener('click', async () => {
-      sv.disabled = true; sv.textContent = '保存中…';
+      const un2 = busyBtn(sv, '保存中');
       try {
         await api('/api/problems/' + pid + '/mind', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ approach: state.mind.session.summary }) });
         state.mind = await api('/api/problems/' + pid + '/mind');
         L.close(); drawProblemPage(pid); toast('思路卡已存好 ✓');
-      } catch (e) { toast(e.message); sv.disabled = false; sv.textContent = '💾 存进思路卡'; }
+      } catch (e) { un2(); toast(e.message); }
     });
     const clr = L.foot.querySelector('[data-clear]');
     if (clr) clr.addEventListener('click', async () => {
@@ -1009,15 +1076,53 @@ async function openCoach(pid, restart) {
       const s = L.body.querySelector('#pfSay'); if (s && !hint) s.focus();
     } catch (e) { setAsk(false); dropOwnNow(); toast(e.message); }
   };
+  /* 整理思路卡是个 10~30 秒的长任务。不给任何反馈的话，整个浮层看着就像卡死了 ——
+     所以：顶部插一条带转圈的横幅、按钮自己转圈、其它按钮照常能用、
+     再加个超时兜底，绝不让它无声无息地挂着。 */
+  const busyBar = (title, tip, onCancel) => {
+    const el = document.createElement('div');
+    el.className = 'pfBusy';
+    el.id = 'pfBusyBox';
+    el.innerHTML = '<div class="pfSpin"></div><div style="flex:1;min-width:0;"><b>' + esc(title) + '</b><br>' + tip + '</div>';
+    if (onCancel) {
+      const c = document.createElement('button');
+      c.className = 'pfBusyCancel'; c.textContent = '知道了';
+      c.addEventListener('click', () => el.remove());
+      el.appendChild(c);
+    }
+    const th = L.body.querySelector('#pfThread');
+    if (th) th.parentElement.insertBefore(el, th); else L.body.insertBefore(el, L.body.firstChild);
+    return el;
+  };
+  const busyBtn = (b, text) => {
+    if (!b) return () => {};
+    const old = b.innerHTML;
+    b.disabled = true;
+    b.innerHTML = '<span class="pfSpin"></span>' + esc(text);
+    return () => { b.disabled = false; b.innerHTML = old; };
+  };
   const finishCoach = async (ly, xpid) => {
     const b = ly.foot.querySelector('[data-finish]');
-    b.disabled = true; b.textContent = '整理中…';
+    if (b && b.disabled) return;
+    const unbusy = busyBtn(b, 'AI 正在整理');
+    const bar = busyBar('AI 正在把你说的整理成思路卡…',
+      '要把这几次对话压成「关键洞察 / 解题步骤 / 复杂度 / 记忆钩子」，通常十几到三十秒。<br>这一步会调模型，慢是正常的 —— 不是卡住了。', true);
+    /* 超时兜底：120 秒还没回来就明说，别让用户对着一个不动的界面猜 */
+    const to = setTimeout(() => { if (bar && bar.isConnected) bar.innerHTML = '<div>⏳ 已经 2 分钟了，模型可能比较慢。你可以先关掉窗口，等一会儿再点「整理成思路卡」重试。</div>'; }, 120000);
     try {
       const r = await api('/api/problems/' + xpid + '/mind/finish', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      clearTimeout(to);
+      if (bar) bar.remove();
+      unbusy();
       state.mind = await api('/api/problems/' + xpid + '/mind');
       render();
-      toast('整理好了，确认后点「存进思路卡」');
-    } catch (e) { toast(e.message); b.disabled = false; b.textContent = '整理成思路卡'; }
+      toast('整理好了，检查一下再点「存进思路卡」');
+    } catch (e) {
+      clearTimeout(to);
+      if (bar) bar.remove();
+      unbusy();
+      toast(e.message);
+    }
   };
   /* 开场就问第一句 —— 打开浮层只看到一个空盒子，正是「看不出引导在哪」的最直接原因。
    已经有会话在聊的就不重问（重开会把上次的话冲掉）。 */
@@ -1067,6 +1172,7 @@ function openRecall(pid, rec) {
       <pre id="pfRef" style="display:none;">${esc(ref)}</pre></div>
     <div class="pfStepLbl"><b>2</b><span>凭记忆重写一遍</span></div>
     <textarea class="pfCode" id="pfMy" placeholder="想到哪写到哪，写不出来的先跳过往下写 —— 空白和半成品也要提交，AI 才知道你卡在哪"></textarea>
+    <div class="pfSub" style="margin-top:6px;">Tab 缩进 · Shift+Tab 反缩进 · 回车自动续行 · 括号引号自动配对</div>
     <div id="pfOut"></div>`;
   body();
   L.foot.innerHTML = `<span class="pfSub" id="pfFMsg">提交后 AI 会判定你的思路一致度，并把这次的跟脚做成卡片</span><div class="spacer"></div>
@@ -1105,8 +1211,9 @@ function openRecall(pid, rec) {
       clearInterval(timer);
       btn.disabled = false; btn.textContent = '再写一次';
       msg.textContent = '这次结果已存进易错卡片和复习进度';
-      out.innerHTML = recallResultHTML(r) + pitCardHTML({ id: 0, title: '', tag: '', hits: 0, detail: '' });
-      out.lastElementChild.remove();
+      out.innerHTML = recallResultHTML(r);
+      const gp = out.querySelector('[data-gopit]');
+      if (gp) gp.addEventListener('click', () => { L.close(); openPitView(pid); });
       L.body.scrollTo({ top: L.body.scrollHeight });
     } catch (e) {
       btn.disabled = false; btn.textContent = '提交给 AI 对照';
@@ -1118,30 +1225,46 @@ function openRecall(pid, rec) {
   L.mask._timer = timer;
   const origClose = L.close;
   L.close = () => { clearInterval(timer); origClose(); };
-  setTimeout(() => { const t = L.body.querySelector('#pfMy'); if (t) t.focus(); }, 60);
+  setTimeout(() => { const t = L.body.querySelector('#pfMy'); if (t) { bindCodeEditor(t); t.focus(); } }, 60);
 }
-/** 盲写对照结论 */
+/** 盲写对照结论。分「判定 / 想起来了 / 漏了什么 / 钩子 / 易错卡」五块，
+    每块有小标题和分隔，别把判定、清单、结论、卡片堆成一大坨看不出层次。 */
 function recallResultHTML(r) {
   const rep = (r && r.report) || {};
   const v = rep.verdict || 'fuzzy';
   const sc = Number(rep.score) || 0;
   const cls = sc >= 85 ? 'good' : sc >= 55 ? 'mid' : 'bad';
   const vname = { pass: '这次真写出来了', fuzzy: '思路在，细节漏了', forgotten: '核心思路没想起来' }[v] || v;
-  const mine = r.cards || [];
-  const open = mine.filter(c => c.status === 'open');
-  return `<div class="pfCardBox" style="margin-top:18px;border-color:var(--border);background:var(--bg);">
-    <div class="pfCt">3 · AI 对照结果</div>
-    <div class="pfScore">
-      <div class="pfRing ${cls}"><b>${sc}</b><i>一致度</i></div>
-      <div><div class="pfVerdict ${v}">${vname}</div>
-        <div class="pfSub" style="margin-top:3px;">思路一致度看的是「关键决策点」对不对，不是代码写法像不像</div></div>
-    </div>
-    ${(rep.got || []).length ? `<ul class="pfLst good">${rep.got.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
-    ${(rep.missed || []).length ? `<ul class="pfLst miss">${rep.missed.map(m => `<li><b>漏了：${esc(m.what)}</b>${m.why ? `<span class="pfWhy">${esc(m.why)}${m.fix ? ' → ' + esc(m.fix) : ''}</span>` : ''}</li>`).join('')}</ul>` : ''}
-    ${rep.hint ? `<div class="pfHint">💡 ${esc(rep.hint)}</div>` : ''}
-    <div class="pfSub" style="margin-top:12px;">${r.newCards ? '新增 ' + r.newCards + ' 张易错卡片' : ''}${r.mergedCards ? '（把 ' + r.mergedCards + ' 张并进了你以前栽过的同一个坑）' : ''}${!r.newCards && !r.mergedCards ? '这次没发现新的坑 —— 说明确实记住了' : ''}</div>
-    ${open.length ? `<div class="pfPits" style="margin-top:10px;">${open.map(pitCardHTML).join('')}</div>` : ''}
-  </div>`;
+  const vtip = {
+    pass: '关键决策点都对上了',
+    fuzzy: '大方向没跑偏，但有该写没写的',
+    forgotten: '连核心结构都没想起来，回去先看思路卡'
+  }[v] || '';
+  const got = (rep.got || []).filter(Boolean);
+  const missed = (rep.missed || []).filter(m => m && m.what);
+  const open = ((r && r.cards) || []).filter(c => c.status === 'open');
+  const sec = (label, tone, inner) => inner ? '<div class="pfRSec ' + tone + '"><div class="pfRSecL">' + esc(label) + '</div>' + inner + '</div>' : '';
+  const ul = (items, cls2) => '<ul class="pfLst ' + cls2 + '">' + items.map(x => '<li>' + x + '</li>').join('') + '</ul>';
+  const added = [];
+  if (r.newCards) added.push('新增 ' + r.newCards + ' 张');
+  if (r.mergedCards) added.push(r.mergedCards + ' 张并进了你以前栽过的同一个坑');
+  const addedTxt = added.length ? added.join('，')
+    : ((r.cards || []).length ? '这次没发现新的坑 —— 说明确实记住了' : '这次没提炼出错点');
+  return '<div class="pfRCard">'
+    + '<div class="pfRHead"><span class="pfRHeadT">③ AI 对照结果</span>'
+    + '<span class="pfScore2 ' + cls + '"><b>' + sc + '</b><i>一致度</i></span></div>'
+    + '<div class="pfRVerdict ' + v + '"><b>' + esc(vname) + '</b><span>' + esc(vtip) + '</span></div>'
+    + '<div class="pfRNote">一致度看的是「关键决策点」对不对，不是代码写法像不像。</div>'
+    + sec('你想起来了', 'good', got.length ? ul(got.map(esc)) : '')
+    + sec('漏了什么', 'miss', missed.length ? ul(missed.map(m => '<b>' + esc(m.what) + '</b>'
+      + (m.why ? '<span class="pfWhy">' + esc(m.why) + '</span>' : '')
+      + (m.fix ? '<span class="pfFix">→ ' + esc(m.fix) + '</span>' : ''))) : '')
+    + (rep.hint ? '<div class="pfHint"><span>💡</span><div>' + esc(rep.hint) + '</div></div>' : '')
+    + '<div class="pfRFoot"><span>' + esc(addedTxt) + '</span>'
+    + (open.length ? '<button class="pfBtn sm" data-gopit>看看易错卡片（' + open.length + '）→</button>' : '')
+    + '</div>'
+    + (open.length ? '<div class="pfPits pfRNew">' + open.map(pitCardHTML).join('') + '</div>' : '')
+    + '</div>';
 }
 
 /** 作答记录表单。传 rec 就是编辑那条记录（预填 + 走 PUT），不传是新增。 */
@@ -1180,6 +1303,7 @@ function showRecordForm(pid, rec) {
       toast('已读取 ' + r.file.split('/').pop());
     } catch (e) { toast(e.message); }
   });
+  bindCodeEditor(document.getElementById('rfCode'));
   document.getElementById('rfSave').addEventListener('click', async () => {
     const payload = {
       date: document.getElementById('rfDate').value,

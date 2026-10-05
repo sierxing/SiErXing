@@ -1,5 +1,6 @@
 # 数据与日志（不提交个人数据）
 data/
+data-location.json
 *.log
 nohup.out
 

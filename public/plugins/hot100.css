@@ -29,14 +29,47 @@
 }
 .pfBtn:hover{border-color:var(--accent); color:var(--accent);}
 .pfBtn:active{transform:translateY(1px);}
-.pfBtn:disabled{opacity:.5; cursor:not-allowed; transform:none;}
-.pfBtn.go{background:var(--accent); border-color:var(--accent); color:#fff;}
-.pfBtn.go:hover{filter:brightness(1.07); color:#fff;}
+.pfBtn:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+.pfBtn:disabled{opacity:.55; cursor:not-allowed; transform:none; filter:none;}
 .pfBtn.sm{padding:5px 11px; font-size:12px; border-radius:8px;}
 .pfBtn.sm:hover{background:var(--accent-soft);}
+/* ⚠️ 主按钮（.go）的规则必须排在 .sm:hover 之后。
+   `.pfBtn.sm:hover` 与 `.pfBtn.go:hover` 权重相同（都是 0,3,0），后写的赢 ——
+   早先把 .go 写在前面，悬停时背景被刷成 --accent-soft（近白）而文字仍是白的，
+   「整理成思路卡 / 存进思路卡」整个看不见字（用户报过）。 */
+.pfBtn.go, .pfBtn.sm.go, .pfBtn.go:hover, .pfBtn.sm.go:hover{
+  background:var(--accent); border-color:var(--accent); color:#fff;
+}
+.pfBtn.go:hover, .pfBtn.sm.go:hover{filter:brightness(1.1);}
 .pfBtn.ghost{border-color:transparent; background:none; color:var(--muted);}
 .pfBtn.ghost:hover{background:var(--soft); color:var(--accent);}
 .pfBtn.danger:hover{border-color:var(--danger); color:var(--danger);}
+.pfBtn.sm.ghost, .pfBtn.sm.ghost:hover{background:none;}
+/* 忙碌中的按钮：转圈 + 文案变化，别让用户以为卡死了 */
+.pfBtn .pfSpin{
+  width:11px; height:11px; border-radius:50%; flex:none;
+  border:2px solid rgba(255,255,255,.4); border-top-color:#fff;
+  animation:pfSpin .7s linear infinite;
+}
+.pfBtn.sm .pfSpin{width:10px; height:10px; border-width:1.6px;}
+@keyframes pfSpin{to{transform:rotate(360deg);}}
+/* 长任务横幅：把「正在生成」摆在最显眼的地方 */
+.pfBusy{
+  display:flex; align-items:flex-start; gap:10px; margin:0 0 14px;
+  border:1.5px solid var(--accent-border); background:var(--accent-soft);
+  border-radius:12px; padding:11px 14px; font-size:12.8px; line-height:1.75;
+}
+.pfBusy b{color:var(--accent);}
+.pfBusy .pfSpin{
+  width:14px; height:14px; border-radius:50%; flex:none; margin-top:3px;
+  border:2px solid var(--accent-border); border-top-color:var(--accent);
+  animation:pfSpin .7s linear infinite;
+}
+.pfBusyCancel{
+  border:0; background:none; color:var(--muted); font-size:11.5px; cursor:pointer;
+  font-family:inherit; padding:0 4px; text-decoration:underline; flex:none;
+}
+.pfBusyCancel:hover{color:var(--danger);}
 
 /* ============ 吸顶工具栏 + 收藏栏 ============ */
 /* 单题页的工具键全部走这条吸顶栏：卡片一多（一百条易错卡？）正文就会被撑爆，
@@ -96,6 +129,57 @@
 .pfFold summary:hover{color:var(--accent);}
 .pfFold .pfPits{margin-top:11px;}
 .pfFold .pfPit{background:var(--card);}
+
+/* ---- 盲写对照结果卡：分块排版，别堆成一坨 ---- */
+.pfRCard{
+  margin-top:18px; border:1.5px solid var(--border); border-radius:14px;
+  background:var(--card); overflow:hidden;
+}
+.pfRHead{
+  display:flex; align-items:center; gap:10px; padding:11px 15px;
+  background:var(--bg); border-bottom:1px solid var(--border);
+}
+.pfRHeadT{font-size:12.5px; font-weight:800; letter-spacing:.3px; flex:1;}
+.pfScore2{
+  display:inline-flex; align-items:baseline; gap:5px; padding:3px 11px; border-radius:999px;
+  background:var(--soft); border:1.5px solid var(--border);
+}
+.pfScore2 b{font-size:16px; font-weight:800; letter-spacing:-.4px; line-height:1.2;}
+.pfScore2 i{font-style:normal; font-size:10px; color:var(--muted);}
+.pfScore2.good{background:rgba(14,159,110,.12); border-color:rgba(14,159,110,.4);}
+.pfScore2.good b{color:var(--ok);}
+.pfScore2.mid{background:rgba(217,119,6,.12); border-color:rgba(217,119,6,.4);}
+.pfScore2.mid b{color:var(--warn);}
+.pfScore2.bad{background:rgba(224,36,36,.1); border-color:rgba(224,36,36,.4);}
+.pfScore2.bad b{color:var(--danger);}
+.pfRVerdict{display:flex; align-items:baseline; gap:9px; flex-wrap:wrap; padding:13px 15px 0;}
+.pfRVerdict b{font-size:15px; font-weight:800; letter-spacing:-.2px;}
+.pfRVerdict.pass b{color:var(--ok);}
+.pfRVerdict.fuzzy b{color:var(--warn);}
+.pfRVerdict.forgotten b{color:var(--danger);}
+.pfRVerdict span{font-size:12px; color:var(--muted);}
+.pfRNote{padding:5px 15px 0; font-size:11.5px; color:var(--muted); line-height:1.7;}
+.pfRSec{padding:12px 15px 0;}
+.pfRSecL{
+  font-size:10.5px; font-weight:800; letter-spacing:.5px; color:var(--muted);
+  display:flex; align-items:center; gap:7px; margin-bottom:2px;
+}
+.pfRSecL:after{content:''; flex:1; height:1px; background:var(--border);}
+.pfRSec.good .pfRSecL{color:var(--ok);}
+.pfRSec.miss .pfRSecL{color:var(--warn);}
+.pfRSec .pfLst li{padding:5px 0 5px 22px; font-size:12.8px;}
+.pfRSec .pfLst li:before{font-size:11px; top:5px;}
+.pfRSec .pfLst li:last-child{border-bottom:0;}
+.pfRSec .pfWhy{display:block; font-size:12px; color:var(--muted); margin-top:2px;}
+.pfRSec .pfFix{display:block; font-size:12px; color:var(--ok); margin-top:1px; font-weight:600;}
+.pfHint > span:first-child{flex:none;}
+.pfRFoot{
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  margin:14px 15px 0; padding:10px 0 12px; border-top:1px dashed var(--border);
+  font-size:12px; color:var(--muted);
+}
+.pfRFoot > span:first-child{flex:1; min-width:0;}
+.pfPits.pfRNew{padding:0 15px 15px;}
 
 /* ============ 浮层：提炼 / 盲写 ============ */
 .pfMask{
@@ -259,35 +343,17 @@
   background:var(--card); border:1px solid var(--border); border-radius:10px; padding:11px 13px;
   font-family:var(--mono,ui-monospace,Consolas,monospace); white-space:pre-wrap; word-break:break-word;
 }
-/* 对照结论 */
-.pfScore{display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-bottom:14px;}
-.pfRing{
-  width:66px; height:66px; border-radius:50%; flex:none; display:flex; flex-direction:column;
-  align-items:center; justify-content:center; border:4px solid var(--border); background:var(--bg);
-}
-.pfRing b{font-size:19px; font-weight:800; letter-spacing:-.6px; line-height:1;}
-.pfRing i{font-style:normal; font-size:9.5px; color:var(--muted);}
-.pfRing.good{border-color:var(--ok);} .pfRing.good b{color:var(--ok);}
-.pfRing.mid{border-color:var(--warn);} .pfRing.mid b{color:var(--warn);}
-.pfRing.bad{border-color:var(--danger);} .pfRing.bad b{color:var(--danger);}
-.pfVerdict{font-size:16px; font-weight:800; letter-spacing:-.3px;}
-.pfVerdict.pass{color:var(--ok);} .pfVerdict.fuzzy{color:var(--warn);} .pfVerdict.forgotten{color:var(--danger);}
+/* 列表项（被 .pfRSec 复用） */
 .pfLst{list-style:none; margin:0; padding:0;}
 .pfLst li{
-  position:relative; padding:7px 0 7px 25px; font-size:13.2px; line-height:1.75;
+  position:relative; padding:6px 0 6px 22px; font-size:12.8px; line-height:1.75;
   border-bottom:1px dashed var(--border);
 }
 .pfLst li:last-child{border-bottom:0;}
-.pfLst li:before{position:absolute; left:4px; top:7px; font-size:12px; font-weight:800;}
+.pfLst li:before{position:absolute; left:2px; top:6px; font-size:11.5px; font-weight:800;}
 .pfLst.good li:before{content:'✓'; color:var(--ok);}
-.pfLst.bad li:before{content:'✗'; color:var(--danger);}
 .pfLst.miss li:before{content:'⚠'; color:var(--warn);}
-.pfLst b{font-weight:700;}
-.pfLst .pfWhy{display:block; font-size:12.2px; color:var(--muted); margin-top:1px;}
-.pfHint{
-  margin-top:12px; background:var(--accent-soft); border:1px solid var(--accent-border);
-  border-radius:11px; padding:9px 13px; font-size:12.8px; color:var(--accent); line-height:1.7;
-}
+.pfLst.bad li:before{content:'✗'; color:var(--danger);}
 
 /* ============ 易错卡片 ============ */
 .pfPitWrap{padding:12px 14px;}

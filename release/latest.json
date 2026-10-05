@@ -1,14 +1,14 @@
 {
-  "version": "1.9.1",
-  "buildVer": "dc935b72c240",
-  "payload": "release/payload-1.9.1.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.9.1.sxar?ref=main",
+  "version": "1.9.2",
+  "buildVer": "8c6590ca5cc6",
+  "payload": "release/payload-1.9.2.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.9.2.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "5c4cff1dd61b6cf18db2af9f8f7a601336e399bb8bad960b95d824a1a9b540e9",
-  "size": 551596,
-  "unpackedSize": 2080423,
-  "publishedAt": "2026-10-05T11:02:06.688Z",
-  "notes": "引导提炼支持多次对话：默认按日期命名、可重命名、可切换继续聊、可删除、可清空当前对话（历史留着）",
+  "sha256": "dd6147b37269963f6f921dcee9dcaaa727e821571ddd78d0e630fae395432b26",
+  "size": 568435,
+  "unpackedSize": 2133680,
+  "publishedAt": "2026-10-05T13:14:55.953Z",
+  "notes": "数据存储路径可改可迁移+修主页面CSS崩坏+引导提炼按钮悬停变白+整理时忙碌态+思路卡更新时间+盲写代码框Tab缩进+对照结果卡重排",
   "exeRequired": false
 }

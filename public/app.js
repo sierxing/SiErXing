@@ -5064,6 +5064,284 @@ function editGoalHTML(g) {
     </div>
   </form>`;
 }
+/* ============ 设置 · 数据存储路径（可改 / 可迁移） ============
+   为什么要有：默认 data/ 跟着程序走，Windows 上 exe 装在 C 盘，
+   信息源图片、作答记录、备份全堆系统盘。搬到 D 盘/移动硬盘是自己能决定的事。
+   切换一律要重启才生效（DATA_DIR 在启动时被插件、同步、上传按值捕获），
+   所以每次成功迁移都给一个「立刻重启」按钮，别让人以为没生效。 */
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
+  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+  return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+let _storeState = null;
+async function storeSectionLoad() {
+  const box = document.getElementById('storeBox');
+  if (!box) return;
+  const paint = () => {
+    const st = _storeState;
+    if (!st) { box.innerHTML = '<p class="muted">正在读取…</p>'; return; }
+    const gb = st.bytes >= 1024 * 1024 * 1024;
+    box.innerHTML = `
+      <div class="storeNow">
+        <div class="storePath" title="${esc(st.dir)}">📂 ${esc(st.dir)}</div>
+        <div class="storeMeta">
+          <span class="chip ${st.custom ? 'ok' : 'gray'}">${st.custom ? '已改过位置' : '默认位置（程序目录下）'}</span>
+          <span class="chip ${st.writable ? 'gray' : 'danger'}">${st.writable ? '可写' : '不可写！'}</span>
+          <span class="chip gray">${fmtBytes(st.bytes)} · ${st.files} 个文件</span>
+          ${st.at ? `<span class="muted" style="font-size:12px;">${esc(String(st.at).slice(0, 10))} 改的</span>` : ''}
+        </div>
+      </div>
+      ${st.lost ? `<p class="hint" style="color:var(--danger);">⚠️ 之前指定的目录找不到了（${esc(st.lost)}），已临时回落到默认目录 —— 可能是移动硬盘没插。</p>` : ''}
+      ${gb && !st.custom && st.inHome === false ? '<p class="hint">数据已经在系统盘（用户目录）下并超过 1 GB，建议搬到空间更大的盘。</p>' : ''}
+      <div class="toolbarRow" style="margin-top:10px;">
+        <button class="btn primary" id="stMove">📁 更改 / 迁移数据存储路径</button>
+        ${st.canPick ? '' : '<span class="hint" style="align-self:center;">这个系统没有图形目录选择器，请把路径粘进输入框</span>'}
+        ${st.custom ? '<button class="btn" id="stReset">搬回程序目录</button>' : ''}
+        ${st.custom ? '<button class="btn" id="stUse">用别的目录里已有的数据</button>' : ''}
+      </div>
+      <p class="hint" style="margin-top:10px;">
+        迁移分四步：<b>复制 → 校验行数 → 切换指针 → 删除原目录</b>。任何一步不通过就<b>不切</b>，数据留在原地。<br>
+        切换后需要<b>重启一次</b>才生效（程序启动时就把数据位置读进去了）。<br>
+        目标目录里已有思而行的数据时，用「用别的目录里已有的数据」直接指过去，不重复搬。
+      </p>`;
+    const mv = document.getElementById('stMove'); if (mv) mv.addEventListener('click', () => openStoreDialog('move'));
+    const rs = document.getElementById('stReset'); if (rs) rs.addEventListener('click', () => doStoreApply({ reset: true }, '搬回程序目录下的 data/'));
+    const ue = document.getElementById('stUse'); if (ue) ue.addEventListener('click', () => openStoreDialog('use'));
+  };
+  paint();
+  try { _storeState = await api('/api/data-location'); } catch (e) { _storeState = { error: e.message }; }
+  paint();
+}
+/** 迁移对话框：选目录（或粘路径）→ 实时体检 → 确认 → 带进度条执行 */
+function openStoreDialog(mode) {
+  const modeUse = mode === 'use';
+  const st0 = _storeState || {};
+  const D = document.createElement('div');
+  D.className = 'bigDialog storeDlg';
+  D.innerHTML = `
+    <div class="stHd">
+      <div class="stHdIc">${modeUse ? '🔗' : '📦'}</div>
+      <div class="stHdTx">
+        <h3>${modeUse ? '用别的目录里已有的数据' : '把数据搬到别处'}</h3>
+        <p>${modeUse
+          ? '只改「数据在哪」，不复制任何东西。目标目录里要有 <span class="mono">sierxing.db</span>。'
+          : '数据库、上传的资料、作答记录、备份会一起搬过去；<b>校验通过才删原来的</b>，中途出岔子就停在原地。'}</p>
+      </div>
+      <button type="button" class="pfX" data-close1 title="关闭">✕</button>
+    </div>
+    <div class="stBody">
+      <div class="stMove">
+        <div class="stFrom"><span class="stMk">从</span><div class="stP" title="${esc(st0.dir || '')}">${esc(st0.dir || '…')}</div><div class="stM">${fmtBytes(st0.bytes)} · ${st0.files} 个文件</div></div>
+        <div class="stArrow">↓</div>
+        <div class="stTo"><span class="stMk">到</span>
+          <div class="inWrap"><i>📁</i><input class="mono" id="stDir" placeholder="${st0.platform === 'win32' ? 'D:\\思而行数据' : '/mnt/d/sierxing 或 ~/Documents/思而行'}" spellcheck="false" autocomplete="off"></div>
+          <div class="stPickRow">
+            ${st0.canPick ? '<button type="button" class="btn small" id="stPick">📂 打开系统目录选择器</button>' : '<span class="hint">这个系统没有图形目录选择器，把路径粘进上面就行</span>'}
+            <span class="hint" id="stPickMsg"></span>
+          </div>
+        </div>
+      </div>
+      <div class="stCheck" id="stCheck"><span class="stCheckIdle">填个路径，这里会先帮你看看能不能放</span></div>
+      ${modeUse ? '' : `<div class="stModes">
+        <label class="stMode"><input type="radio" name="stMode" value="move" checked>
+          <div><b>搬过去，删掉原目录</b><span>腾出 C 盘空间（推荐）</span></div></label>
+        <label class="stMode"><input type="radio" name="stMode" value="copy">
+          <div><b>只复制一份，原目录保留</b><span>不放心时选这个：会占双份空间</span></div></label>
+      </div>`}
+      <details class="stSteps"><summary>迁移分四步，失败会停在哪一步？</summary>
+        <ol><li><b>复制</b> —— 先复制到「目标.迁移中」临时目录，中途断电也不会被当成搬好了</li>
+        <li><b>校验</b> —— 打开目标里的库，核对 goals / nodes / sources / problems 等表行数跟原来一致</li>
+        <li><b>切指针</b> —— 写 <span class="mono">data-location.json</span>（放在程序目录，不会跟着数据挪走）</li>
+        <li><b>删原目录</b> —— 只在第 1~3 步全过、且原目录本来就是默认目录时才删</li></ol>
+        <p>任何一步不通过就<b>不切指针</b>，程序继续用原目录。切换完成后需要重启一次。</p>
+      </details>
+      <div class="stProg" id="stProg" hidden></div>
+    </div>
+    <div class="stFoot">
+      <span class="hint" id="stMsg"></span><div class="spacer" style="flex:1"></div>
+      <button type="button" class="btn" id="stCancel">取消</button>
+      <button type="button" class="btn primary" id="stGo">${modeUse ? '指过去' : '开始迁移'}</button>
+    </div>`;
+  document.body.appendChild(D);
+  let pollTimer = null, progTimer = null;
+  const close = () => {
+    clearInterval(pollTimer); clearInterval(progTimer);
+    document.removeEventListener('keydown', onKey);
+    D.remove();
+  };
+  const onKey = e => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  D.querySelector('[data-close1]').addEventListener('click', close);
+  const msg = document.getElementById('stMsg');
+  const chk = document.getElementById('stCheck');
+  const input = document.getElementById('stDir');
+  const prog = document.getElementById('stProg');
+  const go = document.getElementById('stGo');
+  const busy = on => { go.disabled = on; go.textContent = on ? '进行中…' : (modeUse ? '指过去' : '开始迁移'); };
+  /* 路径一改就体检：能不能写、空间够不够、是不是要搬进自己的子目录 */
+  let chkTimer = null;
+  input.addEventListener('input', () => {
+    clearTimeout(chkTimer);
+    const dir = input.value.trim();
+    if (!dir) { chk.innerHTML = '<span class="stCheckIdle">填个路径，这里会先帮你看看能不能放</span>'; return; }
+    chkTimer = setTimeout(async () => {
+      try {
+        const r = await api('/api/data-location/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dir }) });
+        chk.innerHTML = r.ok
+          ? '<span class="stCheckOk">✓ 可以放这里</span><span class="stCheckTip">要腾出约 ' + fmtBytes(r.need) + ' 的空间' + (r.free != null ? '，那边还有 ' + fmtBytes(r.free) : '') + '</span>'
+          : '<span class="stCheckBad">✗ ' + esc(r.error) + '</span>';
+      } catch (e) { chk.innerHTML = '<span class="stCheckBad">✗ ' + esc(e.message) + '</span>'; }
+    }, 400);
+  });
+  const pick = document.getElementById('stPick');
+  if (pick) pick.addEventListener('click', async () => {
+    pick.disabled = true;
+    const pm = document.getElementById('stPickMsg');
+    pm.textContent = '在弹出的窗口里选文件夹（可以顺手新建一个）…';
+    try { await api('/api/data-location/pick', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); }
+    catch (e) { pm.textContent = '打不开：' + e.message; pick.disabled = false; return; }
+    pollTimer = setInterval(async () => {
+      try {
+        const r = await api('/api/data-location/pick');
+        if (!r.done) return;
+        clearInterval(pollTimer); pollTimer = null;
+        pick.disabled = false;
+        if (r.canceled) { pm.textContent = '已取消'; return; }
+        input.value = r.chosen || '';
+        input.dispatchEvent(new Event('input'));
+        pm.textContent = '已选好';
+      } catch (e) { clearInterval(pollTimer); pollTimer = null; pick.disabled = false; pm.textContent = '失败：' + e.message; }
+    }, 800);
+  });
+  document.getElementById('stCancel').addEventListener('click', close);
+  go.addEventListener('click', async () => {
+    const dir = input.value.trim();
+    if (!dir) { msg.innerHTML = '<span style="color:var(--danger)">先选一个文件夹</span>'; return; }
+    const m = modeUse ? 'copy' : ((D.querySelector('input[name=stMode]:checked') || {}).value || 'move');
+    const payload = modeUse ? { use_existing: true, dir } : { dir, mode: m };
+    msg.textContent = '';
+    chk.innerHTML = '';
+    prog.hidden = false;
+    prog.innerHTML = '<div class="stProgHd"><span class="pfSpinDark"></span><b id="stProgT">正在准备…</b><span class="spacer" style="flex:1"></span><span id="stProgN"></span></div>'
+      + '<div class="stBar"><i id="stBarI" style="width:0%"></i></div>'
+      + '<div class="stProgF" id="stProgF"></div>';
+    busy(true);
+    /* 进度条：几十秒的复制没有进度条就像死机了 */
+    const phases = { scan: '正在统计要搬多少…', copy: '正在复制文件…', verify: '正在校验（打开库核对行数）…', cleanup: '校验通过，正在删掉原目录…', done: '完成', error: '已停止' };
+    progTimer = setInterval(async () => {
+      try {
+        const p = await api('/api/data-location/progress');
+        const t = document.getElementById('stProgT');
+        const n = document.getElementById('stProgN');
+        const f = document.getElementById('stProgF');
+        const bar = document.getElementById('stBarI');
+        if (!t) return;
+        t.textContent = phases[p.phase] || '处理中…';
+        bar.style.width = (p.phase === 'copy' ? p.pct : (p.phase === 'done' ? 100 : 0)) + '%';
+        if (p.phase === 'copy') n.textContent = fmtBytes(p.copied) + ' / ' + fmtBytes(p.total) + '　' + p.pct + '%　' + p.elapsed + ' 秒';
+        else if (p.elapsed) n.textContent = p.elapsed + ' 秒';
+        f.textContent = p.cur ? pathTail(p.cur, 46) : '';
+      } catch (e) { /* 轮询失败就忽略，等下面那次请求给最终结果 */ }
+    }, 700);
+    let r;
+    try {
+      r = await api('/api/data-location/apply', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    } catch (e) {
+      clearInterval(progTimer);
+      busy(false);
+      /* 失败就把横幅留在原地，让人看得见为什么停 —— 早先只弹个 toast，几秒后就没人记得了 */
+      prog.innerHTML = '<div class="stProgBad"><b>✗ 没搬成功</b><br>' + esc(e.message)
+        + (e.message.indexOf('一半') >= 0 ? '' : '') + '</div>';
+      chk.innerHTML = '';
+      msg.innerHTML = '<span style="color:var(--muted)">原数据没动，程序还在用原来的位置。可以修好路径再试，或点「取消」。</span>';
+      return;
+    }
+    clearInterval(progTimer);
+    busy(false);
+    prog.innerHTML = '<div class="stProgOk"><b>✓ ' + esc(modeUse ? '已指向新目录' : (m === 'move' ? '数据已搬过去' : '已复制一份到新目录')) + '</b><br>'
+      + '原位置：' + esc(st0.dir || '') + '<br>新位置：' + esc(r.dir || dir)
+      + ((r.skipped && r.skipped.length) ? '<br><br>有 ' + r.skipped.length + ' 个文件读不了（多半是克隆来的项目里 root 权限的日志），已跳过：<br><span class="mono" style="font-size:11px;">'
+        + r.skipped.slice(0, 5).map(s => esc(s.file)).join('<br>') + (r.skipped.length > 5 ? '<br>…等共 ' + r.skipped.length + ' 个' : '') + '</span><br>数据库和你的数据不受影响。' : '')
+      + '</div>';
+    try { _storeState = await api('/api/data-location'); } catch (e) {}
+    storeSectionLoad();
+    msg.innerHTML = '<b>需要重启一次才会真正生效。</b>';
+    const rd = document.getElementById('stRestart');
+    if (rd) rd.remove();
+    const rb = document.createElement('button');
+    rb.id = 'stRestart'; rb.className = 'btn primary'; rb.textContent = '现在重启';
+    rb.addEventListener('click', async () => {
+      rb.disabled = true; rb.textContent = '正在重启…';
+      try { await api('/api/data-location/restart', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); }
+      catch (e) { rb.disabled = false; rb.textContent = '重启失败，手动重开'; toast(e.message); }
+    });
+    go.replaceWith(rb);
+  });
+}
+/** 路径太长时只留尾巴，中间省略 */
+function pathTail(p, n) {
+  p = String(p || '');
+  return p.length > n ? '…' + p.slice(-(n - 1)) : p;
+}
+
+/** 首次运行：问一次「数据存哪」。
+ *  触发条件刻意保守 —— 只在「从没问过 + 还在默认目录 + 数据还很小」时问一次。
+ *  用 localStorage 记「问过」，包括用户主动关掉也算问过，免得每次启动都弹。 */
+async function maybeAskDataDir() {
+  const KEY = 'sierxing-datadir-asked';
+  let asked = false;
+  try { asked = localStorage.getItem(KEY) === '1'; } catch (e) {}
+  if (asked) return;
+  let st;
+  try { st = await api('/api/data-location'); } catch (e) { return; }
+  if (st.custom) { markAsked(); return; }                       // 已经搬过了，不问
+  if (st.bytes > 200 * 1024 * 1024) { markAsked(); return; }  // 已经攒起来了，搬家不值当（去设置里搬）
+  markAsked();
+  const win = st.platform === 'win32';
+  setTimeout(() => {
+    if (document.getElementById('storeDlg')) return;
+    const ask = confirm(
+      '一句话确认：思而行的数据（目标、信息源、作答记录、备份）存在哪？\n\n'
+      + '现在存在：\n' + st.dir + '\n\n'
+      + (win
+        ? '程序装在哪个盘，数据就跟着在哪个盘。如果装在 C 盘，建议改成 D 盘或移动硬盘 ——\n'
+          + '信息源图片和备份最容易涨到几个 G。\n\n现在改位置？'
+        : '一般不用改，程序目录下的 data/ 就够。\n\n要去设置里改吗？')
+    );
+    if (!ask) return;
+    go('#/settings');
+    setTimeout(() => {
+      const tab = document.querySelector('.setTab[data-tab="set-store"]');
+      if (tab) tab.click();
+    }, 400);
+  }, 2200);
+}
+function markAsked() { try { localStorage.setItem('sierxing-datadir-asked', '1'); } catch (e) {} }
+
+/** 真正执行迁移 / 切指针，成功后问要不要立刻重启 */
+async function doStoreApply(payload, doneMsg) {
+  let r;
+  try { r = await api('/api/data-location/apply', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); }
+  catch (e) { toast(e.message); return null; }
+  if (r.keptAt) toast('没搬成功：' + r.error + '（原数据没动，' + r.keptAt + ' 里是搬了一半的，可以自己看看）');
+  else toast(doneMsg + ' ✓');
+  try { _storeState = await api('/api/data-location'); } catch (e) {}
+  storeSectionLoad();
+  if (r.restartRequired) {
+    const go = confirm(doneMsg + '\n\n需要重启一次才会真正生效 —— 现在重启吗？');
+    if (go) {
+      try {
+        await api('/api/data-location/restart', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        toast('正在重启…');
+      } catch (e) { toast('自动重启失败，手动重开一次就好：' + e.message); }
+    }
+  }
+  return r;
+}
+
 /* ============ 首次使用引导（含界面演示动画 + 可直接配置） ============ */
 const GUIDE_STEPS = [
   {
@@ -6574,6 +6852,7 @@ async function renderSettings() {
     ['set-service', '🖥 服务与启动'],
     ['set-update', '⬆ 版本与更新'],
     ['set-data', '💾 数据备份'],
+    ['set-store', '📁 数据存储路径'],
     ['set-help', '📖 帮助'],
     ['set-about', 'ℹ 关于']
   ];
@@ -6634,7 +6913,11 @@ async function renderSettings() {
         <a class="btn" href="/api/export/json">导出全部 JSON</a>
         <label class="btn">导入 JSON<input type="file" accept=".json" id="importJson" hidden></label>
       </div>
-      <p class="hint" style="margin-top:10px;">每次改动都会自动备份到 data/backups/（保留最近 30 份）。导入会覆盖现有全部数据（导入前会自动备份）。</p>
+      <p class="hint" style="margin-top:10px;">每次改动都会自动备份到数据目录下的 backups/（保留最近 30 份）。导入会覆盖现有全部数据（导入前会自动备份）。</p>
+    </div>
+    <div class="sec" id="set-store">
+      <div class="secTitle">数据存储路径 <span class="secSub">默认在程序目录下；C 盘吃紧就搬到 D 盘 / 移动硬盘</span></div>
+      <div id="storeBox"><p class="muted" style="padding:6px 0;">正在读取…</p></div>
     </div>
     <div class="sec" id="set-help">
       <div class="secTitle">帮助</div>
@@ -7284,6 +7567,8 @@ async function renderSettings() {
     state.settingsTab = cur;
     markTab(cur);
     tabIds.forEach(id => { const el = document.getElementById(id); if (el) el.hidden = (id !== cur); });
+    /* 「数据存储路径」要扫盘统计大小，切到它的时候才去读，别拖慢设置页打开 */
+    if (cur === 'set-store' && !_storeState) storeSectionLoad();
   };
   if (tabsBox) {
     if (window.__setSpy) { try { window.__setSpy.disconnect(); } catch (e) {} window.__setSpy = null; }
@@ -7699,6 +7984,10 @@ function pluginGoButtonsBind() {
   if (!guideDone()) {
     setTimeout(() => { if (!document.getElementById('guideMask')) showGuide(0); }, 500);
   }
+  /* 首次运行时问一句「数据存哪」。
+     Windows 上程序默认装在 C 盘，目标信息源、作答记录、备份都会堆进系统盘 ——
+     趁数据还只有几 MB 的时候问一句，比攒到几个 G 再搬家省事。 */
+  try { maybeAskDataDir(); } catch (e) {}
 })().catch(err => {
   console.error('启动失败：', err);
   try {

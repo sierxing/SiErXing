@@ -330,6 +330,104 @@ body:has(.cmpPage) .wrap{max-width:1460px;}
 .adjStage b{margin-right:8px;}
 .adjStage .muted{font-weight:400;}
 
+/* ============ 设置 · 数据存储路径 ============ */
+.storeDlg{width:640px; max-width:96vw;}
+/* 顶部：图标 + 标题 + 一句话说清后果 */
+.stHd{display:flex; align-items:flex-start; gap:12px; padding:18px 20px 14px; border-bottom:1px solid var(--border);}
+.stHdIc{
+  width:38px; height:38px; border-radius:11px; flex:none; display:flex; align-items:center; justify-content:center;
+  font-size:19px; background:var(--accent-soft); border:1px solid var(--accent-border);
+}
+.stHdTx{flex:1; min-width:0;}
+.stHdTx h3{margin:0 0 3px; font-size:15.5px; font-weight:800; letter-spacing:-.2px;}
+.stHdTx p{font-size:12.5px; color:var(--muted); line-height:1.75; margin:0;}
+.stHdTx b{color:var(--text);}
+.stBody{padding:16px 20px; max-height:calc(100vh - 320px); overflow:auto;}
+/* 从 → 到 */
+.stMove{border:1.5px solid var(--border); border-radius:13px; overflow:hidden;}
+.stFrom,.stTo{padding:11px 13px; display:flex; flex-direction:column; gap:5px;}
+.stFrom{background:var(--bg);}
+.stTo{background:var(--card);}
+.stMk{
+  font-size:10px; font-weight:800; color:var(--muted); letter-spacing:1px;
+}
+.stP{
+  font-family:var(--mono,ui-monospace,Consolas,monospace); font-size:12.2px; font-weight:600;
+  word-break:break-all; line-height:1.6;
+}
+.stM{font-size:11.5px; color:var(--muted);}
+.stArrow{
+  text-align:center; padding:2px 0; background:var(--bg); color:var(--accent);
+  font-size:13px; border-top:1px dashed var(--border); border-bottom:1px dashed var(--border);
+}
+.stPickRow{display:flex; align-items:center; gap:9px; flex-wrap:wrap; margin-top:3px;}
+.stPickRow .hint{align-self:center;}
+/* 体检结果 */
+.stCheck{
+  margin-top:11px; border-radius:11px; padding:9px 13px; font-size:12.5px; line-height:1.7;
+  background:var(--soft); border:1px solid var(--border); min-height:38px;
+  display:flex; align-items:center; gap:9px; flex-wrap:wrap;
+}
+.stCheckIdle{color:var(--muted);}
+.stCheckOk{color:var(--ok); font-weight:700;}
+.stCheckBad{color:var(--danger); font-weight:700;}
+.stCheckTip{color:var(--muted);}
+/* 两种模式：做成两张可点的卡 */
+.stModes{display:grid; grid-template-columns:1fr 1fr; gap:9px; margin-top:12px;}
+@media (max-width:560px){ .stModes{grid-template-columns:1fr;} }
+.stMode{
+  display:flex; align-items:flex-start; gap:9px; padding:11px 13px; cursor:pointer;
+  border:1.5px solid var(--border); border-radius:12px; background:var(--card); transition:.14s;
+}
+.stMode:hover{border-color:var(--accent-border); background:var(--accent-soft);}
+.stMode input{margin:3px 0 0; flex:none;}
+.stMode b{display:block; font-size:12.8px; line-height:1.6;}
+.stMode span{display:block; font-size:11.5px; color:var(--muted); line-height:1.6; margin-top:1px;}
+.stMode:has(input:checked){border-color:var(--accent); background:var(--accent-soft); box-shadow:0 0 0 3px var(--accent-soft);}
+/* 四步说明折叠 */
+.stSteps{
+  margin-top:12px; border:1px solid var(--border); border-radius:11px; background:var(--bg);
+  padding:9px 13px; font-size:12.3px; line-height:1.8;
+}
+.stSteps summary{cursor:pointer; color:var(--muted); font-size:12px; font-weight:600;}
+.stSteps summary:hover{color:var(--accent);}
+.stSteps ol{margin:8px 0 4px; padding-left:20px;}
+.stSteps li{margin:3px 0;}
+.stSteps p{margin:6px 0 0; color:var(--muted); font-size:11.8px;}
+.stSteps b{color:var(--text);}
+.stSteps .mono{font-family:var(--mono,ui-monospace,Consolas,monospace); font-size:11.5px; background:var(--card); padding:0 4px; border-radius:4px;}
+/* 进度条 */
+.stProg{margin-top:13px; border:1.5px solid var(--accent-border); background:var(--accent-soft); border-radius:12px; padding:12px 14px;}
+.stProgHd{display:flex; align-items:center; gap:9px; font-size:12.8px; margin-bottom:9px;}
+.pfSpinDark{
+  width:13px; height:13px; border-radius:50%; flex:none;
+  border:2px solid var(--accent-border); border-top-color:var(--accent);
+  animation:pfSpin .7s linear infinite;
+}
+.stBar{height:7px; border-radius:4px; background:var(--card); overflow:hidden; border:1px solid var(--border);}
+.stBar i{display:block; height:100%; background:var(--accent); transition:width .3s ease-out; border-radius:3px;}
+.stProgF{font-size:11px; color:var(--muted); margin-top:6px; font-family:var(--mono,ui-monospace,Consolas,monospace); word-break:break-all;}
+.stProgOk{border:1.5px solid rgba(14,159,110,.45); background:rgba(14,159,110,.09); color:var(--text); border-radius:12px; padding:12px 14px; font-size:12.8px; line-height:1.8; word-break:break-all;}
+.stProgOk b{color:var(--ok);}
+.stProgBad{border:1.5px solid rgba(224,36,36,.45); background:rgba(224,36,36,.07); color:var(--text); border-radius:12px; padding:12px 14px; font-size:12.8px; line-height:1.8;}
+.stProgBad b{color:var(--danger);}
+.stFoot{
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  padding:13px 20px; border-top:1px solid var(--border); background:var(--bg);
+}
+
+.storeNow{
+  border:1.5px solid var(--border); border-radius:12px; background:var(--soft);
+  padding:12px 14px;
+}
+.storePath{
+  font-size:13px; font-weight:600; font-family:var(--mono,ui-monospace,Consolas,monospace);
+  word-break:break-all; line-height:1.7; margin-bottom:8px;
+}
+.storeMeta{display:flex; align-items:center; gap:7px; flex-wrap:wrap;}
+.storeModes{display:flex; flex-direction:column; gap:7px; margin:4px 0 2px;}
+.storeModes label{display:flex; align-items:center; gap:7px; font-size:13px; cursor:pointer;}
+
 /* 收藏栏（教程页 / 路线图页共用）：钉选功能键常驻第二行 */
 .tutFavBar{display:flex; align-items:center; gap:8px; flex-wrap:wrap;
   background:var(--soft); border:1px solid var(--border); border-radius:10px;
