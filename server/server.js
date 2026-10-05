@@ -175,9 +175,13 @@ ai.init({ getSetting: (k, d) => getSetting(k, d), setSetting: (k, v) => setSetti
 function currentModel() { return getSetting('model', '') || ai.config().model || ''; }
 const DEFAULT_VISION_MODEL = 'opencode-go/deepseek-v4-flash-vision-exp';   // opencode 用户的默认视觉模型（与实习速成一致）
 function currentVisionModel() {
-  /* 优先级：用户在设置页选的识图模型 > 识图专用连接的第一个模型 >
-     对话连接自带的视觉模型 > 旧单值。识图连接是用户单加的（自带地址密钥），
-     不用再跟对话连接绑在一起。 */
+  /* 优先级：独立识图配置（自带地址密钥，最明确）> 用户选的识图引用 >
+     识图专用连接的第一个模型 > 对话连接自带的视觉模型 > 旧单值。
+     状态行直接显示最终用哪个，用户不再猜。 */
+  try {
+    const v = ai.standaloneVision();
+    if (v) return v.models[0];
+  } catch (e) {}
   const ref = getSetting('vision_model', '');
   if (ref) return ref;
   try {
@@ -4517,6 +4521,9 @@ function extractEbookPrefFromAnswers(answers) {
       },
       model: currentModel(),
       vision_model: getSetting('vision_model', ''),
+      /* 独立识图配置回显（密钥只回有没有，不给明文） */
+      vis_base_url: getSetting('vis_base_url', ''),
+      vis_has_key: !!getSetting('vis_api_key', ''),
       ai_provider: getSetting('ai_provider', 'openai'),
       ai_base_url: getSetting('ai_base_url', ''),
       ai_api_key: getSetting('ai_api_key', '') ? '••••••••' : '',
@@ -4542,6 +4549,10 @@ function extractEbookPrefFromAnswers(answers) {
     if (body.ai_timeout_ms != null) set('ai_timeout_ms', body.ai_timeout_ms);
     if (body.ai_api_key != null && String(body.ai_api_key).trim() && !/^•+$/.test(String(body.ai_api_key).trim())) set('ai_api_key', body.ai_api_key);
     if (body.ai_api_key === '') setSetting('ai_api_key', '');
+    /* 独立识图配置（与对话连接分开）：地址留空 = 不启用，密钥留空 = 不修改 */
+    if (body.vis_base_url != null) set('vis_base_url', body.vis_base_url);
+    if (body.vis_api_key != null && String(body.vis_api_key).trim() && !/^•+$/.test(String(body.vis_api_key).trim())) set('vis_api_key', body.vis_api_key);
+    if (body.vis_api_key === '') setSetting('vis_api_key', '');
     return sendJSON(res, 200, { ok: true, settings: { model: currentModel(), ai_provider: getSetting('ai_provider', 'openai'), ai_base_url: getSetting('ai_base_url', ''), ai_vision_model: getSetting('ai_vision_model', ''), ai_timeout_ms: getSetting('ai_timeout_ms', '300000') } });
   }
 

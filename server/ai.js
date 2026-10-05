@@ -225,7 +225,9 @@ function cfg(modelRef) {
     // 裸模型名：在启用连接里找第一条支持它的。找不到就退回第一条对话连接，
     // 让请求照常发出去、由接口报「模型不存在」—— 比在这里抛个含糊错好排查。
     model = String(modelRef).trim();
-    conn = enabled.find(c => c.models.includes(model) || c.defaultModel === model) || enabledChat[0] || null;
+    conn = enabled.find(c => c.models.includes(model) || c.defaultModel === model)
+      || standaloneVisionFor(model)
+      || enabledChat[0] || null;
   } else {
     conn = enabledChat[0] || null;
     model = conn ? connModel(conn) : '';
@@ -271,6 +273,27 @@ function cfg(modelRef) {
   };
 }
 
+/** 独立识图配置是否命中这个模型名：命中就返回合成连接（自带地址密钥） */
+function standaloneVisionFor(model) {
+  const v = standaloneVision();
+  if (v && v.models.includes(model)) return v;
+  return null;
+}
+/** 独立识图配置（设置页"识图模型"专区，用户自己填地址/密钥/模型名）。
+ *  有的服务商没有视觉模型，跟对话连接绑在一起讲不清楚，干脆单列。
+ *  只在 vis_base_url 填了时生效；不填则走原来的链路，老用户不受影响。 */
+function standaloneVision() {
+  const base = (ctx.getSetting('vis_base_url', '') || '').toString().trim();
+  const model = (ctx.getSetting('vision_model', '') || '').toString().trim();
+  if (!base || !model) return null;
+  return normalizeConn({
+    id: 'vision-standalone', name: '识图模型', kind: 'api', purpose: 'vision',
+    provider: 'openai', providerId: '',
+    baseUrl: base,
+    apiKey: (ctx.getSetting('vis_api_key', '') || '').toString(),
+    models: [model], defaultModel: model, visionModel: ''
+  });
+}
 /** 对话栏的模型下拉：把所有启用连接里勾选的模型摊平成一张列表。
  *  id = '连接id::模型名'，label 带连接名，两条连接里同名模型也不会混。 */
 function modelPool() {
@@ -545,15 +568,17 @@ async function fetchModelsFor(target) {
       visionModel: (saved && saved.visionModel) || ''
     });
   } else if (target.baseUrl) {
-    /* 未保存的草稿：用调用方给的地址/密钥，但模型勾选仍取已保存的那条（如果有） */
+    /* 未保存的草稿：用调用方给的地址/密钥，但模型勾选仍取已保存的那条（如果有）。
+       useVisKey：识图专区密钥框空着时，用已存的 vis_api_key（不然每次取列表都得重填）。 */
     const p = providerId ? providerById(providerId) : null;
+    const key = target.apiKey || (target.useVisKey ? ctx.getSetting('vis_api_key', '') : '') || (saved && saved.apiKey) || '';
     c = normalizeConn({
       id: (saved && saved.id) || 'draft',
       name: (saved && saved.name) || (p ? p.name : '草稿'),
       provider,
       providerId,
       baseUrl: target.baseUrl,
-      apiKey: target.apiKey || (saved && saved.apiKey) || '',
+      apiKey: key,
       models: (saved && saved.models) || [],
       defaultModel: (saved && saved.defaultModel) || '',
       visionModel: (saved && saved.visionModel) || (p ? p.vision : '')
@@ -884,6 +909,7 @@ const ai = {
   },
   modelPool,
   modelPoolVision,
+  standaloneVision,
   modelsFor: fetchModelsFor,
 
   /** 统一入口：返回纯文本。opts.model 可为 '连接id::模型名' */

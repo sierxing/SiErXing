@@ -259,12 +259,16 @@ function bootWithWait() {
   })();
 }
 ping(isMe => {
+  /* SX_WAIT=1 是「立即重启」拉起的新实例：旧实例还占着端口，必须等它退出。
+     这个判断必须放最前面 —— 以前放在"已在运行"后面，新实例一 ping 通
+     就以为撞了别的实例而直接退出，旧实例再一退就谁都不在了。
+     用户报的"更新后页面断开、必须手动重开"就是这个。 */
+  if (process.env.SX_WAIT === '1') return bootWithWait();
   if (isMe) {
     say('思而行已经在运行了，直接打开：' + URL_);
     openBrowser();
     return;
   }
-  if (process.env.SX_WAIT === '1') return bootWithWait();
   boot();
 });
 `;
@@ -282,13 +286,16 @@ function writeRelease(payloadBuf, ver, total) {
     /* 用 AtomGit 的 contents 接口取：免鉴权、返回 base64，机器好读 */
     url: 'https://atomgit.com/api/v5/repos/' + REPO_PATH + '/contents/' + file + '?ref=main',
     manifestUrl: 'https://atomgit.com/api/v5/repos/' + REPO_PATH + '/contents/release/latest.json?ref=main',
+    /* 需要换整个 exe 才修好的版本（如启动器 bug），前端据此提示去发布页下载 */
+    releasesUrl: 'https://atomgit.com/' + REPO_PATH + '/releases',
     sha256: crypto.createHash('sha256').update(payloadBuf).digest('hex'),
     size: payloadBuf.length,
     unpackedSize: total,
     publishedAt: new Date().toISOString(),
     notes: NOTES || '见 CHANGELOG / 提交记录',
-    /* 提示：程序文件变了才需要重下 exe；否则用户下次启动会自动跟进这个载荷 */
-    exeRequired: false,
+    /* 启动器本身修了（如重启交接 bug）→ 载荷换不了 exe，必须换整个文件。
+       用 --exe-required 显式标记，前端据此提示用户去发布页下载。 */
+    exeRequired: hasFlag('exe-required'),
   };
   fs.writeFileSync(path.join(RELEDIR, 'latest.json'), JSON.stringify(manifest, null, 2) + '\n');
   return manifest;

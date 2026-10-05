@@ -300,6 +300,8 @@ module.exports = function createUpdate({ appDir, port = 3213, log = () => {} }) 
       state.latestShort = state.latest;
       state.latestSubject = String(man.notes || '').slice(0, 200);
       state.latestDate = String(man.publishedAt || '');
+      state.exeRequired = man.exeRequired === true;
+      state.releasesUrl = String(man.releasesUrl || '');
       /* 语义化比较：只有远端真的更新才提示。
          反过来「本地比清单还新」（自己编译过、或清单回滚了）也绝不能提示降级。 */
       state.behind = cmpVer(state.latest, state.localVersion) > 0 ? 1 : 0;

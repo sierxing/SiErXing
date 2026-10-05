@@ -5858,6 +5858,7 @@ function renderUpdateBanner() {
     <span class="updIcon">🚀</span>
     <div class="updText">
       <b>发现新版本 ${updIsPayload() ? 'v' + esc(u.latestShort || '') : ''}</b>
+      ${u.exeRequired ? '<span class="chip warn">需换整个 exe（启动器有修复）</span>' : ''}
       <span>${esc(updWhereText())} · ${esc(u.latestSubject || '')}</span>
     </div>
     <button class="btn tiny" id="updDetails">更新内容</button>
@@ -5865,7 +5866,9 @@ function renderUpdateBanner() {
     <button class="btn tiny" id="updLater">稍后</button>
     <button class="updClose" id="updSkip" title="跳过此版本（不再提示）">×</button>
     <div class="updList" id="updList" hidden>
-      ${(u.commits || []).map(c => `<div class="updItem"><code>${esc(c.hash)}</code><span>${esc(c.subject)}</span><i>${esc(fmtUpdTime(c.date))}</i></div>`).join('') || '<div class="muted">（没有更多详情）</div>'}
+      ${updIsPayload()
+        ? `<div class="updItem"><span>${esc(u.latestSubject || '（暂无说明）')}</span></div>${u.releasesUrl ? `<div class="updItem"><a href="${esc(u.releasesUrl)}" target="_blank" rel="noopener">去发布页查看完整更新记录 →</a></div>` : ''}`
+        : ((u.commits || []).map(c => `<div class="updItem"><code>${esc(c.hash)}</code><span>${esc(c.subject)}</span><i>${esc(fmtUpdTime(c.date))}</i></div>`).join('') || '<div class="muted">（没有更多详情）</div>')}
       <div class="updNote">更新只会替换程序文件，你的数据（目标 / 组件设置 / 密钥）都在本地，不会丢。</div>
     </div>`;
   const list = el.querySelector('#updList');
@@ -5909,6 +5912,13 @@ async function waitServerBack(maxMs = 40000) {
 }
 async function applyUpdate() {
   const u = state.update || {};
+  /* exeRequired：新功能在载荷里照样能更，但旧启动器交接重启必失败。
+     直接告诉用户两种走法，别让他对着断开的页面发呆。 */
+  if (u.exeRequired) {
+    const go = confirm('新版本 v' + (u.latestShort || '') + ' 包含启动器修复，需要换整个 exe 文件。\n\n点"确定"：先下载新版 exe（发布页），再手动替换运行。\n点"取消"：只更新程序文件（新功能照样有），但更新后要手动关掉重开。');
+    if (go && u.releasesUrl) { try { window.open(u.releasesUrl, '_blank', 'noopener'); } catch (e) {} return; }
+    if (go) return;
+  }
   if (!confirm('更新到最新版本（' + (u.latestShort || '') + '）？\n更新完会自动重启应用，页面会自动刷新。\n你的数据都在本地，不会丢失。')) return;
   const b = document.getElementById('updBanner');
   if (b) b.remove();
@@ -5953,6 +5963,7 @@ async function updateSectionHTML() {
       : (has
         ? (isPay
           ? '<b style="color:var(--accent)">有新版本 v' + esc(u.latestShort || '') + '</b> · 只下载程序文件 ' + (updSizeText() || '') + '，不会重下整个 exe · ' + esc(u.latestSubject || '')
+            + (u.exeRequired ? '<br><span style="color:var(--warn)">本次含启动器修复：功能照常更新，但之后请去发布页下载完整 exe 替换一次，否则自动重启仍需手动重开。</span>' + (u.releasesUrl ? ` <a href="${esc(u.releasesUrl)}" target="_blank" rel="noopener">去发布页 →</a>` : '') : '')
           : '<b style="color:var(--accent)">有 ' + u.behind + ' 个新提交</b> · 最新：' + esc(u.latestSubject || ''))
         : (isPay ? '已是最新版本' : '已是最新版本' + (u.dirty ? ' · 本地有 ' + u.dirty + ' 个改动文件（更新时会自动暂存）' : ''))));
   return `<div class="sec" id="set-update">
@@ -6345,18 +6356,6 @@ function shortHost(base) {
 function connFolded(id) {
   try { return !!(JSON.parse(localStorage.getItem('sierxing-conn-fold') || '{}')[id]); } catch (e) { return false; }
 }
-/** 全局识图选择器选项：只列识图专用连接的模型（id 为 连接::模型）。
- *  没有识图连接时给一句明的，不给空下拉让人猜。 */
-function visPickOptions(conns, cur) {
-  const opts = [];
-  for (const c of (conns || [])) {
-    if (c.purpose !== 'vision' || c.enabled === false) continue;
-    for (const m of (c.models || [])) opts.push({ id: c.id + '::' + m, label: (c.name || '识图') + ' · ' + m });
-  }
-  if (cur && !opts.some(o => o.id === cur)) opts.push({ id: cur, label: cur + '（连接已删或停用）' });
-  return `<option value="">自动（没有识图连接时跟对话走）</option>` + opts.map(o =>
-    `<option value="${esc(o.id)}"${o.id === cur ? ' selected' : ''}>${esc(o.label)}</option>`).join('');
-}
 /** Agent 选择按钮（以后加 codex 之类只改服务端 AGENTS，前端自动多出来） */
 function agentButtonsHTML(sel) {
   const list = AI_AGENTS;
@@ -6510,14 +6509,6 @@ function aiStatusBoxHTML(st) {
   ${st.model ? ' · 默认模型 ' + esc(st.model) : ''}
   ${st.hint ? '<br><span style="color:var(--warn)">' + esc(st.hint) + '</span>' : ''}`;
 }
-/* 全局识图选择器刷新：连接增删/改模型后选项跟着变，尽量保留当前选择 */
-function refreshVisPick(conns) {
-  const sel = document.getElementById('visPick');
-  if (!sel) return;
-  const cur = sel.value;
-  sel.innerHTML = visPickOptions(conns || [], cur);
-  if (cur && Array.from(sel.options).some(o => o.value === cur)) sel.value = cur;
-}
 async function renderSettings() {
   app.innerHTML = '<p class="muted">加载中…</p>';
   const [s, st] = await Promise.all([
@@ -6579,11 +6570,10 @@ async function renderSettings() {
   state._setTabs = SET_TABS.map(([id]) => id);
   html += `<div class="sec aiSec" id="set-ai">
       <div class="secTitle">AI 接入方式 <span class="secSub">选服务商 → 填密钥 → 点模型按钮加入</span></div>
-      <p class="hint" style="margin:-4px 0 10px;">对话时在 💬 AI 助手的模型下拉里选具体用哪个 —— 可以是不同服务商、不同模型。识图专用连接不进对话下拉，只供识图用。</p>
+      <p class="hint" style="margin:-4px 0 10px;">对话时在 💬 AI 助手的模型下拉里选具体用哪个 —— 可以是不同服务商、不同模型。识图走下面单独配置，不用再加连接。</p>
       <div class="toolbarRow" style="margin-bottom:12px;">
         <button class="btn primary" id="addApi">＋ API 连接</button>
         <button class="btn" id="addAgent">＋ Agent 连接</button>
-        <button class="btn" id="addVision">＋ 识图专用</button>
       </div>
       <div id="connList">${conns.map(c => connCardHTML(c, provs, aiCtx)).join('')}</div>
       <div id="connEmpty" ${conns.length ? 'hidden' : ''} class="emptyBox" style="margin:10px 0;">
@@ -6591,9 +6581,27 @@ async function renderSettings() {
         <div class="ebTitle">还没有 AI 连接</div>
         <div class="ebText">点上面「添加连接」，选一个服务商（地址自动填好）→ 填密钥 → 点模型按钮加入要用的模型。</div>
       </div>
-      <div class="field visPickField"><label>识图用哪个模型</label>
-        <span class="inWrap"><i>👁️</i><select id="visPick">${visPickOptions(conns, s.vision_model || '')}</select></span>
-        <div class="hint" style="margin-top:4px;">从上面的「识图专用」连接里选（自带地址密钥）。不选则自动跟对话走。</div>
+      <div class="field visPickField"><label>识图模型（单独配置）</label>
+        <div class="ccRow" style="margin-bottom:9px;">
+          <label class="ccWide">API 地址
+            <span class="inWrap"><i>🔗</i><input class="mono" id="visBase" value="${esc(s.vis_base_url || '')}" placeholder="如 https://dashscope.aliyuncs.com/compatible-mode/v1" spellcheck="false"></span>
+          </label>
+          <label class="ccWide">API 密钥
+            <span class="inWrap"><i>🔑</i><input type="password" id="visKey" value="" placeholder="${s.vis_has_key ? '已保存（留空则不修改）' : 'sk-…'}" spellcheck="false"><button type="button" class="peekBtn" id="visPeek" title="显示 / 隐藏">👁</button></span>
+          </label>
+        </div>
+        <div class="ccRow">
+          <label class="ccWide">模型名
+            <span class="inWrap"><i>⌨️</i><input id="visModel" list="visModelList" value="${esc(s.vision_model || '')}" placeholder="如 qwen-vl-max，点右侧获取可列出该地址支持的" spellcheck="false"></span>
+            <datalist id="visModelList">${(state.visModels || []).map(m => `<option value="${esc(m)}"></option>`).join('')}</datalist>
+          </label>
+        </div>
+        <div class="toolbarRow" style="margin-top:9px;">
+          <button class="btn tiny cbtn" id="visFetch">🔄 获取可用模型</button>
+          <button class="btn tiny cbtn" id="visTest">测试连通</button>
+          <button class="btn tiny cbtn primary" id="visSave">保存识图配置</button>
+        </div>
+        <div class="hint" id="visMsg" style="margin-top:6px;">${st.visionModel ? '当前识图用：<b>' + esc(st.visionModel) + '</b>' : '还没配识图模型（不配则自动跟对话走）'}</div>
       </div>
       <div class="toolbarRow" style="margin-top:12px;">
         <button class="btn primary" id="saveSettings">保存全部连接</button>
@@ -6774,7 +6782,7 @@ async function renderSettings() {
     try { state.aiStatus = await api('/api/ai/status').catch(() => null); } catch (e) {}
     const box = document.getElementById('aiStatusBox');
     if (box && state.aiStatus) box.innerHTML = aiStatusBoxHTML(state.aiStatus);
-    refreshVisPick(savedConns || readConns());
+
   };
   const save = async () => {
     const r = await api('/api/ai/connections', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connections: readConns() }) });
@@ -6937,16 +6945,15 @@ async function renderSettings() {
             return;
     }
 
-    /* 三种添加：API 连接 / Agent 连接 / 识图专用（自带地址密钥，不进对话下拉） */
+    /* 三种添加：API 连接 / Agent 连接（识图走下面专区，不再新开卡） */
     const addApi = e.target.closest('#addApi');
     const addAgent = e.target.closest('#addAgent');
-    const addVision = e.target.closest('#addVision');
-    if (addApi || addAgent || addVision) {
+    if (addApi || addAgent) {
       const list = document.getElementById('connList');
       const id = 'c' + Date.now().toString(36);
       const draft = addAgent
         ? { id, name: '', kind: 'agent', purpose: 'chat', provider: 'opencode', providerId: 'opencode', baseUrl: '', apiKey: '', agent: 'NoTools', timeoutMs: 0, models: [], enabled: true, hasKey: false }
-        : { id, name: '', kind: 'api', purpose: addVision ? 'vision' : 'chat', provider: 'openai', providerId: '', baseUrl: '', apiKey: '', agent: '', timeoutMs: 0, models: [], enabled: true, hasKey: false };
+        : { id, name: '', kind: 'api', purpose: 'chat', provider: 'openai', providerId: '', baseUrl: '', apiKey: '', agent: '', timeoutMs: 0, models: [], enabled: true, hasKey: false };
       list.insertAdjacentHTML('beforeend', connCardHTML(draft, provs, aiCtx));
       document.getElementById('connEmpty').hidden = true;
       const el = list.lastElementChild;
@@ -7045,7 +7052,7 @@ async function renderSettings() {
       if (!confirm('删除「' + n + '」？对话栏里选它的模型也会一并失效。')) return;
       card.remove();
       if (!app.querySelector('.connCard')) document.getElementById('connEmpty').hidden = false;
-      refreshVisPick(readConns());
+
       return;
     }
     /* 只保存这一条：整表提交（服务端本来就是整体覆盖），但只清这张卡的未保存标记 */
@@ -7111,13 +7118,72 @@ async function renderSettings() {
     markDirty(card);
   };
   app.addEventListener('input', window.__aiSetDirtyH);
-  /* 全局识图选择：一切换就存，不用等保存全部 */
-  const visPick = document.getElementById('visPick');
-  if (visPick) visPick.addEventListener('change', async () => {
+  /* 独立识图配置：地址/密钥/模型名 + 取列表 + 单独测试。存到 vis_* 设置，
+     与对话连接完全分开（有的服务商没有视觉模型，绑在一起讲不清楚）。 */
+  const visMsg = document.getElementById('visMsg');
+  const visSay = t => { if (visMsg) visMsg.innerHTML = t; };
+  const visVals = () => ({
+    base: (document.getElementById('visBase') || {}).value || '',
+    key: (document.getElementById('visKey') || {}).value || '',
+    model: ((document.getElementById('visModel') || {}).value || '').trim()
+  });
+  const visPeek = document.getElementById('visPeek');
+  if (visPeek) visPeek.addEventListener('click', () => {
+    const inp = document.getElementById('visKey');
+    if (inp) { inp.type = inp.type === 'password' ? 'text' : 'password'; visPeek.textContent = inp.type === 'password' ? '👁' : '🙈'; }
+  });
+  const visSaveBtn = document.getElementById('visSave');
+  if (visSaveBtn) visSaveBtn.addEventListener('click', async () => {
+    const v = visVals();
+    if (!v.base.trim() || !v.model) { toast('先填地址和模型名'); return; }
     try {
-      await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ vision_model: visPick.value }) });
-      toast(visPick.value ? '识图将使用：' + visPick.selectedOptions[0].textContent : '识图已切回自动');
+      const body = { vis_base_url: v.base.trim(), vision_model: v.model };
+      if (v.key.trim()) body.vis_api_key = v.key.trim();
+      await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const k = document.getElementById('visKey');
+      if (k) { k.value = ''; k.placeholder = '已保存（留空则不修改）'; }
+      state.aiStatus = await api('/api/ai/status').catch(() => null);
+      visSay('已保存。当前识图用：<b>' + esc((state.aiStatus && state.aiStatus.visionModel) || v.model) + '</b>');
+      toast('识图配置已保存');
     } catch (e) { toast('保存失败：' + e.message); }
+  });
+  const visFetch = document.getElementById('visFetch');
+  if (visFetch) visFetch.addEventListener('click', async () => {
+    const v = visVals();
+    if (!v.base.trim()) { toast('先填 API 地址'); return; }
+    visFetch.disabled = true; visFetch.textContent = '获取中…';
+    visSay('正在向该地址请求模型列表…');
+    try {
+      /* 密钥框空着也行：已存过的用存过的（useVisKey），新填的直接用 */
+      const r = await api('/api/ai/models-for', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ baseUrl: v.base.trim(), apiKey: v.key.trim(), useVisKey: !v.key.trim() }) });
+      const list = r.models || [];
+      if (!list.length) {
+        visSay('<span style="color:var(--warn)">没取到：' + esc(r.error || '接口未返回') + '</span>');
+      } else {
+        state.visModels = list;
+        const dl = document.getElementById('visModelList');
+        if (dl) dl.innerHTML = list.map(m => `<option value="${esc(m)}"></option>`).join('');
+        visSay((r.error ? '<span style="color:var(--warn)">' + esc(r.error) + '</span><br>' : '') + '取到 <b>' + list.length + '</b> 个，点模型名输入框的小箭头选，选完点「保存识图配置」。');
+        toast('取到 ' + list.length + ' 个模型');
+      }
+    } catch (e) { visSay('<span style="color:var(--warn)">取列表失败：' + esc(e.message) + '</span>'); }
+    finally { visFetch.disabled = false; visFetch.textContent = '🔄 获取可用模型'; }
+  });
+  const visTest = document.getElementById('visTest');
+  if (visTest) visTest.addEventListener('click', async () => {
+    const v = visVals();
+    /* 没保存也能测：先存（只存填了的项），再按模型名打 */
+    try {
+      const body = {};
+      if (v.base.trim()) body.vis_base_url = v.base.trim();
+      if (v.key.trim()) body.vis_api_key = v.key.trim();
+      if (v.model) body.vision_model = v.model;
+      if (Object.keys(body).length) await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (!v.model) { toast('先填模型名'); return; }
+      visSay('正在用识图配置请求一次…');
+      const r = await api('/api/ai/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: v.model }) });
+      visSay(r.ok ? `✅ <b>连通正常</b> · ${esc(r.model)}<br>回复：${esc(r.sample || '')}` : `❌ <b>连不通</b>：${esc(r.message || '')}`);
+    } catch (e) { visSay('❌ 测试失败：' + esc(e.message)); }
   });
   document.getElementById('saveSettings').addEventListener('click', async () => {
     /* 保存全部：原地刷新，不整页重绘（重绘会丢滚动位置；各卡输入都在 DOM 里没丢） */
