@@ -1,13 +1,13 @@
 {
-  "version": "1.5.5",
-  "buildVer": "68c6dc086c23",
-  "payload": "release/payload-1.5.5.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.5.5.sxar?ref=main",
+  "version": "1.5.6",
+  "buildVer": "2fe44b6c4f30",
+  "payload": "release/payload-1.5.6.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.5.6.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
-  "sha256": "75d12b55a6177e52d0785263582d05a8140265b8661ac078b68805cdcd71e47f",
-  "size": 501398,
-  "unpackedSize": 1912707,
-  "publishedAt": "2026-10-05T04:00:03.919Z",
-  "notes": "每个已选模型可单独测试连通（小片上点测，结果标在片上）；整卡测试逐个测并列明细",
+  "sha256": "582384f849dd97455ceb7b38dfb095fd7530d32ea71b21e5d09fdef2ef88818e",
+  "size": 502984,
+  "unpackedSize": 1918757,
+  "publishedAt": "2026-10-05T04:13:41.912Z",
+  "notes": "获取模型后自动批量测连通（绿红标记+悬停原因+可停止）；卡片按钮统一样式；说明文字收进悬停问号",
   "exeRequired": false
 }

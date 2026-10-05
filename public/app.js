@@ -6301,12 +6301,30 @@ function providerButtonsHTML(sel) {
       <span class="pbName">${esc(p.name)}</span>
     </button>`).join('')}</div>`;
 }
-/** 一排模型按钮。on = 已选。 */
-function modelButtonsHTML(models, sel) {
-  const s = sel || [];
-  if (!models.length) return '<div class="hint" style="padding:8px 2px;">还没有可选模型 —— 先填好密钥，再点「获取可用模型」。</div>';
-  return `<div class="mBtnGrid">${models.map(m => `
-    <button type="button" class="mBtn${s.indexOf(m) >= 0 ? ' on' : ''}" data-mbtn="${esc(m)}">${esc(m)}</button>`).join('')}</div>`;
+/** 一排模型按钮。on = 已选；ok/bad = 批量测试过的结果（悬停看详情）；testing = 正在测。 */
+function modelButtonsHTML(models, sel, tested) {
+  const s = sel || [], t = tested || {};
+  if (!models.length) return '<div class="hint" style="padding:8px 2px;">还没有可选模型 —— 先填好密钥，再点「获取并测试」。</div>';
+  return `<div class="mBtnGrid">${models.map(m => {
+    const st = t[m];
+    const msg = t[m + '_msg'];
+    return `<button type="button" class="mBtn${s.indexOf(m) >= 0 ? ' on' : ''}${st === true ? ' ok' : ''}${st === false ? ' bad' : ''}" data-mbtn="${esc(m)}"${msg ? ` title="${esc(msg)}"` : ''}>${esc(m)}</button>`;
+  }).join('')}</div>`;
+}
+/** 某张卡的批量测试结果：aiCtx.tested[connId] = {模型名: true/false, 模型名_msg: '原因'} */
+function testedOf(card) {
+  const cid = card.getAttribute('data-conn');
+  return (window.__aiTested && window.__aiTested[cid]) || {};
+}
+/** 给单个模型按钮上测试态（不整区重绘，进度实时可见） */
+function paintBtn(card, m, state, msg) {
+  const b = Array.from(card.querySelectorAll('[data-mbtn]')).find(x => x.getAttribute('data-mbtn') === m);
+  if (!b) return;
+  b.classList.remove('ok', 'bad', 'testing');
+  if (state === true) b.classList.add('ok');
+  else if (state === false) b.classList.add('bad');
+  else if (state === 'testing') b.classList.add('testing');
+  if (msg != null) b.title = msg;
 }
 /** 已选模型区：从池子里把选中的挑出来排成小片，可单独移除 */
 function chosenChipsHTML(models, sel) {
@@ -6371,18 +6389,17 @@ function connCardHTML(c, provs, ctx) {
       <div class="spacer"></div>
       <span class="dirtyDot" data-role="dirty" hidden>●未保存</span>
       <label class="sw" title="启用 / 停用这条连接"><input type="checkbox" data-f="enabled" ${c.enabled !== false ? 'checked' : ''}><i></i></label>
-      <button class="btn tiny" data-act="saveone">保存</button>
+      <button class="btn tiny cbtn primary" data-act="saveone">保存</button>
       <button class="btn tiny danger" data-act="del">删除</button>
     </div>
     <div class="ccBody" data-role="body"${connFolded(c.id) ? ' hidden' : ''}>
     <div class="ccBlock">
-      <div class="ccLabel">① 选择服务商<span class="hint">点一下自动填好官方地址</span></div>
+      <div class="ccLabel"><span class="step">1</span>选择服务商 <span class="q" data-tip="点一下自动填好该服务商的官方地址和视觉模型">?</span></div>
       ${providerButtonsHTML(pid)}
     </div>
 
     <div class="ccBlock">
-      <div class="ccLabel">② 填地址与密钥
-        <span class="hint">${(p && p.noKey) ? '本地服务，密钥可留空' : '填完才能取到模型列表'}</span></div>
+      <div class="ccLabel"><span class="step">2</span>填地址与密钥 <span class="q" data-tip="${(p && p.noKey) ? '本地服务，密钥可留空' : '填完密钥才能取到模型列表'}">?</span></div>
       <div class="ccRow">
         <label class="ccWide">API 地址
           <span class="inWrap"><i>🔗</i><input class="mono" data-f="baseUrl" value="${esc(c.baseUrl || '')}" placeholder="选服务商会自动填好" spellcheck="false"></span>
@@ -6395,16 +6412,17 @@ function connCardHTML(c, provs, ctx) {
     </div>
 
     <div class="ccBlock">
-      <div class="ccLabel">③ 选择模型
-        <span class="hint">${avail.length ? '点模型按钮加入，可多选；列表里没有就下面手填' : '点右侧按钮获取该地址实际支持的模型，列表里没有就下面手填'}</span>
+      <div class="ccLabel"><span class="step">3</span>选择模型
+        <span class="q" data-tip="${avail.length ? '绿=刚测过能通，红=不通（悬停看原因）；列表里没有就下面手填' : '点右侧获取：先取该地址支持的模型，再逐个测能否联通；列表里没有就下面手填'}">?</span>
         <div class="spacer"></div>
-        <button class="btn tiny" data-act="test">测试连通</button>
-        <button class="btn tiny" data-act="models">🔄 获取可用模型</button>
+        <button class="btn tiny cbtn" data-act="test">✓ 测试连通</button>
+        <button class="btn tiny cbtn primary" data-act="models">🔄 获取并测试</button>
       </div>
-      <div data-role="availBox">${modelButtonsHTML(avail, sel)}</div>
+      <div data-role="availBox">${modelButtonsHTML(avail, sel, ((window.__aiTested || {})[c.id] || {}))}</div>
       <div class="mAddRow">
-        <span class="inWrap"><i>⌨️</i><input data-role="mCustom" placeholder="手动输入模型名，回车加入（官方出新模型、名单没更新时用这个）" spellcheck="false"></span>
-        <button type="button" class="btn tiny" data-act="madd">添加</button>
+        <span class="inWrap"><i>⌨️</i><input data-role="mCustom" placeholder="手动输入模型名，回车加入" spellcheck="false"></span>
+        <span class="q" data-tip="官方出新模型、名单没更新时用这个">?</span>
+        <button type="button" class="btn tiny cbtn" data-act="madd">添加</button>
       </div>
       <div class="ccLabel" style="margin-top:10px;"><span data-role="selCount">已选模型（${sel.length}）</span><span class="hint">保存后才会出现在对话栏</span></div>
       <div data-role="chosenBox">${chosenChipsHTML(avail, sel)}</div>
@@ -6439,30 +6457,31 @@ function agentCardHTML(c, ctx) {
       <div class="spacer"></div>
       <span class="dirtyDot" data-role="dirty" hidden>●未保存</span>
       <label class="sw" title="启用 / 停用这条连接"><input type="checkbox" data-f="enabled" ${c.enabled !== false ? 'checked' : ''}><i></i></label>
-      <button class="btn tiny" data-act="saveone">保存</button>
+      <button class="btn tiny cbtn primary" data-act="saveone">保存</button>
       <button class="btn tiny danger" data-act="del">删除</button>
     </div>
     <div class="ccBody" data-role="body"${connFolded(c.id) ? ' hidden' : ''}>
     <div class="ccBlock">
-      <div class="ccLabel">① 选择 Agent<span class="hint">${esc(a.hint || '')}</span></div>
+      <div class="ccLabel"><span class="step">1</span>选择 Agent <span class="q" data-tip="${esc(a.hint || '以后支持 codex 等其它 Agent 时，这里会自动多出来')}">?</span></div>
       ${agentButtonsHTML(aid)}
     </div>
     <div class="ccBlock">
-      <div class="ccLabel">② 检测本机并获取模型
-        <span class="hint">先确认本机装了，再列出它能用的模型</span>
+      <div class="ccLabel"><span class="step">2</span>检测本机并获取模型
+        <span class="q" data-tip="先确认本机装了该 Agent，再列出它能用的模型；获取后自动逐个测试，绿=通">?</span>
         <div class="spacer"></div>
-        <button class="btn tiny" data-act="test">测试连通</button>
-        <button class="btn tiny" data-act="models">🔄 检测并获取模型</button>
+        <button class="btn tiny cbtn" data-act="test">✓ 测试连通</button>
+        <button class="btn tiny cbtn primary" data-act="models">🔄 检测并测试</button>
       </div>
       <div class="ocProbe" data-role="ocprobe">${probe
         ? (probe.installed
           ? `<span class="ok">✓ 已检测到 ${esc(a.name)}${esc(probe.version ? ' ' + probe.version : '')}</span>`
           : `<span class="bad">✗ ${esc(probe.hint || '未检测到')}</span>`)
         : '<span class="muted">点上面的按钮检测本机并列出可用模型</span>'}</div>
-      <div data-role="availBox">${modelButtonsHTML(avail, sel)}</div>
+      <div data-role="availBox">${modelButtonsHTML(avail, sel, ((window.__aiTested || {})[c.id] || {}))}</div>
       <div class="mAddRow">
         <span class="inWrap"><i>⌨️</i><input data-role="mCustom" placeholder="手动输入模型名，回车加入" spellcheck="false"></span>
-        <button type="button" class="btn tiny" data-act="madd">添加</button>
+        <span class="q" data-tip="官方出新模型、名单没更新时用这个">?</span>
+        <button type="button" class="btn tiny cbtn" data-act="madd">添加</button>
       </div>
       <div class="ccLabel" style="margin-top:10px;"><span data-role="selCount">已选模型（${sel.length}）</span><span class="hint">保存后才会出现在对话栏</span></div>
       <div data-role="chosenBox">${chosenChipsHTML(avail, sel)}</div>
@@ -6642,18 +6661,54 @@ async function renderSettings() {
         if (cid) aiCtx.avail[cid] = list;
         const sel = cardSel(card);
         const box = card.querySelector('[data-role="availBox"]');
-        if (box) box.innerHTML = modelButtonsHTML(list, sel);
+        if (box) box.innerHTML = modelButtonsHTML(list, sel, testedOf(card));
         const chosen = card.querySelector('[data-role="chosenBox"]');
         if (chosen) chosen.innerHTML = chosenChipsHTML(list, sel);
                 const lbl = card.querySelector('[data-role="selCount"]');
         if (lbl) lbl.textContent = '已选模型（' + sel.length + '）';
         if (hint) hint.innerHTML = (r.error ? '<span style="color:var(--warn)">' + esc(r.error) + '</span><br>' : '')
-          + '取到 <b>' + list.length + '</b> 个模型，点按钮加入，点「保存设置」后才会出现在对话栏。';
-        toast('取到 ' + list.length + ' 个模型');
+          + '取到 <b>' + list.length + '</b> 个模型，下面自动逐个测试连通。';
+        toast('取到 ' + list.length + ' 个模型，开始批量测试');
+        await batchTest(card, list);
       }
     } catch (err) {
       if (hint) hint.innerHTML = '<span style="color:var(--warn)">取列表失败：' + esc(err.message) + '</span>';
-    } finally { if (btn) { btn.disabled = false; btn.textContent = '🔄 获取可用模型'; } }
+    } finally { if (btn) { btn.disabled = false; btn.textContent = '🔄 获取并测试'; } }
+  };
+  /* 批量测试：把刚取到的模型逐个打一遍最短请求，绿=通、红=不通（悬停看原因）。
+     跑的时候按钮变成「停止」，点一下跑完当前就停。结果记全局，重绘不丢。 */
+  const batchTest = async (card, list) => {
+    const cid = card.getAttribute('data-conn');
+    window.__aiTesting = window.__aiTesting || {};
+    if (window.__aiTesting[cid]) return;
+    const run = window.__aiTesting[cid] = { stop: false };
+    window.__aiTested = window.__aiTested || {};
+    const T = window.__aiTested[cid] = window.__aiTested[cid] || {};
+    const btn = card.querySelector('[data-act="models"]');
+    const hint = card.querySelector('[data-role="msghint"]');
+    const oldT = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = false; btn.textContent = '■ 停止'; }
+    let okN = 0;
+    try {
+      for (let i = 0; i < list.length; i++) {
+        if (run.stop) break;
+        const m = list[i];
+        if (hint) hint.innerHTML = `正在测 ${i + 1}/${list.length}：${esc(m)}…（点「停止」可中断）`;
+        paintBtn(card, m, 'testing');
+        try {
+          const r = await api('/api/ai/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connId: cid, modelName: m }) });
+          T[m] = !!r.ok;
+          T[m + '_msg'] = r.ok ? ('联通正常' + (r.sample ? ' · 回复：' + r.sample : '')) : (r.message || '连不通');
+          if (r.ok) okN++;
+        } catch (err) { T[m] = false; T[m + '_msg'] = err.message; }
+        paintBtn(card, m, T[m], T[m + '_msg']);
+      }
+      if (hint) hint.innerHTML = (run.stop ? '已停止。' : '') + `测完：通 <b>${okN}</b>/${list.length}（绿=通，红=不通，悬停看原因；选中的才会进对话栏）`;
+      toast(run.stop ? '已停止批量测试' : ('批量测试完：通 ' + okN + '/' + list.length));
+    } finally {
+      delete window.__aiTesting[cid];
+      if (btn) { btn.disabled = false; btn.textContent = oldT; }
+    }
   };
   /* 取某张卡的「当前选中模型」：优先看已选区的小片，没有小片时从可选按钮的 on 状态反推。
      可选按钮才是真状态源，已选小片只是它的镜像 —— 这样「取列表后重新渲染」不会丢选择。 */
@@ -6670,7 +6725,7 @@ async function renderSettings() {
     sel = sel || cardSel(card);
     const box = card.querySelector('[data-role="availBox"]');
     const chosen = card.querySelector('[data-role="chosenBox"]');
-    if (box) box.innerHTML = modelButtonsHTML(avail, sel);
+    if (box) box.innerHTML = modelButtonsHTML(avail, sel, testedOf(card));
     if (chosen) chosen.innerHTML = chosenChipsHTML(avail, sel);
     const lbl = card.querySelector('[data-role="selCount"]');
     if (lbl) lbl.textContent = '已选模型（' + sel.length + '）';
@@ -6793,7 +6848,7 @@ async function renderSettings() {
       const keep = cardSel(card).filter(m => !p || (p.models || []).indexOf(m) >= 0);
       if (p && (p.models || []).length) {
         const box = card.querySelector('[data-role="availBox"]');
-        if (box) box.innerHTML = modelButtonsHTML(p.models, keep);
+        if (box) box.innerHTML = modelButtonsHTML(p.models, keep, testedOf(card));
         const chosen = card.querySelector('[data-role="chosenBox"]');
         if (chosen) chosen.innerHTML = chosenChipsHTML(p.models, keep);
                 const lbl = card.querySelector('[data-role="selCount"]');
@@ -6874,7 +6929,7 @@ async function renderSettings() {
       const sel = cardSel(card).filter(x => x !== m);
       const avail = Array.from(card.querySelectorAll('[data-mbtn]')).map(x => x.getAttribute('data-mbtn'));
       const box = card.querySelector('[data-role="availBox"]');
-      if (box) box.innerHTML = modelButtonsHTML(avail.length ? avail : (provs.find(x => x.id === card.getAttribute('data-prov')) || {}).models || [], sel);
+      if (box) box.innerHTML = modelButtonsHTML(avail.length ? avail : (provs.find(x => x.id === card.getAttribute('data-prov')) || {}).models || [], sel, testedOf(card));
       const chosen = card.querySelector('[data-role="chosenBox"]');
       if (chosen) chosen.innerHTML = chosenChipsHTML(avail, sel);
       const lbl = card.querySelector('[data-role="selCount"]');
@@ -6921,7 +6976,7 @@ async function renderSettings() {
       const sel = cardSel(card);
       if (sel.indexOf(m) < 0) sel.push(m);
       const box = card.querySelector('[data-role="availBox"]');
-      if (box) box.innerHTML = modelButtonsHTML(avail, sel);
+      if (box) box.innerHTML = modelButtonsHTML(avail, sel, testedOf(card));
       const chosen = card.querySelector('[data-role="chosenBox"]');
       if (chosen) chosen.innerHTML = chosenChipsHTML(avail, sel);
       const lbl = card.querySelector('[data-role="selCount"]');
@@ -7010,6 +7065,9 @@ async function renderSettings() {
       return;
     }
     if (act === 'models') {
+      /* 跑批量测试时这个按钮就是「停止」 */
+      const cidM = card.getAttribute('data-conn');
+      if (window.__aiTesting && window.__aiTesting[cidM]) { window.__aiTesting[cidM].stop = true; return; }
       const pid = card.getAttribute('data-prov');
       if (pid === 'opencode') {
         const probe = card.querySelector('[data-role="ocprobe"]');
@@ -7025,7 +7083,7 @@ async function renderSettings() {
           else toast(st.hint || '未检测到 opencode');
         } catch (err) {
           if (probe) probe.innerHTML = '<span class="bad">检测失败：' + esc(err.message) + '</span>';
-        } finally { btn.disabled = false; btn.textContent = '🔄 检测并获取模型'; }
+        } finally { btn.disabled = false; if (!window.__aiTesting || !window.__aiTesting[card.getAttribute('data-conn')]) btn.textContent = '🔄 检测并测试'; }
         return;
       }
       await fetchModelsInto(card, pid);

@@ -1106,14 +1106,44 @@ body.aiOpen .nodePanel{right:calc(var(--ai-w, 440px) + 26px);}
 .provBtn{display:flex; align-items:center; gap:7px; padding:7px 9px; border:1px solid var(--border); border-radius:10px; background:var(--bg); cursor:pointer; font-size:12.5px; color:var(--text); text-align:left;}
 .provBtn:hover{border-color:var(--accent);}
 .provBtn.on{border-color:var(--accent); background:var(--accent-soft); box-shadow:inset 0 0 0 1px var(--accent);}
+.provBtn.on .pbName::after{content:" ✓"; font-weight:700;}
 .pbBrand{display:inline-flex; align-items:center; justify-content:center; width:26px; height:26px; flex:none; border-radius:7px; background:var(--accent-soft); color:var(--accent); font-size:11px; font-weight:800; letter-spacing:.5px;}
 .provBtn.on .pbBrand{background:var(--accent); color:#fff;}
 .pbName{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
-/* 模型按钮：多选，选中态与服务商按钮一致 */
-.mBtnGrid{display:flex; flex-wrap:wrap; gap:7px; max-height:190px; overflow:auto; background:var(--bg); border:1px solid var(--border); border-radius:9px; padding:8px;}
-.mBtn{padding:5px 11px; border:1px solid var(--border); border-radius:20px; background:var(--soft); cursor:pointer; font-size:12px; font-family:var(--mono,ui-monospace,Consolas,monospace); color:var(--text); word-break:break-all;}
-.mBtn:hover{border-color:var(--accent);}
-.mBtn.on{border-color:var(--accent); background:var(--accent-soft); color:var(--accent); font-weight:600;}
+/* 步骤徽标 + 说明气泡（卡片里的解释文字统一收进 ⓘ，悬停才显示，平时不占地方） */
+.step{display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px; flex:none;
+  border-radius:50%; background:var(--accent); color:#fff; font-size:11px; font-weight:800;}
+.q{display:inline-flex; align-items:center; justify-content:center; width:15px; height:15px; flex:none;
+  border:1px solid var(--border); border-radius:50%; color:var(--muted);
+  font-size:10px; font-weight:700; font-style:normal; cursor:help; position:relative;}
+.q:hover{border-color:var(--accent); color:var(--accent);}
+.q:hover::after{content:attr(data-tip); position:absolute; bottom:calc(100% + 7px); left:50%; transform:translateX(-50%);
+  width:230px; white-space:normal; background:var(--card); color:var(--text); border:1px solid var(--border);
+  border-radius:9px; padding:8px 10px; font-size:12px; font-weight:400; line-height:1.6; z-index:60;
+  box-shadow:0 6px 20px rgba(0,0,0,.18); text-align:left;}
+/* 卡片里的功能按钮：统一样式，不再是光秃秃的文字 */
+.connCard .btn.tiny{border-radius:14px; padding:3px 12px; font-size:11.5px; transition:.12s;}
+.connCard .btn.tiny:hover{filter:brightness(1.06);}
+.connCard .btn.tiny.cbtn{border:1px solid var(--border); background:var(--bg);}
+.connCard .btn.tiny.cbtn:hover{border-color:var(--accent);}
+.connCard .btn.tiny.cbtn.primary{background:var(--accent); border-color:var(--accent); color:#fff; font-weight:700;}
+.connCard .btn.tiny.danger{color:var(--danger);}
+.connCard .btn.tiny:disabled{opacity:.55; cursor:wait;}
+/* 模型按钮：选中/通/不通/测中四态 */
+.mBtn{padding:5px 11px; border:1px solid var(--border); border-radius:16px; background:var(--soft);
+  cursor:pointer; font-size:12px; font-family:var(--mono,ui-monospace,Consolas,monospace); color:var(--text);
+  word-break:break-all; transition:.12s;}
+.mBtn:hover{border-color:var(--accent); transform:translateY(-1px);}
+.mBtn.on{border-color:var(--accent); background:var(--accent); color:#fff; font-weight:700;}
+.mBtn.on::after{content:" ✓";}
+.mBtn.ok{border-color:var(--ok); color:var(--ok);}
+.mBtn.ok::after{content:" ✓";}
+.mBtn.bad{border-color:var(--danger); color:var(--danger); opacity:.8;}
+.mBtn.bad::after{content:" !";}
+.mBtn.testing{animation:mpulse 1s infinite;}
+@keyframes mpulse{50%{opacity:.45;}}
+.mBtnGrid{display:flex; flex-wrap:wrap; gap:7px; max-height:190px; overflow:auto; background:var(--bg);
+  border:1px solid var(--border); border-radius:9px; padding:8px;}
 /* 手动输入模型名：名单没更新、官方出新模型时用户自己加 */
 .mAddRow{display:flex; gap:7px; margin-top:8px;}
 .mAddRow .inWrap{flex:1;}
