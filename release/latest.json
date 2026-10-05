@@ -1,14 +1,14 @@
 {
-  "version": "1.10.0",
-  "buildVer": "833bf247459b",
-  "payload": "release/payload-1.10.0.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.0.sxar?ref=main",
+  "version": "1.10.1",
+  "buildVer": "28228898106b",
+  "payload": "release/payload-1.10.1.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.1.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "d1785fced3f86ed7c71e2d39625d639c7599933ac523e1f3d2cc4f6df901d4b6",
-  "size": 577370,
-  "unpackedSize": 2159426,
-  "publishedAt": "2026-10-05T14:52:31.839Z",
-  "notes": "节点可挂载本地文件夹当资料源：本节点及子节点可见、其它分支看不到，规划拆分与教程自动读它",
+  "sha256": "1cc1b2bbbdd574e0ce269b7c09bb7452e1d5f94a06d18b2f73fde6586d62e2cc",
+  "size": 577488,
+  "unpackedSize": 2159666,
+  "publishedAt": "2026-10-05T14:57:46.450Z",
+  "notes": "修文件夹对话框一点输入框就关掉节点面板：全局关闭器豁免tutDialog",
   "exeRequired": false
 }

@@ -213,7 +213,9 @@ document.addEventListener('click', e => {
 document.addEventListener('click', e => {
   const panel = document.getElementById('nodePanel');
   if (!panel) return;
-  if (e.target.closest('.nodePanel') || e.target.closest('.ctxMenu') || e.target.closest('[data-detail]') || e.target.closest('[data-cycle]') || e.target.closest('#nextOpen')) return;
+  /* .tutDialog 豁免：教程对话框和文件夹关联对话框都挂在 body 下（不在 .nodePanel 里），
+     不豁免的话点对话框里的输入框会把底下的节点面板一起关掉 */
+  if (e.target.closest('.nodePanel') || e.target.closest('.tutDialog') || e.target.closest('.ctxMenu') || e.target.closest('[data-detail]') || e.target.closest('[data-cycle]') || e.target.closest('#nextOpen')) return;
   panel.remove();
   const npMask = document.getElementById('nodePanelMask'); if (npMask) npMask.remove();
 });
