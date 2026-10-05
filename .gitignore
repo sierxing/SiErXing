@@ -19,3 +19,6 @@ Thumbs.db
 dist/
 
 public/_boot.html
+
+# 本地部署清单（只放本机，不提交）
+服务器下单清单.md
