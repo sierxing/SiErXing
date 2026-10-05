@@ -730,6 +730,24 @@ function parseOpencodeJsonl(line) {
   try { return JSON.parse(line); } catch (e) { return null; }
 }
 
+/** 从 opencode 的 JSONL 输出里找 {type:'error'}，翻译成人话。
+ *  这类错误走 stdout，不走 stderr —— 以前只看 stderr，所以报出来就是一句
+ *  没头没尾的"未返回内容"，用户根本不知道是没登录（本次实测就是 403 未登录）。 */
+function opencodeStdioError(out) {
+  for (const line of String(out || '').split('\n')) {
+    const d = parseOpencodeJsonl(line.trim());
+    if (!d || d.type !== 'error' || !d.error) continue;
+    const et = String(d.error.type || '');
+    const msg = String(d.error.message || '');
+    if (/agent/i.test(msg) && /(not found|不存在|unknown|无效|invalid)/i.test(msg)) return '';  // 代理问题走重试，不在这里报
+    if (/auth|login|401|403|FreeTier|forbidden|unauthorized/i.test(et + ' ' + msg)) {
+      return 'opencode 本机登录不可用：' + (msg || et) + '（先在终端执行 `opencode auth login` 登录或配好 Key，再点测试）';
+    }
+    if (msg) return 'opencode 报错：' + msg.slice(0, 200);
+  }
+  return '';
+}
+
 function opencodeArgs(c, opts, withAgent) {
   const { model, images } = opts;
   const args = ['run', '--format', 'json', '--auto'];
@@ -751,10 +769,10 @@ async function opencodeText(c, opts) {
     return await new Promise((resolve, reject) => {
       let child;
       try { child = spawnOpencode(args, prompt); } catch (e) { return reject(new Error(opencodeMissingError())); }
-      let buf = '', text = '';
+      let buf = '', text = '', outAll = '';
       const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) {} reject(new Error('opencode 调用超时')); }, timeoutMs || 300000);
       child.stdout.on('data', chunk => {
-        buf += chunk;
+        buf += chunk; outAll += chunk;
         let nl;
         while ((nl = buf.indexOf('\n')) >= 0) {
           const line = buf.slice(0, nl).trim();
@@ -774,10 +792,12 @@ async function opencodeText(c, opts) {
       child.on('close', () => {
         clearTimeout(timer);
         if (text) return resolve(text);
-        if (isAgentError(errBuf)) {
+        if (isAgentError(errBuf + outAll)) {
           log('[ai] 代理不可用，改用 opencode 默认代理重试');
           return opencodeText(c, { ...opts, onEvent: null }).then(resolve).catch(reject);
         }
+        const se = opencodeStdioError(outAll);
+        if (se) return reject(new Error(se));
         reject(new Error('opencode 未返回内容（可在终端执行 opencode run "你好" 检查是否可用）' + (errBuf ? '：' + errBuf.slice(0, 160) : '')));
       });
     });
@@ -799,6 +819,8 @@ async function opencodeText(c, opts) {
     }
   }
   if (!text) {
+    const se = opencodeStdioError(r.out);
+    if (se) throw new Error(se);
     const errText = String(r.err || '').split('\n').filter(Boolean).slice(-2).join(' ');
     throw new Error('opencode 未返回内容' + (errText ? '：' + errText.slice(0, 200) : ''));
   }
