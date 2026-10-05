@@ -1,13 +1,13 @@
 {
-  "version": "1.2.0",
-  "buildVer": "bda0fb9a6781",
-  "payload": "release/payload-1.2.0.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.2.0.sxar?ref=main",
+  "version": "1.3.0",
+  "buildVer": "c3bf61886229",
+  "payload": "release/payload-1.3.0.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.3.0.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
-  "sha256": "27b76c80ff572d6e96b5660d0307a39d8a4f71caa6892fe4dddcfda2d9f3d345",
-  "size": 480932,
-  "unpackedSize": 1842265,
-  "publishedAt": "2026-10-05T02:02:37.805Z",
-  "notes": "AI 接入方式改为「连接 + 模型池」：选服务商自动填官方 Base URL，按连接获取模型列表并多选；同一个 Base URL 可挂多个模型，可添加多个 Base URL；对话栏按 连接::模型 选择用哪个模型；opencode 也能列出模型。密钥不再明文下发前端。",
+  "sha256": "e14ac6ca1a2b888fa170248983940f4f463384d6735cb35e916ef9a99004c3a9",
+  "size": 485440,
+  "unpackedSize": 1859073,
+  "publishedAt": "2026-10-05T02:24:56.798Z",
+  "notes": "AI 设置改成服务商按钮+模型按钮：选服务商自动填官方地址，模型点按钮多选；opencode 先检测本机再列出可用模型；同步用户名刷新不再丢失（令牌本来就在，只是密码框按惯例不回显明文）",
   "exeRequired": false
 }

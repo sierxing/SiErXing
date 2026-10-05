@@ -4317,6 +4317,13 @@ function extractEbookPrefFromAnswers(answers) {
   if (p === '/api/ai/providers' && method === 'GET') {
     return sendJSON(res, 200, { providers: ai.PROVIDERS });
   }
+  /* opencode 装没装。设置页在列出 opencode 模型前先探这个，
+     免得用户点了才发现没装、界面上却没有「检测」这一步。 */
+  if (p === '/api/ai/opencode-status' && method === 'GET') {
+    const st = ai.opencodeStatus();
+    if (st.installed) ai.ensureOpencodeAgent();
+    return sendJSON(res, 200, st);
+  }
   if (p === '/api/ai/connections' && method === 'GET') {
     return sendJSON(res, 200, { connections: ai.connections() });
   }

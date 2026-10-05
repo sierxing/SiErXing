@@ -371,6 +371,9 @@ module.exports = function createSync(ctx) {
     const snap = cloned ? readLocalSnapshot() : null;
     return {
       enabled: enabled(), hasGit, repo: safeUrl(repoUrl()), branch: branch(),
+      /* 用户名要回给前端做回显：之前 status 里没有 user，前端用了个从没赋值的
+         state.settingsSyncUser，刷新后用户名输入框永远是空的 —— 用户以为「没保存」。 */
+      user: (getSetting('sync_user', '') || '').trim(),
       autoPush: autoPush(), autoPull: autoPull(), images: syncImages(), hasToken: !!token(),
       workDir: WORK_DIR, cloned, commit: remoteHead, workState: ahead,
       lastAt: getSetting('sync_last_at', ''), lastStatus: getSetting('sync_last_status', ''),

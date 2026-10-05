@@ -1013,7 +1013,8 @@ body.aiOpen .nodePanel{right:calc(var(--ai-w, 440px) + 26px);}
 .rfFormHead{display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600; margin-bottom:8px;}
 
 /* ===== AI 接入方式：连接卡片 ===== */
-/* 一条连接 = 一个服务商 + 一套地址/密钥 + 多个已勾选的模型 */
+/* 一条连接 = 一个服务商 + 一套地址/密钥 + 多个已选模型。
+   服务商与模型都用按钮排成网格：点了服务商自动填地址，点了模型按钮即加入。 */
 .connCard{border:1px solid var(--border); border-radius:12px; background:var(--soft); padding:11px 12px; margin-bottom:11px;}
 .ccHead{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:9px;}
 .ccHead .ccName{flex:1; min-width:150px; font-weight:600; background:var(--bg);}
@@ -1021,17 +1022,42 @@ body.aiOpen .nodePanel{right:calc(var(--ai-w, 440px) + 26px);}
 .ccRow{display:flex; gap:10px; flex-wrap:wrap; margin-bottom:9px;}
 .ccRow > label{display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); flex:1; min-width:170px;}
 .ccRow > label.ccWide{flex:2; min-width:260px;}
-.ccModels{border-top:1px dashed var(--border); padding-top:9px;}
-.ccModelsHead{display:flex; align-items:baseline; gap:9px; font-size:12.5px; font-weight:600; margin-bottom:6px; flex-wrap:wrap;}
-.ccModelsHead .hint{font-weight:400;}
-/* 模型多选：竖排网格，一眼能扫完 */
+.ccBlock{margin-bottom:11px;}
+.ccBlock:last-child{margin-bottom:0;}
+.ccLabel{display:flex; align-items:center; gap:8px; font-size:12.5px; font-weight:700; margin-bottom:7px; flex-wrap:wrap;}
+.ccLabel .hint{font-weight:400;}
+.ccLabel .spacer{flex:1;}
+.ccDoc{font-size:12px; color:var(--muted); margin:-3px 0 9px;}
+/* 服务商按钮：两字品牌缩写 + 中文名，选中描边高亮 */
+.provGrid{display:grid; grid-template-columns:repeat(auto-fill,minmax(108px,1fr)); gap:7px;}
+.provBtn{display:flex; align-items:center; gap:7px; padding:7px 9px; border:1px solid var(--border); border-radius:10px; background:var(--bg); cursor:pointer; font-size:12.5px; color:var(--text); text-align:left;}
+.provBtn:hover{border-color:var(--accent);}
+.provBtn.on{border-color:var(--accent); background:var(--accent-soft); box-shadow:inset 0 0 0 1px var(--accent);}
+.pbBrand{display:inline-flex; align-items:center; justify-content:center; width:26px; height:26px; flex:none; border-radius:7px; background:var(--accent-soft); color:var(--accent); font-size:11px; font-weight:800; letter-spacing:.5px;}
+.provBtn.on .pbBrand{background:var(--accent); color:#fff;}
+.pbName{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+/* 模型按钮：多选，选中态与服务商按钮一致 */
+.mBtnGrid{display:flex; flex-wrap:wrap; gap:7px; max-height:190px; overflow:auto; background:var(--bg); border:1px solid var(--border); border-radius:9px; padding:8px;}
+.mBtn{padding:5px 11px; border:1px solid var(--border); border-radius:20px; background:var(--soft); cursor:pointer; font-size:12px; font-family:var(--mono,ui-monospace,Consolas,monospace); color:var(--text); word-break:break-all;}
+.mBtn:hover{border-color:var(--accent);}
+.mBtn.on{border-color:var(--accent); background:var(--accent-soft); color:var(--accent); font-weight:600;}
+/* 已选模型小片：点 × 移除 */
+.mChips{display:flex; flex-wrap:wrap; gap:7px; min-height:28px;}
+.mChip{display:inline-flex; align-items:center; gap:6px; padding:4px 6px 4px 11px; border:1px solid var(--accent-border); background:var(--accent-soft); color:var(--accent); border-radius:20px; font-size:12px; font-family:var(--mono,ui-monospace,Consolas,monospace);}
+.mChip i{font-style:normal; cursor:pointer; border-radius:50%; width:16px; height:16px; line-height:15px; text-align:center; background:var(--bg); font-size:12px;}
+.mChip i:hover{background:var(--danger); color:#fff;}
+.ocProbe{font-size:12px; margin-bottom:7px;}
+.ocProbe .ok{color:var(--ok);} .ocProbe .bad{color:var(--danger);} .ocProbe .muted{color:var(--muted);}
+.ccHint{font-size:12px; color:var(--muted); margin-top:6px; line-height:1.7;}
+.ccHint:empty{display:none;}
+.ccAdv{margin-top:9px; font-size:12px; color:var(--muted);}
+.ccAdv summary{cursor:pointer;}
+/* 旧的 checkbox 列表样式保留（别处可能还用），新卡片已改用按钮 */
 .mPickList{display:flex; flex-direction:column; gap:3px; max-height:210px; overflow:auto; background:var(--bg); border:1px solid var(--border); border-radius:9px; padding:7px 9px;}
 .mPick{display:flex; align-items:center; gap:7px; font-size:12.5px; padding:2px 3px; border-radius:6px; cursor:pointer; word-break:break-all;}
 .mPick:hover{background:var(--soft);}
 .mPick input{flex:none; margin:0;}
 .mPick span{font-family:var(--mono,ui-monospace,Consolas,monospace);}
-.ccHint{font-size:12px; color:var(--muted); margin-top:6px; line-height:1.7;}
-.ccHint:empty{display:none;}
 .prTitle{color:var(--text); text-decoration:none; font-size:13px;}
 .prTitle:hover{color:var(--accent);}
 .prTitle b{color:var(--muted); font-weight:600; margin-right:3px;}

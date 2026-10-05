@@ -44,15 +44,23 @@ function log(...a) { try { console.log(...a); } catch (e) {} }
 /* 选服务商 → 自动填好 Base URL，用户不用手打；模型列表则在填好地址与密钥后
    向该地址的 /models 现取，取不到就退回这里的建议值。 */
 const PROVIDERS = [
-  { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com', models: ['deepseek-chat', 'deepseek-reasoner'], vision: '' },
-  { id: 'qwen', name: '通义千问', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen-max', 'qwen-plus', 'qwen-turbo'], vision: 'qwen-vl-max' },
-  { id: 'moonshot', name: 'Kimi', baseUrl: 'https://api.moonshot.cn/v1', models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'], vision: '' },
-  { id: 'zhipu', name: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4-plus', 'glm-4-flash', 'glm-4-air'], vision: 'glm-4v-plus' },
-  { id: 'siliconflow', name: '硅基流动', baseUrl: 'https://api.siliconflow.cn/v1', models: ['deepseek-ai/DeepSeek-V3', 'Qwen/Qwen2.5-72B-Instruct'], vision: '' },
-  { id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4o', 'gpt-4o-mini', 'o3-mini'], vision: 'gpt-4o' },
-  { id: 'openrouter', name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', models: ['anthropic/claude-3.5-sonnet', 'google/gemini-2.0-flash-001'], vision: '' },
-  { id: 'ollama', name: '本地 Ollama', baseUrl: 'http://localhost:11434/v1', models: ['qwen2.5:14b', 'llama3.1:8b'], vision: '', noKey: true },
-  { id: 'custom', name: '自定义（手填地址）', baseUrl: '', models: [], vision: '' }
+  { id: 'deepseek', name: 'DeepSeek', brand: 'DS', baseUrl: 'https://api.deepseek.com', models: ['deepseek-chat', 'deepseek-reasoner'], vision: '', docs: 'https://platform.deepseek.com/api_keys' },
+  { id: 'qwen', name: '通义千问', brand: 'QW', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen-max', 'qwen-plus', 'qwen-turbo', 'qwen3-max'], vision: 'qwen-vl-max', docs: 'https://bailian.console.aliyun.com/' },
+  { id: 'moonshot', name: 'Kimi', brand: 'KM', baseUrl: 'https://api.moonshot.cn/v1', models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k', 'kimi-k2-turbo-preview'], vision: '', docs: 'https://platform.moonshot.cn/console/api-keys' },
+  { id: 'zhipu', name: '智谱 GLM', brand: 'GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4-plus', 'glm-4-flash', 'glm-4-air', 'glm-4v-plus'], vision: 'glm-4v-plus', docs: 'https://open.bigmodel.cn/usercenter/apikeys' },
+  { id: 'siliconflow', name: '硅基流动', brand: 'SF', baseUrl: 'https://api.siliconflow.cn/v1', models: ['deepseek-ai/DeepSeek-V3', 'deepseek-ai/DeepSeek-R1', 'Qwen/Qwen2.5-72B-Instruct', 'THUDM/glm-4-9b-chat'], vision: '', docs: 'https://cloud.siliconflow.cn/account/ak' },
+  { id: 'openai', name: 'OpenAI', brand: 'OA', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'o3-mini'], vision: 'gpt-4o', docs: 'https://platform.openai.com/api-keys' },
+  { id: 'openrouter', name: 'OpenRouter', brand: 'OR', baseUrl: 'https://openrouter.ai/api/v1', models: ['anthropic/claude-sonnet-4', 'google/gemini-2.5-pro', 'deepseek/deepseek-chat'], vision: '', docs: 'https://openrouter.ai/keys' },
+  { id: 'baidu', name: '百度千帆', brand: 'BD', baseUrl: 'https://qianfan.baidubce.com/v2', models: ['ernie-4.5-turbo-128k', 'ernie-4.5-8k-preview', 'deepseek-v3'], vision: '', docs: 'https://console.bce.baidu.com/qianfan/ais/console/apikey' },
+  { id: 'volcengine', name: '火山方舟', brand: 'VE', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', models: ['doubao-pro-256k', 'doubao-lite-32k', 'deepseek-v3-250324'], vision: '', docs: 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey' },
+  { id: 'tencent', name: '腾讯混元', brand: 'HY', baseUrl: 'https://api.hunyuan.cloud.tencent.com/v1', models: ['hunyuan-turbos-latest', 'hunyuan-t1-latest'], vision: '', docs: 'https://cloud.tencent.com/document/product/1729' },
+  { id: 'ollama', name: '本地 Ollama', brand: 'OL', baseUrl: 'http://localhost:11434/v1', models: ['qwen2.5:14b', 'qwen3:8b', 'llama3.1:8b'], vision: '', noKey: true, docs: 'https://ollama.com' },
+  { id: 'lmstudio', name: 'LM Studio', brand: 'LM', baseUrl: 'http://localhost:1234/v1', models: [], vision: '', noKey: true, docs: 'https://lmstudio.ai' },
+  { id: 'custom', name: '其他 / 自填', brand: '···', baseUrl: '', models: [], vision: '', docs: '' },
+  /* opencode 也放进服务商列表：前端按服务商按钮统一渲染，
+     点它时先探本机装没装，探测通过才列出可用模型。
+     没有这一项的话 opencode 就没有「选模型」的地方 —— 那正是用户报的毛病。 */
+  { id: 'opencode', name: 'opencode CLI', brand: 'OC', baseUrl: '', models: [], vision: '', isOpencode: true, docs: 'https://opencode.ai/docs' }
 ];
 function providerById(id) { return PROVIDERS.find(p => p.id === id) || null; }
 
@@ -480,11 +488,20 @@ async function fetchModelsFor(target) {
   }
 
   if (c.provider === 'opencode') {
+    /* 先探装没装。没装就别白等一次 spawn 超时，直接把提示给出去。 */
+    const st = opencodeStatus();
+    if (!st.installed) return { models: [], error: st.hint };
     try {
       const r = await runOpencode(c, ['models'], 60000);
-      const models = String(r.out).split('\n').map(s => s.trim()).filter(Boolean);
+      /* `opencode models` 的输出是每行一个模型名，可能带 provider 前缀；
+         有的版本会打成表格/带对号，统一去掉前缀符号再过滤。 */
+      const models = String(r.out).split('\n')
+        .map(s => s.trim().replace(/^[✓✔•*-]\s*/, '').replace(/\s*\(.*\)$/, '').trim())
+        .filter(Boolean)
+        .filter(s => !/^(provider|model|models|available|available models)\b/i.test(s))
+        .filter(s => /[a-z0-9]/i.test(s));
       if (models.length) return { models, error: '' };
-      return { models: [], error: 'opencode 没有返回模型列表（先在终端跑 opencode 登录并配好账号）' };
+      return { models: [], error: 'opencode 返回了空列表：先在终端跑 `opencode models` 看看，或完成 `opencode auth login` 登录' };
     } catch (e) {
       return { models: [], error: e.message };
     }
@@ -567,6 +584,40 @@ function opencodeCommand() {
   else opencodeCmdCache = { file: target, prefix: [], resolved: target };
   return opencodeCmdCache;
 }
+/** opencode 装没装、装在哪。
+ *  设置页要先探这个再列模型 —— 少一层「检测 → 刷新按钮」的来回，
+ *  否则用户点了才发现没装，界面上却连「检测」的入口都没有。 */
+function opencodeStatus() {
+  const cmd = opencodeCommand();
+  const cands = [];
+  if (cmd.resolved) cands.push(cmd.resolved);
+  /* Linux/macOS 上 PATH 里的 opencode 没有 resolved，用 which 补一次 */
+  if (!cmd.resolved && process.platform !== 'win32') {
+    try {
+      const out = execFileSync('sh', ['-c', 'command -v opencode'], { encoding: 'utf8', timeout: 5000 });
+      const w = String(out).trim().split('\n')[0];
+      if (w) cands.push(w);
+    } catch (e) {}
+  }
+  let version = '';
+  try {
+    const r = execFileSync(cmd.file, cmd.prefix.concat(['--version']), {
+      encoding: 'utf8', timeout: 8000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore']
+    });
+    version = String(r).trim().split('\n')[0].slice(0, 40);
+  } catch (e) {}
+  const found = !!(cmd.resolved || cands.length) && !cmd.missing;
+  return {
+    installed: found,
+    resolved: cands[0] || '',
+    version,
+    /* 没装时给一句能照着做的提示，别只说「未安装」 */
+    hint: found ? '' : (process.platform === 'win32'
+      ? '未检测到 opencode。Windows 上请确认已安装，且在命令行里执行 `where opencode` 能找到（npm 装的一般在 %APPDATA%\\npm\\opencode.cmd）。'
+      : '未检测到 opencode。请先安装（npm i -g opencode），并确认终端里执行 `opencode --version` 有输出。')
+  };
+}
+
 /** 统一 spawn：提示词通过 stdin 传入（避免 Windows 命令行转义/长度限制问题） */
 function spawnOpencode(args, prompt) {
   ensureOpencodeAgent();
@@ -785,6 +836,8 @@ const ai = {
     return true;
   },
   newConnId,
+  /** opencode 是否可用（设置页在列出 opencode 模型前先探这个） */
+  opencodeStatus,
   /** 使用 opencode 时确保代理配置存在（供设置页调用） */
   ensureOpencodeAgent,
   /** 连接测试：发一句最短的请求 */
