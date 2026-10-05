@@ -2371,12 +2371,12 @@ function showTutorialDialog(nodeId) {
     <div class="tdBody">
       <p class="hint" style="margin:2px 0 10px;">教程以「真正掌握知识点」为目标：讲原理 → 分步实践（含自检与排错）→ 练习 → 掌握自测清单。生成约需 1-3 分钟。</p>
       <div class="field"><textarea id="tdNote" placeholder="补充要求（可选）：例如 我完全零基础请讲慢一点 / 多给可复制的代码 / 侧重面试常问点…"></textarea></div>
-      <div class="tdFolders muted" id="tdFolders">正在看本节点有没有挂文件夹…</div>
+      <div class="tdFolders muted" id="tdFolders">正在看本节点有没有挂文件夹（不勾则 AI 自动挑着读）…</div>
       <details class="tdCode" id="tdCodeBox">
         <summary>📂 结合项目源码讲解（可选，只读；data/.env/.git 等不会列出）</summary>
         <div class="tdCodeBody">
           <input id="tdCodeSearch" placeholder="🔍 筛选文件（敲文件名关键字，挂载的文件夹和本程序都筛）" autocomplete="off">
-          <div class="tdCodeHint muted">勾选后教程会对照真实代码讲（类名/调用链要对得上）。单文件最多 24KB，共最多 60KB。</div>
+          <div class="tdCodeHint muted">勾选后教程会对照真实代码讲（类名/调用链要对得上）。单文件最多 24KB，共最多 60KB。<b>不勾也行：生成时 AI 会自己看文件清单挑要读的。</b></div>
           <div id="tdFolderFiles"></div>
           <div class="tdCodeList" id="tdCodeList"><span class="muted">展开后加载…</span></div>
           <div class="tdCodeSel muted" id="tdCodeSel"></div>

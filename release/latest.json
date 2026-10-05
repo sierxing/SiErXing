@@ -1,14 +1,14 @@
 {
-  "version": "1.10.3",
-  "buildVer": "5004bd69ae61",
-  "payload": "release/payload-1.10.3.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.3.sxar?ref=main",
+  "version": "1.10.4",
+  "buildVer": "69a265dcc378",
+  "payload": "release/payload-1.10.4.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.4.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "62d42ed6220fce36e6d96c1aa1194ec64ceecd4058d28095e3d87c47c2793c30",
-  "size": 579714,
-  "unpackedSize": 2167205,
-  "publishedAt": "2026-10-05T15:41:11.831Z",
-  "notes": "教程对话框源码清单改列挂载文件夹文件并可勾选+对话框按钮钉底",
+  "sha256": "59c4d65f0b19ad8870302fc5dcb71bd894bc1e8cf125af37206eb5006c36f3a5",
+  "size": 582141,
+  "unpackedSize": 2174813,
+  "publishedAt": "2026-10-05T15:49:38.871Z",
+  "notes": "教程生成时AI自动挑要读的源码文件（不勾选也行）",
   "exeRequired": false
 }

@@ -209,7 +209,140 @@ function readStoredCodeFiles(stored) {
   return out;
 }
 
+/* ================= AI 自动挑文件 =================
+ * 用户不勾选时，教程生成前先让 AI 看一眼文件清单，自己挑最相关的读。
+ * 比写死的「README + 小文件」准：比如学 RAG 架构，AI 会去挑
+ * api/server.py、internal/engine 这类入口和核心实现，而不是子目录的 README。 */
+
+/** 把各文件夹的文件清单压成 AI 能看的文本。太大就按目录截（每目录留前 12 个）。 */
+function buildSelectionList(entries, maxEntries) {
+  const max = Math.max(50, Math.min(3000, Number(maxEntries) || 1200));
+  const lines = [];
+  const allow = [];
+  let total = 0, cut = false;
+  const realOf = p => { try { return fs.realpathSync(p); } catch (err) { return path.resolve(p); } };
+  for (const e of (entries || [])) {
+    if (!e || e.missing) continue;
+    let files = [];
+    try { files = listCodeFiles(e.path); } catch (err) { continue; }
+    if (!files.length) continue;
+    const root = realOf(e.path);
+    for (const f of files) allow.push({ name: e.name, root, path: f.path });
+    lines.push('【' + e.name + '】共 ' + files.length + ' 个可读文件：');
+    total++;
+    /* 按目录分组，每目录最多 12 个，超了只记数（保证 AI 看到结构全貌） */
+    const byDir = new Map();
+    for (const f of files) {
+      const d = f.path.includes('/') ? f.path.slice(0, f.path.lastIndexOf('/')) : '(根)';
+      if (!byDir.has(d)) byDir.set(d, []);
+      byDir.get(d).push(f);
+    }
+    for (const [d, fs2] of byDir) {
+      for (const f of fs2.slice(0, 12)) {
+        if (total >= max) { cut = true; break; }
+        lines.push('- ' + e.name + '/' + f.path);
+        total++;
+      }
+      if (cut) break;
+      if (fs2.length > 12) { lines.push('  （' + d + ' 下还有 ' + (fs2.length - 12) + ' 个，略）'); total++; }
+    }
+    if (cut) break;
+  }
+  if (cut) lines.push('（清单太长已截断，优先看上面列出的入口、README 和核心目录）');
+  return { text: lines.join('\n'), truncated: cut, allow };
+}
+
+/** 从 AI 回复里抠 JSON（本模块自带，不依赖 server.js 的同名函数） */
+function pickJSONObject(text) {
+  const s = String(text || '');
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== '{') continue;
+    let depth = 0, inStr = false, esc = false;
+    for (let j = i; j < s.length; j++) {
+      const c = s[j];
+      if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+      if (c === '"') inStr = true;
+      else if (c === '{') depth++;
+      else if (c === '}') { depth--; if (!depth) { try { return JSON.parse(s.slice(i, j + 1)); } catch (e) { break; } } }
+    }
+  }
+  return null;
+}
+
+/**
+ * 让 AI 从清单里挑文件。返回 [{root, path}]（已逐一对清单校验过，
+ * 编造的路径、..、超长的一律丢掉）。失败抛错，调用方回落到启发式。
+ */
+async function selectFilesWithAI(aiText, model, opts) {
+  const o = opts || {};
+  const listText = String(o.listText || '').trim();
+  if (!listText) throw new Error('没有文件清单');
+  const allow = o.allow || [];
+  const allowSet = new Set(allow.map(a => a.root + '\n' + a.path));
+  const prompt = [
+    '你是代码导航员。用户正在学【' + String(o.title || '').slice(0, 80) + '】',
+    o.detail ? '（' + String(o.detail).slice(0, 200) + '）' : '',
+    '下面是他挂载的源码文件夹的文件清单。请挑出讲解这个知识点**最值得读的最多 12 个文件**。',
+    '挑的原则：入口文件（main/server/router/index）、核心实现、配置文件各来一点；',
+    'README 只留 1-2 个最相关的；测试文件、翻译版 README、纯数据/迁移脚本不要。',
+    '严格只输出一个 JSON 对象，不要代码围栏、不要任何额外文字：',
+    '{"files":["文件夹名/相对路径", ...], "why":"一句话说为什么挑这些（40字内）"}',
+    '',
+    '=== 文件清单 ===',
+    listText
+  ].filter(x => x !== '').join('\n');
+  const raw = await aiText(prompt, model, o.timeoutMs || 120000);
+  const j = pickJSONObject(raw);
+  if (!j || !Array.isArray(j.files)) throw new Error('AI 没给出文件清单');
+  const out = [];
+  const seen = new Set();
+  for (const item of j.files.slice(0, 12)) {
+    const s = String(item || '');
+    const k = s.indexOf('/');
+    if (k < 1) continue;
+    const folderName = s.slice(0, k), rel = s.slice(k + 1).replace(/\\/g, '/').replace(/^\.\/+/, '').trim().slice(0, 160);
+    if (!rel || rel.includes('..')) continue;
+    /* 路径必须精确命中清单里的某一项（防编造） */
+    const hit = allow.find(a => a.name === folderName && a.path === rel)
+      || allow.find(a => a.path === rel || a.path.endsWith('/' + rel) || rel.endsWith('/' + a.path));
+    if (!hit) continue;
+    const key = hit.root + '\n' + hit.path;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    void allowSet;
+    out.push({ root: hit.root, path: hit.path });
+  }
+  if (!out.length) throw new Error('AI 挑的文件都不在清单里');
+  return { picked: out, why: String(j.why || '').slice(0, 100) };
+}
+
+/** 按挑中的清单读文件（预算内），返回 {block, list}，形状与 gatherFolderCode 一致 */
+function readSelectedFiles(picks, budget) {
+  let room = Math.max(1000, Math.min(60000, Number(budget) || 30000));
+  const byRoot = new Map();
+  for (const p of (picks || []).slice(0, 12)) {
+    if (!p || !p.root || !p.path) continue;
+    if (!byRoot.has(p.root)) byRoot.set(p.root, []);
+    byRoot.get(p.root).push(p.path);
+  }
+  const parts = [];
+  const list = [];
+  for (const [root, rels] of byRoot) {
+    let got = [];
+    try { got = readCodeFiles(root, rels, { perFile: 15000, total: room }); }
+    catch (e) { continue; }
+    if (!got.length) continue;
+    parts.push('【文件夹资料（AI 精选）：' + root + '】\n' + got.map(f =>
+      '--- ' + f.path + (f.truncated ? '（过长已截断）' : '') + ' ---\n' + f.text).join('\n'));
+    for (const f of got) { list.push({ root, path: f.path }); room -= f.text.length; }
+    if (room <= 1000) break;
+  }
+  if (!parts.length) return { block: '', list: [] };
+  return { block: parts.join('\n\n').slice(0, 60000), list };
+}
+
 module.exports = {
   validateAttachFolder, parseNodeSources, collectFolderEntries,
-  folderBodyForPrompt, gatherFolderCode, readStoredCodeFiles, DENY_HOME_NAMES
+  folderBodyForPrompt, gatherFolderCode, readStoredCodeFiles,
+  buildSelectionList, selectFilesWithAI, readSelectedFiles, DENY_HOME_NAMES
 };

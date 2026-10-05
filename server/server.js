@@ -3046,7 +3046,24 @@ function streamTutorial(req, res, node, format, note, codeFiles, withFolders, fo
           const realOf = p => { try { return fs.realpathSync(p); } catch (e) { return path.resolve(p); } };
           const rest = entries.filter(e => !e.missing && !pickedRoots.has(realOf(e.path)));
           const room = Math.max(5000, 60000 - codeBlock.length);
-          const g = nodeFolders.gatherFolderCode(rest, room);
+          /* 用户一个都没勾：让 AI 看着文件清单自己挑（比写死的 README+小文件准）。
+             失败就回落到启发式，教程照样生成，不卡死。 */
+          let g = { block: '', list: [] };
+          if (!pickedRoots.size && rest.length) {
+            try {
+              send({ status: 'AI 正在看文件清单，挑这次要讲的源码…' });
+              const sel = nodeFolders.buildSelectionList(rest, 1200);
+              const picked = await nodeFolders.selectFilesWithAI(
+                aiText, (currentModel && currentModel()) || '',
+                { title: node.title, detail: node.detail, listText: sel.text, allow: sel.allow, timeoutMs: 120000 });
+              g = nodeFolders.readSelectedFiles(picked.picked, room);
+              if (g.list.length) send({ status: `AI 挑了 ${g.list.length} 个文件：${picked.picked.slice(0, 3).map(x => x.path.split('/').pop()).join('、')}${g.list.length > 3 ? '…' : ''}（${picked.why || '按需精读'}）` });
+            } catch (err) {
+              console.log('[tutorial] AI 选文件失败，回落启发式:', err.message);
+              g = { block: '', list: [] };
+            }
+          }
+          if (!g.list.length) g = nodeFolders.gatherFolderCode(rest, room);
           if (g.list.length) {
             codeBlock += (codeBlock ? '\n\n' : '') + g.block;
             for (const f of g.list) codeList.push({ root: f.root, path: f.path });
