@@ -1158,9 +1158,15 @@ function taskBarRender() {
           <div class="taskMain">
             <div class="taskTitle">${esc(t.title || m.label)}</div>
             <div class="taskMsg">${esc(t.message || '')}${t.nodeId ? ' · 节点 #' + t.nodeId : ''}${t.note ? ' · 备注：' + esc(String(t.note).slice(0, 40)) : ''}</div>
+            ${t.status === 'failed' && t.error && t.error.length > 46 ? `<div class="taskErr" data-task-err="${t.id}" title="点开看完整原因">${esc(String(t.error).slice(0, 46))}… <span class="taskErrMore">看原因</span></div>` : ''}
             ${t.status === 'running' ? `<div class="taskProg"><i style="width:${t.progress || 0}%"></i></div>` : ''}
           </div>
-          ${taskActive(t) ? `<button class="btn tiny" data-task-cancel="${t.id}">停止</button>` : `<span class="taskState">${t.status === 'done' ? '✓ 完成' : t.status === 'failed' ? '✗ 失败' : '已停止'}</span>`}
+          ${taskActive(t)
+            ? `<button class="btn tiny" data-task-cancel="${t.id}">停止</button>`
+            : `<span class="taskState">${t.status === 'done' ? '✓ 完成' : t.status === 'failed' ? '✗ 失败' : '已停止'}</span>`}
+          ${!taskActive(t) && t.canRetry
+            ? `<button class="btn tiny retry" data-task-retry="${t.id}" ${t.retrying ? 'disabled' : ''} title="${t.status === 'done' ? '再跑一次同样的任务' : '失败后一键重跑：入参照旧，不用重新打一遍那段话'}">${t.retrying ? '提交中…' : '🔄 重试'}</button>`
+            : ''}
         </div>`;
       }).join('') : '<div class="muted" style="font-size:12px;padding:6px;">暂无任务</div>'}
       ${recent.length ? `<button class="btn tiny" id="taskClear" style="margin:6px 0 2px;">清除已完成</button>` : ''}
@@ -1169,6 +1175,32 @@ function taskBarRender() {
   if (pill) pill.addEventListener('click', () => { state.taskOpen = !state.taskOpen; taskBarRender(); });
   el.querySelectorAll('[data-task-cancel]').forEach(b => b.addEventListener('click', async () => {
     try { await api('/api/tasks/' + b.getAttribute('data-task-cancel') + '/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); toast('已请求停止'); await taskPoll(); } catch (e) { toast(e.message); }
+  }));
+  /* 失败原因可点开看全文：报错信息是黑盒时，用户至少该知道"到底为什么没成" */
+  el.querySelectorAll('[data-task-err]').forEach(d => d.addEventListener('click', async () => {
+    const id = d.getAttribute('data-task-err');
+    const t = (state.tasks || []).find(x => String(x.id) === String(id));
+    if (!t) return;
+    const full = String(t.error || '（没有更多信息）');
+    const tip = document.createElement('div');
+    tip.className = 'taskErrTip';
+    tip.textContent = full;
+    d.appendChild(tip);
+    d.classList.add('open');
+    const off = ev => { if (!tip.contains(ev.target) && ev.target !== d) { d.classList.remove('open'); tip.remove(); document.removeEventListener('click', off, true); } };
+    setTimeout(() => document.addEventListener('click', off, true), 0);
+  }));
+  /* 重试：不需要用户重新打一遍那段话/那条意见（意见往往很长，重打最容易出错） */
+  el.querySelectorAll('[data-task-retry]').forEach(b => b.addEventListener('click', async () => {
+    const id = b.getAttribute('data-task-retry');
+    b.disabled = true; b.textContent = '提交中…';
+    try {
+      const r = await api('/api/tasks/' + id + '/retry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (r && r.ok === false) { toast('⚠️ ' + (r.error || '重试失败')); }
+      else toast('🔄 已重新提交（原样的入参），进度见左下角任务中心');
+    } catch (e) { toast(e.message); }
+    state.taskOpen = true;
+    await taskPoll();
   }));
   const clr = el.querySelector('#taskClear');
   if (clr) clr.addEventListener('click', async () => {
@@ -1536,6 +1568,59 @@ function tutRoot() {
   catch (e) { return null; }
 }
 function tutHeadEl(i) { try { return tutDoc().getElementById('tutsec-' + i); } catch (e) { return null; } }
+/* HTML 教程的**正文自带**目录（AI 常写 <nav class="toc"><a href="#s1">…</a></nav>）跳转失效时，
+   用户看到的就是"点了没反应"。真实原因：那份教程被截断了 —— 目录列 12 节，正文只写到第 3 节，
+   #s4…#s12 这些锚点压根不存在（线上真事，教程 id=52）。
+   这里在渲染时提前体检，发现残缺就插一段说明 + 指向"重新生成/换模型"的提示，
+   并把失效的目录项标出来（点了会提示，而不是静默无反应）。 */
+function tutBodyAnchors() {
+  const d = tutDoc();
+  try {
+    const out = [];
+    d.querySelectorAll('a[href^="#"]').forEach(a => {
+      const id = String(a.getAttribute('href') || '').slice(1);
+      if (!id) return;
+      if (out.some(x => x.id === id)) return;
+      out.push({ id, text: (a.textContent || '').trim().slice(0, 40), dead: !d.getElementById(id) });
+    });
+    return out;
+  } catch (e) { return []; }
+}
+function tutTruncNotice(deadAnchors) {
+  if (!deadAnchors || !deadAnchors.length) return;
+  const old = document.getElementById('tutTruncBar'); if (old) old.remove();
+  const bar = document.createElement('div');
+  bar.id = 'tutTruncBar';
+  bar.className = 'tutTruncBar';
+  bar.innerHTML = `<span class="ttbIcon">⚠️</span>
+    <span class="ttbText">这份教程<span class="ttbHi">没写完就断了</span>：正文自带目录里的
+      <b>${deadAnchors.length}</b> 个章节（如 ${esc(deadAnchors.slice(0, 3).map(x => '#' + x.id).join('、'))}）在正文里根本不存在，点它们不会有反应。
+      <span class="ttbDim">多半是模型单次输出到上限被截断。</span></span>
+    <span class="spacer" style="flex:1"></span>
+    ${state.tutNodeId ? `<button class="btn tiny" data-ttb-gen>🔄 重新生成一份完整的</button>` : ''}
+    <button class="btn tiny" data-ttb-close title="知道了">✕</button>`;
+  const host = document.getElementById('tutMeta');
+  if (host && host.parentNode) host.parentNode.insertBefore(bar, host.nextSibling);
+  else document.body.appendChild(bar);
+  bar.querySelector('[data-ttb-close]').addEventListener('click', () => bar.remove());
+  const gb = bar.querySelector('[data-ttb-gen]');
+  if (gb) gb.addEventListener('click', () => {
+    const nid = (state.tutNodeId || 0);
+    if (!nid) { toast('这个教程没关联节点，没法一键重生成 —— 请回到目标页对节点重新生成'); return; }
+    if (!confirm('重新生成会新增一份教程（当前这份保留，之后可以删）。要继续吗？')) return;
+    gb.disabled = true; gb.textContent = '提交中…';
+    fetch('/api/nodes/' + nid + '/tutorial', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ format: (tutFmtOf(Number(rr.id)) || 'html'), note: '重写一份完整的：上次输出被截断了，务必写完所有章节并以 </html> 收尾' })
+    }).then(() => { toast('已提交（进度见左下角任务中心）'); gb.textContent = '已提交'; gb.disabled = true; })
+      .catch(err => { toast(err.message); gb.disabled = false; gb.textContent = '🔄 重新生成一份完整的'; });
+  });
+  console.warn('[tutorial] 检测到教程被截断：' + deadAnchors.length + ' 个目录章节缺失 → ' + deadAnchors.map(x => '#' + x.id).join(' '));
+}
+function tutFmtOf(tid) {
+  try { const t = ((state.goal && state.goal.tutorials) || []).find(x => Number(x.id) === Number(tid)); return t && t.format; } catch (e) {}
+  return state.tutFmt || 'html';
+}
 /* 正文滚了多少 / 能滚多远 —— Markdown 用主文档，HTML 用 iframe 内部 */
 function tutScrollRatio() {
   try {
@@ -1756,6 +1841,72 @@ document.addEventListener('click', async e => {
     if (ta) { ta.placeholder = '说出你想怎么改这份教程，例如：第三章再展开讲讲 / 多给一个完整代码示例 / 练习换成更简单的'; ta.focus(); }
   }, 200);
 });
+/* ===== 教程：历史版本（查看/预览/恢复，全局委托） ===== */
+document.addEventListener('click', async e => {
+  const btn = e.target.closest && e.target.closest('#tutVersBtn');
+  if (!btn) return;
+  const rr = parseRoute();
+  if (rr.view !== 'tutorial') return;
+  openTutVersions(Number(rr.id));
+});
+function openTutVersions(tid) {
+  const old = document.getElementById('tutVersDlg');
+  if (old) old.remove();
+  const t = ((state.goal && state.goal.tutorials) || []).find(x => Number(x.id) === Number(tid));
+  const isHtml = t && t.format === 'html';
+  const D = document.createElement('div');
+  D.className = 'bigDialog';
+  D.id = 'tutVersDlg';
+  D.innerHTML = `<div class="tdHead"><span class="bdTitle">🕘 历史版本<div class="bdSub">每次 AI 修改 / 手动保存都会留一版（最近 10 版）。恢复前会自动存当前版，所以恢复也可撤销。</div></span><div class="spacer" style="flex:1"></div><button class="btn tiny" data-vclose>✕</button></div>
+    <div class="tdBody"><div class="muted">加载中…</div></div>`;
+  document.body.appendChild(D);
+  const close = () => D.remove();
+  D.querySelector('[data-vclose]').addEventListener('click', close);
+  D.addEventListener('mousedown', ev => { if (ev.target === D) close(); });
+  document.addEventListener('keydown', function onKey(ev) { if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); } });
+  const body = D.querySelector('.tdBody');
+  const paint = async () => {
+    let rows = [];
+    try {
+      const r = await api('/api/tutorials/' + tid + '/versions');
+      rows = r.versions || [];
+    } catch (err) { body.innerHTML = '<div class="muted">加载失败：' + esc(err.message) + '</div>'; return; }
+    if (!rows.length) { body.innerHTML = '<div class="muted">还没有历史版本：改一次（AI 修改或手动保存）就会留一版。</div>'; return; }
+    body.innerHTML = rows.map((v, i) => `<div class="tutVerRow${i === 0 ? ' cur' : ''}">
+      <div class="tutVerInfo"><div class="tutVerT">${i === 0 ? '<span class="chip ok">最新</span> ' : ''}${esc(v.reason || '（无说明）')}</div>
+      <div class="tutVerM">${esc(fmtDate(v.created_at))} · ${Number(v.chars) >= 1000 ? (Number(v.chars) / 1000).toFixed(1) + 'k 字' : v.chars + ' 字'}</div></div>
+      <div class="spacer" style="flex:1"></div>
+      <button class="btn tiny" data-vprev="${v.id}">预览</button>
+      <button class="btn tiny primary" data-vrestore="${v.id}">恢复到这版</button>
+    </div>`).join('');
+    body.querySelectorAll('[data-vprev]').forEach(b => b.addEventListener('click', async () => {
+      try {
+        const r = await api('/api/tutorials/versions/' + b.getAttribute('data-vprev'));
+        const v = r.version || {};
+        body.innerHTML = `<button class="btn tiny" data-vback>← 返回列表</button>
+          <div class="tutVerPrevMeta">${esc(v.reason || '')} · ${esc(fmtDate(v.created_at))}</div>`
+          + (isHtml
+            ? `<iframe class="tutFrame tutVerFrame" sandbox="allow-scripts allow-same-origin allow-popups" srcdoc=""></iframe>`
+            : `<div class="tutBody mdBody">${mdToHTML(v.content || '')}</div>`);
+        if (isHtml) {
+          const fr = body.querySelector('.tutVerFrame');
+          if (fr) fr.srcdoc = tutThemedHTML(cleanHtmlForFrame(v.content || ''));
+        }
+        body.querySelector('[data-vback]').addEventListener('click', paint);
+      } catch (err) { toast(err.message); }
+    }));
+    body.querySelectorAll('[data-vrestore]').forEach(b => b.addEventListener('click', async () => {
+      if (!confirm('恢复到这版？当前版会自动存一份（“回滚前自动保存”），所以这步也可撤销。')) return;
+      try {
+        await api('/api/tutorials/' + tid + '/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version_id: Number(b.getAttribute('data-vrestore')) }) });
+        close();
+        toast('已恢复 ✓ 当前版已自动存档');
+        try { await renderTutorialPage(tid); } catch (err) { location.reload(); }
+      } catch (err) { toast(err.message); }
+    }));
+  };
+  paint();
+}
 /* ===== AI 助手（右侧侧边栏） ===== */
 function opChipHTML(o) {
   const t = String(o.title || '').slice(0, 40);
@@ -3393,12 +3544,14 @@ async function renderTutorialPage(tid) {
   state.tutGoal = goal || null;          // 教程语境目标：组件开关按它判定，不串到别的目标
   state.tutUpdatedAt = t ? (t.updated_at || '') : '';   // 任务轮询用它判断内容是否真变了
   const isHtml = t.format === 'html';
+  try { state.tutFmt = t.format; state.tutNodeId = node ? node.id : 0; } catch (e) {}
   const sizeK = Math.max(1, Math.round((t.content || '').length / 1000));
   app.innerHTML = `<div class="tutPage">
     <div class="tutSticky">
     <div class="tutHead">
       <button class="back" data-go="#/g/${t.goal_id}">← 返回目标</button>
       <button class="btn small" data-tbtn id="tutEditBtn" title="在右侧对话栏里说你想怎么改，AI 会按意见修改（保留原有内容，只改需要改的地方）">💬 让 AI 修改</button>
+      <button class="btn small" data-tbtn id="tutVersBtn" title="每次 AI 修改/手动保存都会留一版，改坏了从这里恢复（恢复前会自动存当前版，所以恢复也可撤销）">🕘 历史版本</button>
       <button class="btn small" data-tbtn id="tutTocBtn" title="显示 / 隐藏左侧目录">📑 目录</button>
       ${(goalCompOn(goal, 'notes') && window.NodeNotes) ? `<button class="btn small" data-tbtn id="tutNoteBtn" title="展开 / 收起右侧笔记栏">🗒 笔记</button>` : ''}
       ${(goalCompOn(goal, 'tutbookmark') && window.TutBookmark) ? `<button class="btn small" data-tbtn id="tutBmBtn" title="随时标记阅读位置（不用翻到底部）">🔖 标签</button>` : ''}
@@ -3431,7 +3584,15 @@ async function renderTutorialPage(tid) {
        以前统一 setTimeout(200) —— iframe 内容多的时候 200ms 还没解析完，
        tutTocBuild 拿到 0 个标题就静默 return，表现为"目录组件失效"。 */
     let built = false;
-    const build = () => { if (built) return; built = true; try { tutTocBuild(tid); } catch (e) {} };
+    const build = () => {
+      if (built) return; built = true;
+      try { tutTocBuild(tid); } catch (e) {}
+      /* 体检正文自带目录：锚点不存在 = 教程被截断（点目录没反应的真正原因） */
+      try {
+        const dead = tutBodyAnchors().filter(x => x.dead);
+        if (dead.length) tutTruncNotice(dead);
+      } catch (e) { console.warn('[tutorial] 截断体检失败', e); }
+    };
     fr.addEventListener('load', build, { once: true });
     fr.setAttribute('srcdoc', tutThemedHTML(cleanHtmlForFrame(t.content)));
     setTimeout(build, 1500);   // 兜底：万一 load 没触发

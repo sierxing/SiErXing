@@ -24,7 +24,7 @@ const { spawn } = require('node:child_process');
 
 // 参与同步的表（顺序无关，导入时先清空再写入）
 const SYNC_TABLES = [
-  'goals', 'nodes', 'sources', 'tutorials', 'tutorial_bookmarks', 'tutorial_progress', 'node_notes', 'node_workspaces', 'goal_versions', 'study_records', 'study_days', 'study_segments', 'ai_prompts',
+  'goals', 'nodes', 'sources', 'tutorials', 'tutorial_versions', 'tutorial_bookmarks', 'tutorial_progress', 'node_notes', 'node_workspaces', 'goal_versions', 'study_records', 'study_days', 'study_segments', 'ai_prompts',
   'chat_sessions', 'chats', 'problems', 'practice_records', 'daily_plans', 'jd_images',
   /* 执行可视化 HTML 跟着作答记录走（一记录一份，删记录级联删）。 */
   'record_visuals',

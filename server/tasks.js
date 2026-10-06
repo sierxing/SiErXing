@@ -14,7 +14,8 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3 } = {}
     id: t.id, type: t.type, title: t.title, goalId: t.goalId, nodeId: t.nodeId,
     note: t.note, status: t.status, message: t.message, progress: t.progress,
     createdAt: t.createdAt, startedAt: t.startedAt, endedAt: t.endedAt,
-    error: t.error, result: t.result
+    error: t.error, result: t.result,
+    canRetry: typeof t._retry === 'function', retrying: !!t.retrying
   });
 
   const list = (goalId) => [...tasks.values()]
@@ -70,16 +71,46 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3 } = {}
   }
 
   /** 提交任务：run({ signal, note, progress }) 返回结果 */
-  function submit({ type, title, goalId, nodeId, note, run, message }) {
+  function submit({ type, title, goalId, nodeId, note, run, message, retry }) {
     const id = ++seq;
     tasks.set(id, {
       id, type, title: String(title || '').slice(0, 120), goalId: goalId || 0, nodeId: nodeId || 0,
       note: String(note || '').slice(0, 1000), status: 'queued', message: message || '排队中…',
       progress: 0, createdAt: Date.now(), startedAt: 0, endedAt: 0, error: '', result: null,
-      _run: run, _abort: null
+      _run: run, _abort: null, _retry: typeof retry === 'function' ? retry : null
     });
     pump();
     return id;
+  }
+
+  /* ---- 失败重试 ----
+     用户不想为了重跑一次 AI 任务再把那句话/那条意见重新打一遍（线上真这么骂过）。
+     重试 = 用当初那份入参重新提交一个新任务，所以旧任务原样保留（还能看它当时的报错）。
+     retryFactory 由调用方（server.js）注入：从「当前请求」生成闭包，
+     于是所有任务类型都能白拿重试能力，不必各自重构。 */
+  let retryFactory = null;
+  function setRetryFactory(fn) { retryFactory = typeof fn === 'function' ? fn : null; }
+  function autoRetry() {
+    if (!retryFactory) return null;
+    try { const f = retryFactory(); return typeof f === 'function' ? f : null; } catch (e) { return null; }
+  }
+  /* 重试返回的可能是 Promise（比如"把当初那次请求原样再发一遍"要走 HTTP），
+     所以这里是 async；taskId 拿不到就靠 retrying 标记让前端继续轮询 */
+  async function retry(id) {
+    const t = tasks.get(Number(id));
+    if (!t) return { ok: false, error: '任务不存在（可能已刷新页面或重启过服务）' };
+    if (running().some(x => x.id === t.id) || queued().some(x => x.id === t.id)) return { ok: false, error: '这个任务还在跑，先等它结束' };
+    if (!t._retry) return { ok: false, error: '这个任务不支持重试（在页面里重新发起一次即可）' };
+    t.message = '正在重新提交…';
+    t.retrying = true;
+    let nid = 0;
+    try { nid = await t._retry(); } catch (e) {
+      t.retrying = false;
+      return { ok: false, error: '重试失败：' + (e && e.message ? e.message : String(e)) };
+    }
+    t.retrying = false;
+    if (!nid) return { ok: true, taskId: 0, note: '已重新提交，进度会在左下角任务中心出现' };
+    return { ok: true, taskId: nid };
   }
 
   function cancel(id) {
@@ -99,16 +130,23 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3 } = {}
     return { ok: true };
   }
 
+  /* 结束的任务（done/failed/cancelled）才允许重试；进行中的按钮前端会置灰 */
+  function retryable(id) {
+    const t = tasks.get(Number(id));
+    return !!(t && typeof t._retry === 'function' && ['done', 'failed', 'cancelled'].includes(t.status));
+  }
+
   /* 手动模式：用于"流式接口 + 前端展示"的既有 AI 流程
      —— 任务立刻标记为 running，由调用方通过 progress/done/fail 汇报；客户端断开不会中断 */
-  function begin({ type, title, goalId, nodeId, note, message }) {
+  function begin({ type, title, goalId, nodeId, note, message, retry }) {
     const id = ++seq;
     const ac = new AbortController();
     const t = {
       id, type, title: String(title || '').slice(0, 120), goalId: goalId || 0, nodeId: nodeId || 0,
       note: String(note || '').slice(0, 1000), status: 'running', message: message || '处理中…',
       progress: 0, createdAt: Date.now(), startedAt: Date.now(), endedAt: 0, error: '', result: null,
-      _run: null, _abort: ac
+      _run: null, _abort: ac,
+      _retry: typeof retry === 'function' ? retry : autoRetry()
     };
     tasks.set(id, t);
     log('[task] 开始 #' + id, type, t.title);
@@ -129,5 +167,5 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3 } = {}
     return { total: tasks.size, running: running().length, queued: queued().length, maxConcurrent };
   }
 
-  return { submit, begin, list, cancel, clear, status };
+  return { submit, begin, list, cancel, clear, status, retry, retryable, setRetryFactory };
 };

@@ -154,6 +154,17 @@ CREATE TABLE IF NOT EXISTS tutorials (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+/* 教程版本：每次“AI 修改 / 手动保存”覆盖正文前，先把旧正文存一份。
+   回滚本身也会先存当前版，所以恢复操作永远可撤销。
+   只留最近 10 版，超了删最旧的（正文最长几万字，无限留会撑库）。 */
+CREATE TABLE IF NOT EXISTS tutorial_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tutorial_id INTEGER NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tutver_tid ON tutorial_versions(tutorial_id, id);
 CREATE TABLE IF NOT EXISTS sources (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   goal_id INTEGER NOT NULL,
@@ -2135,6 +2146,17 @@ function buildRefineNodePrompt(goal, node, kids, feedback, folderCode) {
   return lines.join('\n');
 }
 /* ===== 版本快照与对比 ===== */
+/* 教程改前存档：把当前正文存一份版本，超 10 版删最旧的。
+   调用方保证：只在“真的要覆盖”之前调；reason 说明这次为什么存。 */
+function saveTutorialVersion(tid, reason) {
+  const t = db.prepare('SELECT * FROM tutorials WHERE id = ?').get(Number(tid));
+  if (!t || !t.content) return 0;
+  const r = db.prepare('INSERT INTO tutorial_versions (tutorial_id, content, reason, created_at) VALUES (?,?,?,?)')
+    .run(t.id, String(t.content), String(reason || '').slice(0, 120), nowISO());
+  db.prepare('DELETE FROM tutorial_versions WHERE tutorial_id = ? AND id NOT IN (SELECT id FROM tutorial_versions WHERE tutorial_id = ? ORDER BY id DESC LIMIT 10)')
+    .run(t.id, t.id);
+  return Number(r.lastInsertRowid);
+}
 function beginVersion(goalId, reason) {
   if (!goalCompOn(goalId, 'versions')) return 0;
   const nodes = db.prepare('SELECT * FROM nodes WHERE goal_id = ? ORDER BY level, sort_order, id').all(goalId);
@@ -2999,36 +3021,227 @@ function streamChat(req, res, goal, message, session) {
    改成了“离线同步引擎”，标题留着、正文全换，长度检查根本拦不住。
    规则：从标题抽主题词，要求“原文命中≥2 且新文命中≥2”；只有
    “旧的对、新的错”时才判跑题（新旧都不沾边的不管，免得标题太空时误杀）。 */
+/* 主题词按可信度分级：
+   strong = 长度≥3 的中文词 + 英文词（"部署架构"/"RAGFlow"）—— 正文里出现才算真讲了这个主题
+   weak   = 二元切分（"部署"/"启动"）—— 只用来在 strong 不足时兜底
+   ⚠️ 二元词极容易被"蒙中"：线上真翻过一次车 —— 新教程通篇讲"怎么写技术教程"，
+      开头复述了一遍标题，于是"测绘/RAGFlow/部署/架构/启动/链路"全部出现在正文里，
+      而 RAGFlow 一个字都没讲，跑题守卫因此放行。所以计数时 strong 与 weak 分开。 */
 function topicKeywords(title) {
   const stop = new Set(['教程', '学习', '笔记', '总结', '阶段', '任务', '目标', '介绍', '指南', '规划', '讲解', '详解', '入门', '精通', '实战', '实践']);
-  const out = [];
-  const push = w => { if (w && w.length >= 2 && !out.includes(w)) out.push(w); };
+  const anchorEn = [], anchor = [], strong = [], weak = [];
+  const push = (arr, w) => { if (w && w.length >= 2 && !arr.includes(w)) arr.push(w); };
   const s = String(title || '');
   const runs = [];
   for (const m of s.match(/[\u4e00-\u9fa5]{2,}/g) || []) {
     let w = m;
     for (const st of stop) w = w.split(st).join(' ');
-    for (const piece of w.split(' ')) if (piece.length >= 2) { runs.push(piece); push(piece); }
+    for (const piece of w.split(' ')) {
+      if (piece.length < 2) continue;
+      runs.push(piece);
+      push(strong, piece.length >= 3 ? piece : '');
+      if (piece.length >= 5) push(anchor, piece);
+    }
   }
-  for (const m of s.match(/[A-Za-z][A-Za-z0-9_.\-]{2,}/g) || []) push(m);
-  /* 长词再按二元切一遍兜底：改写时只提“部署”“启动”这种散词也能命中；
-     垃圾二元（如“署架”）命中不了任何正文，无害 */
-  for (const r of runs) for (let i = 0; i + 1 < r.length; i++) push(r.slice(i, i + 2));
-  return out.slice(0, 14);
+  for (const m of s.match(/[A-Za-z][A-Za-z0-9_.\-]{2,}/g) || []) { push(anchorEn, m); push(strong, m); }
+  for (const r of runs) if (r.length >= 4) for (let i = 0; i + 1 < r.length; i++) push(weak, r.slice(i, i + 2));
+  return {
+    anchorEn: anchorEn.slice(0, 4),      // 英文专名（"RAGFlow"）：最可靠，判定首选
+    anchorZh: anchor.slice(0, 3),        // 长中文短语：可靠，但容易在"复述主题"时蒙中
+    strong: strong.slice(0, 8),
+    weak: weak.slice(0, 10)
+  };
 }
+/* 只留"读者能看到的内容"来判主题。
+   ⚠️ 必须把 <head> 整块丢掉：HTML 教程的 <title> 里往往就是节点标题原样，
+      而跑题的新教程照样会带着正确的 <title> —— 不去掉就等于用标题验证标题，
+      守卫必然放行（线上真踩过：新教程通篇讲"怎么写教程"，只靠 <title> 就蒙混过关）。 */
 function stripTags(html) {
-  return String(html || '').replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  return String(html || '')
+    .replace(/<head[\s\S]*?<\/head>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ');
 }
 function topicDrifted(newHtml, oldHtml, titles) {
-  const kws = [];
-  for (const t of (titles || [])) for (const k of topicKeywords(t)) if (!kws.includes(k)) kws.push(k);
-  if (kws.length < 3) return null;
+  const anchorEn = [], anchorZh = [], strong = [], weak = [];
+  for (const t of (titles || [])) {
+    const k = topicKeywords(t);
+    for (const x of k.anchorEn) if (!anchorEn.includes(x)) anchorEn.push(x);
+    for (const x of k.anchorZh) if (!anchorZh.includes(x)) anchorZh.push(x);
+    for (const x of k.strong) if (!strong.includes(x)) strong.push(x);
+    for (const x of k.weak) if (!weak.includes(x)) weak.push(x);
+  }
   const bodyNew = stripTags(newHtml).toLowerCase();
   const bodyOld = stripTags(oldHtml).toLowerCase();
-  const hits = kws.filter(k => bodyNew.includes(k.toLowerCase()));
-  const oldHits = kws.filter(k => bodyOld.includes(k.toLowerCase()));
-  if (oldHits.length >= 2 && hits.length < 2) return { kws, oldHits, hits };
+  const count = (w, body) => body.split(w.toLowerCase()).length - 1;
+  const hits = (list, body) => list.filter(k => body.includes(k.toLowerCase()));
+  const total = list => list.reduce((s, k) => s + count(k, bodyNew), 0);
+  /* 判定优先级（从可靠到将就）：
+       ① 标题里有英文专名 → 只看它（"RAGFlow" 出现与否几乎不可能被巧合骗过）
+       ② 否则用长中文短语，且要求**反复出现**（≥2 次）——
+          只出现一次往往只是开头复述了一遍主题，线上翻车那版就是这样蒙混过关的
+       ③ 再退而求其次才用 strong/weak，且命中数要够多 */
+  /* 关键在 stripTags 已丢掉 <head>：正文里出现 0 次专名才是跑题的可靠信号。
+     出现 1 次就算在讲 —— 真实的 RAGFlow 教程里也有只出现一两次的，
+     要求"≥2 次"会误杀好教程（实测导出样本里 RAGFlow 只出现 1 次）。
+     唯一例外是正文太短：几百字的补充说明本来就可能只提一次，判不了就不判。 */
+  if (bodyNew.length < 600) return null;
+  let oldOn = false, newOff = false, used = '';
+  /* 出现次数的要求**跟旧文对齐**，而不是一刀切：
+     正文长（>3000 字）且旧文本来就反复提这个主题（≥2 次）→ 新文也得 ≥2 次，
+     拦住"开头复述一遍主题就交差"；
+     旧文自己都只提 1 次（真人写的、措辞精简）→ 就按 1 次要求，
+     否则会把用户自己的好教程误杀（线上真有一份：正文 32k 字，
+     "环境搭建与变量"整篇只出现 1 次，却完全没跑题）。 */
+  const need = (() => {
+    if (bodyNew.length <= 3000) return 1;
+    const oldTotal = anchorEn.concat(anchorZh).reduce((s, w) => s + count(w, bodyOld), 0);
+    return oldTotal >= 2 ? 2 : 1;
+  })();
+  const enough = list => total(list) >= need;
+  if (anchorEn.length) {
+    used = '英文专名 ' + anchorEn.join('/') + '（正文需出现≥' + need + '次）';
+    oldOn = hits(anchorEn, bodyOld).length >= 1;
+    newOff = !enough(anchorEn);
+  } else if (anchorZh.length) {
+    used = '长中文短语 ' + anchorZh.join('/') + '（正文需出现≥' + need + '次）';
+    oldOn = hits(anchorZh, bodyOld).length >= 1;
+    newOff = !enough(anchorZh);
+  } else if (strong.length >= 2) {
+    used = 'strong ' + strong.join('/');
+    oldOn = hits(strong, bodyOld).length >= 1;
+    newOff = hits(strong, bodyNew).length === 0;
+  } else if (weak.length) {
+    used = 'weak ' + weak.join('/');
+    oldOn = hits(weak, bodyOld).length >= 2;
+    newOff = hits(weak, bodyNew).length < 2;
+  } else {
+    return null;   // 标题太泛，没法判
+  }
+  if (oldOn && newOff) return { used, anchorEn, anchorZh, strong, weak, newBody: bodyNew.slice(0, 200) };
   return null;
+}
+/* ===== 教程完整性体检 =====
+   线上真翻过车：AI 输出到一半被截断（目录列了 12 节，正文只写到第 3 节），
+   而原来的校验只看「长度够不够」，25k 字远超阈值 → 半截内容照常入库。
+   后果不是报错，而是用户看到的东西静默缺了一大块：页内目录点后面几节全没反应。
+   所以除了长度，必须查结构：
+     · HTML 有 <html> 却没有 </html>            → 中途断了
+     · 结构标签开合不齐（div/section/style…）    → 中途断了
+     · 目录里有 href="#x" 但全文找不到 id="x"  → 目录承诺的章节没写出来（最典型）
+   宁可空着也不要假装完整：真断了就自动续写，续不上就明说，别悄悄存半截。 */
+function countTag(s, tag) {
+  const open = (s.match(new RegExp('<' + tag + '(?=[\\s>/])', 'gi')) || []).length;
+  const close = (s.match(new RegExp('</' + tag + '\\s*>', 'gi')) || []).length;
+  return { open, close };
+}
+/* 结构标签只挑「几乎必然成对」的：p/li/td 这类 AI 常省略闭合标签，算进去会误判好教程。
+   div 的闭合情况实测很脏（用户库里那份正常教程就少一个 </div>，多半是 </div></div> 手滑），
+   少 1 个不作为截断证据 —— 缺一整段时下面的锚点检查会抓到。 */
+const STRUCT_TAGS = ['html', 'head', 'body', 'section', 'style', 'script', 'table', 'ul', 'ol', 'pre', 'svg'];
+function tutIntegrity(txt, format) {
+  const s = String(txt || '');
+  /* issues = 截断证据（命中即没写完 → 续写 / 拒收）
+     soft   = 疑似瑕疵（模型自己写歪了，但正文可能确实是完整的，不作为拒收理由） */
+  const issues = [], soft = [], missingAnchors = [];
+  if (format === 'html') {
+    const low = s.toLowerCase();
+    if (/<html[\s>]/.test(low) && !/<\/html>\s*$/.test(low.trim())) issues.push('正文没有以 </html> 收尾（HTML 写了一半就断了）');
+    const unbalanced = [];
+    for (const tag of STRUCT_TAGS) {
+      const c = countTag(s, tag);
+      if (c.open && c.open !== c.close) unbalanced.push('<' + tag + '> 开 ' + c.open + ' / 闭 ' + c.close);
+    }
+    if (unbalanced.length) issues.push('标签开合不齐：' + unbalanced.slice(0, 4).join('，'));
+    /* 目录承诺 vs 正文实有：链接目标 id 必须真的存在于正文里。
+       正文断在第 3 节 → 目录里 #s4…#s12 全是空头支票，用户点后面几节全没反应。
+       但模型也会在**完整**教程里留下个别失效锚点（用户库里那份正常教程就少了 s13/s14，
+       而它结尾有 </html>、结构也齐），所以只在"已经有别的截断证据"时才把它当证据。 */
+    const hrefs = new Set();
+    for (const m of s.matchAll(/href\s*=\s*["']#([A-Za-z][\w:.-]*)["']/g)) hrefs.add(m[1]);
+    for (const a of hrefs) {
+      const esc = a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // id 可能写成 id="x" / id='x' / id=x（HTML 允许省略引号），三种都算存在
+      if (new RegExp('id\\s*=\\s*(?:["\']' + esc + '["\']|' + esc + '(?=[\\s>]))', 'i').test(s)) continue;
+      missingAnchors.push(a);
+    }
+    if (missingAnchors.length) {
+      const msg = '目录里有 ' + missingAnchors.length + ' 个章节在正文里找不到（' + missingAnchors.slice(0, 5).join('、') + (missingAnchors.length > 5 ? '…' : '') + '）';
+      if (issues.length) issues.push(msg);
+      else soft.push(msg + '（正文本身完整，应该只是目录里多了几个失效链接）');
+    }
+  } else {
+    /* Markdown 的围栏不闭合只当"疑似"（soft），不当拒收理由：
+       线上用户库里就有一份 9 月的老教程，末尾代码块少了收尾的 ```（内容本身是完整的）。
+       拿它拒收一次合法修改，比放过一次轻微不完整更糟。
+       Markdown 真被截断由"长度比原文短太多"那条兜住，不靠围栏判断。 */
+    const fences = (s.match(/^\s*(?:```|~~~)/gm) || []).length;
+    if (fences % 2) soft.push('末尾代码块 ``` 没有闭合（内容看起来仍完整）');
+  }
+  return { ok: !issues.length, issues, soft, missingAnchors };
+}
+/* 续写提示词：给「已经写出的内容尾部」+ 具体缺什么，让模型接着往下写。
+   只带尾部不带全文（省上下文），并明确禁止重复已输出内容与加前言。 */
+/* 部分模型输出到上限时会"自己觉得写完了"，或者直接在 </section> 之后就停。
+   结束标记不完整 = 硬截断，无从续写，只能明说。这种情况常见于 DeepSeek-flash 写长 HTML。 */
+function endsMidway(txt, format) {
+  const s = String(txt || '').trim();
+  if (!s) return '内容为空';
+  if (format === 'html') {
+    if (!/<\/html>\s*$/i.test(s)) return '结尾缺少 </html>（输出到上限被硬截断，无法续写）';
+    const tail = s.slice(-400);
+    const lastOpen = tail.lastIndexOf('<section'), lastClose = tail.lastIndexOf('</section>');
+    if (lastOpen > lastClose) return '结尾处 <section> 没闭合（输出到上限被硬截断，无法续写）';
+  } else {
+    const fences = (s.match(/^\s*(?:```|~~~)/gm) || []).length;
+    if (fences % 2) return '结尾代码块 ``` 没闭合（输出到上限被硬截断，无法续写）';
+  }
+  return '';
+}
+function buildTruncRepairPrompt(title, format, tail, issues) {
+  const isHtml = format === 'html';
+  return [
+    '你刚才写一份' + (isHtml ? ' HTML ' : ' Markdown ') + '教程《' + String(title || '').slice(0, 80) + '》时输出被截断了，只写了一半就断了。',
+    '',
+    '【检测到的问题】',
+    ...issues.map(x => '· ' + x),
+    '（这是一个"续写补全"请求，不是从头重写：下面的尾部就是你已经写到的位置）',
+    '',
+    '【你已经写出来的内容的尾部】',
+    '```' + (isHtml ? 'html' : 'markdown'),
+    String(tail || '').slice(-3000),
+    '```',
+    '',
+    'SX-REPAIR-MARK —— 现在只输出续写部分，从上面中断的位置紧接着往下写】',
+    '铁律：',
+    '1) 不要重复任何已输出的内容，不要重写开头，不要写"以下是…"之类的说明或道歉。',
+    '2) 不要输出 <!DOCTYPE>、<html>、<head> 这些开头标签（已有），只写后续片段。' + (isHtml ? '' : ''),
+    isHtml
+      ? '3) 把上一个没闭合的标签补上（如 </div> </section>），继续写完剩余章节，最后一定要有 </body></html> 收尾。'
+      : '3) 如果上一段代码块没闭合，先补 ``` 收上，再继续写。',
+    isHtml ? '4) 章节标题和 id 要跟已有目录保持一致，目录里列出的章节一个都不能少。' : '4) 保持与前文同样的结构与风格。',
+    '5) 直接输出续写内容本身。'
+  ].join('\n');
+}
+/* 体检不过就自动续写（最多 2 轮），续完再体检；仍不过把问题抛给调用方决定。 */
+async function repairTruncatedText({ raw, format, title, issues, runText, progress }) {
+  let out = String(raw || '');
+  let tries = 0;
+  while (tries < 2) {
+    if (progress) progress(70 + tries * 5, '教程被截断了，正在让 AI 补全缺失部分（第 ' + (tries + 1) + ' 次）…');
+    const more = await runText(buildTruncRepairPrompt(title, format, out.slice(-3000), issues));
+    const add = cleanTutorialText(String(more || ''), format);
+    if (!add || add.length < 80) break;
+    out += (out.endsWith('\n') ? '' : '\n') + add;
+    tries++;
+    const chk = tutIntegrity(out, format);
+    if (chk.ok) { console.log('[tutorial] 截断续写成功（第 ' + tries + ' 轮补齐）'); return { text: out, issues: [], fixed: true }; }
+    issues = chk.issues;
+  }
+  return { text: out, issues, fixed: false };
 }
 function cleanTutorialText(txt, format) {
   let s = String(txt || '').trim();
@@ -3049,10 +3262,47 @@ function cleanTutorialText(txt, format) {
   }
   return s.trim();
 }
+/* 生成教程走 SSE 直推前端，响应体早就发出去了，没法在服务端"原样重跑"。
+   于是重试时把当初那次 POST 原封不动地再发一遍给本进程（任务照样进队列、照样在后台跑，
+   这次没人读 SSE 流而已 —— 前端本来也只看任务中心）。
+   codeFiles 里的文件夹项带绝对路径，序列化回来仍会被同一套 root 校验拦住，不存在越权读。 */
+function localSelfPost(path, payload) {
+  return new Promise(resolve => {
+    let settled = false;
+    const done = v => { if (!settled) { settled = true; resolve(v); } };
+    try {
+      const req2 = http.request({
+        host: '127.0.0.1', port: PORT, path, method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(JSON.stringify(payload || {})) }
+      }, r => {
+        /* SSE 流：只关心"被受理了"，读完立刻丢掉连接（res.write 失败在 streamTutorial 里有 try/catch） */
+        r.on('data', () => {});
+        r.on('end', () => done(0));
+        r.on('error', () => done(0));
+        setTimeout(() => done(0), 3000);
+      });
+      req2.on('error', () => done(0));
+      req2.end(JSON.stringify(payload || {}));
+      setTimeout(() => done(0), 8000);
+    } catch (e) { done(0); }
+  });
+}
+function tutGenRetry(node, format, note, codeFiles, withFolders, folderFiles) {
+  return async () => {
+    const nid = node && node.id ? Number(node.id) : 0;
+    if (!nid) return 0;
+    await localSelfPost('/api/nodes/' + nid + '/tutorial', {
+      format, note: note || '', codeFiles: codeFiles || [], withFolders: withFolders !== false, folderFiles: folderFiles || []
+    });
+    return 0;   // 新任务 id 由前端从任务列表里看（提交即刻可见）
+  };
+}
 function streamTutorial(req, res, node, format, note, codeFiles, withFolders, folderFiles) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   const model = currentModel();
-  const tk = tasks.begin({ type: 'tutorial', title: '生成教程：' + (node ? node.title : ''), goalId: node ? node.goal_id : 0, nodeId: node ? node.id : 0, note: note || '' });
+  const tk = tasks.begin({ type: 'tutorial', title: '生成教程：' + (node ? node.title : ''), goalId: node ? node.goal_id : 0, nodeId: node ? node.id : 0, note: note || '', retry: tutGenRetry(node, format, note, codeFiles, withFolders, folderFiles) });
+  /* SSE 响应是"一次性输出"：重试发回来的这份没人读，所以显式说明一下，
+     免得后来看日志的人以为前端断流了。 */
     const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} if (obj && obj.status) tk.progress(undefined, obj.status); };
   (async () => {
     try {
@@ -3107,9 +3357,26 @@ function streamTutorial(req, res, node, format, note, codeFiles, withFolders, fo
         } catch (e) { console.log('[tutorial] 文件夹资料载入失败:', e.message); }
       }
       send({ status: `正在撰写「${String(node.title).slice(0, 18)}」的${format === 'html' ? ' HTML ' : ' Markdown '}教程（讲原理、分步实践、练习与自测，约需 1-3 分钟）…` });
-      let txt = await aiText(buildTutorialPrompt(goal, node, format, note, codeBlock), model, 600000);
-      txt = cleanTutorialText(txt, format);
-      if (!txt || txt.length < 200) throw new Error('教程生成失败（内容过短），请重试');
+      const prompt = buildTutorialPrompt(goal, node, format, note, codeBlock);
+      let txt = cleanTutorialText(await aiText(prompt, model, 600000), format);
+      if (!txt || txt.length < 200) throw new Error('教程生成失败：AI 只写了 ' + (txt ? txt.length : 0) + ' 字就停了。原教程没动，可以点任务上的「🔄 重试」，或换个输出更长的模型再试');
+      /* 体检：结构不完整多半是被输出上限截断（长度够、结构缺）。
+         自动续写补齐；补不齐就把问题说清楚 —— 不能把半截教程当成功写进库。 */
+      let chk = tutIntegrity(txt, format);
+      if (!chk.ok) {
+        send({ status: '检测到教程被截断（' + chk.issues[0] + '），正在让 AI 补全…' });
+        const fixed = await repairTruncatedText({
+          raw: txt, format, title: node.title, issues: chk.issues,
+          runText: (p) => aiText(p, model, 600000)
+        });
+        txt = fixed.text; chk = tutIntegrity(txt, format);
+        if (!chk.ok) {
+          const hard = endsMidway(txt, format);
+          throw new Error('教程没能写完整（已自动续写 2 次仍不完整）：' + chk.issues.join('；')
+            + (hard ? '。原因：' + hard + ' —— 换 deepseek-chat / deepseek-reasoner 等输出上限更高的模型，或把篇幅要求调小一点' : '')
+            + '。教程未保存，点任务上的「🔄 重试」可原样重跑');
+        }
+      }
       const t = nowISO();
       const title = String(node.title).trim().slice(0, 120);
       const r = db.prepare('INSERT INTO tutorials (goal_id, node_id, title, format, content, code_files, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)')
@@ -3118,11 +3385,15 @@ function streamTutorial(req, res, node, format, note, codeFiles, withFolders, fo
       db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(t, goal.id);
       backup();
       send({ done: true, tutorial: { id: tid, node_id: node.id, title, format, created_at: t, chars: txt.length }, goal: getGoal(goal.id) });
+      tk.done({ tutorialId: tid, length: txt.length });
     } catch (e) {
       tk.fail(e);
       send({ error: e.message });
+      return res.end();
     }
-    tk.done({ ok: true });
+    /* ⚠️ 别在这里无脑补一句 tk.done()：失败分支已经 tk.fail() 过了，
+       再调 done 会把 failed 覆盖成"✓ 完成" —— 于是教程生成失败在任务中心
+       显示成成功，用户完全不知道出了事（这正是"失败看不出原因"的一部分）。 */
     res.end();
   })();
 }
@@ -3676,13 +3947,15 @@ function redactText(raw) {
           db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), goal.id);
           const report2 = await finishVersion(goal, vid, reason);
           backup();
+          tk.done({ ok: true });
           send({ done: true, added, goal: getGoal(goal.id), sources: sourcesOf(goal.id), report: report2, versionId: vid });
         }
       } catch (e) {
+        /* 失败分支到此为止：绝不能再调 tk.done()，否则 failed 会被覆盖成"✓ 完成"，
+           任务失败在任务中心显示成成功，用户完全看不出出了什么事。 */
         tk.fail(e);
         send({ error: e.message });
       }
-      tk.done({ ok: true });
       res.end();
     })();
     return;
@@ -3843,8 +4116,11 @@ function redactText(raw) {
       sess = db.prepare('SELECT * FROM chat_sessions WHERE id = ?').get(sidRaw);
       if (!sess || Number(sess.goal_id) !== Number(tut.goal_id)) return sendJSON(res, 400, { error: '对话不存在或不属于该目标，请刷新后重试' });
     }
-    const taskId = tasks.submit({
+    /* 任务重试闭包：重跑「教程修改」，入参与当初完全一致。
+       失败时不必把那条修改意见重新打一遍（意见常常很长，重打一遍最容易出错）。 */
+    const startEditTask = () => tasks.submit({
       type: 'tutorial', title: '修改教程：' + String(tut.title || '').slice(0, 30), goalId: tut.goal_id, nodeId: tut.node_id, note: feedback,
+      retry: startEditTask,
       run: async ({ progress, signal }) => {
         progress(5, '正在按你的意见修改教程…');
         let editCodeBlock = '';
@@ -3867,32 +4143,64 @@ function redactText(raw) {
         const editBase = buildTutorialEditPrompt(goal, node, tut, feedback, tut.format, editCodeBlock);
         const runEdit = async (prompt) => cleanTutorialText(String(await ai.text({ prompt, model: currentModel(), timeoutMs: 600000, signal }) || ''), tut.format);
         let out = await runEdit(editBase);
-        if (out.length > 0 && out.length < 80) {
-          /* 模型只回了句确认语（“好的，我来改…”）却没给正文 —— 这是小模型改长文的常见偷懒，
-             不是真的没输出。明确再要一次全文，比直接报错让用户干等更省一轮。 */
-          console.log('[tutorial] 修改初回只有 ' + out.length + ' 字，疑似确认语，追加指令重试。首字：' + out.slice(0, 60));
-          progress(60, 'AI 只回了确认语，正在让它直接输出全文…');
-          out = await runEdit(editBase + '\n\n【注意】不要只回复确认、解释或道歉，直接输出修改后的完整教程正文。');
+        /* 模型偷懒有两类，都得再要一次全文，别让用户干等：
+           ① 只回了句确认语（"好的，我来改…"）
+           ② 更阴的一种：反过来向**我们**要材料 —— "请把上次已输出的尾部粘贴过来"
+              （真实翻车日志：'【已输出内容的尾部】后面没有内容，无法确定中断位置'）。
+              它把续写提示词当成了新任务，于是吐出 30 字就收工。 */
+        const looksLikeAskBack = s => /请(把|将)?[^。]{0,20}(粘贴|提供|发来|贴上)|无法确定|发过来|才能继续/.test(String(s || ''));
+        for (let round = 1; round <= 2; round++) {
+          if (out && out.length >= 80 && !looksLikeAskBack(out)) break;
+          if (!out || !out.length) break;
+          console.log('[tutorial] 修改初回只有 ' + out.length + ' 字（' + (looksLikeAskBack(out) ? '模型反过来要我们提供材料' : '疑似确认语') + '），追加指令重试。首字：' + out.slice(0, 60));
+          progress(55 + round * 5, 'AI 第一次没给出正文，正在让它直接输出全文…');
+          out = await runEdit(editBase + '\n\n【重要】不要只回复确认、解释或道歉，也不要向我索要任何材料 —— 你需要的原文已经完整包含在上面了。现在直接输出修改后的完整教程正文。');
         }
         if (!out || out.length < 80) {
           console.log('[tutorial] 修改失败：清洗后长度 ' + (out ? out.length : 0) + '，原文长度 ' + String(tut.content || '').length);
           throw new Error(out && out.length
-            ? 'AI 这次只返回了 ' + out.length + ' 个字（疑似没写完），原教程没动：请重试，或把修改意见拆小一点分多次提'
+            ? 'AI 这次只返回了 ' + out.length + ' 个字（没写出正文），原教程没动：点「🔄 重试」可原样重跑；若反复如此，多半是模型单次输出上限不够，换 deepseek-chat / deepseek-reasoner 会更稳'
             : 'AI 返回内容为空，请重试');
         }
         // 防截断兜底：原文很长、新文却只有一小截时，宁可报错也不覆盖好教程
         const origLen = String(tut.content || '').length;
         progress(80, '正在保存新版本…');
         if (origLen > 3000 && out.length < Math.max(500, Math.floor(origLen * 0.2))) {
-          throw new Error('AI 返回内容过短（仅原文 ' + Math.round(out.length / Math.max(1, origLen) * 100) + '%，疑似被截断），已保留原教程：请重试，或把修改意见拆小一点分多次提');
+          throw new Error('AI 返回内容过短（仅原文 ' + Math.round(out.length / Math.max(1, origLen) * 100) + '%，疑似被截断），原教程没动：点任务上的「🔄 重试」即可原样重跑，或把修改意见拆小一点分多次提');
+        }
+        /* 结构体检：长度够不代表写完了（线上翻车：目录 12 节、正文只写到第 3 节，
+           长度 25k 远超阈值，于是半截教程被当成功写进库，用户点后面几节全没反应）。
+           这里改成先自动续写补齐，补不齐就拒收并说明缺什么。 */
+        let chk = tutIntegrity(out, tut.format);
+        if (!chk.ok) {
+          console.log('[tutorial] 修改结果疑似截断：' + chk.issues.join('；'));
+          progress(70, '结果被截断，正在让 AI 补全缺失部分…');
+          const fixed = await repairTruncatedText({
+            raw: out, format: tut.format, title: tut.title, issues: chk.issues,
+            runText: (p) => ai.text({ prompt: p, model: currentModel(), timeoutMs: 600000, signal })
+          });
+          out = fixed.text;
+          chk = tutIntegrity(out, tut.format);
+          if (!chk.ok) {
+            console.log('[tutorial] 续写 2 次仍不完整，拒收。' + chk.issues.join('；'));
+            /* 硬截断（缺 </html> 这类结束标记）没法靠续写补：把"为什么"讲清楚，
+               免得用户以为是随机故障反复重试 —— 真实原因是模型单次输出上限。 */
+            const hard = endsMidway(out, tut.format);
+            throw new Error('AI 这次没写完整（已自动续写 2 次仍缺：' + chk.issues.join('；') + '）'
+              + (hard ? '。原因：' + hard + ' —— 换 deepseek-chat / deepseek-reasoner 等输出上限更高的模型，或把修改意见拆小一点分多次提' : '')
+              + '。原教程没动，点「🔄 重试」可原样重跑');
+          }
         }
         // 防跑题兜底：标题留着、正文被换成毫不相干的内容时，长度检查拦不住
         // （线上翻车：RAGFlow 教程被改成离线同步引擎）。命中即拒收，原教程不动。
         const drift = topicDrifted(out, tut.content, [tut.title, node && node.title]);
         if (drift) {
-          console.log('[tutorial] 修改疑似跑题，拒收。主题词：' + drift.kws.join('/') + '，原文命中：' + drift.oldHits.join('/') + '，新文命中：' + (drift.hits.join('/') || '无'));
-          throw new Error('AI 新写的内容疑似跑题（正文里找不到“' + drift.kws.slice(0, 4).join('”“') + '”等主题词），已保留原教程：请换个说法再提意见，或先问它复述一遍要改什么，确认对了再让它写');
+          const missed = (drift.anchorEn.length ? drift.anchorEn : drift.anchorZh.length ? drift.anchorZh : drift.strong).slice(0, 4);
+          console.log('[tutorial] 修改疑似跑题，拒收。判定依据：' + drift.used + '；新文正文开头：' + drift.newBody);
+          throw new Error('AI 新写的内容疑似跑题（正文里找不到“' + missed.join('”“') + '”等主题词），已保留原教程：请换个说法再提意见，或先问它复述一遍要改什么，确认对了再让它写');
         }
+        // 先存旧版（教程版本表），再覆盖正文 —— 改坏了能从历史版本恢复
+        try { saveTutorialVersion(tid, 'AI 修改：' + String(feedback || '').slice(0, 100)); } catch (e) {}
         // 保留历史版本（写入 goal_versions 便于回滚），再覆盖教程内容
         try {
           const vid = beginVersion(tut.goal_id, '教程修改：' + String(tut.title || '').slice(0, 20));
@@ -3906,6 +4214,7 @@ function redactText(raw) {
         return { tutorialId: tid, length: out.length };
       }
     });
+    const taskId = startEditTask();
     // 先落库对话记录（任务在后台跑，记录立刻可见；刷新后从会话里读出来）
     if (sess) {
       const t = nowISO();
@@ -3933,6 +4242,7 @@ function redactText(raw) {
     const content = body.content != null ? String(body.content) : '';
     if (!content.trim()) return sendJSON(res, 400, { error: '内容不能为空' });
     const goal = db.prepare('SELECT * FROM goals WHERE id = ?').get(tut.goal_id);
+    try { saveTutorialVersion(tid, '手动编辑'); } catch (e) {}
     try {
       const vid = beginVersion(tut.goal_id, '手动编辑教程：' + String(tut.title || '').slice(0, 20));
       db.prepare('UPDATE tutorials SET content = ?, updated_at = ? WHERE id = ?').run(content, nowISO(), tid);
@@ -3942,6 +4252,36 @@ function redactText(raw) {
     }
     backup();
     return sendJSON(res, 200, { ok: true, length: content.length });
+  }
+  /* ---- 教程版本：列表 / 取正文 / 恢复 ----
+     每次 AI 修改、手动保存覆盖正文前都会先存一份（只留最近 10 版）。
+     恢复时先把当前版存一份（“回滚前自动保存”），所以恢复本身也可撤销。 */
+  const tutVersMatch = p.match(/^\/api\/tutorials\/(\d+)\/versions$/);
+  if (tutVersMatch && method === 'GET') {
+    const tid = Number(tutVersMatch[1]);
+    if (!db.prepare('SELECT id FROM tutorials WHERE id = ?').get(tid)) return sendJSON(res, 404, { error: '教程不存在' });
+    const rows = db.prepare('SELECT id, tutorial_id, reason, LENGTH(content) AS chars, created_at FROM tutorial_versions WHERE tutorial_id = ? ORDER BY id DESC').all(tid);
+    return sendJSON(res, 200, { versions: rows });
+  }
+  const tutVerOneMatch = p.match(/^\/api\/tutorials\/versions\/(\d+)$/);
+  if (tutVerOneMatch && method === 'GET') {
+    const v = db.prepare('SELECT * FROM tutorial_versions WHERE id = ?').get(Number(tutVerOneMatch[1]));
+    if (!v) return sendJSON(res, 404, { error: '该版本不存在' });
+    return sendJSON(res, 200, { version: v });
+  }
+  const tutRestoreMatch = p.match(/^\/api\/tutorials\/(\d+)\/restore$/);
+  if (tutRestoreMatch && method === 'POST') {
+    const tid = Number(tutRestoreMatch[1]);
+    const tut = db.prepare('SELECT * FROM tutorials WHERE id = ?').get(tid);
+    if (!tut) return sendJSON(res, 404, { error: '教程不存在' });
+    const body = await readBody(req);
+    const v = db.prepare('SELECT * FROM tutorial_versions WHERE id = ? AND tutorial_id = ?').get(Number(body.version_id), tid);
+    if (!v) return sendJSON(res, 404, { error: '该版本不存在（或不属于这份教程）' });
+    try { saveTutorialVersion(tid, '回滚前自动保存'); } catch (e) {}
+    db.prepare('UPDATE tutorials SET content = ?, updated_at = ? WHERE id = ?').run(v.content, nowISO(), tid);
+    db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), tut.goal_id);
+    backup();
+    return sendJSON(res, 200, { ok: true, tutorial: db.prepare('SELECT * FROM tutorials WHERE id = ?').get(tid) });
   }
   const tutMatch = p.match(/^\/api\/tutorials\/(\d+)$/);
   if (tutMatch) {
@@ -4261,6 +4601,12 @@ function extractEbookPrefFromAnswers(answers) {
   const taskCancelMatch = p.match(/^\/api\/tasks\/(\d+)\/cancel$/);
   if (taskCancelMatch && method === 'POST') {
     return sendJSON(res, 200, tasks.cancel(Number(taskCancelMatch[1])));
+  }
+  /* 失败重试：用当初那份入参重新提交一个新任务（用户不用把意见/命令再打一遍）。
+     旧任务保留（还能看到它当时的报错），新任务是独立的一条。 */
+  const taskRetryMatch = p.match(/^\/api\/tasks\/(\d+)\/retry$/);
+  if (taskRetryMatch && method === 'POST') {
+    return sendJSON(res, 200, await tasks.retry(Number(taskRetryMatch[1])));
   }
   if (p === '/api/tasks/clear' && method === 'POST') {
     const b = await readBody(req).catch(() => ({}));
@@ -4737,20 +5083,22 @@ function extractEbookPrefFromAnswers(answers) {
     const sources = db.prepare('SELECT * FROM sources ORDER BY id').all();
     const settings = db.prepare('SELECT * FROM settings').all();
     const tutorials = db.prepare('SELECT * FROM tutorials ORDER BY id').all();
+    let tutorialVersions = [];
+    try { tutorialVersions = db.prepare('SELECT * FROM tutorial_versions ORDER BY id').all(); } catch (e) {}
     const pluginData = {};
     for (const pl of PLUGINS) { try { if (typeof pl.exportData === 'function') pluginData[pl.id] = pl.exportData(pluginCtx()); } catch (e) {} }
     res.writeHead(200, {
       'Content-Type': 'application/json; charset=utf-8',
       'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent('思而行-导出-' + stamp() + '.json')}`
     });
-    return res.end(JSON.stringify({ exportedAt: nowISO(), goals, nodes, sources, tutorials, settings, pluginData }, null, 2));
+    return res.end(JSON.stringify({ exportedAt: nowISO(), goals, nodes, sources, tutorials, tutorialVersions, settings, pluginData }, null, 2));
   }
   if (p === '/api/import/json' && method === 'POST') {
     const body = await readBody(req);
     const goals = Array.isArray(body.goals) ? body.goals : [];
     if (!goals.length) return sendJSON(res, 400, { error: '没有可导入的目标' });
     backup();
-    db.exec('DELETE FROM nodes; DELETE FROM sources; DELETE FROM goals; DELETE FROM goal_versions; DELETE FROM tutorials; DELETE FROM chats; DELETE FROM chat_sessions;');
+    db.exec('DELETE FROM nodes; DELETE FROM sources; DELETE FROM goals; DELETE FROM goal_versions; DELETE FROM tutorials; DELETE FROM tutorial_versions; DELETE FROM chats; DELETE FROM chat_sessions;');
     for (const pl of PLUGINS) { try { if (typeof pl.clearAll === 'function') pl.clearAll(pluginCtx()); } catch (e) {} }
     const insG = db.prepare('INSERT INTO goals (id,title,profile,materials,weekly_hours,deadline,status,error,summary,constraints,plugins,ebook_pref,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
     for (const g of goals) insG.run(g.id != null ? Number(g.id) : null, g.title || '', g.profile || '', g.materials || '', g.weekly_hours || '', g.deadline || '', g.status || 'draft', g.error || '', g.summary || '', typeof g.constraints === 'string' ? g.constraints : JSON.stringify(g.constraints || []), typeof g.plugins === 'string' ? g.plugins : JSON.stringify(g.plugins || {}), typeof g.ebook_pref === 'string' ? g.ebook_pref : JSON.stringify(g.ebook_pref || {}), g.created_at || nowISO(), g.updated_at || nowISO());
@@ -4758,6 +5106,11 @@ function extractEbookPrefFromAnswers(answers) {
     for (const n of (Array.isArray(body.nodes) ? body.nodes : [])) insN.run(n.id != null ? Number(n.id) : null, Number(n.goal_id), n.parent_id ? Number(n.parent_id) : null, Number(n.level || 0), n.title || '', n.detail || '', n.artifact || '', n.acceptance || '', n.hours || '', typeof n.sources === 'string' ? n.sources : JSON.stringify(n.sources || []), n.status || 'todo', Number(n.sort_order || 0), n.created_at || nowISO(), n.updated_at || nowISO());
     const insT = db.prepare('INSERT INTO tutorials (id,goal_id,node_id,title,format,content,code_files,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)');
     for (const t of (Array.isArray(body.tutorials) ? body.tutorials : [])) insT.run(t.id != null ? Number(t.id) : null, Number(t.goal_id), Number(t.node_id), t.title || '', t.format || 'md', t.content || '', typeof t.code_files === 'string' ? t.code_files : JSON.stringify(t.code_files || []), t.created_at || nowISO(), t.updated_at || nowISO());
+    const insTV = db.prepare('INSERT INTO tutorial_versions (id,tutorial_id,content,reason,created_at) VALUES (?,?,?,?,?)');
+    for (const v of (Array.isArray(body.tutorialVersions) ? body.tutorialVersions : [])) {
+      if (v.tutorial_id == null || !v.content) continue;
+      insTV.run(v.id != null ? Number(v.id) : null, Number(v.tutorial_id), String(v.content), String(v.reason || '').slice(0, 120), v.created_at || nowISO());
+    }
     const insS = db.prepare('INSERT INTO sources (id,goal_id,title,url,site,kind,snippet,content,created_at) VALUES (?,?,?,?,?,?,?,?,?)');
     for (const s of (Array.isArray(body.sources) ? body.sources : [])) insS.run(s.id != null ? Number(s.id) : null, Number(s.goal_id), s.title || '', s.url || '', s.site || '', s.kind || '', s.snippet || '', s.content || '', s.created_at || nowISO());
     for (const pl of PLUGINS) {

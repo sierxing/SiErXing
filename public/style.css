@@ -431,6 +431,26 @@ body:has(.cmpPage) .wrap{max-width:1460px;}
 .storeModes{display:flex; flex-direction:column; gap:7px; margin:4px 0 2px;}
 .storeModes label{display:flex; align-items:center; gap:7px; font-size:13px; cursor:pointer;}
 
+/* 教程历史版本 */
+.tutVerRow{display:flex; align-items:center; gap:10px; padding:10px 4px; border-bottom:1px dashed var(--border); flex-wrap:wrap;}
+.tutVerRow:last-child{border-bottom:none;}
+.tutVerInfo{min-width:0;}
+.tutVerT{font-size:13px; font-weight:600; line-height:1.6; word-break:break-word;}
+.tutVerM{font-size:11.5px; color:var(--muted); margin-top:2px;}
+.tutVerPrevMeta{font-size:12px; color:var(--muted); margin:8px 0;}
+.tutVerFrame{width:100%; min-height:50vh; border:1px solid var(--border); border-radius:10px; background:var(--card);}
+/* 教程被截断告警条（正文自带目录里有点不动的章节时出现） */
+.tutTruncBar{
+  display:flex; align-items:center; gap:9px; flex-wrap:wrap;
+  margin:10px 0 2px; padding:9px 12px; border-radius:11px;
+  background:rgba(231,140,60,.10); border:1px solid rgba(231,140,60,.42); color:var(--text);
+  font-size:12.5px; line-height:1.6;
+}
+.tutTruncBar .ttbIcon{font-size:14px; flex:none;}
+.tutTruncBar .ttbText{min-width:0;}
+.tutTruncBar .ttbHi{font-weight:700; color:#c9701f;}
+.tutTruncBar .ttbDim{color:var(--muted);}
+.tutTruncBar[data-dark="1"] .ttbHi{color:#f0a94e;}
 /* 收藏栏（教程页 / 路线图页共用）：钉选功能键常驻第二行 */
 .tutFavBar{display:flex; align-items:center; gap:8px; flex-wrap:wrap;
   background:var(--soft); border:1px solid var(--border); border-radius:10px;
@@ -1997,6 +2017,18 @@ body{padding-left:78px;}
 .taskProg{height:4px; background:var(--soft); border-radius:3px; margin-top:5px; overflow:hidden;}
 .taskProg i{display:block; height:100%; background:var(--accent); transition:width .3s;}
 .taskState{font-size:11.5px; color:var(--muted); flex:none;}
+/* 失败原因：默认截断一行，点开看全文（报错是黑盒时用户得知道为什么没成） */
+.taskErr{position:relative; margin-top:3px; font-size:11px; color:var(--danger); cursor:pointer; line-height:1.5;}
+.taskErrMore{text-decoration:underline; opacity:.8; margin-left:2px;}
+.taskErrTip{
+  position:absolute; left:0; top:calc(100% + 4px); z-index:60; max-width:420px;
+  padding:8px 10px; border-radius:9px; background:var(--card); border:1px solid var(--border);
+  box-shadow:var(--shadow-md, 0 10px 30px rgba(10,8,25,.22)); color:var(--text);
+  font-size:11.5px; line-height:1.65; white-space:normal; word-break:break-word;
+}
+.btn.tiny.retry{border-color:var(--accent); color:var(--accent);}
+.btn.tiny.retry:hover{background:var(--accent-soft);}
+.btn.tiny.retry:disabled{opacity:.6; cursor:default;}
 
 /* 节点正在被 AI 处理：呼吸光环 + 文案 */
 .mtnode.aiBusy, .mttask.aiBusy{
