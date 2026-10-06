@@ -737,7 +737,13 @@ function openRecallView(pid) {
  *  不走 innerHTML 拼接 —— AI 的 HTML 里引号换行随便写都不会炸。 */
 function openVisual(pid, rec) {
   const prob = (state.problem && state.problem.problem) || {};
-  const L = openLayer('📊 执行可视化', esc((prob.fid || '') + '. ' + (prob.title || '') + ' · ' + (rec.date || '') + (rec.language ? ' · ' + rec.language : '')));
+  const L = openLayer('📊 执行可视化', esc((prob.fid || '') + '. ' + (prob.title || '') + ' · ' + (rec.date || '') + (rec.language ? ' · ' + rec.language : '')),
+    { headExtra: '<button class="pfFull" data-full title="全屏 / 还原">⛶</button>' });
+  /* 全屏切换绑在 head 上（paint 只重绘 body/foot，head 常驻，绑一次就行） */
+  L.win.querySelector('[data-full]').addEventListener('click', e => {
+    L.win.classList.toggle('full');
+    e.currentTarget.classList.toggle('on', L.win.classList.contains('full'));
+  });
   const paint = html => {
     L.body.innerHTML = '<iframe class="pfVisFrame" sandbox="allow-scripts" title="执行可视化"></iframe>'
       + '<div class="pfSub" style="margin-top:8px;">单文件离线页（无外部请求），沙箱里跑，动不了主页面。输入切换、播放/单步/调速都在页里面。</div>';

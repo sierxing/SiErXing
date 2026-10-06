@@ -1,14 +1,14 @@
 {
-  "version": "1.10.6",
-  "buildVer": "260d44dc23ff",
-  "payload": "release/payload-1.10.6.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.6.sxar?ref=main",
+  "version": "1.10.7",
+  "buildVer": "c40f0c5a9de3",
+  "payload": "release/payload-1.10.7.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.7.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "eaf339748b71049f519094d86ae11de56056cb34d253a4adc02dff1a503fbff4",
-  "size": 587180,
-  "unpackedSize": 2191969,
-  "publishedAt": "2026-10-06T06:12:49.307Z",
-  "notes": "作答记录加执行可视化：AI把本次提交做成单文件交互HTML（换输入/播放单步/代码对照）",
+  "sha256": "bd278c7d9175afd7abeba6466413240947d5c6f2123240a94dff47bb9767912f",
+  "size": 587502,
+  "unpackedSize": 2192896,
+  "publishedAt": "2026-10-06T06:35:14.699Z",
+  "notes": "执行可视化查看器加全屏切换",
   "exeRequired": false
 }
