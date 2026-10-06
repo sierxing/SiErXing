@@ -1,14 +1,14 @@
 {
-  "version": "1.10.12",
-  "buildVer": "e86422b81cf5",
-  "payload": "release/payload-1.10.12.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.12.sxar?ref=main",
+  "version": "1.10.13",
+  "buildVer": "235c52b4512c",
+  "payload": "release/payload-1.10.13.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.13.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "eb42759a4944b676a445505ae8d8f851c157600fff913f31440c4fce76968a12",
-  "size": 591850,
-  "unpackedSize": 2204703,
-  "publishedAt": "2026-10-06T10:13:56.346Z",
-  "notes": "教程修改失败黑盒改可观测：确认语自动再要一次全文，报错带字数",
+  "sha256": "cdbcd1728b25df92458d0f467c042b0f08484f0ca6965f7c9a3edc4da1d7ce85",
+  "size": 593028,
+  "unpackedSize": 2207636,
+  "publishedAt": "2026-10-06T10:31:03.906Z",
+  "notes": "教程修改加防跑题守卫：标题主题词新旧对照，跑题拒收保原教程",
   "exeRequired": false
 }

@@ -2995,6 +2995,41 @@ function streamChat(req, res, goal, message, session) {
 }
 
 
+/* 跑题检查（教程修改流程用）：线上真实翻车过 —— 模型把“RAGFlow 部署架构”
+   改成了“离线同步引擎”，标题留着、正文全换，长度检查根本拦不住。
+   规则：从标题抽主题词，要求“原文命中≥2 且新文命中≥2”；只有
+   “旧的对、新的错”时才判跑题（新旧都不沾边的不管，免得标题太空时误杀）。 */
+function topicKeywords(title) {
+  const stop = new Set(['教程', '学习', '笔记', '总结', '阶段', '任务', '目标', '介绍', '指南', '规划', '讲解', '详解', '入门', '精通', '实战', '实践']);
+  const out = [];
+  const push = w => { if (w && w.length >= 2 && !out.includes(w)) out.push(w); };
+  const s = String(title || '');
+  const runs = [];
+  for (const m of s.match(/[\u4e00-\u9fa5]{2,}/g) || []) {
+    let w = m;
+    for (const st of stop) w = w.split(st).join(' ');
+    for (const piece of w.split(' ')) if (piece.length >= 2) { runs.push(piece); push(piece); }
+  }
+  for (const m of s.match(/[A-Za-z][A-Za-z0-9_.\-]{2,}/g) || []) push(m);
+  /* 长词再按二元切一遍兜底：改写时只提“部署”“启动”这种散词也能命中；
+     垃圾二元（如“署架”）命中不了任何正文，无害 */
+  for (const r of runs) for (let i = 0; i + 1 < r.length; i++) push(r.slice(i, i + 2));
+  return out.slice(0, 14);
+}
+function stripTags(html) {
+  return String(html || '').replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+}
+function topicDrifted(newHtml, oldHtml, titles) {
+  const kws = [];
+  for (const t of (titles || [])) for (const k of topicKeywords(t)) if (!kws.includes(k)) kws.push(k);
+  if (kws.length < 3) return null;
+  const bodyNew = stripTags(newHtml).toLowerCase();
+  const bodyOld = stripTags(oldHtml).toLowerCase();
+  const hits = kws.filter(k => bodyNew.includes(k.toLowerCase()));
+  const oldHits = kws.filter(k => bodyOld.includes(k.toLowerCase()));
+  if (oldHits.length >= 2 && hits.length < 2) return { kws, oldHits, hits };
+  return null;
+}
 function cleanTutorialText(txt, format) {
   let s = String(txt || '').trim();
   const m = s.match(/^```[a-zA-Z]*\n([\s\S]*?)\n```$/);
@@ -3850,6 +3885,13 @@ function redactText(raw) {
         progress(80, '正在保存新版本…');
         if (origLen > 3000 && out.length < Math.max(500, Math.floor(origLen * 0.2))) {
           throw new Error('AI 返回内容过短（仅原文 ' + Math.round(out.length / Math.max(1, origLen) * 100) + '%，疑似被截断），已保留原教程：请重试，或把修改意见拆小一点分多次提');
+        }
+        // 防跑题兜底：标题留着、正文被换成毫不相干的内容时，长度检查拦不住
+        // （线上翻车：RAGFlow 教程被改成离线同步引擎）。命中即拒收，原教程不动。
+        const drift = topicDrifted(out, tut.content, [tut.title, node && node.title]);
+        if (drift) {
+          console.log('[tutorial] 修改疑似跑题，拒收。主题词：' + drift.kws.join('/') + '，原文命中：' + drift.oldHits.join('/') + '，新文命中：' + (drift.hits.join('/') || '无'));
+          throw new Error('AI 新写的内容疑似跑题（正文里找不到“' + drift.kws.slice(0, 4).join('”“') + '”等主题词），已保留原教程：请换个说法再提意见，或先问它复述一遍要改什么，确认对了再让它写');
         }
         // 保留历史版本（写入 goal_versions 便于回滚），再覆盖教程内容
         try {
