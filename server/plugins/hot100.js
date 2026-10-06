@@ -50,6 +50,15 @@ CREATE TABLE IF NOT EXISTS practice_records (
   minutes INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
+/* 执行可视化：AI 针对某一次提交的代码生成的单文件交互 HTML（自包含、无外部请求）。
+   一条记录只留一份，重新生成直接覆盖；删作答记录时级联删。 */
+CREATE TABLE IF NOT EXISTS record_visuals (
+  record_id INTEGER PRIMARY KEY,
+  problem_id INTEGER NOT NULL DEFAULT 0,
+  html TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS daily_plans (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   goal_id INTEGER NOT NULL,
@@ -226,7 +235,8 @@ module.exports = {
       minds: ctx.db.prepare('SELECT * FROM problem_mind').all(),
       mindSessions: ctx.db.prepare('SELECT * FROM mind_sessions').all(),
       recalls: ctx.db.prepare('SELECT * FROM recall_tests').all(),
-      pitfalls: ctx.db.prepare('SELECT * FROM pitfall_cards').all()
+      pitfalls: ctx.db.prepare('SELECT * FROM pitfall_cards').all(),
+      visuals: ctx.db.prepare('SELECT record_id,problem_id,html,created_at,updated_at FROM record_visuals').all()
     };
   },
   importData(data, ctx) {
@@ -276,6 +286,12 @@ module.exports = {
     for (const x of (data.pitfalls || [])) db.prepare('INSERT OR REPLACE INTO pitfall_cards (id,problem_id,goal_id,record_id,tag,title,detail,advice,hits,weight,status,source_test,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
       .run(x.id, x.problem_id, x.goal_id || 0, x.record_id || 0, x.tag || '', x.title || '', x.detail || '', x.advice || '',
         x.hits || 1, x.weight || 0, x.status || 'open', x.source_test || 0, x.created_at || '', x.updated_at || '');
+    /* 可视化 HTML 体积大但数量少（一记录一份），随备份走；老备份没有该字段，容错 */
+    for (const x of (data.visuals || [])) {
+      if (!x.record_id || !x.html) continue;
+      db.prepare('INSERT OR REPLACE INTO record_visuals (record_id,problem_id,html,created_at,updated_at) VALUES (?,?,?,?,?)')
+        .run(x.record_id, x.problem_id || 0, String(x.html).slice(0, 200000), x.created_at || '', x.updated_at || '');
+    }
     /* 复习排期是「今天练哪几道」，跨设备没什么意义（各人作息不同），照样同步但不覆盖别人的当天清单 */
     for (const x of (data.plansReview || [])) {
       if (!x.goal_id || !x.date) continue;
@@ -413,6 +429,67 @@ module.exports = {
         const recordDelMatch = p.match(/^\/api\/records\/(\d+)$/);
         if (recordDelMatch && method === 'DELETE') {
           db.prepare('DELETE FROM practice_records WHERE id = ?').run(Number(recordDelMatch[1]));
+          /* 作答记录删了，它的可视化 HTML 一并删（孤儿 HTML 留着只占地方） */
+          db.prepare('DELETE FROM record_visuals WHERE record_id = ?').run(Number(recordDelMatch[1]));
+          return sendJSON(res, 200, { ok: true });
+        }
+    }
+  },
+  /* ---- 执行可视化：AI 把某次提交的代码做成单文件交互 HTML ---- */
+  {
+    /* 读某条记录的可视化（没有返回 exists:false，前端据此决定是直接看还是先生成） */
+    method: 'GET', pattern: /^\/api\/records\/(\d+)\/visual$/,
+    handler: async (req, res, u, ctx) => {
+      const p = u.pathname, method = req.method;
+        const m = p.match(/^\/api\/records\/(\d+)\/visual$/);
+        if (m && method === 'GET') {
+          const v = db.prepare('SELECT * FROM record_visuals WHERE record_id = ?').get(Number(m[1]));
+          if (!v || !v.html) return sendJSON(res, 200, { exists: false });
+          return sendJSON(res, 200, { exists: true, html: v.html, updated_at: v.updated_at || '' });
+        }
+    }
+  },
+  {
+    /* 生成（幂等覆盖）：没有代码的记录不给生成，不浪费 AI 调用 */
+    method: 'POST', pattern: /^\/api\/records\/(\d+)\/visualize$/,
+    handler: async (req, res, u, ctx) => {
+      const p = u.pathname, method = req.method;
+        const m = p.match(/^\/api\/records\/(\d+)\/visualize$/);
+        if (m && method === 'POST') {
+          const rid = Number(m[1]);
+          const rec = db.prepare('SELECT * FROM practice_records WHERE id = ?').get(rid);
+          if (!rec) return sendJSON(res, 404, { error: '记录不存在' });
+          if (!String(rec.code || '').trim()) return sendJSON(res, 400, { error: '这条记录没存代码 —— 点「编辑」把代码补上再可视化' });
+          if (typeof aiText !== 'function') return sendJSON(res, 500, { error: '当前环境没有可用 AI' });
+          const prob = db.prepare('SELECT * FROM problems WHERE id = ?').get(rec.problem_id);
+          if (!prob) return sendJSON(res, 404, { error: '题目不存在' });
+          try {
+            const raw = await aiText(buildVisualPrompt(prob, rec), (currentModel && currentModel()) || '', 180000);
+            let html = extractVisualHTML(raw);
+            /* 有些模型写长了会被截断，续写那轮还可能回一句废话（“把尾部粘贴过来我才能继续”）。
+               此时不直接报错，换精简版提示词重试一次：输入减到 2 组、日志压到 15 步以内，
+               输出短了反而容易一次写完。两次都拿不到才算失败。 */
+            if (!html) {
+              const raw2 = await aiText(buildVisualPrompt(prob, rec) + VISUAL_COMPACT, (currentModel && currentModel()) || '', 180000);
+              html = extractVisualHTML(raw2);
+            }
+            if (!html) return sendJSON(res, 500, { error: 'AI 没返回可用的 HTML（换个模型或重试）' });
+            const t = nowISO();
+            db.prepare('INSERT INTO record_visuals (record_id,problem_id,html,created_at,updated_at) VALUES (?,?,?,COALESCE((SELECT created_at FROM record_visuals WHERE record_id=?),?),?) ON CONFLICT(record_id) DO UPDATE SET html=excluded.html, updated_at=excluded.updated_at')
+              .run(rid, rec.problem_id, html, rid, t, t);
+            return sendJSON(res, 200, { ok: true, html });
+          } catch (e) { return sendJSON(res, 500, { error: e.message || '生成可视化失败' }); }
+        }
+    }
+  },
+  {
+    /* 删掉某条记录的可视化（代码没变、想换个样式时先删再生成） */
+    method: 'DELETE', pattern: /^\/api\/records\/(\d+)\/visual$/,
+    handler: async (req, res, u, ctx) => {
+      const p = u.pathname, method = req.method;
+        const m = p.match(/^\/api\/records\/(\d+)\/visual$/);
+        if (m && method === 'DELETE') {
+          db.prepare('DELETE FROM record_visuals WHERE record_id = ?').run(Number(m[1]));
           return sendJSON(res, 200, { ok: true });
         }
     }
@@ -1477,6 +1554,72 @@ function statementBrief(prob, max) {
   s = s.replace(/\s+/g, ' ').trim();
   return s.length > (max || 700) ? s.slice(0, max) + '…' : s;
 }
+/* ---- 执行可视化：prompt 与 HTML 提取 ----
+   关键设计：可视化页必须真的「执行」起来，而不是静态配图。
+   所以强制要求 AI 在页内用 JS 复刻用户代码的逻辑（生成步骤日志），
+   再配输入切换 + 播放/单步/重置/调速。页内零外部请求（离线可看，
+   也和本项目零依赖的思路一致），只输出一个 HTML 文件。 */
+const VISUAL_RULE = [
+  '你是一个算法可视化出题人。用户刚做对一道 LeetCode 题，现在要你把他这次提交的代码做成一个「能动手玩」的单文件交互网页，让他看清各种输入下代码的执行效果。',
+  '',
+  '硬性格式（违反任何一条都算失败）：',
+  '1. 只输出一个完整 HTML 文件：<!DOCTYPE html> 开头，</html> 结尾。不要代码围栏、不要任何解释文字。',
+  '2. 零外部请求：不许引用任何 CDN / 在线字体 / 图片 / iframe，所有样式和脚本都内联。离线双击打开也要能用。',
+  '3. 全中文界面，手机和桌面都能看（布局自适应小屏）。',
+  '',
+  '页面必须包含这四块（缺一块都算失败）：',
+  'A. 输入切换器：至少 3 组输入 —— 题面示例输入全收录，再加 1 组边界输入（空数组 / 单个元素 / 最小最大值，哪个贴切放哪个）。点哪组就用哪组跑。',
+  'B. 执行动画区：把数据结构画出来（SVG / Canvas / div 格子都行，如数组画成格子、哈希表画成键值行、指针画成箭头），每一步高亮当前处理的元素。',
+  'C. 步骤控制台：播放 / 暂停 / 单步 / 重置四个按钮 + 速度滑杆。下方配「步骤日志」列表，每步一句话说清干了什么（如“i=2，查到补数 7 在表中，返回 [0,2]”）。',
+  'D. 代码对照区：把用户代码原文贴出来（<pre> 即可），当前执行的行要高亮（你生成步骤日志时顺手标行号）。',
+  '',
+  '正确性要求（最重要）：',
+  '- 页内用 JavaScript 把用户代码的逻辑原样复刻一遍（函数名可另起，但分支和循环语义必须一致），动画和日志都由这个复刻函数驱动，不许手写假步骤。',
+  '- 生成前先在心里用每组输入跑一遍复刻函数，输出必须和题面示例的期望输出一致；对不上就改复刻函数，不要改输入。',
+  '- 如果用户代码本身有 bug（比如他这次没通过），照实可视化：把错的那一步标红并在日志里指出。',
+  '',
+  '只输出 HTML，不要其它任何文字。'
+].join('\n');
+/* 精简重试后缀：第一次没拿到可用 HTML（多半是写太长被截断）时，
+   不换模型直接降需求重试 —— 输入 2 组、日志 15 步以内、样式从简，
+   输出短了反而容易一次写完闭合。 */
+const VISUAL_COMPACT = '\n\n【补充要求（精简版，优先级最高）】上面要求一次写完对你太长了，这次只做最小可用版本：'
+  + '输入切换器只做 2 组输入；步骤日志不超过 15 条；动画区只画数组格子+当前指针，不用 Canvas 特效；'
+  + '样式能看清就行，不要堆装饰。其它要求不变，仍只输出一个完整 HTML。';
+function buildVisualPrompt(prob, rec) {
+  /* 注意不用 statementBrief：它会把 <pre> 示例压成“[代码]”二字，
+     而可视化页恰恰要靠示例输入输出来定输入切换器。这里保留 pre 文本。 */
+  let stmt = String(prob.statement || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+    .replace(/\s+/g, ' ').trim().slice(0, 3000);
+  return [
+    VISUAL_RULE, '',
+    '题目：' + prob.fid + '. ' + prob.title + '（难度 ' + (prob.difficulty || '未知') + '）',
+    '题面（含示例输入输出）：' + (stmt || '（未缓存）'),
+    '用户这次提交的语言：' + (rec.language || '未知') + '（' + (rec.passed ? '已通过' : '未通过') + '）', '',
+    '=== 用户代码（以它为准复刻逻辑） ===',
+    '```\n' + String(rec.code || '').slice(0, 12000) + '\n```'
+  ].join('\n');
+}
+/** 从 AI 回复里抠出 HTML：去围栏、去前后废话；拿不到合法片段就返回空（调用方报错，不存坏数据）。 */
+function extractVisualHTML(raw) {
+  let s = String(raw || '').trim();
+  if (!s) return '';
+  s = s.replace(/^```[a-zA-Z]*\s*/, '').replace(/\s*```$/, '').trim();
+  const i = s.search(/<!DOCTYPE html|<html/i);
+  if (i > 0) s = s.slice(i).trim();
+  else if (i < 0) {
+    /* 连 html 标签都没有：退一步收 <style>/<div>/<svg> 片段并包一层 */
+    if (!/<(div|svg|canvas|style|script|pre|table)[\s>]/i.test(s)) return '';
+    s = '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body>' + s + '</body></html>';
+  }
+  if (!/<\/html\s*>\s*$/i.test(s)) s += '\n</html>';
+  /* 体积上限：超了说明 AI 在堆字，截断反而会破标签，直接拒掉让用户重试 */
+  if (s.length > 200000) return '';
+  if (s.length < 500) return '';
+  return s;
+}
 const SUMMARY_RULE = [
   '把这段师生对话整理成一张「思路卡」。要求：',
   '- 开头用学员自己的措辞和直觉，不要换成教科书腔。',
@@ -1986,3 +2129,7 @@ function openInIDE(problem, language) {
   } catch (e) {}
   return { file, dir, lang, langName: LANG_NAME[lang] || lang, created, repaired };
 }
+
+/* 单测出口：宿主只读 id/name/api 等已知字段，多出来的 key 会被忽略。
+   专供自测脚本 require 后直接调纯函数，不起服务。 */
+module.exports.__visualTest = { buildVisualPrompt, extractVisualHTML };

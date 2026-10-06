@@ -438,6 +438,7 @@ function drawProblemPage(pid) {
               ${r.minutes ? `<span class="muted">${r.minutes} 分钟</span>` : ''}
               <div class="spacer"></div>
               <button class="btn tiny" data-redo="${r.id}" title="遮住这份代码，凭记忆重敲一遍，AI 对照后帮你提炼易错点">↻ 尝试重做</button>
+              <button class="btn tiny" data-visual="${r.id}" title="AI 把这次提交的代码做成可交互的执行动画：换输入、单步看每一步干了什么">📊 可视化</button>
               <button class="btn tiny" data-editrec="${r.id}">编辑</button>
               <button class="btn tiny danger" data-delrec="${r.id}">删除</button>
             </div>
@@ -485,6 +486,13 @@ function drawProblemPage(pid) {
     if (!rec) return;
     if (!String(rec.code || '').trim()) return toast('这条记录没存代码 —— 点「编辑」把代码补上才能当重做基准');
     openRecall(pid, rec);
+  }));
+  /* 每条作答记录上的「可视化」：没代码的不给点（点了也是浪费一次 AI 调用） */
+  app.querySelectorAll('[data-visual]').forEach(b => b.addEventListener('click', () => {
+    const rec = recs.find(r => r.id === Number(b.getAttribute('data-visual')));
+    if (!rec) return;
+    if (!String(rec.code || '').trim()) return toast('这条记录没存代码 —— 点「编辑」把代码补上再可视化');
+    openVisual(pid, rec);
   }));
   /* 每条作答记录上方那枚易错点小片：点开只看这一张（不同题目的错点不通用，不跳走上下文） */
   app.querySelectorAll('[data-openpit]').forEach(b => b.addEventListener('click', () => openPitView(pid, b.getAttribute('data-openpit'))));
@@ -723,6 +731,55 @@ function openRecallView(pid) {
     if (r) r.addEventListener('click', () => { const rec = withCode[0]; L.close(); openRecall(pid, rec); });
   };
   paint();
+}
+/** 执行可视化：AI 把某次提交做成单文件交互 HTML，沙箱 iframe 里看。
+ *  有存档直接看，没存档先调生成（十几到几十秒）。srcdoc 用属性赋值，
+ *  不走 innerHTML 拼接 —— AI 的 HTML 里引号换行随便写都不会炸。 */
+function openVisual(pid, rec) {
+  const prob = (state.problem && state.problem.problem) || {};
+  const L = openLayer('📊 执行可视化', esc((prob.fid || '') + '. ' + (prob.title || '') + ' · ' + (rec.date || '') + (rec.language ? ' · ' + rec.language : '')));
+  const paint = html => {
+    L.body.innerHTML = '<iframe class="pfVisFrame" sandbox="allow-scripts" title="执行可视化"></iframe>'
+      + '<div class="pfSub" style="margin-top:8px;">单文件离线页（无外部请求），沙箱里跑，动不了主页面。输入切换、播放/单步/调速都在页里面。</div>';
+    L.body.querySelector('.pfVisFrame').srcdoc = html;
+    L.foot.innerHTML = '<span class="pfSub">AI 按这次提交的代码逻辑复刻执行</span><div class="spacer"></div>'
+      + '<button class="pfBtn sm" data-cancel>关闭</button>'
+      + '<button class="pfBtn sm danger" data-delv>删除可视化</button>'
+      + '<button class="pfBtn sm go" data-regen>↻ 重新生成</button>';
+    L.foot.querySelector('[data-cancel]').addEventListener('click', L.close);
+    L.foot.querySelector('[data-delv]').addEventListener('click', async () => {
+      if (!confirm('删掉这次的可视化？（代码还在，想看时重新生成就行）')) return;
+      try { await api('/api/records/' + rec.id + '/visual', { method: 'DELETE' }); L.close(); toast('已删除'); }
+      catch (e) { toast(e.message); }
+    });
+    L.foot.querySelector('[data-regen]').addEventListener('click', () => generate(true));
+  };
+  const generate = async (regen) => {
+    L.body.innerHTML = '<div class="pfEmpty"><span class="pfEi">📊</span>AI 正在把这次提交做成可交互的执行动画…<br><span class="pfSub">要复刻代码逻辑并配好几组输入，通常十几到几十秒。</span></div>';
+    L.foot.innerHTML = '<span class="pfSub">生成中…关掉窗口不会中断，下次打开直接看</span><div class="spacer"></div><button class="pfBtn sm" data-cancel>关闭</button>';
+    L.foot.querySelector('[data-cancel]').addEventListener('click', L.close);
+    try {
+      const r = await api('/api/records/' + rec.id + '/visualize', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (!r.html) throw new Error('AI 没返回可用的 HTML');
+      paint(r.html);
+      toast(regen ? '已重新生成 ✓' : '可视化已生成 ✓');
+    } catch (e) {
+      L.body.innerHTML = '<div class="pfEmpty"><span class="pfEi">⚠️</span>生成失败：' + esc(e.message) + '<br><br><button class="pfBtn sm go" data-retry>重试</button></div>';
+      L.body.querySelector('[data-retry]').addEventListener('click', () => generate(regen));
+      L.foot.innerHTML = '<div class="spacer"></div><button class="pfBtn sm" data-cancel>关闭</button>';
+      L.foot.querySelector('[data-cancel]').addEventListener('click', L.close);
+    }
+  };
+  (async () => {
+    L.body.innerHTML = '<div class="pfEmpty"><span class="pfEi">📊</span>加载中…</div>';
+    L.foot.innerHTML = '<div class="spacer"></div><button class="pfBtn sm" data-cancel>关闭</button>';
+    L.foot.querySelector('[data-cancel]').addEventListener('click', L.close);
+    try {
+      const r = await api('/api/records/' + rec.id + '/visual');
+      if (r.exists && r.html) paint(r.html);
+      else generate(false);
+    } catch (e) { generate(false); }
+  })();
 }
 /** 一次题目的所有提炼对话：切换 / 重命名 / 删除。默认按日期命名。 */
 function openSessionList(pid) {

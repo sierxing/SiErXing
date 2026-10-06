@@ -26,6 +26,8 @@ const { spawn } = require('node:child_process');
 const SYNC_TABLES = [
   'goals', 'nodes', 'sources', 'tutorials', 'tutorial_bookmarks', 'tutorial_progress', 'node_notes', 'node_workspaces', 'goal_versions', 'study_records', 'study_days', 'study_segments', 'ai_prompts',
   'chat_sessions', 'chats', 'problems', 'practice_records', 'daily_plans', 'jd_images',
+  /* 执行可视化 HTML 跟着作答记录走（一记录一份，删记录级联删）。 */
+  'record_visuals',
   /* 掌握闭环：思路卡 / 引导会话 / 盲写考核 / 易错卡片 / 复习进度。
      review_plans 不进这里 —— 它是「今天练哪几道」，各人作息不同，
      跟着插件的备份 importData 走就够了，跨设备互相覆盖没意义。 */

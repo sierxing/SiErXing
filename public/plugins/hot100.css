@@ -53,6 +53,8 @@
 }
 .pfBtn.sm .pfSpin{width:10px; height:10px; border-width:1.6px;}
 @keyframes pfSpin{to{transform:rotate(360deg);}}
+/* 执行可视化：沙箱 iframe 撑满弹窗正文 */
+.pfVisFrame{width:100%; height:62vh; min-height:420px; border:1.5px solid var(--border); border-radius:12px; background:#fff;}
 /* 长任务横幅：把「正在生成」摆在最显眼的地方 */
 .pfBusy{
   display:flex; align-items:flex-start; gap:10px; margin:0 0 14px;
