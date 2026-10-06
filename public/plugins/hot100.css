@@ -196,10 +196,14 @@
   display:flex; flex-direction:column; overflow:hidden; animation:pfUp .2s ease-out;
 }
 .pfWin.narrow{max-width:720px;}
-/* 全屏态：弹窗撑满视口（可视化查看器用），iframe 跟着长高 */
+/* 撑满态（回落用）：弹窗撑满视口（可视化查看器用），iframe 跟着长高 */
 .pfWin.full{max-width:none; width:calc(100vw - 48px); height:calc(100vh - 48px); max-height:none;}
 .pfWin.full .pfBody{display:flex; flex-direction:column;}
 .pfWin.full .pfVisFrame{flex:1; height:auto; min-height:0;}
+/* 原生全屏态：真正的全屏，去圆角贴边，iframe 占满剩余高度 */
+.pfWin:fullscreen{max-width:none; width:100%; height:100%; max-height:none; border-radius:0; border:0; animation:none;}
+.pfWin:fullscreen .pfBody{display:flex; flex-direction:column;}
+.pfWin:fullscreen .pfVisFrame{flex:1; height:auto; min-height:0;}
 .pfFull{border:0; background:none; cursor:pointer; color:var(--muted); font-size:15px; line-height:1; padding:5px 9px; border-radius:8px; flex:none;}
 .pfFull:hover{background:var(--soft); color:var(--accent);}
 .pfFull.on{color:var(--accent);}

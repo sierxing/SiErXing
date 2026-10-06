@@ -1,14 +1,14 @@
 {
-  "version": "1.10.7",
-  "buildVer": "c40f0c5a9de3",
-  "payload": "release/payload-1.10.7.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.7.sxar?ref=main",
+  "version": "1.10.8",
+  "buildVer": "80cb0827050b",
+  "payload": "release/payload-1.10.8.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.8.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "bd278c7d9175afd7abeba6466413240947d5c6f2123240a94dff47bb9767912f",
-  "size": 587502,
-  "unpackedSize": 2192896,
-  "publishedAt": "2026-10-06T06:35:14.699Z",
-  "notes": "执行可视化查看器加全屏切换",
+  "sha256": "6ba6dd968c45699f975febd95c282e3f376ca2ace423cf03129038e6b999146c",
+  "size": 588187,
+  "unpackedSize": 2194721,
+  "publishedAt": "2026-10-06T06:41:15.025Z",
+  "notes": "执行可视化查看器改真全屏（原生Fullscreen API+回落撑满）",
   "exeRequired": false
 }

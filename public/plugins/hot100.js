@@ -739,11 +739,31 @@ function openVisual(pid, rec) {
   const prob = (state.problem && state.problem.problem) || {};
   const L = openLayer('📊 执行可视化', esc((prob.fid || '') + '. ' + (prob.title || '') + ' · ' + (rec.date || '') + (rec.language ? ' · ' + rec.language : '')),
     { headExtra: '<button class="pfFull" data-full title="全屏 / 还原">⛶</button>' });
-  /* 全屏切换绑在 head 上（paint 只重绘 body/foot，head 常驻，绑一次就行） */
-  L.win.querySelector('[data-full]').addEventListener('click', e => {
-    L.win.classList.toggle('full');
-    e.currentTarget.classList.toggle('on', L.win.classList.contains('full'));
+  /* 全屏切换绑在 head 上（paint 只重绘 body/foot，head 常驻，绑一次就行）。
+     优先走浏览器原生全屏（真正的全屏，不是撑大的弹窗）；不支持或被拒绝时
+     回落到原来的撑满态，保证哪里都能点。关窗口时如果还在全屏里，先退出来，
+     否则浏览器会停在一个空的全屏页上。 */
+  const fullBtn = L.win.querySelector('[data-full]');
+  const syncFullBtn = () => {
+    /* 窗口已关（走原生的 ✕/Esc/点遮罩）时顺手把自己解绑，不留野监听 */
+    if (!L.win.isConnected) { document.removeEventListener('fullscreenchange', syncFullBtn); return; }
+    const on = document.fullscreenElement === L.win || (!document.fullscreenElement && L.win.classList.contains('full'));
+    fullBtn.classList.toggle('on', !!on);
+    fullBtn.textContent = document.fullscreenElement === L.win ? '🗗' : '⛶';
+  };
+  fullBtn.addEventListener('click', async () => {
+    try {
+      if (document.fullscreenElement === L.win) await document.exitFullscreen();
+      else if (L.win.requestFullscreen) await L.win.requestFullscreen();
+      else throw new Error('no fs api');
+    } catch (e) {
+      L.win.classList.toggle('full');
+    }
+    syncFullBtn();
   });
+  document.addEventListener('fullscreenchange', syncFullBtn);
+  const rawClose = L.close;
+  L.close = () => { if (document.fullscreenElement === L.win) { try { document.exitFullscreen(); } catch (e) {} } document.removeEventListener('fullscreenchange', syncFullBtn); rawClose(); };
   const paint = html => {
     L.body.innerHTML = '<iframe class="pfVisFrame" sandbox="allow-scripts" title="执行可视化"></iframe>'
       + '<div class="pfSub" style="margin-top:8px;">单文件离线页（无外部请求），沙箱里跑，动不了主页面。输入切换、播放/单步/调速都在页里面。</div>';
@@ -940,7 +960,9 @@ function openLayer(title, sub, opts) {
     mask.remove();
     if (o.onClose) o.onClose();
   };
-  const onKey = e => { if (e.key === 'Escape') close(); };
+  /* 全屏时按 Esc 先退全屏，不关窗口：浏览器原生全屏本来就是 Esc 退出，
+     这里不拦一下的话，退全屏的同时会把弹窗也关了 */
+  const onKey = e => { if (e.key !== 'Escape') return; if (document.fullscreenElement) return; close(); };
   document.addEventListener('keydown', onKey);
   /* 点遮罩空白处关掉，点窗内不关 */
   mask.addEventListener('mousedown', e => { if (e.target === mask) close(); });
