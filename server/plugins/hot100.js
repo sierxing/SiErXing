@@ -450,7 +450,10 @@ module.exports = {
     }
   },
   {
-    /* 生成（幂等覆盖）：没有代码的记录不给生成，不浪费 AI 调用 */
+    /* 生成（幂等覆盖）：没有代码的记录不给生成，不浪费 AI 调用。
+       生成前可带 requirements（用户先提需求）；生成后可带 feedback 改（见修改路径）。
+       带 feedback 且已有存档时走修改路径：把现有 HTML + 修改意见一起发给 AI，
+       只改用户说的部分，其它原样保留（比推倒重来省，也保得住已满意的部分）。 */
     method: 'POST', pattern: /^\/api\/records\/(\d+)\/visualize$/,
     handler: async (req, res, u, ctx) => {
       const p = u.pathname, method = req.method;
@@ -463,21 +466,35 @@ module.exports = {
           if (typeof aiText !== 'function') return sendJSON(res, 500, { error: '当前环境没有可用 AI' });
           const prob = db.prepare('SELECT * FROM problems WHERE id = ?').get(rec.problem_id);
           if (!prob) return sendJSON(res, 404, { error: '题目不存在' });
+          let body = {};
+          try { body = await readBody(req); } catch (e) {}
+          const requirements = String((body && body.requirements) || '').trim().slice(0, 2000);
+          const feedback = String((body && body.feedback) || '').trim().slice(0, 2000);
+          let prompt, revised = false;
+          if (feedback) {
+            const cur = db.prepare('SELECT html FROM record_visuals WHERE record_id = ?').get(rid);
+            if (!cur || !cur.html) return sendJSON(res, 400, { error: '还没有可视化可以改 —— 先生成一份' });
+            prompt = buildVisualRevisePrompt(prob, rec, cur.html, feedback);
+            revised = true;
+          } else {
+            prompt = buildVisualPrompt(prob, rec, requirements);
+          }
           try {
-            const raw = await aiText(buildVisualPrompt(prob, rec), (currentModel && currentModel()) || '', 180000);
+            const model = (currentModel && currentModel()) || '';
+            const raw = await aiText(prompt, model, 180000);
             let html = extractVisualHTML(raw);
             /* 有些模型写长了会被截断，续写那轮还可能回一句废话（“把尾部粘贴过来我才能继续”）。
                此时不直接报错，换精简版提示词重试一次：输入减到 2 组、日志压到 15 步以内，
-               输出短了反而容易一次写完。两次都拿不到才算失败。 */
+               输出短了反而容易一次写完闭合。两次都拿不到才算失败。 */
             if (!html) {
-              const raw2 = await aiText(buildVisualPrompt(prob, rec) + VISUAL_COMPACT, (currentModel && currentModel()) || '', 180000);
+              const raw2 = await aiText(prompt + VISUAL_COMPACT, model, 180000);
               html = extractVisualHTML(raw2);
             }
             if (!html) return sendJSON(res, 500, { error: 'AI 没返回可用的 HTML（换个模型或重试）' });
             const t = nowISO();
             db.prepare('INSERT INTO record_visuals (record_id,problem_id,html,created_at,updated_at) VALUES (?,?,?,COALESCE((SELECT created_at FROM record_visuals WHERE record_id=?),?),?) ON CONFLICT(record_id) DO UPDATE SET html=excluded.html, updated_at=excluded.updated_at')
               .run(rid, rec.problem_id, html, rid, t, t);
-            return sendJSON(res, 200, { ok: true, html });
+            return sendJSON(res, 200, { ok: true, html, revised });
           } catch (e) { return sendJSON(res, 500, { error: e.message || '生成可视化失败' }); }
         }
     }
@@ -1586,7 +1603,7 @@ const VISUAL_RULE = [
 const VISUAL_COMPACT = '\n\n【补充要求（精简版，优先级最高）】上面要求一次写完对你太长了，这次只做最小可用版本：'
   + '输入切换器只做 2 组输入；步骤日志不超过 15 条；动画区只画数组格子+当前指针，不用 Canvas 特效；'
   + '样式能看清就行，不要堆装饰。其它要求不变，仍只输出一个完整 HTML。';
-function buildVisualPrompt(prob, rec) {
+function buildVisualPrompt(prob, rec, requirements) {
   /* 注意不用 statementBrief：它会把 <pre> 示例压成“[代码]”二字，
      而可视化页恰恰要靠示例输入输出来定输入切换器。这里保留 pre 文本。 */
   let stmt = String(prob.statement || '')
@@ -1600,6 +1617,22 @@ function buildVisualPrompt(prob, rec) {
     '用户这次提交的语言：' + (rec.language || '未知') + '（' + (rec.passed ? '已通过' : '未通过') + '）', '',
     '=== 用户代码（以它为准复刻逻辑） ===',
     '```\n' + String(rec.code || '').slice(0, 12000) + '\n```'
+  ].join('\n') + (String(requirements || '').trim()
+    ? '\n\n=== 用户这次的额外要求（优先级最高，其它规则照旧） ===\n' + String(requirements).trim().slice(0, 2000)
+    : '');
+}
+/* 修改路径的 prompt：把现有 HTML 全文 + 用户意见一起给，只改说的部分。
+   HTML 可能上万字，截 60KB 喂进去（超了说明页太大，尾部 inference 无关紧要，先保意见可见）。 */
+function buildVisualRevisePrompt(prob, rec, curHtml, feedback) {
+  return [
+    VISUAL_RULE, '',
+    '题目：' + prob.fid + '. ' + prob.title + '（难度 ' + (prob.difficulty || '未知') + '）',
+    '用户这次提交的语言：' + (rec.language || '未知'), '',
+    '=== 当前页面的完整 HTML（以它为基础改） ===',
+    '```html\n' + String(curHtml || '').slice(0, 60000) + '\n```', '',
+    '=== 用户的修改意见（只改这些，其它原样保留；改完仍是完整闭合的单文件 HTML） ===',
+    String(feedback || '').trim().slice(0, 2000), '',
+    '只输出改好的完整 HTML，不要其它任何文字。'
   ].join('\n');
 }
 /** 从 AI 回复里抠出 HTML：去围栏、去前后废话；拿不到合法片段就返回空（调用方报错，不存坏数据）。 */
@@ -2132,4 +2165,4 @@ function openInIDE(problem, language) {
 
 /* 单测出口：宿主只读 id/name/api 等已知字段，多出来的 key 会被忽略。
    专供自测脚本 require 后直接调纯函数，不起服务。 */
-module.exports.__visualTest = { buildVisualPrompt, extractVisualHTML };
+module.exports.__visualTest = { buildVisualPrompt, buildVisualRevisePrompt, extractVisualHTML };

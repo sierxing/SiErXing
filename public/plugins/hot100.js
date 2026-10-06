@@ -771,6 +771,7 @@ function openVisual(pid, rec) {
     L.foot.innerHTML = '<span class="pfSub">AI 按这次提交的代码逻辑复刻执行</span><div class="spacer"></div>'
       + '<button class="pfBtn sm" data-cancel>关闭</button>'
       + '<button class="pfBtn sm danger" data-delv>删除可视化</button>'
+      + '<button class="pfBtn sm" data-revise>✎ 让 AI 修改</button>'
       + '<button class="pfBtn sm go" data-regen>↻ 重新生成</button>';
     L.foot.querySelector('[data-cancel]').addEventListener('click', L.close);
     L.foot.querySelector('[data-delv]').addEventListener('click', async () => {
@@ -779,13 +780,46 @@ function openVisual(pid, rec) {
       catch (e) { toast(e.message); }
     });
     L.foot.querySelector('[data-regen]').addEventListener('click', () => generate(true));
+    /* 反馈修改：弹一行输入，发送后在现有页面基础上改（不是推倒重来） */
+    L.foot.querySelector('[data-revise]').addEventListener('click', () => {
+      L.foot.innerHTML = '<input class="pfSay sm" id="pfReviseInput" placeholder="说说要改哪：比如 动画太快 / 加一组逆序输入 / 格子大一点 / 换深色风格…" maxlength="500">'
+        + '<div class="spacer"></div><button class="pfBtn sm" data-cancel2>取消</button>'
+        + '<button class="pfBtn sm go" data-send>发送给 AI</button>';
+      const inp = L.foot.querySelector('#pfReviseInput');
+      inp.focus();
+      L.foot.querySelector('[data-cancel2]').addEventListener('click', () => paint(L.body.querySelector('.pfVisFrame').srcdoc));
+      L.foot.querySelector('[data-send]').addEventListener('click', async () => {
+        const fb = inp.value.trim();
+        if (!fb) return toast('先写一句要改什么');
+        L.body.innerHTML = '<div class="pfEmpty"><span class="pfEi">📊</span>AI 正在按你的意见改这页…<br><span class="pfSub">只改你说的部分，其它原样保留。</span></div>';
+        L.foot.innerHTML = '<span class="pfSub">修改中…</span><div class="spacer"></div><button class="pfBtn sm" data-cancel>关闭</button>';
+        L.foot.querySelector('[data-cancel]').addEventListener('click', L.close);
+        try {
+          const r = await api('/api/records/' + rec.id + '/visualize', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ feedback: fb }) });
+          if (!r.html) throw new Error('AI 没返回可用的 HTML');
+          paint(r.html);
+          toast('已按意见修改 ✓');
+        } catch (e) {
+          L.body.innerHTML = '<div class="pfEmpty"><span class="pfEi">⚠️</span>修改失败：' + esc(e.message) + '<br><br><button class="pfBtn sm go" data-back>回退查看原版</button></div>';
+          L.body.querySelector('[data-back]').addEventListener('click', async () => {
+            try {
+              const rr = await api('/api/records/' + rec.id + '/visual');
+              if (rr.exists && rr.html) paint(rr.html);
+              else L.close();
+            } catch (ee) { L.close(); }
+          });
+          L.foot.innerHTML = '<div class="spacer"></div><button class="pfBtn sm" data-cancel>关闭</button>';
+          L.foot.querySelector('[data-cancel]').addEventListener('click', L.close);
+        }
+      });
+    });
   };
-  const generate = async (regen) => {
+  const generate = async (regen, requirements) => {
     L.body.innerHTML = '<div class="pfEmpty"><span class="pfEi">📊</span>AI 正在把这次提交做成可交互的执行动画…<br><span class="pfSub">要复刻代码逻辑并配好几组输入，通常十几到几十秒。</span></div>';
     L.foot.innerHTML = '<span class="pfSub">生成中…关掉窗口不会中断，下次打开直接看</span><div class="spacer"></div><button class="pfBtn sm" data-cancel>关闭</button>';
     L.foot.querySelector('[data-cancel]').addEventListener('click', L.close);
     try {
-      const r = await api('/api/records/' + rec.id + '/visualize', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const r = await api('/api/records/' + rec.id + '/visualize', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requirements ? { requirements } : {}) });
       if (!r.html) throw new Error('AI 没返回可用的 HTML');
       paint(r.html);
       toast(regen ? '已重新生成 ✓' : '可视化已生成 ✓');
@@ -796,6 +830,22 @@ function openVisual(pid, rec) {
       L.foot.querySelector('[data-cancel]').addEventListener('click', L.close);
     }
   };
+  /* 无存档时先让用户提需求（可跳过）：比如重点看哪一步、加什么输入、什么风格。
+     有存档直接看，需求只在生成那一下用。 */
+  const askRequirements = () => {
+    L.body.innerHTML = '<div class="pfEmpty" style="text-align:left;"><span class="pfEi">📊</span>'
+      + '<div style="font-weight:700;margin-bottom:8px;">第一次生成，先说说你想要什么样的可视化？（可空）</div>'
+      + '<textarea class="pfSay sm" id="pfReqInput" maxlength="500" placeholder="比如：重点展示双指针是怎么相遇的 / 加一组全是重复元素的输入 / 格子大一点，手机上看 / 深色风格"></textarea>'
+      + '<div class="pfSub" style="margin-top:8px;">生成之后还能点「✎ 让 AI 修改」继续调，不用一次想全。</div></div>';
+    L.foot.innerHTML = '<div class="spacer"></div><button class="pfBtn sm" data-cancel>关闭</button>'
+      + '<button class="pfBtn sm" data-skip>跳过，直接生成</button>'
+      + '<button class="pfBtn sm go" data-gen>按要求生成</button>';
+    L.foot.querySelector('[data-cancel]').addEventListener('click', L.close);
+    L.foot.querySelector('[data-skip]').addEventListener('click', () => generate(false, ''));
+    L.foot.querySelector('[data-gen]').addEventListener('click', () => {
+      generate(false, (L.body.querySelector('#pfReqInput').value || '').trim());
+    });
+  };
   (async () => {
     L.body.innerHTML = '<div class="pfEmpty"><span class="pfEi">📊</span>加载中…</div>';
     L.foot.innerHTML = '<div class="spacer"></div><button class="pfBtn sm" data-cancel>关闭</button>';
@@ -803,8 +853,8 @@ function openVisual(pid, rec) {
     try {
       const r = await api('/api/records/' + rec.id + '/visual');
       if (r.exists && r.html) paint(r.html);
-      else generate(false);
-    } catch (e) { generate(false); }
+      else askRequirements();
+    } catch (e) { askRequirements(); }
   })();
 }
 /** 一次题目的所有提炼对话：切换 / 重命名 / 删除。默认按日期命名。 */

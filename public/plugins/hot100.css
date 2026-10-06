@@ -314,6 +314,9 @@
 }
 .pfSay:focus{border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); background:var(--card);}
 .pfSay::placeholder{color:var(--muted); opacity:.75;}
+/* 小号输入框：塞在底栏一行的反馈/需求输入 */
+.pfSay.sm{min-height:38px; padding:7px 11px; font-size:12.5px; border-radius:10px;}
+.pfFoot .pfSay.sm{flex:1; min-width:180px;}
 /* 整理出来的思路卡 */
 .pfCardBox{
   border:1.5px solid var(--accent-border); background:var(--accent-soft);
