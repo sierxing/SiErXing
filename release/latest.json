@@ -1,14 +1,14 @@
 {
-  "version": "1.10.11",
-  "buildVer": "6fac13aa21cc",
-  "payload": "release/payload-1.10.11.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.11.sxar?ref=main",
+  "version": "1.10.12",
+  "buildVer": "e86422b81cf5",
+  "payload": "release/payload-1.10.12.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.12.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "e0a198aebe5b8cee339730ef5f6e12b1bc37f519cf751a805482d08af4b8a8aa",
-  "size": 591504,
-  "unpackedSize": 2203796,
-  "publishedAt": "2026-10-06T09:40:01.809Z",
-  "notes": "修HTML教程深色字看不清：浅色主题不再碰body变量与宽选择器",
+  "sha256": "eb42759a4944b676a445505ae8d8f851c157600fff913f31440c4fce76968a12",
+  "size": 591850,
+  "unpackedSize": 2204703,
+  "publishedAt": "2026-10-06T10:13:56.346Z",
+  "notes": "教程修改失败黑盒改可观测：确认语自动再要一次全文，报错带字数",
   "exeRequired": false
 }

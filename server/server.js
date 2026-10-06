@@ -3829,14 +3829,25 @@ function redactText(raw) {
             editCodeBlock = parts.join('\n\n');
           }
         } catch (e) { console.log('[tutorial] 修改时源码载入失败:', e.message); }
-        const txt = await ai.text({ prompt: buildTutorialEditPrompt(goal, node, tut, feedback, tut.format, editCodeBlock), model: currentModel(), timeoutMs: 600000, signal });
-        progress(80, '正在保存新版本…');
-        /* 修改流程也要过清洗：模型爱在前面加一句"这是根据您的意见重写的…"，
-           只去头尾围栏清不掉这种前言（线上已有教程因此顶部挂着一截废话） */
-        let out = cleanTutorialText(String(txt || ''), tut.format);
-        if (!out || out.length < 80) throw new Error('AI 返回内容为空，请重试');
+        const editBase = buildTutorialEditPrompt(goal, node, tut, feedback, tut.format, editCodeBlock);
+        const runEdit = async (prompt) => cleanTutorialText(String(await ai.text({ prompt, model: currentModel(), timeoutMs: 600000, signal }) || ''), tut.format);
+        let out = await runEdit(editBase);
+        if (out.length > 0 && out.length < 80) {
+          /* 模型只回了句确认语（“好的，我来改…”）却没给正文 —— 这是小模型改长文的常见偷懒，
+             不是真的没输出。明确再要一次全文，比直接报错让用户干等更省一轮。 */
+          console.log('[tutorial] 修改初回只有 ' + out.length + ' 字，疑似确认语，追加指令重试。首字：' + out.slice(0, 60));
+          progress(60, 'AI 只回了确认语，正在让它直接输出全文…');
+          out = await runEdit(editBase + '\n\n【注意】不要只回复确认、解释或道歉，直接输出修改后的完整教程正文。');
+        }
+        if (!out || out.length < 80) {
+          console.log('[tutorial] 修改失败：清洗后长度 ' + (out ? out.length : 0) + '，原文长度 ' + String(tut.content || '').length);
+          throw new Error(out && out.length
+            ? 'AI 这次只返回了 ' + out.length + ' 个字（疑似没写完），原教程没动：请重试，或把修改意见拆小一点分多次提'
+            : 'AI 返回内容为空，请重试');
+        }
         // 防截断兜底：原文很长、新文却只有一小截时，宁可报错也不覆盖好教程
         const origLen = String(tut.content || '').length;
+        progress(80, '正在保存新版本…');
         if (origLen > 3000 && out.length < Math.max(500, Math.floor(origLen * 0.2))) {
           throw new Error('AI 返回内容过短（仅原文 ' + Math.round(out.length / Math.max(1, origLen) * 100) + '%，疑似被截断），已保留原教程：请重试，或把修改意见拆小一点分多次提');
         }
