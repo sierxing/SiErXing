@@ -2089,6 +2089,11 @@ function buildTutorialPrompt(goal, node, format, note, codeBlock) {
   lines.push('');
   if (format === 'html') {
     lines.push('【输出格式】只输出一个完整的 HTML 文档（<!DOCTYPE html> 开始，</html> 结束，UTF-8，内联 <style> 美化排版：清晰的标题层级、代码块样式、提示框、可勾选清单样式、目录导航）。不要输出 Markdown、不要用代码块包裹整篇文档、不要任何额外说明文字。不要使用外部 JS/CSS 依赖。');
+    /* 血泪换来的三条：①模型爱在文档前加一句前言导致顶部挂废话；
+       ②页内 JS 被沙箱拦过，现在放开了，必须约法三章；
+       ③被要求做 PPT 时容易跑题去讲"怎么做幻灯片"。 */
+    lines.push('【HTML 附加铁律】第一行必须是 <!DOCTYPE html>，前面一个字都不能多；第一屏必须是本节标题和本节内容，不许写成其它主题。');
+    lines.push('【页内脚本约法三章】只许操作本页 DOM（翻页、折叠、动画、高亮）；禁止 fetch/XHR、localStorage、Cookie、top 跳转、新窗口弹窗。违反即不合格。');
   } else {
     lines.push('【输出格式】只输出 Markdown 正文（# 一级标题开始）。不要用 ``` 包裹整篇内容，不要输出任何额外说明文字。代码块、表格、清单、引用都要用标准 Markdown 语法。');
   }
@@ -2995,6 +3000,8 @@ function cleanTutorialText(txt, format) {
   const m = s.match(/^```[a-zA-Z]*\n([\s\S]*?)\n```$/);
   if (m) s = m[1].trim();
   if (format === 'html') {
+    /* 不要求全文被围栏包裹：模型经常在前面加一句前言（"这是根据您的意见重写的…"），
+       后面再贴整篇 HTML。只认标记抽取 —— 找不到标记才原样保留。 */
     const low = s.toLowerCase();
     const i = low.indexOf('<!doctype');
     const j = low.lastIndexOf('</html>');
@@ -3824,8 +3831,9 @@ function redactText(raw) {
         } catch (e) { console.log('[tutorial] 修改时源码载入失败:', e.message); }
         const txt = await ai.text({ prompt: buildTutorialEditPrompt(goal, node, tut, feedback, tut.format, editCodeBlock), model: currentModel(), timeoutMs: 600000, signal });
         progress(80, '正在保存新版本…');
-        let out = String(txt || '').trim();
-        out = out.replace(/^```(?:markdown|md|html)?\s*/i, '').replace(/```\s*$/, '');
+        /* 修改流程也要过清洗：模型爱在前面加一句"这是根据您的意见重写的…"，
+           只去头尾围栏清不掉这种前言（线上已有教程因此顶部挂着一截废话） */
+        let out = cleanTutorialText(String(txt || ''), tut.format);
         if (!out || out.length < 80) throw new Error('AI 返回内容为空，请重试');
         // 防截断兜底：原文很长、新文却只有一小截时，宁可报错也不覆盖好教程
         const origLen = String(tut.content || '').length;

@@ -1275,7 +1275,8 @@ function tutThemedHTML(html) {
     ? { bg: '#14131c', fg: '#e8e7f2', card: '#1c1b26', border: '#2e2c3d', muted: '#9c9ab0', code: '#191822', accent: '#8b9cff' }
     : { bg: '#ffffff', fg: '#1f2430', card: '#f8f9fb', border: '#e5e7eb', muted: '#6b7280', code: '#f3f4f6', accent: '#4f46e5' };
   const css = `<style id="sx-theme">
-  html,body{background:${v.bg} !important;color:${v.fg} !important;}
+  html{background:${v.bg} !important;}
+  body{background:${v.bg};color:${v.fg};}
   body{--bg:${v.bg};--fg:${v.fg};--card:${v.card};--border:${v.border};--muted:${v.muted};}
   a{color:${v.accent} !important;}
   pre,code,pre code{background:${v.code} !important;color:${v.fg} !important;border-color:${v.border} !important;}
@@ -1289,6 +1290,19 @@ function tutThemedHTML(html) {
   if (/<\/head>/i.test(t)) return t.replace(/<\/head>/i, css + '</head>');
   if (/<body[^>]*>/i.test(t)) return t.replace(/<body[^>]*>/i, m => m + css);
   return css + t;
+}
+/* 渲染兜底：库里可能躺着修改流程存下来的脏 HTML（顶部一段前言+围栏），
+   显示前按标记抽一次。只动显示，不改库里的数据。 */
+function cleanHtmlForFrame(html) {
+  const s = String(html || '');
+  const low = s.toLowerCase();
+  const i = low.indexOf('<!doctype');
+  const j = low.lastIndexOf('</html>');
+  if (i >= 0 && j > i) return s.slice(i, j + 7);
+  const i2 = low.indexOf('<html');
+  const j2 = low.lastIndexOf('</html>');
+  if (i2 >= 0 && j2 > i2) return '<!DOCTYPE html>\n' + s.slice(i2, j2 + 7);
+  return s;
 }
 
 /* ============ Ctrl + 左键拖拽：框选节点批量操作 ============ */
@@ -3396,7 +3410,7 @@ async function renderTutorialPage(tid) {
     </div>
     <div class="tutMeta">${node ? '对应任务：' + esc(node.title) : ''}${goal ? '　·　所属目标：' + esc(goal.title) : ''}　·　生成于 ${esc(fmtDate(t.created_at))}${(goalCompOn(goal, 'workspace') && window.Workspace) ? '　·　<span class="wsHint" id="wsHint"></span>' : ''}</div>
     ${isHtml
-      ? `<iframe class="tutFrame" id="tutFrame" sandbox="allow-same-origin allow-popups"></iframe>`
+      ? `<iframe class="tutFrame" id="tutFrame" sandbox="allow-scripts allow-same-origin allow-popups"></iframe>`
       : `<div class="tutBody mdBody">${mdToHTML(t.content)}</div>`}
     {/* 书签为浮动面板（顶栏按钮呼出），此处不占位 */}
   </div>`;
@@ -3408,7 +3422,7 @@ async function renderTutorialPage(tid) {
     let built = false;
     const build = () => { if (built) return; built = true; try { tutTocBuild(tid); } catch (e) {} };
     fr.addEventListener('load', build, { once: true });
-    fr.setAttribute('srcdoc', tutThemedHTML(t.content));
+    fr.setAttribute('srcdoc', tutThemedHTML(cleanHtmlForFrame(t.content)));
     setTimeout(build, 1500);   // 兜底：万一 load 没触发
   }
   setTimeout(() => { try { tutTocBuild(tid); } catch (e) {} }, 200);   // 侧边目录大纲

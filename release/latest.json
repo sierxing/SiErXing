@@ -1,14 +1,14 @@
 {
-  "version": "1.10.9",
-  "buildVer": "a0644568d08e",
-  "payload": "release/payload-1.10.9.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.9.sxar?ref=main",
+  "version": "1.10.10",
+  "buildVer": "703c52a6cd56",
+  "payload": "release/payload-1.10.10.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.10.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "907d3438233dbcbb8f1c703797c71f89a68581c3d9c5c3677baab9b972b3a7ea",
-  "size": 590004,
-  "unpackedSize": 2201118,
-  "publishedAt": "2026-10-06T06:44:51.134Z",
-  "notes": "执行可视化：生成前可提需求，生成后可反馈让AI修改",
+  "sha256": "f9dff7b9bb2e99dd9e47032b8c6952977d7a57463192e47fc6a44759d21cc5c2",
+  "size": 590902,
+  "unpackedSize": 2202750,
+  "publishedAt": "2026-10-06T09:23:59.588Z",
+  "notes": "修HTML教程PPT点不动+顶部废话+主题打架：沙箱放行脚本，清洗走修改流程，提示词约法三章",
   "exeRequired": false
 }
