@@ -1274,17 +1274,28 @@ function tutThemedHTML(html) {
   const v = dark
     ? { bg: '#14131c', fg: '#e8e7f2', card: '#1c1b26', border: '#2e2c3d', muted: '#9c9ab0', code: '#191822', accent: '#8b9cff' }
     : { bg: '#ffffff', fg: '#1f2430', card: '#f8f9fb', border: '#e5e7eb', muted: '#6b7280', code: '#f3f4f6', accent: '#4f46e5' };
-  const css = `<style id="sx-theme">
-  html{background:${v.bg} !important;}
-  body{background:${v.bg};color:${v.fg};}
-  body{--bg:${v.bg};--fg:${v.fg};--card:${v.card};--border:${v.border};--muted:${v.muted};}
+  /* 主题只给变量 + color-scheme；元素级兜底（a/pre/表格/引用/容器）只在深色模式生效。
+     血泪原因有三（前两个修完第三个才冒出来，全是线上真实踩到的）：
+     1) body 强刷会洗掉 AI 自带的深色设计；
+     2) 更隐蔽：`.tip,.note,.warn,.card,.box,section>div` 这类宽选择器带 !important，
+        会命中教程自己的布局 div（如 .s-inner），把里面的字色强制刷成主题色 ——
+        无头实测抓到 h1 computed 就是这么变深的，而教程源码里根本没有这个颜色；
+     3) 最隐蔽：连 body 上的 `--bg:#fff` 变量定义都会劫持教程 `var(--bg)` 的底色 ——
+        教程 body 写的是“渐变 + var(--bg)”，变量被换成白色后渐变下面全是白。
+     所以浅色模式只留 html 打底 + color-scheme + 链接色，body 一行都不碰；
+     无样式内容回退浏览器默认（黑字白底，可读）；深色模式仍整体强制。 */
+  const elFallback = dark ? `
+  body{background:${v.bg} !important;color:${v.fg} !important;}
   a{color:${v.accent} !important;}
   pre,code,pre code{background:${v.code} !important;color:${v.fg} !important;border-color:${v.border} !important;}
   blockquote{border-left-color:${v.border} !important;color:${v.muted} !important;background:${v.card} !important;}
   table,th,td{border-color:${v.border} !important;}
   th{background:${v.card} !important;}
   hr{border-color:${v.border} !important;}
-  .tip,.note,.warn,.card,.box,section>div{background:${v.card} !important;border-color:${v.border} !important;color:${v.fg} !important;}
+  .tip,.note,.warn,.card,.box,section>div{background:${v.card} !important;border-color:${v.border} !important;color:${v.fg} !important;}` : `
+  a{color:${v.accent};}`;
+  const css = `<style id="sx-theme">
+  html{background:${v.bg} !important;color-scheme:${dark ? 'dark' : 'light'};}${elFallback}
   </style>`;
   const t = String(html || '');
   if (/<\/head>/i.test(t)) return t.replace(/<\/head>/i, css + '</head>');
