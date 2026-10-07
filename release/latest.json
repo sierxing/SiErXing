@@ -1,14 +1,14 @@
 {
-  "version": "1.10.16",
-  "buildVer": "2ba893ea8e46",
-  "payload": "release/payload-1.10.16.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.16.sxar?ref=main",
+  "version": "1.10.17",
+  "buildVer": "6e8bb1530463",
+  "payload": "release/payload-1.10.17.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.17.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "75f24dd04f486e490f63e7d8f72a0ab4228b09c7d147725716803752de5256e8",
-  "size": 620916,
-  "unpackedSize": 2284402,
-  "publishedAt": "2026-10-07T13:28:51.769Z",
-  "notes": "用自己的话三件事成一条线：AI 每轮给整体掌握判断（能讲清机制/最薄弱在哪）、提问解释完把你接回自己的话、收尾改成你先自己写整理稿再由 AI 对照",
+  "sha256": "617fd34a8caea8fdee5a4ff52beb755dddcad23dbcfa68b1f5316d9345fb6266",
+  "size": 623127,
+  "unpackedSize": 2290250,
+  "publishedAt": "2026-10-07T13:44:46.562Z",
+  "notes": "修「用自己的话」里 AI 回复显示成一坨 JSON：模型输出被写断时不再把 {\"answer\":… 当正文吐出来，解释改成纯文本两段式（截断也能正常显示），并加了抢救式解析",
   "exeRequired": false
 }

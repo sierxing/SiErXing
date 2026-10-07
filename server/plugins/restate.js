@@ -466,17 +466,26 @@ async function coachTurn(basePrompt, dims, timeoutMs, signal) {
   };
   try {
     await ask('');
-    const j = extractJSON(raw);
+    const j = parseAIObject(raw);
     if (j && String(j.probe || j.q || '').trim()) return normCoachTurn(j, dims);
   } catch (e) { raw = raw || ('ERR ' + (e.message || e)); }
   /* 模型没给 JSON：再试一次，并把它的原话怼回去让它自己改格式 */
   try {
     await ask('\n\n【注意】你上一次的输出不是合法 JSON，只输出 {"read":"…","hit":[…],"focus":"…","say":"…","probe":"…","done":false} 这个对象本身。');
-    const j2 = extractJSON(raw);
+    const j2 = parseAIObject(raw);
     if (j2 && String(j2.probe || j2.q || '').trim()) return normCoachTurn(j2, dims);
   } catch (e) { /* 两次都不听话就用第一次的原话 */ }
-  const plain = String(raw || '').replace(/^```[a-z]*\s*/i, '').replace(/```$/, '').trim();
-  if (!plain) throw new Error('AI 没有给出问题，换个模型再试');
+  /* 两次都没给出能用的 JSON。它可能把 JSON 写断了 —— 那就再抢救一次字段，
+     实在捞不到也**不能把半截 JSON 当问题显示**，宁可报错（有重试键）。 */
+  const salv = parseAIObject(raw) || {};
+  const guess = String(salv.probe || salv.q || salv.say || salv.read || '').trim();
+  if (guess) {
+    return { read: String(salv.read || '').trim(), hit: [], focus: 'refine',
+      say: String(salv.say || '').trim(), probe: guess.slice(0, 800), done: false, raw: true };
+  }
+  let plain = String(raw || '').replace(/^```[a-z]*\s*/i, '').replace(/```$/, '').trim();
+  if (looksLikeJSON(plain)) plain = '';
+  if (!plain) throw new Error('AI 这次没给出能用的引导问题（输出被写断了），点重试再来一次');
   return { read: '', hit: [], focus: 'refine', say: '', probe: plain.slice(0, 800), done: false, raw: true };
 }
 
@@ -619,18 +628,38 @@ function buildChatPrompt(tut, point, step, history, question, body) {
     '',
     '【他的问题】' + String(question || '').slice(0, 400),
     '',
-    '【要求】',
-    '1. answer：直接回答（150~350 字）。用他能懂的话，先给结论再给理由。',
-    '   · 涉及代码必须用 ``` 围栏包裹（注明语言）。',
-    '   · 如果他的问题里有明显的误解，先纠正那一句，再回答。',
-    '2. back：**必填**，回答完把他接回自己的话 —— 一句必须由他用自己的话重讲的问题。',
-    '   · 问的是他刚听懂的那一点，不要换话题、不要问新的知识点。',
-    '   · 例：「那你用一句话跟我说：base 里放的到底是什么？」',
-    '   · 这个字段不能省 —— 没有它，解释就只是"又看懂了一遍"，他还是说不出来。',
-    '3. 这不是提问模式，不用输出 hit/focus。',
+    '【怎么输出】',
+    '第一段：直接回答（150~350 字）。用他能懂的话，先给结论再给理由。',
+    '  · 涉及代码必须用 ``` 围栏包裹（注明语言）。',
+    '  · 他问题里有明显误解，先纠正那一句再回答。',
+    '然后另起一行，写一个 【接回】 标记，后面跟一句**必须由他用自己的话重讲**的问题：',
+    '  · 问的是他刚听懂的那一点，不要换话题、不要问新的知识点。',
+    '  · 不能省 —— 没有它，解释就只是"又看懂了一遍"，他还是说不出来。',
     '',
-    '只输出一个 JSON 对象：{"answer":"...","back":"接回自己的一句话问题"}'
+    '**不要输出 JSON**，就这两段：',
+    '（正文……）',
+    '【接回】（一句要他用自己的话重讲的问题）',
+    '',
+    '例：',
+    '`include` 只是把另一份文件的内容拼进来，它本身不启动任何服务；真正决定某个服务',
+    '起不起的是它身上那个 `profiles` 标签。',
+    '【接回】那你用一句话说：base 里放的到底是什么，profiles 又是在管什么？'
   ].join('\n');
+}
+/* 解析 chat 的回答：纯文本两段式（截断了也照样能显示正文），
+   同时兼容模型仍按旧格式吐 JSON 的情况。 */
+function splitChatReply(text) {
+  const t = String(text || '').trim();
+  if (!t) return { answer: '', back: '' };
+  if (looksLikeJSON(t) && /"answer"\s*:/.test(t)) {
+    const j = parseAIObject(t) || {};
+    return { answer: String(j.answer || '').trim(), back: String(j.back || '').trim() };
+  }
+  const m = t.match(/(?:^|\n)[ \t]*(?:【接回】|\[接回\]|接回[:：])[ \t]*([\s\S]*)$/);
+  let answer = t, back = '';
+  if (m) { back = String(m[1] || '').trim(); answer = t.slice(0, m.index).trim(); }
+  answer = answer.replace(/^[ \t]*(?:【答】|【回答】)[ \t]*/, '').trim();
+  return { answer, back };
 }
 
 /* ---------- JSON 提取（模型常带围栏或前后废话） ---------- */
@@ -666,6 +695,98 @@ function extractJSON(text) {
   if (!objs.length) return null;
   objs.sort((a, b) => Object.keys(b).length - Object.keys(a).length);
   return objs[0];
+}
+/* ---------- 抢救式解析 ----------
+   模型把 JSON 写断（输出被截断，或自动续写把两段 JSON 接在一起）时，
+   extractJSON 因为找不到收尾的 } 会整个放弃，上层就把 {"answer":"… 原样吐给用户。
+   这里按字段把能读出来的值捞出来：截断的那个字段也读到哪算哪，总比显示 JSON 强。 */
+function salvageValue(t, key) {
+  const head = new RegExp('"' + key + '"\\s*:\\s*"').exec(t);
+  if (!head) {
+    const lit = new RegExp('"' + key + '"\\s*:\\s*(true|false|-?\\d+(?:\\.\\d+)?)').exec(t);
+    if (!lit) return null;
+    return lit[1] === 'true' ? true : lit[1] === 'false' ? false : Number(lit[1]);
+  }
+  let out = '';
+  for (let i = head.index + head[0].length; i < t.length; i++) {
+    const c = t[i];
+    if (c === '\\') {
+      const n = t[i + 1];
+      if (n === 'n') { out += '\n'; i++; }
+      else if (n === 't') { out += '\t'; i++; }
+      else if (n === 'r') { out += '\r'; i++; }
+      else if (n === 'u') {
+        const hex = t.slice(i + 2, i + 6);
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) { out += String.fromCharCode(parseInt(hex, 16)); i += 5; }
+        else i++;
+      } else if (n == null) { break; }
+      else { out += n; i++; }
+      continue;
+    }
+    if (c === '"') break;   // 正常收尾
+    out += c;               // 截断了：读到哪算哪
+  }
+  return out.trim() ? out : null;
+}
+function salvageArray(t, key) {
+  const head = new RegExp('"' + key + '"\\s*:\\s*\\[').exec(t);
+  if (!head) return null;
+  const out = [];
+  let i = head.index + head[0].length;
+  while (i < t.length) {
+    while (i < t.length && t[i] !== '{' && t[i] !== '"' && t[i] !== ']') i++;
+    if (i >= t.length || t[i] === ']') break;
+    if (t[i] === '"') {                       // 字符串数组
+      let j = i + 1, buf = '';
+      for (; j < t.length; j++) {
+        const c = t[j];
+        if (c === '\\') { buf += c + (t[j + 1] || ''); j++; continue; }
+        if (c === '"') break;
+        buf += c;
+      }
+      try { out.push(JSON.parse('"' + buf + '"')); } catch (e) { out.push(buf); }
+      i = j + 1;
+      continue;
+    }
+    let depth = 0, inStr = false, esc = false, end = -1;   // 对象数组：配平扫描
+    for (let j = i; j < t.length; j++) {
+      const c = t[j];
+      if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+      if (c === '"') { inStr = true; continue; }
+      if (c === '{') depth++;
+      else if (c === '}') { depth--; if (depth === 0) { end = j; break; } }
+    }
+    if (end < 0) break;                       // 这一项被截断了：不完整就别塞给用户
+    try { const o = JSON.parse(t.slice(i, end + 1)); if (o && typeof o === 'object') out.push(o); } catch (e) {}
+    i = end + 1;
+  }
+  return out.length ? out : null;
+}
+/* 统一入口：先正常解析，不行再抢救。所有 AI 返回 JSON 的地方都该用它。 */
+function parseAIObject(text) {
+  const t = String(text || '').trim();
+  if (!t) return null;
+  const j = extractJSON(t);
+  if (j) return j;
+  const o = {};
+  for (const k of ['answer', 'back', 'mine', 'line', 'read', 'say', 'probe', 'q', 'verdict', 'weak', 'focus', 'title', 'summary']) {
+    const v = salvageValue(t, k);
+    if (v != null) o[k] = v;
+  }
+  for (const k of ['hit', 'kept', 'gaps', 'wrong', 'missed', 'key_points']) {
+    const a = salvageArray(t, k);
+    if (a) o[k] = a;
+  }
+  for (const k of ['done', 'ok']) {
+    const v = salvageValue(t, k);
+    if (typeof v === 'boolean') o[k] = v;
+  }
+  return Object.keys(o).length ? o : null;
+}
+/* 这段文本看起来是没解析成功的 JSON 吗？（宁可说"答不上来"，也不能把 {"answer":"… 给用户看） */
+function looksLikeJSON(s) {
+  const t = String(s || '').trim();
+  return /^\s*\{\s*"/.test(t) && /"\s*:/.test(t.slice(0, 80));
 }
 const strList = v => (Array.isArray(v) ? v : []).map(x => String(x || '').trim()).filter(Boolean).slice(0, 8);
 const normWrong = v => (Array.isArray(v) ? v : []).map(x => ({
@@ -803,7 +924,7 @@ module.exports = {
         return sendJSON(res, 200, {
           round: roundOut(db.prepare('SELECT * FROM restate_rounds WHERE id = ?').get(rid)),
           point, turns: [],
-          coach: { hit: [], focus: '', pending: null, dims: dimsOf(point) },
+          coach: { hit: [], focus: '', pending: null, back: '', level: 0, verdict: '', weak: '', dims: dimsOf(point) },
           resumed: false
         });
       }
@@ -873,7 +994,7 @@ module.exports = {
         const turn = await coachTurnOnce(r, point, dims, st, history, userText, hint);
         return sendJSON(res, 200, {
           turn: turn && turn.insertId ? db.prepare('SELECT * FROM restate_turns WHERE id = ?').get(Number(turn.insertId)) : null,
-          coach: { hit: st.hit, focus: st.focus, pending: st.pending, dims },
+          coach: (() => { const c = coachOf(r.id); c.dims = dims; return c; })(),
           dims,
           done: !!(st.pending && st.pending.done),
           turns: turnsOf(r.id)
@@ -903,8 +1024,10 @@ module.exports = {
           message: draft ? 'AI 正在润色你写的版本，并对照原文找差距' : 'AI 正在把你说过的话整理成一版，并对照原文找差距',
           run: signal => aiText(buildFinishPrompt(tutOf(r.tutorial_id) || { title: '', content: '' }, point, history, draft), currentModel(), 60000, null, signal)
         });
-        const d = extractJSON(txt) || {};
-        const mine = String(d.mine || draft || '').slice(0, 1200);
+        const d = parseAIObject(txt) || {};
+        let mine = String(d.mine || '').trim();
+        if (!mine || looksLikeJSON(mine)) mine = String(draft || '').trim();   // 别把半截 JSON 当"我的话"
+        mine = mine.slice(0, 1200);
         /* kept 模型常漏给（输出被截断/它偷懒）。兜底用引导模式里 AI 自己打的 ✓ ——
            那也是"他确实讲到了"的依据，比让页面空着强，且不是编出来的。 */
         const stF = coachOf(r.id);
@@ -952,12 +1075,14 @@ module.exports = {
           message: 'AI 正在答你的问题，答完会把你接回用自己的话',
           run: signal => aiText(buildChatPrompt(tut, point, { t: cur.name, ask: cur.ask }, history, text, body), currentModel(), 60000, null, signal)
         });
-        const d = extractJSON(txt) || {};
-        const answer = String(d.answer || txt || '').trim().slice(0, 2000)
-          || '这个我暂时答不上来，换个问法试试？';
+        const parsed = splitChatReply(txt);
+        let answer = String(parsed.answer || '').trim().slice(0, 3000);
+        /* 万一还是没解析出来、拿到的是一坨 JSON —— 宁可说"答不上来"，
+           也不能把 {"answer":"… 原样显示在对话里（用户看到的就是这种）。 */
+        if (!answer || looksLikeJSON(answer)) answer = '这个我一时没答好，换个问法再问一次？';
         /* back 模型常漏给。解释完如果不接回自己的话，就只是"又看懂了一遍"——
            所以兜底也要有一句：拿当前关注维度里那个"他自己答得出来"的小切口来问。 */
-        let back = String(d.back || '').trim().slice(0, 200);
+        let back = String(parsed.back || '').trim().slice(0, 200);
         if (!back) {
           const askTxt = String((focusDim && (focusDim.ask || focusDim.probe)) || cur.ask || '').trim();
           back = askTxt ? ('那你用自己的话说一遍：' + askTxt.slice(0, 120)) : '';
@@ -1010,7 +1135,7 @@ module.exports = {
           message: 'AI 正在把你各点说过的话，按主线串成一篇整体叙述',
           run: signal => aiText(buildWeavePrompt(t, arcOf(t.id), done), currentModel(), 90000, null, signal)
         });
-        const d = extractJSON(txt) || {};
+        const d = parseAIObject(txt) || {};
         const weave = {
           narrative: String(d.narrative || '').slice(0, 4000),
           links: (Array.isArray(d.links) ? d.links : []).map(x => ({
