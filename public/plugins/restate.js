@@ -55,15 +55,47 @@
     const c = (cur && cur.coach) || {};
     const dims = dimsOfPoint(cur && cur.point);
     const hit = (c.hit && c.hit.length) ? c.hit : collectHit();
-    return { dims, hit, focus: String(c.focus || ''), pending: c.pending || null };
+    /* level/verdict/weak 可能只存在最新那一次的判定里（服务端存的 state 优先） */
+    const lv = Number.isFinite(Number(c.level)) && c.level !== null && c.level !== undefined ? Number(c.level) : lastJudge().level;
+    return {
+      dims, hit, focus: String(c.focus || ''), pending: c.pending || null,
+      level: Math.max(0, Math.min(3, lv || 0)),
+      verdict: String(c.verdict || lastJudge().verdict || ''),
+      weak: String(c.weak || lastJudge().weak || ''),
+      /* 「接回自己那句话」独立存一份（用户可能先提问、后被 AI 问），
+         pending 不在时也要显示，否则解释就只是"又看懂了一遍" */
+      back: String(c.back || (c.pending && c.pending.back) || '')
+    };
   }
+  /* 服务端没给整体判断时，从最近一次带 level 的判定里取（刷新后也不至于空白） */
+  function lastJudge() {
+    for (let i = (cur.turns || []).length - 1; i >= 0; i--) {
+      let v = {};
+      v = objOf(cur.turns[i].verdict);
+      if (v.level != null) return { level: Number(v.level) || 0, verdict: String(v.verdict || ''), weak: String(v.weak || '') };
+    }
+    return { level: 0, verdict: '', weak: '' };
+  }
+  /* 接口可能已经把数组解析好了（restate 的 gaps/kept 是服务端 parse 过再返回的）。
+     这时候再 JSON.parse 会抛异常被 catch 吃掉 —— 页面就静默空一块，很难查。 */
+  function listOf(v) {
+    if (Array.isArray(v)) return v;
+    try { const a = JSON.parse(String(v || '[]')); return Array.isArray(a) ? a : []; } catch (e) { return []; }
+  }
+  function objOf(v) {
+    if (v && typeof v === 'object') return v;
+    try { const o = JSON.parse(String(v || '{}')); return (o && typeof o === 'object') ? o : {}; } catch (e) { return {}; }
+  }
+  /* 掌握档位的说法（别写"0/1/2/3"给用户看） */
+  const LEVEL_TXT = ['还没开口', '能说出关键词', '能讲清机制', '能自己讲成一段'];
+  const levelTxt = n => LEVEL_TXT[Math.max(0, Math.min(3, Number(n) || 0))];
   /* 服务端没给 hit（比如刚刷新、还没聊过）时，从历史 turn 的判定里并出来 ——
      这样左栏的 ✓ 不会因为刷新一下就没了。 */
   function collectHit() {
     const out = [];
     for (const t of (cur.turns || [])) {
       let v = {};
-      try { v = JSON.parse(t.verdict || '{}'); } catch (e) {}
+      v = objOf(t.verdict);
       for (const k of (v.hit || [])) if (out.indexOf(k) < 0) out.push(k);
     }
     return out;
@@ -134,7 +166,7 @@
     if (!p || p.hint) return;
     for (let i = (cur.turns || []).length - 1; i >= 0; i--) {
       let v = {};
-      try { v = JSON.parse(cur.turns[i].verdict || '{}'); } catch (e) {}
+      v = objOf(cur.turns[i].verdict);
       if (v.kind === 'hint') { p.hint = { say: v.say || '', probe: v.probe || '' }; return; }
     }
   }
@@ -149,6 +181,7 @@
   function draw() {
     if (view === 'pick') drawPick();
     else if (view === 'talk') drawTalk();
+    else if (view === 'draft') drawDraft();
     else if (view === 'notes') drawNotes();
     else if (view === 'hist') drawHistory(histIdx);
     else drawDone();
@@ -353,7 +386,7 @@
       let turns = [];
       try { const x = await api('/api/restate-round/' + r.id); turns = x.turns || []; } catch (e) {}
       let gaps = [];
-      try { gaps = JSON.parse(r.gaps || '[]'); } catch (e) {}
+      gaps = listOf(r.gaps);
       const badge = r.status === 'active' ? '<span class="rsTag act">进行中</span>'
         : (DONE(r) ? '<span class="rsTag ok">已沉淀</span>' : '<span class="rsTag">已归档</span>');
       blocks.push(`<div class="rsHistBlk">
@@ -381,7 +414,17 @@
   function ladderHTML() {
     const c = coachState();
     const allDone = c.dims.every(d => c.hit.indexOf(d.key) >= 0);
-    return `<div class="rsDims">
+    /* 掌握档位：光有 ✓/✗ 看不出"AI 眼里我现在到底什么水平"，
+       所以单独给一条 —— 从"能说出关键词"到"能自己讲成一段"是四个能感觉到的台阶。 */
+    const lvHTML = `<div class="rsLevel">
+      <div class="rsLevelHd"><span>AI 判断你的掌握</span><span class="rsSub">${esc(levelTxt(c.level))}</span></div>
+      <div class="rsLevelBar">${[0, 1, 2, 3].map(i =>
+        '<span class="rsLevelStep' + (i <= c.level ? ' on' : '') + '">' + (i === 0 ? '关键词' : i === 1 ? '说得清' : i === 2 ? '讲得透' : '讲成段') + '</span>'
+      ).join('')}</div>
+      ${c.verdict ? `<div class="rsLevelV">${esc(c.verdict)}</div>` : ''}
+      ${c.weak ? `<div class="rsLevelW">最薄弱：${esc(c.weak)}</div>` : ''}
+    </div>`;
+    return lvHTML + `<div class="rsDims">
       <div class="rsDimsHd"><span>覆盖清单</span>
         <span class="rsSub">${c.hit.length}/${c.dims.length} 已讲到 · AI 自己挑下一个问什么</span></div>
       <div class="rsDimsRow">${c.dims.map(d => {
@@ -393,6 +436,8 @@
       </div>
     </div>`;
   }
+  /* 解释之后接回自己的话 —— 那一块单独抽出来，两处渲染共用 */
+  const backHTML = (b) => `<div class="rsBack">刚才你问的那点，AI 答完了 —— 现在<b>轮到你用自己的话</b>说一遍：${esc(b)}</div>`;
   /* 当前该回的那一问：优先用服务端 pending（它才是"正等着你回答"的那一问） */
   function pendingAsk() {
     const c = coachState();
@@ -405,14 +450,19 @@
     const point = cur.point || { title: '' };
     const turns = cur.turns || [];
     const c = coachState();
-    const ask = pendingAsk();
+    /* 叫 askQ 不叫 ask：同名会把下面的 ask() 函数遮蔽掉，
+       结果「不明白，问一句」按钮永远绑不上事件（点着没反应）。 */
+    const askQ = pendingAsk();
     const last = [...turns].reverse().find(x => {
-      let v = {}; try { v = JSON.parse(x.verdict || '{}'); } catch (e) {}
+      const v = objOf(x.verdict);
       return v.kind === 'ask';
     });
     const spoke = turns.some(x => x.user_text);
     const focusName = dimName(c.focus) || (c.focus === 'refine' ? '打磨' : '');
-    const allDone = !!(ask && ask.done) || (!ask && c.dims.every(d => c.hit.indexOf(d.key) >= 0) && spoke);
+    const allDone = !!(askQ && askQ.done) || (!askQ && c.dims.every(d => c.hit.indexOf(d.key) >= 0) && spoke);
+    /* 「解释完接回自己那句话」只渲染一处：pending 上有就用它，没有就用服务端独立存的那份。
+       之前挂在 askQ 分支里，结果那一问在时反而看不到 —— 正好是最常出现的情况。 */
+    const backQ = String((askQ && askQ.back) || c.back || '');
     // 右栏解释哪一轮：默认跟着**最新一条**（就是你眼前这条），发送后自动选中新轮。
     // 之前默认取「当前级最近一条」，结果右栏停在第 39 轮、中间栏已滚到第 44 轮，两边对不上。
     // 归一化成具体 id，这样 turnHTML 能把它高亮出来 —— 右栏在讲哪条，中间栏得看得出来。
@@ -432,16 +482,17 @@
             ${ladderHTML()}
             <div class="rsQ">
               <div class="rsQT"><span class="rsQBadge">${esc(focusName || '等你先说')}</span>${allDone ? '<span class="rsQFinal">可以收尾了</span>' : ''}</div>
-              ${ask
-                ? `<p class="rsQQ">${esc(ask.probe)}</p>
-                   ${ask.read ? `<div class="rsRead">AI 判断你<i>${esc(ask.read)}</i>，现在补这一块</div>` : ''}
-                   ${ask.hint ? `<details class="rsKey" open><summary>刚才的提示（只给方向，不是答案）</summary><p>${esc((ask.hint.probe || ask.hint.say || ''))}</p></details>` : ''}`
+              ${askQ
+                ? `<p class="rsQQ">${esc(askQ.probe)}</p>
+                   ${askQ.read ? `<div class="rsRead">AI 判断你<i>${esc(askQ.read)}</i>，现在补这一块</div>` : ''}
+                   ${askQ.hint ? `<details class="rsKey" open><summary>刚才的提示（只给方向，不是答案）</summary><p>${esc((askQ.hint.probe || askQ.hint.say || ''))}</p></details>` : ''}`
                 : '<p class="rsQQ muted">' + (busy ? 'AI 正在读你说的话、想下一个问题…' : (spoke ? '覆盖清单上的点已经讲到了 —— 点「下一问」让它继续追问，或直接收尾。' : '点下面「下一问」，AI 会挑最该先弄清的那一条问你。')) + '</p>'}
+              ${backQ ? backHTML(backQ) : ''}
             </div>
           </div>
           <div class="rsNav">
             <button class="btn tiny" id="rsHint" title="不给答案，只把方向指出来">💡 卡住了</button>
-            <button class="btn tiny primary" id="rsNext">${ask ? '换一个问法 →' : '下一问 →'}</button>
+            <button class="btn tiny primary" id="rsNext">${askQ ? '换一个问法 →' : '下一问 →'}</button>
             <button class="btn tiny" id="rsBack">换个知识点</button>
           </div>
         </aside>
@@ -462,9 +513,9 @@
           <div class="rsInput">
             <textarea id="rsSay" rows="2" placeholder="你怎么想就怎么说，不用组织语言（Ctrl/⌘+Enter 发送）"></textarea>
             <div class="rsInputBtns">
-              <button class="btn primary" id="rsSend"${busy || !ask ? ' disabled title="先让 AI 问一句"' : ''}>${busy ? 'AI 在读…' : '我说完了'}</button>
+              <button class="btn primary" id="rsSend"${busy || !askQ ? ' disabled title="先让 AI 问一句"' : ''}>${busy ? 'AI 在读…' : '我说完了'}</button>
               <button class="btn" id="rsAsk">不明白，问一句</button>
-              ${spoke ? '<button class="btn" id="rsFinish">收尾对照</button>' : ''}
+              ${spoke ? '<button class="btn" id="rsFinish">整理成我的话</button>' : ''}
             </div>
           </div>
         </section>
@@ -499,7 +550,7 @@
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); send(false, false); }
     });
     document.getElementById('rsSend').addEventListener('click', () => send(false, false));
-    document.getElementById('rsAsk').addEventListener('click', ask);
+    document.getElementById('rsAsk').addEventListener('click', ask);   // ← 全局那个函数，别用被遮蔽的 askQ
     const nx = document.getElementById('rsNext');
     if (nx) nx.addEventListener('click', () => send(true, false));
     const hb = document.getElementById('rsHint');
@@ -592,7 +643,7 @@
         <p class="muted">对话再长也不会把左边的题挤走，点中间任意一轮就能回看。</p></div>`;
     }
     let v = {};
-    try { v = JSON.parse(t.verdict || '{}'); } catch (e) {}
+    v = objOf(t.verdict);
     if (v.kind === 'chat') {
       return `<div class="rsAnHead"><span class="rsAnStep">你问了一句</span>
         <span class="rsAnWhen">${esc(String(t.created_at || '').slice(11, 16))}</span></div>`
@@ -624,7 +675,7 @@
      几十轮对话后用户要滚一整屏才看得到问题。 */
   function turnHTML(t, hist) {
     let v = {};
-    try { v = JSON.parse(t.verdict || '{}'); } catch (e) {}
+    v = objOf(t.verdict);
     const isChat = v.kind === 'chat';
     const isHint = v.kind === 'hint';
     const hasV = !isChat && !isHint && ((v.hit || []).length > 0);
@@ -718,43 +769,98 @@
     if (!force && p) return;
     send(true, false);
   }
+  /* 问一句 → AI 解释 → 立刻把"轮到你用自己的话说一遍"顶到左栏。
+     解释如果不能接回自己的话，就只是"又看懂了一遍"。 */
   async function ask() {
     if (busy) return;
     const ta = document.getElementById('rsSay');
     const text = String(ta.value || '').trim();
     if (!text) return toast('先写下你的问题');
-    busy = true; draw();
+    busy = true; busyMsg = 'AI 正在答你的问题…';
+    draw();
     try {
       const r = await api('/api/restate-round/' + cur.round.id + '/chat', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text })
       });
       cur.turns.push(r.turn);
       selId = r.turn.id;
+      /* back 由服务端存进 coach.back，这里只把它显示出来 */
+      if (r.back) { cur.coach = cur.coach || { hit: [], focus: '', pending: null }; cur.coach.back = r.back; }
+      try { ta.value = ''; } catch (e) {}
     } catch (e) { toast(e.message); }
-    busy = false; draw();
+    busy = false; busyMsg = '';
+    draw();
     scrollThreadToEnd();
   }
-  async function finish() {
+  /* 收尾分两步：① 让用户自己把这段整理成一版（真正"内化"的那一步得他自己走）
+     ② AI 只润色 + 对照原文找差距。
+     直接一步让 AI 整理，沉淀出来的还是书上的话 —— 这个组件就白做了。 */
+  function drawDraft() {
+    const c = coachState();
+    const hint = c.dims.map(d => d.name).join(' · ');
+    app.innerHTML = `<div class="jdPage rsPage rsDraftPage">
+      ${headHTML('把它整理成你自己的话')}
+      <div class="rsDraftBox">
+        <div class="rsDraftT">🗣 现在轮到你写</div>
+        <p class="rsDraftLead">不看左边 AI 的原话，按<b>你刚才自己说的那些</b>，把这个知识点从头到尾讲一遍：</p>
+        <ul class="rsDraftReq">
+          <li>先说<b>为什么要它</b>（它解决了什么麻烦）</li>
+          <li>再说<b>它大致怎么做到</b>（关键机制）</li>
+          <li>最后说<b>什么情况下会失效</b>（边界）</li>
+        </ul>
+        <p class="muted">用你的话、你的类比，写多写少都行 —— 写出来才知道哪块其实还没真懂。
+          <span class="muted">（覆盖清单：${esc(hint)}）</span></p>
+        <textarea id="rsDraftTa" rows="9" placeholder="例：我一直以为 base 就是个公共配置片段，后来才明白它还得配合 profiles 才不至于重复写……"></textarea>
+        <div class="rsDraftBtns">
+          <button class="btn primary" id="rsDraftOk">写好了，让 AI 帮我顺一遍</button>
+          <button class="btn" id="rsDraftBack">← 回去接着聊</button>
+        </div>
+        <p class="muted" style="margin-top:8px;">AI 只会理顺顺序、补上连接，<b>不会替你重写</b> —— 你这段用词就是最终沉淀下来的样子。</p>
+      </div>
+    </div>`;
+    const ta = document.getElementById('rsDraftTa');
+    ta.value = String((cur.round && cur.round.draft) || '');
+    document.getElementById('rsDraftBack').addEventListener('click', () => { view = 'talk'; draw(); });
+    document.getElementById('rsDraftOk').addEventListener('click', () => doFinish(ta.value));
+    setTimeout(() => ta.focus(), 40);
+  }
+  async function doFinish(draft) {
     if (busy) return;
-    if (!confirm('现在收尾，生成「我的话」对照？\n（后面还可以换个角度再来一轮）')) return;
-    busy = true; draw();
+    const text = String(draft || '').trim();
+    if (!text && !confirm('还没写整理稿。确定直接让 AI 从你说过的那些话里整理吗？\n（自己写一遍内化效果会好很多）')) {
+      return;
+    }
+    busy = true; busyMsg = 'AI 正在帮你顺一遍，并对照原文找差距…';
+    draw();
     try {
-      await api('/api/restate-round/' + cur.round.id + '/finish', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+      const r = await api('/api/restate-round/' + cur.round.id + '/finish', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ draft: text })
       });
+      cur.round = r.round;
       await reload();
       view = 'done';
     } catch (e) { toast(e.message); }
-    busy = false; draw();
+    busy = false; busyMsg = '';
+    draw();
+  }
+  async function finish() {
+    if (busy) return;
+    view = 'draft';
+    draw();
   }
 
   /* ---------- 收尾对照 ---------- */
   function drawDone() {
     const r = cur.round || {};
-    let gaps = [];
-    try { gaps = JSON.parse(r.gaps || '[]'); } catch (e) {}
+    let gaps = [], kept = [];
+    gaps = listOf(r.gaps);
+    kept = listOf(r.kept);
     app.innerHTML = `<div class="jdPage rsPage">
       ${headHTML('你的版本 vs 原文')}
+      ${String(r.draft || '').trim() ? `<div class="rsSec rsOwnSec">
+        <div class="rsSecT">✍️ 你自己写的原版（AI 只理顺了顺序，这段才是沉淀下来的主体）</div>
+        <div class="rsOwnRaw">${esc(r.draft)}</div>
+      </div>` : ''}
       <div class="rsSec">
         <div class="rsSecT">${esc(r.point_title || '')}</div>
         <div class="rsMine">
@@ -763,6 +869,10 @@
         </div>
         ${r.line ? `<p class="rsLine">${esc(r.line)}</p>` : ''}
       </div>
+      ${kept.length ? `<div class="rsSec">
+        <div class="rsSecT">AI 认定你真讲对了的地方（${kept.length}）</div>
+        <div class="rsKept">${kept.map(k => '<div class="rsKeptI">✓ ' + esc(k) + '</div>').join('')}</div>
+      </div>` : ''}
       <div class="rsSec">
         <div class="rsSecT">${gaps.length ? '和关键要点的差距（' + gaps.length + '）' : '要点都覆盖了 ✓'}</div>
         ${gaps.length ? `<div class="rsGaps">${gaps.map(g => `

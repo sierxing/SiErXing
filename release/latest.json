@@ -1,14 +1,14 @@
 {
-  "version": "1.10.15",
-  "buildVer": "4e7ce296a7d3",
-  "payload": "release/payload-1.10.15.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.15.sxar?ref=main",
+  "version": "1.10.16",
+  "buildVer": "2ba893ea8e46",
+  "payload": "release/payload-1.10.16.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.16.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "c9b88615a39dcc8fc61eba62665d810f6fb81986cb3f398954579ab8a2451724",
-  "size": 614603,
-  "unpackedSize": 2265065,
-  "publishedAt": "2026-10-07T10:13:09.165Z",
-  "notes": "用自己的话改成 AI 判断掌握情况的引导模式：覆盖清单+AI自选焦点，不再走固定四级阶梯",
+  "sha256": "75f24dd04f486e490f63e7d8f72a0ab4228b09c7d147725716803752de5256e8",
+  "size": 620916,
+  "unpackedSize": 2284402,
+  "publishedAt": "2026-10-07T13:28:51.769Z",
+  "notes": "用自己的话三件事成一条线：AI 每轮给整体掌握判断（能讲清机制/最薄弱在哪）、提问解释完把你接回自己的话、收尾改成你先自己写整理稿再由 AI 对照",
   "exeRequired": false
 }
