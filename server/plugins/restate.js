@@ -3,17 +3,17 @@
  * ------------------------------------------------------------------
  * 和随堂测验的区别：测验考「你记住了吗」，这个组件解决「我记得但说不出来」。
  *
- * 设计要点是**循序渐进**，不是一上来就问细节。AI 提大纲时，为每个知识点同时
- * 生成一条「理解阶梯」（默认四级）：
- *   ① 缘起 —— 为什么会遇到这个问题？在此之前卡在哪？（先建立动机）
- *   ② 轮廓 —— 它大致在做什么？（建立整体图景）
- *   ③ 关键 —— 支撑它的关键机制/前提/边界在哪里？（建立精度）
- *   ④ 串讲 —— 把前三级串成一段完整表述（这一步才叫「内化」）
+ * 设计对齐「🧭 AI 引导提炼思路」（每日刷题里的那道题）：**不按剧本问，而是让 AI 读用户
+ * 已经讲过的话，自己判断还缺哪一块，然后只补那一块。**
+ *   · 每个知识点带一份「覆盖清单」（dims）—— 提炼大纲时由 AI 照着这个知识点的实质内容
+ *     生成（3-6 条），不是写死的四级阶梯；
+ *   · 用户每次答完，AI 判断哪些维度已经讲到（hit），**跳过**用户已讲清的，只挑**最关键的
+ *     那一个**缺口追问；实在讲不下去就换一个更小的切口问；
+ *   · 核心维度都覆盖到了之后进入「打磨」状态：不再补清单，改问能把他的表述变得更扎实的问题；
+ *   · 卡住可以点「提示」，只给方向不给答案。
  *
- * 每一级 AI 先抛一个**引导性问题**（不给答案），用户答完 AI 判「这一级到位没」，
- * 只指出**最关键的那一个**缺口并给方向提示（给方向不给答案）→ 用户可反复答、
- * 可追问、可跳过、可回退，全部由用户说了算，没有倒计时也不自动推进。
- * 走完阶梯后收尾：输出「你的版本 vs 原文要点」对照 → 沉淀成「我的话」。
+ * 一切都由用户说了算：可反复答、可追问、可跳过、可随时收尾，没有倒计时也不自动推进。
+ * 走完收尾：输出「你的版本 vs 原文要点」对照 → 沉淀成「我的话」。
  *
  * 涉及代码一律要求用 ``` 围栏包裹。
  */
@@ -82,6 +82,18 @@ CREATE TABLE IF NOT EXISTS restate_rounds (
   gaps TEXT NOT NULL DEFAULT '[]',
   line TEXT NOT NULL DEFAULT '',
   turns INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+/* 引导模式（1.10.15 起）：AI 自己判断掌握情况、自己挑下一个问什么，不再按固定阶梯走。
+   hit     = 已覆盖的维度 key（JSON 数组，跨轮累积）
+   focus   = AI 上一轮选中的关注维度（或 refine）
+   pending = 当前正等着用户回答的那一问（还没配对成一轮，所以单独存一份） */
+CREATE TABLE IF NOT EXISTS restate_coach (
+  round_id INTEGER PRIMARY KEY,
+  hit TEXT NOT NULL DEFAULT '[]',
+  focus TEXT NOT NULL DEFAULT '',
+  pending TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -154,13 +166,32 @@ function roundsOf(tid) {
 function turnsOf(rid) {
   return db.prepare('SELECT * FROM restate_turns WHERE round_id = ? ORDER BY seq, id').all(Number(rid));
 }
+/* ---------- 引导模式状态（hit / focus / pending） ----------
+   和每日刷题的「AI 引导提炼思路」同一套机制：维度不是顺序剧本，是「值得覆盖到」的检查表；
+   AI 每轮读用户已经讲过的话，标出 hit、挑一个 focus 追问。 */
+function coachOf(rid) {
+  const r = db.prepare('SELECT * FROM restate_coach WHERE round_id = ?').get(Number(rid));
+  if (!r) return { hit: [], focus: '', pending: null };
+  let hit = [];
+  try { const a = JSON.parse(r.hit || '[]'); hit = Array.isArray(a) ? a.map(String) : []; } catch (e) { hit = []; }
+  let pending = null;
+  if (String(r.pending || '').trim()) { try { pending = JSON.parse(r.pending); } catch (e) { pending = null; } }
+  return { hit, focus: String(r.focus || ''), pending: (pending && typeof pending === 'object') ? pending : null };
+}
+function saveCoach(rid, st) {
+  const now = nowISO();
+  db.prepare('INSERT INTO restate_coach (round_id, hit, focus, pending, created_at, updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(round_id) DO UPDATE SET hit = excluded.hit, focus = excluded.focus, pending = excluded.pending, updated_at = excluded.updated_at')
+    .run(Number(rid), JSON.stringify((st && st.hit) || []), String((st && st.focus) || ''), (st && st.pending) ? JSON.stringify(st.pending) : '', now, now);
+}
 function stripHtml(html) {
   return String(html || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 /* ---------- 提示词 ---------- */
 
-/* 阶梯的兜底模板：AI 没给 steps 时用，保证界面永远有台阶可走 */
+/* ---- 阶梯（老机制，保留用于兼容历史数据）----
+   1.10.15 起新会话走「引导模式」（COVER_DIMS 覆盖清单 + AI 自己挑 focus），
+   这里的四段只服务已经存在的 restate_points（老库里 points 已经带了 steps）。 */
 const STEP_FALLBACK = [
   { t: '缘起', q: '在遇到它之前，这件事是怎么做的？卡在哪儿了？', hint: '想想没有它的时候你会怎么做、哪里别扭' },
   { t: '轮廓', q: '那它到底在做什么？用一句粗话概括。', hint: '先别管细节，说个大概就行' },
@@ -180,8 +211,58 @@ function normSteps(v) {
       hint: String(s.hint || s.scaffold || '').slice(0, 200)
     });
   }
-  return out.length ? out : STEP_FALLBACK.slice();
+  return out;
 }
+/* 兜底阶梯：老 points 没有 steps 时仍要能走（历史数据兼容） */
+const STEPS_FALLBACK = () => STEP_FALLBACK.slice();
+
+/* ===== 引导模式的覆盖维度 =====
+   刻意**不写死**「缘起→轮廓→关键→串讲」这种顺序剧本：知识点五花八门（概念、命令、
+   架构、公式），统一剧本必然问些无关的问题。做法与每日刷题的「引导提炼思路」一致：
+   维度是「值得覆盖到」的检查表，AI 每轮读用户已经讲过的话，**只补真正还缺的那一块**。
+   下面这套是通用底座（提炼大纲时还会照着每个知识点的实质内容再生成/裁剪）。 */
+const COVER_DIMS = [
+  { key: 'why', name: '为什么需要它', ask: '在遇到它之前这件事怎么做的？卡在哪？它解决了什么麻烦', probe: '他想不到动机，就具体问「没有它的时候你会怎么做、哪一步最别扭」' },
+  { key: 'gist', name: '它到底在做什么', ask: '用一句粗话概括它在做的事（别抠细节）', probe: '他讲得太散，就让他压成一句话，越短越好' },
+  { key: 'how', name: '关键机制/怎么做到的', ask: '它靠哪条关键机制成立的，过程大致怎么走', probe: '只会说名字说不出理由，问他「换成另一个做法会在哪一点不行」' },
+  { key: 'cond', name: '前提与边界', ask: '什么条件下才成立、什么输入下会失效、最容易误解的是哪一点', probe: '给一个具体小例子让他自己判断会不会出问题' },
+  { key: 'contrast', name: '跟什么不一样', ask: '跟最接近的那个东西/做法比，差别到底在哪', probe: '他没想过对比，就问「如果用你熟悉的那个做法代替，会差在哪」' },
+  { key: 'link', name: '和上下文怎么连起来', ask: '它在整篇/整门知识里处于什么位置，前后跟什么接得上', probe: '他完全没框架，就先问「它属于哪一类问题」，再问跟同类的还有什么' },
+  { key: 'use', name: '什么时候会真的用到', ask: '什么场景下你会想起它、拿它做什么', probe: '只想得到考试答案，就反问「写代码时哪个地方你会想起这段」' }
+];
+/* 覆盖齐了之后不是结束，而是改问能让表述更扎实的东西（对应刷题那边的 refine） */
+const REFINE_ASKS = [
+  '把他这一大段压缩成 3 步有序步骤（让他自己拆，不要替他拆）',
+  '指出他描述里最含糊的一个词，问清那个词到底指什么',
+  '问他这段表述在什么情况下会误导别人，然后让他改那句话',
+  '问他「如果只允许说一句」，他会留哪一句，凭什么留它',
+  '让他用自己的话给出一个能验证对错的具体例子',
+  '问他刚才说的哪一步最没把握，为什么没把握'
+];
+/* 维度清单兜底：AI 提炼时没给 dims（或老 points 没这字段）就用这套通用底座 */
+function normDims(v, point) {
+  const a = Array.isArray(v) ? v : [];
+  const out = [];
+  for (const d of a.slice(0, 7)) {
+    if (!d) continue;
+    const name = String((d.name != null ? d.name : d.t) || '').trim();
+    if (!name) continue;
+    out.push({
+      key: String(d.key || ('k' + out.length)).slice(0, 20),
+      name: name.slice(0, 14),
+      ask: String(d.ask || d.q || '').slice(0, 200),
+      probe: String(d.probe || d.hint || '').slice(0, 200)
+    });
+  }
+  if (out.length >= 3) return out;
+  /* 老 points 没 dims：用通用底座，但把 summary 当成「gist」的 ask，别的照旧 */
+  return COVER_DIMS.map(d => ({
+    key: d.key, name: d.name, ask: d.ask, probe: d.probe
+  }));
+}
+const dimsOf = p => (p && Array.isArray(p.dims) && p.dims.length) ? p.dims : normDims(null, p);
+const dimOfKey = (dims, k) => (dims || []).find(d => d.key === k) || null;
+const DIM_KEYS_FALLBACK = COVER_DIMS.map(d => d.key);
 
 function buildPointsPrompt(tut) {
   const body = (tut.format === 'html' ? stripHtml(tut.content) : String(tut.content || '')).slice(0, 20000);
@@ -203,16 +284,22 @@ function buildPointsPrompt(tut) {
     '   - summary：50 字内讲清「这个点到底在说什么」',
     '   - key_points：2-4 条「用户用自己的话讲出来时必须覆盖的要点」，每条 30 字内。',
     '     写「实质内容」而不是「原句」——它是我们判断用户漏讲了什么的依据。',
-    '2. steps：**理解阶梯**。每个点给 4 级，按理解顺序排：',
-    '   ① 缘起：为什么会遇到这个问题？在它之前卡在哪？（建立动机，别一上来就问细节）',
-    '   ② 轮廓：它大致在做什么？（建立整体图景）',
-    '   ③ 关键：最关键的机制/前提/边界在哪？（建立精度）',
-    '   ④ 串讲：把前三级连起来完整表述（这一步才叫内化）',
-    '   每级含：t（这一步的名字）、q（**引导性问题**，一句话，',
-    '   像导师那样提问，**不要在问题里泄露答案**）、hint（方向提示，一句话，',
-    '   指出该往哪想，但**不能直接把答案说出来**）。',
-    '   · 步骤数可少于 4，但顺序必须是先动机后机制。',
-    '3. 点与点尽量不重叠，不要拆太碎。',
+    '2. key_points：2-4 条「用户用自己的话讲出来时必须覆盖的要点」，每条 30 字内。',
+    '   写「实质内容」而不是「原句」——它是我们判断用户漏讲了什么的依据。',
+    '3. dims：**覆盖清单**，3-6 条，照着这个知识点的**实质内容**来定，不要套模板。',
+    '   每条含：key（短标识，如 why/gist/mech/edge，同一份里唯一）、',
+    '   name（≤6 字短名，如「为什么需要它」）、ask（这一条到底要用户讲清什么）、',
+    '   probe（用户答不上来时改问的更小切口）。',
+    '   · 清单是**检查表不是顺序剧本**：AI 会读用户已讲的话、跳过已覆盖的，只补缺的那一块。',
+    '   · 所以每条都要是这个知识点特有、真讲不出来就说明没懂的东西。',
+    '   · 讲某个 API：可以是「解决什么问题」「参数怎么对应」「什么时候不能这么做」；',
+    '     讲某个概念：可以是「和相邻概念的区别」「失效边界」「直觉类比」。',
+    '4. 点与点尽量不重叠，不要拆太碎。',
+    '',
+    '【输出格式：只输出一个 JSON 对象，不要任何解释文字】',
+    '{"thesis":"...","spine":["...","..."],"branches":[{"id":"b0","name":"...","gist":"..."}],'
+    + '"points":[{"title":"...","branch":"b0","summary":"...","key_points":["...","..."],'
+    + '"dims":[{"key":"why","name":"...","ask":"...","probe":"..."}]}]}',
     '',
     '【输出格式：只输出一个 JSON 对象，不要任何解释文字】',
     '{"thesis":"...","spine":["...","..."],"branches":[{"id":"b0","name":"...","gist":"..."}],'
@@ -225,61 +312,169 @@ function buildPointsPrompt(tut) {
 }
 
 /* 判断用户在**当前这一级**讲得怎么样；只指出最关键的一个缺口 */
-function buildTurnPrompt(tut, point, step, stepIdx, stepTotal, history, userText, arc) {
+/* ===== 引导模式：让 AI 自己判断掌握情况、自己挑下一个问什么 =====
+   和每日刷题的「🧭 AI 引导提炼思路」同一套机制，用户明确要求对齐它。
+   关键差别（相对老的固定四级阶梯）：维度清单是**检查表不是剧本**，
+   AI 每轮先读用户已经讲过的话，把讲到的标进 hit，跳过已覆盖的，只补最关键的那一块。 */
+function buildCoachPrompt(tut, point, dims, history, userText, arc, hitSoFar, hintMode) {
   const L = [];
-  L.push('你是学习教练，正在陪用户**循序渐进**地理解一个知识点。用户正处在阶梯的第 ' + (stepIdx + 1) + ' / ' + stepTotal + ' 级。');
-  L.push('你的任务只有一个：判断他**这一级**讲到位没有。不要提前追问后面级别的细节——那是后面的台阶。');
+  L.push('你是一位耐心的学习教练。用户正在把一个知识点**用自己的话讲出来**——他看得懂，但说不出来，这正是最常见的假掌握。');
   L.push('');
-  // 让 AI 知道这个点在整张图上的位置：这样点评时能顺手接上前后关系，而不是孤立评价
-  if (arc && (arc.thesis || (arc.spine || []).length)) {
-    L.push('【整篇教程的知识架构（判断时心里有数：他在图上哪个位置，别孤立评价）】');
-    if (arc.thesis) L.push('核心主张：' + String(arc.thesis).slice(0, 200));
-    if ((arc.spine || []).length) {
-      L.push('主线推进：');
-      arc.spine.forEach((s, i) => L.push('  ' + (i + 1) + '. ' + String(s).slice(0, 120)));
-    }
-    L.push('');
-  }
+  L.push('【最重要：不要按清单顺序从头问】');
+  L.push('下面给的是一份「值得覆盖到」的检查表，**不是剧本**。你必须先读他刚说的话，自己判断：');
+  L.push('- 他已经讲到的维度，**跳过，不要再问一遍**（这是最招人烦的错：用户明明已经讲清楚了，你还逼他重说）；');
+  L.push('- 只补他**真正还没说清的那一个**维度；');
+  L.push('- 如果覆盖清单基本都到了（他核心已经讲成型），focus 填 "refine"，改问能把他的表述变得更扎实的东西（见下面的打磨清单）；');
+  L.push('- 如果他的表述有明显错误或含糊到会影响理解，先纠这一处，别急着往下走。');
+  L.push('');
   L.push('【知识点】' + String(point.title || ''));
   L.push('【它讲的是什么】' + String(point.summary || ''));
   if ((point.key_points || []).length) {
     L.push('【最终要覆盖的要点（此刻只用来判断"有没有讲错"，不要一次性全倒给他）】');
     for (const k of point.key_points) L.push('- ' + String(k));
   }
-  L.push('');
-  L.push('【当前这一级】' + String(step.t || ('第' + (stepIdx + 1) + '级')) + '：' + String(step.q || ''));
-  L.push('【这一级的参考方向】' + String(step.hint || '（无）'));
-  L.push('');
-  if (history && history.length) {
-    L.push('【用户前面各级已经说过的（别重复问已经讲到的）】');
-    for (const h of history.slice(-5)) L.push('- ' + String(h).slice(0, 200));
+  if (arc && (arc.thesis || (arc.spine || []).length)) {
     L.push('');
+    L.push('【整篇教程的知识架构（判断时心里有数：他在图上哪个位置，别孤立评价）】');
+    if (arc.thesis) L.push('核心主张：' + String(arc.thesis).slice(0, 200));
+    if ((arc.spine || []).length) {
+      L.push('主线推进：');
+      arc.spine.forEach((x, i) => L.push('  ' + (i + 1) + '. ' + String(x).slice(0, 120)));
+    }
   }
-  L.push('【用户这一轮的表述】');
-  L.push(String(userText || '').slice(0, 800));
   L.push('');
-  L.push('【要求】');
-  L.push('1. ok：**这一级**是否到位了（讲到了就算，不要求完整、不扣字眼）。到位为 true。');
-  L.push('2. probe：如果没到位，**只针对最关键的那一个**缺口，一句话追问。');
-  L.push('   · 不要罗列缺失项，不要一次问好几个问题，不要提前问下一级的内容。');
-  L.push('3. scaffold：给方向去补这个缺口，**不能直接给答案**。');
-  L.push('4. wrong：只有确实说反/说错才填（用户可能理解错的关键处），没有就空数组。');
-  L.push('5. ai_text：两三句自然语言回应（肯定他讲对的部分，别空泛夸），末尾带上你的追问或"可以进下一级了"。');
-  L.push('   写成直接对用户说的话，不要复述结构、不要说"根据评判标准"。');
-  L.push('6. 语气平实，别用"太棒了""完美"这类空话。');
-  L.push('7. 涉及代码一律用 ``` 围栏包裹（注明语言）。');
+  if (hitSoFar && hitSoFar.length) {
+    L.push('【前面几轮他已经讲到的维度（这些不要再问）】' + hitSoFar.map(k => {
+      const d = dimOfKey(dims, k); return d ? d.name : k;
+    }).join('、'));
+  }
+  if (history && history.length) {
+    L.push('');
+    L.push('【他前面说过的话（判断已覆盖到哪些维度时用）】');
+    for (const h of history.slice(-6)) L.push('- ' + String(h).slice(0, 220));
+  }
+  if (userText) {
+    L.push('');
+    L.push('【他这一轮的表述】');
+    L.push(String(userText).slice(0, 1000));
+  } else {
+    L.push('');
+    L.push('【他还没开口】这是第一次提问，问最该先弄清的那一条。');
+  }
   L.push('');
-  L.push('只输出一个 JSON 对象：');
-  L.push('{"ok":false,"hit":["这一级他已讲到的"],"missed":["这一级还缺什么"],'
-    + '"wrong":[{"said":"用户说的","right":"实际应该是"}],'
-    + '"probe":"一句话追问","scaffold":"方向提示（不给答案）","ai_text":"两三句回应"}');
+  if (hintMode) {
+    L.push('【这一轮是「提示」】他卡住了。给他一个**提示**：先复述他卡在哪，再用一句更小的话把方向指出来，让他自己走完那一步。');
+    L.push('绝对不能出现完整答案、代码或伪码。');
+    L.push('');
+    L.push('只输出一个 JSON 对象：{"read":"一句话点出他卡在哪","hit":[],"focus":"refine","say":"一句安抚 + 提示","probe":"一个提示（1~2 句）","done":false}');
+    return L.join('\n');
+  }
+  L.push('【别的硬规矩】');
+  L.push('1. hit 只填你**确实在他这段话里听到了**的维度，别因为他提到了就乐观给分。');
+  L.push('2. 绝对不给答案、不给代码、不给伪码。他说「别引导了直接告诉我」才破例，而且只讲概念不给代码。');
+  L.push('3. 他说「不会 / 不知道 / 卡住」时，不要重复原问题、不要给答案，换到该维度的 probe 里那个更小的切口。');
+  L.push('4. probe 要具体到能一句话回答。不要列编号、不要一次抛好几个问题、不要给选项。');
+  L.push('5. say 用平实的话肯定他刚才**说的那一个具体点**，不要空泛夸（「很好」是废话）。');
+  L.push('6. 若他已经把剩下的维度都覆盖到了，done 填 true。');
+  L.push('7. 语气平实，别用「太棒了」「完美」这类空话。');
+  L.push('8. 涉及代码一律用 ``` 围栏包裹（注明语言）。');
+  L.push('');
+  L.push('【输出格式：只输出一个 JSON 对象，不要代码围栏、不要任何多余文字】');
+  L.push('{"read":"一句话说他现在懂到哪了（40 字内）",');
+  L.push(' "hit":["他已经讲到的维度 key"],');
+  L.push(' "focus":"这一轮要补的那个维度 key，或 refine",');
+  L.push(' "say":"两三句回应：先点出他讲对的具体那一点（顺带纠错就说错在哪），再自然地引出下面的问题",');
+  L.push(' "probe":"你这一个问题（2~3 句）",');
+  L.push(' "done":false}', '');
+  L.push('【覆盖清单（key｜名称｜问到什么｜他答不上来时改问）】');
+  L.push(dims.map(d => '- ' + d.key + '｜' + d.name + '｜' + (d.ask || '') + '｜' + (d.probe || '')).join('\n'));
+  L.push('- refine｜把表述讲扎实｜覆盖清单基本都到了，从这些里挑一个最能让他的表述变扎实的：' + REFINE_ASKS.join('；'));
   return L.join('\n');
+}
+function normCoachTurn(j, dims) {
+  const keys = (dims || []).map(d => d.key);
+  const probe = String(j.probe || j.q || '').trim().slice(0, 900);
+  const hit = (Array.isArray(j.hit) ? j.hit : []).map(String).filter(k => keys.includes(k));
+  let focus = String(j.focus || '').trim();
+  // 只认清单里的维度，模型编的名字一律当 refine（不能让它把用户带跑偏）
+  if (focus !== 'refine' && !keys.includes(focus)) focus = 'refine';
+  return {
+    read: String(j.read || '').trim().slice(0, 200),
+    hit,
+    focus,
+    say: String(j.say || '').trim().slice(0, 600),
+    probe,
+    done: !!j.done
+  };
+}
+/** 让 AI 出一轮引导。模型不听话就重试一次，仍不行退回纯文本（至少能显示成一句话）。 */
+async function coachTurn(basePrompt, dims, timeoutMs, signal) {
+  let raw = '';
+  const ask = async (extra) => {
+    const r = await aiText(basePrompt + (extra || ''), (currentModel && currentModel()) || '', timeoutMs || 120000, null, signal);
+    raw = String(r == null ? '' : r).trim();
+    return raw;
+  };
+  try {
+    await ask('');
+    const j = extractJSON(raw);
+    if (j && String(j.probe || j.q || '').trim()) return normCoachTurn(j, dims);
+  } catch (e) { raw = raw || ('ERR ' + (e.message || e)); }
+  /* 模型没给 JSON：再试一次，并把它的原话怼回去让它自己改格式 */
+  try {
+    await ask('\n\n【注意】你上一次的输出不是合法 JSON，只输出 {"read":"…","hit":[…],"focus":"…","say":"…","probe":"…","done":false} 这个对象本身。');
+    const j2 = extractJSON(raw);
+    if (j2 && String(j2.probe || j2.q || '').trim()) return normCoachTurn(j2, dims);
+  } catch (e) { /* 两次都不听话就用第一次的原话 */ }
+  const plain = String(raw || '').replace(/^```[a-z]*\s*/i, '').replace(/```$/, '').trim();
+  if (!plain) throw new Error('AI 没有给出问题，换个模型再试');
+  return { read: '', hit: [], focus: 'refine', say: '', probe: plain.slice(0, 800), done: false, raw: true };
+}
+
+
+/* 引导模式的核心：跑一轮 AI，存 hit/focus/pending。
+   hint=true 时只给方向（不消耗 pending 的那一问，也不推进 hit）。 */
+async function coachTurnOnce(r, point, dims, st, history, userText, hint) {
+  const base = buildCoachPrompt(tutOf(r.tutorial_id) || { title: '', content: '' }, point, dims, history, userText, arcOf(r.tutorial_id), st.hit, hint);
+  const focusName = (() => { const d = dimOfKey(dims, st.focus); return d ? d.name : '打磨'; })();
+  const turn = await aiJob({
+    title: (hint ? '给个提示 · ' : '接着引导 · ') + String(point.title || '').slice(0, 24),
+    note: String(point.title || '').slice(0, 80),
+    goalId: Number(r.goal_id || 0),
+    nodeId: Number(r.node_id || 0),
+    message: hint ? 'AI 正在把方向指出来（不给答案）'
+      : 'AI 正在读你说的话，判断还缺哪一块（当前关注「' + focusName + '」）',
+    run: signal => coachTurn(base, dims, 90000, signal)
+  });
+  const now = nowISO();
+  /* hint 那一轮不进 turns（它是插在当前问题上的提示，不是新一轮问答），
+     但要让用户看得到 → 存成 kind='hint' 的一轮，ai_text 就是提示本身。 */
+  const ver = {
+    kind: hint ? 'hint' : 'ask',
+    read: turn.read, hit: turn.hit, focus: turn.focus,
+    say: turn.say, probe: turn.probe, missed: [], wrong: [], scaffold: '',
+    ok: false, ai_text: [turn.say, turn.probe].filter(Boolean).join('\n\n') || '……'
+  };
+  const prev = turnsOf(r.id);
+  const ins = db.prepare('INSERT INTO restate_turns (round_id, seq, user_text, ai_text, verdict, created_at) VALUES (?,?,?,?,?,?)')
+    .run(r.id, prev.length + 1, hint ? '' : (userText || ''), ver.ai_text, JSON.stringify(ver), now);
+  if (!hint) db.prepare('UPDATE restate_rounds SET turns = ?, updated_at = ? WHERE id = ?').run(prev.length + 1, now, r.id);
+  st.focus = turn.focus;
+  if (!hint) {
+    st.hit = [...new Set(st.hit.concat(turn.hit || []))];
+    st.pending = { read: turn.read, hit: turn.hit, focus: turn.focus, say: turn.say, probe: turn.probe, done: turn.done };
+  } else {
+    /* 提示挂在当前那一问下面，不改 pending */
+    if (st.pending) st.pending.hint = { say: turn.say, probe: turn.probe };
+  }
+  saveCoach(r.id, st);
+  return { insertId: ins.lastInsertRowid };
 }
 
 /* 收尾：把用户逐级的表达整理成一版「我的话」，并对照原文讲清差异 */
 function buildFinishPrompt(tut, point, history) {
   return [
-    '你是学习教练。用户已经沿着阶梯用自己的话讲过这个知识点（先讲动机，再讲轮廓、关键，最后串讲），现在做收尾对照。',
+    '你是学习教练。用户已经用自己的话讲过这个知识点（AI 判断过他的掌握情况、只补了他缺的那几块），现在做收尾对照。',
     '',
     '【知识点】' + String(point.title || ''),
     '【它讲的是什么】' + String(point.summary || ''),
@@ -395,7 +590,7 @@ module.exports = {
   name: '用自己的话',
   icon: '🧠',
   category: '其它',
-  desc: '逐步引导你把教程知识点用自己的话讲出来：AI 只追问最关键的那一个缺口、给方向不给答案，最后沉淀成「我的话」',
+  desc: '把教程知识点用自己的话讲出来：AI 读你已经讲的，自己判断还缺哪一块、只补那一块（不给答案），最后沉淀成「我的话」',
   order: 45,
   goalToggle: false,
   defaultEnabled: true,
@@ -411,6 +606,7 @@ module.exports = {
     if (rs.length) {
       const ph = rs.map(() => '?').join(',');
       ctx.db.prepare(`DELETE FROM restate_turns WHERE round_id IN (${ph})`).run(...rs);
+      ctx.db.prepare(`DELETE FROM restate_coach WHERE round_id IN (${ph})`).run(...rs);
     }
     ctx.db.prepare('DELETE FROM restate_rounds WHERE goal_id = ?').run(goalId);
     ctx.db.prepare('DELETE FROM restate_points WHERE tutorial_id NOT IN (SELECT id FROM tutorials)').run();
@@ -447,7 +643,7 @@ module.exports = {
           note: String(t.title || '').slice(0, 80),
           goalId: Number(t.goal_id || 0),
           nodeId: Number(t.node_id || 0),
-          message: 'AI 正在读教程，梳理整体架构并设计各点的理解阶梯',
+          message: 'AI 正在读教程，梳理整体架构并为每个知识点定覆盖清单',
           run: signal => aiText(buildPointsPrompt(t), currentModel(), 120000, null, signal)
         });
         const data = extractJSON(txt);
@@ -461,7 +657,8 @@ module.exports = {
           branch: String(x.branch || '').slice(0, 12),
           summary: String(x.summary || '').slice(0, 120),
           key_points: strList(x.key_points || x.keyPoints).map(k => k.slice(0, 60)).slice(0, 4),
-          steps: normSteps(x.steps)
+          dims: normDims(x.dims, x),
+          steps: normSteps(x.steps)     // 老字段留着只为兼容更早的数据
         }));
         if (!pts.length) throw new Error('大纲提炼失败，请重试');
         const arc = normArc(data && !Array.isArray(data) ? data : null, pts);
@@ -492,7 +689,7 @@ module.exports = {
         if (!fresh) {
           const ex = db.prepare("SELECT * FROM restate_rounds WHERE tutorial_id = ? AND point_idx = ? AND status = 'active' ORDER BY id DESC LIMIT 1")
             .get(t.id, idx);
-          if (ex) return sendJSON(res, 200, { round: ex, point, turns: turnsOf(ex.id), resumed: true });
+          if (ex) return sendJSON(res, 200, { round: ex, point, turns: turnsOf(ex.id), coach: (() => { const c = coachOf(ex.id); c.dims = dimsOf(point); return c; })(), resumed: true });
         }
         // 只归档「同一个知识点」的旧轮次，不动别的知识点
         db.prepare("UPDATE restate_rounds SET status = 'archived', updated_at = ? WHERE tutorial_id = ? AND point_idx = ? AND status = 'active'")
@@ -501,7 +698,12 @@ module.exports = {
           .run(t.id, Number((body && body.node_id) || 0) || (t.node_id || 0), Number((body && body.goal_id) || 0) || (t.goal_id || 0),
             idx, String(point.title || '').slice(0, 60), 'active', now, now);
         const rid = Number(info.lastInsertRowid);
-        return sendJSON(res, 200, { round: db.prepare('SELECT * FROM restate_rounds WHERE id = ?').get(rid), point, turns: [], resumed: false });
+        return sendJSON(res, 200, {
+          round: db.prepare('SELECT * FROM restate_rounds WHERE id = ?').get(rid),
+          point, turns: [],
+          coach: { hit: [], focus: '', pending: null, dims: dimsOf(point) },
+          resumed: false
+        });
       }
     },
     /* 读一轮（含全部对话） */
@@ -514,35 +716,19 @@ module.exports = {
         const r = db.prepare('SELECT * FROM restate_rounds WHERE id = ?').get(Number(m[1]));
         if (!r) return sendJSON(res, 404, { error: '轮次不存在' });
         const pts = pointsOf(r.tutorial_id);
-        return sendJSON(res, 200, { round: r, point: pts[r.point_idx] || { title: r.point_title }, turns: turnsOf(r.id) });
+        const point = pts[r.point_idx] || { title: r.point_title };
+        return sendJSON(res, 200, {
+          round: r,
+          point,
+          turns: turnsOf(r.id),
+          coach: (() => { const c = coachOf(r.id); c.dims = dimsOf(point); return c; })()
+        });
       }
     },
     /* 移动阶梯：next 下一级 / prev 回退一级 / skip 跳过本级（都只是改指针，不调 AI） */
-    {
-      method: 'POST',
-      pattern: /^\/api\/restate-round\/(\d+)\/step$/,
-      handler: async (req, res, u, ctx) => {
-        const m = u.pathname.match(/^\/api\/restate-round\/(\d+)\/step$/);
-        if (!m || req.method !== 'POST') return false;
-        const r = db.prepare('SELECT * FROM restate_rounds WHERE id = ?').get(Number(m[1]));
-        if (!r) return sendJSON(res, 404, { error: '轮次不存在' });
-        const body = await readBody(req).catch(() => ({}));
-        const pts = pointsOf(r.tutorial_id);
-        const point = pts[r.point_idx] || { title: r.point_title, steps: [] };
-        const steps = (point.steps && point.steps.length) ? point.steps : STEP_FALLBACK;
-        const cur0 = Math.max(0, Math.min(Number(r.step_idx || 0), steps.length - 1));
-        const act = String((body && body.action) || 'next');
-        let to = cur0;
-        if (act === 'prev') to = cur0 - 1;
-        else if (act === 'skip') to = cur0 + 1;
-        else to = cur0 + 1;   // next
-        to = Math.max(0, Math.min(to, steps.length - 1));
-        const now = nowISO();
-        db.prepare('UPDATE restate_rounds SET step_idx = ?, updated_at = ? WHERE id = ?').run(to, now, r.id);
-        return sendJSON(res, 200, { round: db.prepare('SELECT * FROM restate_rounds WHERE id = ?').get(r.id), step_idx: to });
-      }
-    },
-    /* 用户说一轮 → AI 判「当前这一级」到不到位 + 只追问最关键的一个缺口 */
+    /* 用户说一轮 / 点提示 / 点「下一问」 → AI 自己判断掌握情况并挑下一个问题
+       （对齐每日刷题的「🧭 AI 引导提炼思路」；老的固定四级阶梯已不再作为主流程）
+       body: { text?: 他的表述, hint?: 只给方向, force?: 不带回答只要下一个问题 } */
     {
       method: 'POST',
       pattern: /^\/api\/restate-round\/(\d+)\/turn$/,
@@ -552,37 +738,43 @@ module.exports = {
         const r = db.prepare('SELECT * FROM restate_rounds WHERE id = ?').get(Number(m[1]));
         if (!r) return sendJSON(res, 404, { error: '轮次不存在' });
         const body = await readBody(req).catch(() => ({}));
-        const userText = String((body && body.text) || '').trim().slice(0, 1000);
-        if (!userText) return sendJSON(res, 400, { error: '先写下你的理解' });
+        const userText = String((body && body.text) || '').trim().slice(0, 1200);
+        const hint = !!(body && body.hint);
+        const force = !!(body && body.force);
         const pts = pointsOf(r.tutorial_id);
         const point = pts[r.point_idx] || { title: r.point_title, key_points: [] };
-        const steps = (point.steps && point.steps.length) ? point.steps : STEP_FALLBACK;
-        const stepIdx = Math.max(0, Math.min(Number(r.step_idx || 0), steps.length - 1));
-        const step = steps[stepIdx];
+        const dims = dimsOf(point);
+        const st = coachOf(r.id);
         const prev = turnsOf(r.id);
         const history = prev.filter(x => x.user_text).map(x => x.user_text);
-        const txt = await aiJob({
-          title: '判断这一级讲到位没 · ' + String(step.t || ('第' + (stepIdx + 1) + '级')),
-          note: String(point.title || '').slice(0, 80),
-          goalId: Number(r.goal_id || 0),
-          message: 'AI 正在读你这段话，判断「' + String(step.t || ('第' + (stepIdx + 1) + '级')) + '」到位没有',
-          run: signal => aiText(buildTurnPrompt(tutOf(r.tutorial_id) || { title: '', content: '' }, point, step, stepIdx, steps.length, history, userText, arcOf(r.tutorial_id)), currentModel(), 60000, null, signal)
-        });
-        const v = extractJSON(txt) || {};
-        const verdict = {
-          step_idx: stepIdx, step_t: String(step.t || ''),
-          ok: !!v.ok, hit: strList(v.hit), missed: strList(v.missed), wrong: normWrong(v.wrong),
-          probe: String(v.probe || '').slice(0, 200), scaffold: String(v.scaffold || '').slice(0, 200),
-          ai_text: String(v.ai_text || '').slice(0, 800)
-        };
-        if (!verdict.ai_text) verdict.ai_text = verdict.probe || '我看看你这段话……';
-        const now = nowISO();
-        const ins = db.prepare('INSERT INTO restate_turns (round_id, seq, user_text, ai_text, verdict, created_at) VALUES (?,?,?,?,?,?)')
-          .run(r.id, prev.length + 1, userText, verdict.ai_text, JSON.stringify(verdict), now);
-        db.prepare('UPDATE restate_rounds SET turns = ?, updated_at = ? WHERE id = ?').run(prev.length + 1, now, r.id);
+        /* 只有真的答了一句（或明确要提示/要下一问）才继续；否则 400，
+           否则用户误触一次就会白白烧掉一次 AI 调用 */
+        if (!userText && !hint && !force) return sendJSON(res, 400, { error: '先写下你的理解' });
+        if (userText && st.pending) {
+          /* 把「刚才那一问」和这个回答配成一轮：那一问问的时候还没人答，
+             进不了 turns，所以先存在 pending 里（否则第一问会在页面上凭空消失）。 */
+          const p0 = st.pending;
+          const now = nowISO();
+          const ver = {
+            kind: 'coach',
+            focus: String(p0.focus || ''), hit: Array.isArray(p0.hit) ? p0.hit : [],
+            read: String(p0.read || ''), probe: String(p0.probe || ''), say: String(p0.say || ''),
+            missed: strList(p0.missed), wrong: normWrong(p0.wrong), scaffold: String(p0.scaffold || ''),
+            ok: false, ai_text: String(p0.ai_text || p0.say || p0.probe || '')
+          };
+          const ins = db.prepare('INSERT INTO restate_turns (round_id, seq, user_text, ai_text, verdict, created_at) VALUES (?,?,?,?,?,?)')
+            .run(r.id, prev.length + 1, userText, ver.ai_text, JSON.stringify(ver), now);
+          db.prepare('UPDATE restate_rounds SET turns = ?, updated_at = ? WHERE id = ?').run(prev.length + 1, now, r.id);
+          st.pending = null;
+          st.hit = [...new Set(st.hit.concat(Array.isArray(p0.hit) ? p0.hit : []))];
+        }
+        const turn = await coachTurnOnce(r, point, dims, st, history, userText, hint);
         return sendJSON(res, 200, {
-          turn: db.prepare('SELECT * FROM restate_turns WHERE id = ?').get(Number(ins.lastInsertRowid)),
-          step_idx: stepIdx, step_total: steps.length
+          turn: turn && turn.insertId ? db.prepare('SELECT * FROM restate_turns WHERE id = ?').get(Number(turn.insertId)) : null,
+          coach: { hit: st.hit, focus: st.focus, pending: st.pending, dims },
+          dims,
+          done: !!(st.pending && st.pending.done),
+          turns: turnsOf(r.id)
         });
       }
     },
@@ -633,10 +825,13 @@ module.exports = {
         if (!text) return sendJSON(res, 400, { error: '先写下你的问题' });
         const pts = pointsOf(r.tutorial_id);
         const point = pts[r.point_idx] || { title: r.point_title, key_points: [] };
-        const steps = (point.steps && point.steps.length) ? point.steps : STEP_FALLBACK;
-        const stepIdx = Math.max(0, Math.min(Number(r.step_idx || 0), steps.length - 1));
+        /* 引导模式下"当前这一级"是 AI 现挑的 focus，取不到时退回通用底座的第一条 */
+        const st0 = coachOf(r.id);
+        const dims0 = dimsOf(point);
+        const focusDim = dimOfKey(dims0, st0.focus);
+        const cur = focusDim || dims0[0] || COVER_DIMS[0];
         const history = turnsOf(r.id).filter(x => x.user_text).map(x => x.user_text);
-        let reply = await aiText(buildChatPrompt(tutOf(r.tutorial_id) || { title: '', content: '' }, point, steps[stepIdx], history, text), currentModel(), 60000);
+        let reply = await aiText(buildChatPrompt(tutOf(r.tutorial_id) || { title: '', content: '' }, point, { t: cur.name, q: cur.ask }, history, text), currentModel(), 60000);
         reply = String(reply || '').trim().slice(0, 1500) || '这个我暂时答不上来，换个问法试试？';
         const prev = turnsOf(r.id);
         const now = nowISO();

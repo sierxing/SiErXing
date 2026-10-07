@@ -33,7 +33,7 @@ const SYNC_TABLES = [
      跟着插件的备份 importData 走就够了，跨设备互相覆盖没意义。 */
   'review_cards', 'problem_mind', 'mind_sessions', 'recall_tests', 'pitfall_cards',
   'quiz_outlines', 'quiz_sessions', 'quiz_records',
-  'restate_points', 'restate_arc', 'restate_rounds', 'restate_turns'
+  'restate_points', 'restate_arc', 'restate_rounds', 'restate_turns', 'restate_coach'
 ];
 // 不参与同步的列：题面正文与代码模板体积大，且每台设备用本机 LeetCode 登录态自己抓即可；
 // 多设备之间互相覆盖反而会看到别人的缓存（导入时保留本机已有值）

@@ -1,12 +1,13 @@
 /**
  * 思而行 · 前端插件：用自己的话（把教程知识点内化成用户自己的语言）
  * ------------------------------------------------------------------
- * 循序渐进，不一上来就问细节。AI 在提炼大纲时给每个知识点生成一条「理解阶梯」：
- *   ① 缘起（为什么会遇到它）→ ② 轮廓（它大致在做什么）→ ③ 关键（最关键的机制）
- *   → ④ 串讲（连起来完整表述）
- * 用户当前停在第 N 级，AI 先抛引导性问题（不给答案），用户答完判「这一级到没到位」，
- * 只指出最关键的那一个缺口 + 给方向（不给答案）。可反复答、可追问、可跳过、可回退，
- * 全程用户说了算，没有倒计时、不自动推进。走完后收尾对照，沉淀成「我的话」。
+ * 和每日刷题里的「🧭 AI 引导提炼思路」同一套机制：**不按固定剧本问**。
+ * 提炼大纲时 AI 给每个知识点生成一份「覆盖清单」（3-6 条，照着这个知识点的实质内容定），
+ * 用户每答一次，AI 读他已经讲过的话 → 标出讲到的维度（✓）→ 跳过已覆盖的 → 只补最关键的那一块。
+ * 清单覆盖得差不多时进入「✦ 打磨」：不再补清单，改问能让表述更扎实的问题。
+ * 卡住点「💡 提示」只给方向不给答案，且不消耗当前那一问。
+ *
+ * 全程用户说了算：可反复答、可追问、可跳过、可随时收尾，没有倒计时、不自动推进。
  */
 'use strict';
 (function () {
@@ -16,6 +17,7 @@
   let view = 'pick';
   let cur = null;          // { round, point, turns }
   let busy = false;
+  let busyMsg = '';
   let histIdx = -1;        // 对话存档当前看的知识点
   let selId = 0;           // 右栏正在看哪一轮的解析（0 = 跟最新走）
 
@@ -24,31 +26,49 @@
   function roundsOf(idx) {
     return rounds.filter(r => Number(r.point_idx) === idx).slice().reverse();
   }
-  const FALLBACK = [
-    { t: '缘起', q: '在遇到它之前，这件事是怎么做的？卡在哪儿了？', hint: '想想没有它的时候你会怎么做、哪里别扭' },
-    { t: '轮廓', q: '那它到底在做什么？用一句粗话概括。', hint: '先别管细节，说个大概就行' },
-    { t: '关键', q: '它成立最关键的那一点是什么？少了哪条就不成立？', hint: '找它的前提、边界或最容易误解的地方' },
-    { t: '串讲', q: '现在把前面几级连起来，用你自己的话完整讲一遍。', hint: '从「为什么要它」开始，一路讲到「它怎么做、关键在哪」' },
+  /* ---------- 覆盖清单（引导模式）----------
+     服务端每轮会带上 coach = { hit, focus, pending }：hit 是 AI 判断"你已经讲到"的维度，
+     pending 是当前正等着你回答的那一问。清单本身随每个知识点的实质内容生成，不是写死的四级。 */
+  const FALLBACK_DIMS = [
+    { key: 'why', name: '为什么需要它', ask: '在遇到它之前这件事怎么做的？卡在哪？它解决了什么麻烦' },
+    { key: 'gist', name: '它到底在做什么', ask: '用一句粗话概括它在做的事（别抠细节）' },
+    { key: 'how', name: '关键机制', ask: '它靠哪条关键机制成立的，过程大致怎么走' },
+    { key: 'cond', name: '前提与边界', ask: '什么条件下才成立、什么情况下会失效' },
+    { key: 'contrast', name: '跟什么不一样', ask: '跟最接近的那个东西比，差别到底在哪' },
+    { key: 'link', name: '和上下文怎么连', ask: '它在这门知识里处于什么位置，前后跟什么接得上' },
+    { key: 'use', name: '什么时候用得上', ask: '什么场景下你会想起它、拿它做什么' }
   ];
-  const stepsOf = p => (p && p.steps && p.steps.length) ? p.steps : FALLBACK;
-  const stepOf = () => {
-    const steps = stepsOf(cur && cur.point);
-    const i = Math.max(0, Math.min(Number((cur && cur.round && cur.round.step_idx) || 0), steps.length - 1));
-    return { i: i, total: steps.length, s: steps[i] };
+  const dimsOf = p => (p && p.dims && p.dims.length) ? p.dims : FALLBACK_DIMS;
+  /* 兜底也要能对上老数据：老 points 里只有 steps（名字是缘起/轮廓…），映射到通用维度 */
+  const dimsOfPoint = p => {
+    if (p && p.dims && p.dims.length) return p.dims;
+    if (p && p.steps && p.steps.length) {
+      const MAP = { 缘起: 'why', 轮廓: 'gist', 关键: 'how', 串讲: 'use' };
+      return p.steps.map((s, i) => ({
+        key: MAP[s.t] || ('k' + i), name: String(s.t || ('第' + (i + 1) + '项')).slice(0, 14),
+        ask: String(s.q || ''), probe: String(s.hint || '')
+      }));
+    }
+    return FALLBACK_DIMS;
   };
-  /* 每一级答过没有 / AI 判过没到位 */
-  function stepMarks() {
+  function coachState() {
+    const c = (cur && cur.coach) || {};
+    const dims = dimsOfPoint(cur && cur.point);
+    const hit = (c.hit && c.hit.length) ? c.hit : collectHit();
+    return { dims, hit, focus: String(c.focus || ''), pending: c.pending || null };
+  }
+  /* 服务端没给 hit（比如刚刷新、还没聊过）时，从历史 turn 的判定里并出来 ——
+     这样左栏的 ✓ 不会因为刷新一下就没了。 */
+  function collectHit() {
     const out = [];
     for (const t of (cur.turns || [])) {
       let v = {};
       try { v = JSON.parse(t.verdict || '{}'); } catch (e) {}
-      if (typeof v.step_idx !== 'number' || v.kind === 'chat') continue;
-      const m = out[v.step_idx] || (out[v.step_idx] = { tries: 0, ok: false });
-      m.tries++;
-      if (v.ok) m.ok = true;
+      for (const k of (v.hit || [])) if (out.indexOf(k) < 0) out.push(k);
     }
     return out;
   }
+  const dimName = k => { const d = dimsOfPoint(cur && cur.point).find(x => x.key === k); return d ? d.name : (k === 'refine' ? '打磨' : ''); };
   function progressOf(idx) {
     const rs = rounds.filter(r => Number(r.point_idx) === idx && r.mine);
     return { done: rs.length, active: rounds.some(r => Number(r.point_idx) === idx && r.status === 'active') };
@@ -97,11 +117,26 @@
     if (si >= 0) bits.push('主线第 ' + (si + 1) + ' 步');
     return bits.join(' · ');
   }
-  /* 读一轮（含 point 与全部对话），用于刷新后续接 */
+  /* 读一轮（含 point、全部对话、引导状态），用于刷新后续接 */
   async function loadRound(id) {
     const r = await api('/api/restate-round/' + id);
     cur = { round: r.round, point: r.point || { title: r.round.point_title }, turns: r.turns || [] };
+    if (r.coach) {
+      cur.coach = r.coach;
+      adoptHint();
+    }
     selId = 0;
+  }
+  /* 提示那一轮不进 coach.pending（它只是挂在当前那一问下面），所以刷新后要从 turns 里捞回来。
+     否则"刚才那条提示"会随刷新消失 —— 而它恰恰是用户最需要留着的那句。 */
+  function adoptHint() {
+    const p = cur && cur.coach && cur.coach.pending;
+    if (!p || p.hint) return;
+    for (let i = (cur.turns || []).length - 1; i >= 0; i--) {
+      let v = {};
+      try { v = JSON.parse(cur.turns[i].verdict || '{}'); } catch (e) {}
+      if (v.kind === 'hint') { p.hint = { say: v.say || '', probe: v.probe || '' }; return; }
+    }
   }
 
   function headHTML(title) {
@@ -155,14 +190,14 @@
         ${(woven.links || []).length ? '<div class="toolbarRow"><button class="btn" id="rsWeave2">看完整串联</button></div>' : ''}
       </div>` : ''}
       <div class="rsIntro">
-        <p>看懂却说不出来，是最常见的假掌握。这里 AI <b>不会先甩答案给你</b>，而是带你沿一条阶梯一步步走：</p>
-        <ol class="rsLadderIntro">
-          <li><b>缘起</b> —— 为什么会遇到这个问题？之前卡在哪</li>
-          <li><b>轮廓</b> —— 它大致在做什么</li>
-          <li><b>关键</b> —— 最关键的机制 / 前提 / 边界</li>
-          <li><b>串讲</b> —— 把前三级连起来，用你自己的话讲一遍</li>
-        </ol>
-        <p class="muted">每一级 AI 只追问你<b>最关键的那一个</b>缺口，给方向不给答案。哪级都能反复答、跳过或回退，你说了算。</p>
+        <p>看懂却说不出来，是最常见的假掌握。这里 AI <b>不会先甩答案给你</b>，而是读你写的、自己判断还缺哪一块：</p>
+        <ul class="rsLadderIntro">
+          <li>每个知识点有一份<b>覆盖清单</b>（由 AI 照着这个知识点的实质内容生成，不是写死的几级）</li>
+          <li>你每答一次，它先判断<b>你已经讲到哪些</b>（✓ 打在清单上），已经讲清的<b>不会再问一遍</b></li>
+          <li>只补<b>最关键的那一个</b>缺口，给方向不给答案；卡住可以点「💡 卡住了」只拿提示</li>
+          <li>清单覆盖得差不多时进入<b>打磨</b>：不再补清单，改问能让你的表述更扎实的问题</li>
+        </ul>
+        <p class="muted">同一个知识点两次进来，问的顺序可以不一样 —— 它跟着你实际讲了什么走。全程你说了算：可反复答、可追问、可跳过。</p>
         <p class="muted">走完几个点之后，可以点下面的<b>「串起整篇」</b>，AI 会把你说过的话按主线拼成一篇连贯的整体叙述 —— 那是真正的"知识架构内化"。</p>
       </div>
       ${points.length ? `
@@ -171,14 +206,14 @@
         <div class="rsList">${points.map((p, i) => {
           const pr = progressOf(i);
           const rs = roundsOf(i);
-          const n = stepsOf(p).length;
+          const dl = dimsOfPoint(p);
           // 进行中的那一轮：直接续接，别再开一轮空的（服务端也会兜住）
           const live = rs.find(r => r.status === 'active');
           const liveTurns = live ? (Number(live.turns) || 0) : 0;
           return `<div class="rsPt ${pr.done ? 'done' : ''}">
             <div class="rsPtL"><span class="rsPtDot">${i + 1}</span>
               <span class="rsPtBody"><b>${esc(p.title)} ${branchTagOf(p)}</b><span>${esc(p.summary || '')}</span>
-                <span class="rsPtSteps">${n} 级阶梯：${esc(stepsOf(p).map(x => x.t).join(' → '))}</span>
+                <span class="rsPtSteps">覆盖清单：${esc(dl.map(x => x.name).join(' · '))}</span>
                 ${live ? `<span class="rsPtLive">✍️ 没做完，已说 ${liveTurns} 条 —— 点「继续」接着来</span>` : ''}
                 ${rs.length ? `<span class="rsPtHist">🗨 ${rs.length} 轮对话 · 共 ${rs.reduce((a, r) => a + (Number(r.turns) || 0), 0)} 条
                   <button class="btn tiny" data-rs-hist="${i}">看对话</button></span>` : ''}</span></div>
@@ -191,7 +226,7 @@
         }).join('')}</div>
       </div>` : `
       <div class="rsSec"><div class="rsSecT">知识点大纲</div>
-        <p class="muted">还没提炼。先让 AI 从这篇教程里拆出知识点，并为每个点生成一条理解阶梯。</p></div>`}
+        <p class="muted">还没提炼。先让 AI 从这篇教程里拆出知识点，并为每个点生成一份覆盖清单。</p></div>`}
       <div class="toolbarRow">
         ${points.length ? `<button class="btn primary" id="rsWeave" ${doneCount < 1 ? 'disabled title="先至少走完一个点并收尾"' : ''}>🧩 串起整篇${doneCount ? '（已沉淀 ' + doneCount + ' 个点）' : ''}</button>
           <button class="btn" id="rsRedo">重新提炼架构</button>`
@@ -227,11 +262,14 @@
         });
         // ⚠️ 必须用服务端返回的 turns。之前写死 turns:[]，
         // 续接已有轮次时对话全被清空 —— 表现就是"换个知识点再回来，记录没了"。
-        cur = { round: r.round, point: r.point, turns: r.turns || [] };
+        cur = { round: r.round, point: r.point, turns: r.turns || [], coach: r.coach || null };
         selId = 0;
         view = 'talk';
         draw();
         if (r.resumed) toast('接着上次那一轮继续');
+        // 还没有正在等回答的那一问（比如新开的一轮）→ 让 AI 先问第一句。
+        // 已有的 pending 绝不覆盖：刷新页面不能把用户眼前那一问顶掉。
+        if (!cur.coach || !cur.coach.pending) askNext(true);
       } catch (e) { toast(e.message); b.disabled = false; }
     }));
   }
@@ -337,21 +375,28 @@
     document.getElementById('rsHBack').addEventListener('click', () => { view = 'pick'; draw(); });
   }
 
-  /* ---------- 阶梯复述 ---------- */
+  /* ---------- 覆盖清单 ----------
+     不是顺序剧本，是「值得覆盖到」的检查表：✓ = AI 判断你已经讲到；
+     高亮 = AI 这一轮选中的关注点。所以同一个知识点两次进来，问的顺序可以不一样。 */
   function ladderHTML() {
-    const steps = stepsOf(cur.point);
-    const marks = stepMarks();
-    const now = stepOf().i;
-    return `<div class="rsLadder">${steps.map((s, i) => {
-      const m = marks[i];
-      const cls = i < now ? 'passed' : (i === now ? 'now' : 'todo');
-      const mk = i < now ? '✓' : (m && m.ok ? '✓' : (m ? '·' : ''));
-      return `<div class="rsRung ${cls}">
-        <span class="rsRungN">${i + 1}</span>
-        <span class="rsRungT">${esc(s.t || ('第' + (i + 1) + '级'))}</span>
-        <span class="rsRungM">${mk}</span>
-      </div>`;
-    }).join('')}</div>`;
+    const c = coachState();
+    const allDone = c.dims.every(d => c.hit.indexOf(d.key) >= 0);
+    return `<div class="rsDims">
+      <div class="rsDimsHd"><span>覆盖清单</span>
+        <span class="rsSub">${c.hit.length}/${c.dims.length} 已讲到 · AI 自己挑下一个问什么</span></div>
+      <div class="rsDimsRow">${c.dims.map(d => {
+        const on = c.hit.indexOf(d.key) >= 0;
+        return '<span class="rsDim' + (on ? ' on' : '') + (d.key === c.focus ? ' cur' : '') + '"'
+          + ' title="' + esc(d.ask || d.name) + '">' + (on ? '✓ ' : '') + esc(d.name) + '</span>';
+      }).join('')}
+      ${(allDone || c.focus === 'refine') ? '<span class="rsDim cur refine" title="覆盖清单基本都到了 —— 这一轮改问能让表述更扎实的东西，而不是继续走清单">✦ 打磨</span>' : ''}
+      </div>
+    </div>`;
+  }
+  /* 当前该回的那一问：优先用服务端 pending（它才是"正等着你回答"的那一问） */
+  function pendingAsk() {
+    const c = coachState();
+    return c.pending && c.pending.probe ? c.pending : null;
   }
 
   /* 三栏：左=问题（常驻可见）· 中=对话（自己滚）· 右=选中那一轮的解析。
@@ -359,13 +404,15 @@
   function drawTalk() {
     const point = cur.point || { title: '' };
     const turns = cur.turns || [];
-    const { i: si, total: stot, s: step } = stepOf();
+    const c = coachState();
+    const ask = pendingAsk();
     const last = [...turns].reverse().find(x => {
       let v = {}; try { v = JSON.parse(x.verdict || '{}'); } catch (e) {}
-      return v.step_idx === si && v.kind !== 'chat';
+      return v.kind === 'ask';
     });
     const spoke = turns.some(x => x.user_text);
-    const isLast = si >= stot - 1;
+    const focusName = dimName(c.focus) || (c.focus === 'refine' ? '打磨' : '');
+    const allDone = !!(ask && ask.done) || (!ask && c.dims.every(d => c.hit.indexOf(d.key) >= 0) && spoke);
     // 右栏解释哪一轮：默认跟着**最新一条**（就是你眼前这条），发送后自动选中新轮。
     // 之前默认取「当前级最近一条」，结果右栏停在第 39 轮、中间栏已滚到第 44 轮，两边对不上。
     // 归一化成具体 id，这样 turnHTML 能把它高亮出来 —— 右栏在讲哪条，中间栏得看得出来。
@@ -375,7 +422,7 @@
     const pos = positionOf(Number(cur.round.point_idx || 0));
 
     app.innerHTML = `<div class="jdPage rsPage rsTalkPage">
-      ${headHTML('第 ' + (si + 1) + ' / ' + stot + ' 级 · ' + (step.t || ''))}
+      ${headHTML(focusName ? ('AI 当前关注「' + focusName + '」') : '让它读你说的话')}
       <div class="rsPanes" id="rsPanes">
         <aside class="rsPane rsPaneQ">
           <div class="rsPaneT">🧭 上下文</div>
@@ -384,14 +431,17 @@
             ${pos ? '<div class="rsPos">📍 ' + esc(pos) + '</div>' : ''}
             ${ladderHTML()}
             <div class="rsQ">
-              <div class="rsQT"><span class="rsQBadge">${esc(step.t || ('第' + (si + 1) + '级'))}</span>${isLast ? '<span class="rsQFinal">最后一级</span>' : ''}</div>
-              <p class="rsQQ">${esc(step.q || '')}</p>
-              ${step.hint ? `<details class="rsKey"><summary>想不出来？看方向提示（不是答案）</summary><p>${esc(step.hint)}</p></details>` : ''}
+              <div class="rsQT"><span class="rsQBadge">${esc(focusName || '等你先说')}</span>${allDone ? '<span class="rsQFinal">可以收尾了</span>' : ''}</div>
+              ${ask
+                ? `<p class="rsQQ">${esc(ask.probe)}</p>
+                   ${ask.read ? `<div class="rsRead">AI 判断你<i>${esc(ask.read)}</i>，现在补这一块</div>` : ''}
+                   ${ask.hint ? `<details class="rsKey" open><summary>刚才的提示（只给方向，不是答案）</summary><p>${esc((ask.hint.probe || ask.hint.say || ''))}</p></details>` : ''}`
+                : '<p class="rsQQ muted">' + (busy ? 'AI 正在读你说的话、想下一个问题…' : (spoke ? '覆盖清单上的点已经讲到了 —— 点「下一问」让它继续追问，或直接收尾。' : '点下面「下一问」，AI 会挑最该先弄清的那一条问你。')) + '</p>'}
             </div>
           </div>
           <div class="rsNav">
-            ${si > 0 ? '<button class="btn tiny" id="rsPrev">← 上一级</button>' : ''}
-            ${!isLast ? '<button class="btn tiny primary" id="rsNext">下一级 →</button>' : ''}
+            <button class="btn tiny" id="rsHint" title="不给答案，只把方向指出来">💡 卡住了</button>
+            <button class="btn tiny primary" id="rsNext">${ask ? '换一个问法 →' : '下一问 →'}</button>
             <button class="btn tiny" id="rsBack">换个知识点</button>
           </div>
         </aside>
@@ -402,17 +452,17 @@
             <span class="rsPaneN">${turns.length ? turns.length + ' 轮' : '还没开口'}</span>
             ${turns.length ? '<button class="btn tiny" id="rsLatest">跳到最新 ↓</button>' : ''}
           </div>
-          <div class="rsThread" id="rsThread">${turns.length ? turns.map(t => turnHTML(t, si)).join('')
-            : `<div class="rsEmpty"><span class="rsEmptyI">${si === 0 ? '🤔' : '✍️'}</span>
-                 <p><b>${si === 0 ? '先别急着想定义。' : '这一级'}</b>${si === 0
-                   ? '回想一下：在学会它之前，这件事你是怎么做的？卡在哪一步？'
-                   : '按左边那个问题回答就好，写得零散、口语都没关系。'}</p></div>`}
+          <div class="rsThread" id="rsThread">${turns.length ? turns.map(t => turnHTML(t, false)).join('')
+            : `<div class="rsEmpty"><span class="rsEmptyI">🤔</span>
+                 <p>AI 会读你写的，<b>自己判断还缺哪一块</b>，然后只补那一块。<br>
+                    你已经说清楚的地方，它不会再让你重说一遍。<br><br>
+                    如果第一句还没出来，点左下「下一问」。</p></div>`}
           </div>
-          ${busy ? '<div class="rsBusy">AI 在想…</div>' : ''}
+          ${busy ? '<div class="rsBusy">' + (busyMsg || 'AI 在想…') + '</div>' : ''}
           <div class="rsInput">
-            <textarea id="rsSay" rows="2" placeholder="按左边这级的问题回答…（Ctrl/⌘+Enter 发送）"></textarea>
+            <textarea id="rsSay" rows="2" placeholder="你怎么想就怎么说，不用组织语言（Ctrl/⌘+Enter 发送）"></textarea>
             <div class="rsInputBtns">
-              <button class="btn primary" id="rsSend">${busy ? '发送中…' : '我说完了'}</button>
+              <button class="btn primary" id="rsSend"${busy || !ask ? ' disabled title="先让 AI 问一句"' : ''}>${busy ? 'AI 在读…' : '我说完了'}</button>
               <button class="btn" id="rsAsk">不明白，问一句</button>
               ${spoke ? '<button class="btn" id="rsFinish">收尾对照</button>' : ''}
             </div>
@@ -422,7 +472,7 @@
 
         <aside class="rsPane rsPaneA">
           <div class="rsPaneT">📋 解析反馈<span class="rsPaneN" id="rsAnWhich">${selNo ? '第 ' + selNo + ' 轮' : ''}</span></div>
-          <div class="rsPaneBody" id="rsAnalysis">${analysisHTML(selTurn, si)}</div>
+          <div class="rsPaneBody" id="rsAnalysis">${analysisHTML(selTurn)}</div>
         </aside>
       </div>
     </div>`;
@@ -436,7 +486,7 @@
       app.querySelectorAll('[data-rs-turn]').forEach(x => x.classList.toggle('sel', Number(x.getAttribute('data-rs-turn')) === selId));
       const t = list.find(x => x.id === selId) || selTurn;
       const box = document.getElementById('rsAnalysis');
-      if (box) box.innerHTML = analysisHTML(t, si);
+      if (box) box.innerHTML = analysisHTML(t);
       const which = document.getElementById('rsAnWhich');
       if (which) {
         const i = list.indexOf(t);
@@ -446,14 +496,14 @@
 
     const ta = document.getElementById('rsSay');
     ta.addEventListener('keydown', e => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); send(); }
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); send(false, false); }
     });
-    document.getElementById('rsSend').addEventListener('click', send);
+    document.getElementById('rsSend').addEventListener('click', () => send(false, false));
     document.getElementById('rsAsk').addEventListener('click', ask);
-    const pv = document.getElementById('rsPrev');
-    if (pv) pv.addEventListener('click', () => moveStep('prev'));
     const nx = document.getElementById('rsNext');
-    if (nx) nx.addEventListener('click', () => moveStep('next'));
+    if (nx) nx.addEventListener('click', () => send(true, false));
+    const hb = document.getElementById('rsHint');
+    if (hb) hb.addEventListener('click', () => send(false, true));
     const fb = document.getElementById('rsFinish');
     if (fb) fb.addEventListener('click', finish);
     document.getElementById('rsBack').addEventListener('click', () => { cur = null; view = 'pick'; draw(); });
@@ -532,58 +582,72 @@
     const el = document.getElementById('rsThread');
     if (el) el.scrollTop = el.scrollHeight;
   }
-  /* 右栏：选中那一轮的解析。没选中就提示怎么用。 */
-  function analysisHTML(t, si) {
+  /* 右栏：选中那一轮的判定 —— AI 判断你讲到了什么、还挑了哪个缺口。
+     正常对话里判定**一律不内联**（内联会把左边的题越推越远，几十轮后要滚一整屏才看得到问题），
+     只在右栏显示选中那一轮的；存档浏览没有右栏，所以那儿仍然内联摊开。 */
+  function analysisHTML(t) {
     if (!t) {
       return `<div class="rsAnNone"><span class="rsEmptyI">📋</span>
-        <p>你说完一段，这里会显示 AI 对<b>那一轮</b>的判定：讲到了什么、还缺什么、往哪想。</p>
-        <p class="muted">对话再长也不会把左边的题挤走，点中间任意一轮就能回看它的解析。</p></div>`;
+        <p>你说完一段，这里会显示 AI 对<b>那一轮</b>的判断：你已经讲到哪些、它挑了哪个缺口接着问。</p>
+        <p class="muted">对话再长也不会把左边的题挤走，点中间任意一轮就能回看。</p></div>`;
     }
     let v = {};
     try { v = JSON.parse(t.verdict || '{}'); } catch (e) {}
-    const stepLbl = v.step_t ? '第 ' + ((Number(v.step_idx) || 0) + 1) + ' 级 · ' + esc(v.step_t) : '';
-    const head = `<div class="rsAnHead">${stepLbl ? '<span class="rsAnStep">' + stepLbl + '</span>' : ''}
-      ${v.ok === true ? '<span class="rsAnTag ok">到位</span>' : (v.ok === false ? '<span class="rsAnTag warn">还差一点</span>' : '')}
-      <span class="rsAnWhen">${esc(String(t.created_at || '').slice(11, 16))}</span></div>`;
     if (v.kind === 'chat') {
-      return head + '<div class="rsAnChat"><b>你问的</b>' + esc(t.user_text) + '</div>'
+      return `<div class="rsAnHead"><span class="rsAnStep">你问了一句</span>
+        <span class="rsAnWhen">${esc(String(t.created_at || '').slice(11, 16))}</span></div>`
+        + '<div class="rsAnChat"><b>你问的</b>' + esc(t.user_text) + '</div>'
         + '<div class="rsAnReply mdBody">' + mdToHTML(t.ai_text) + '</div>';
     }
-    // 下一手提示：以前是插在对话流里的独立段落，现在跟着解析走，位置永远固定
-    const st = stepOf();
-    const hint = (v.step_idx !== st.i) ? ''
-      : (v.ok === true
-        ? (st.i >= st.total - 1
-          ? '<div class="rsAnNext">✅ 串讲完成 —— 点左下「收尾对照」，看看你的版本和原文差在哪。</div>'
-          : '<div class="rsAnNext">✅ 这一级到位了，点左边「下一级 →」继续往上走。</div>')
-        : '<div class="rsAnNext">还差一点。AI 只挑了<b>最关键的那个缺口</b>：补上再答一次，或者直接点左边「下一级 →」回头补。</div>');
+    if (v.kind === 'hint') {
+      return `<div class="rsAnHead"><span class="rsAnStep">💡 只给方向，不给答案</span>
+        <span class="rsAnWhen">${esc(String(t.created_at || '').slice(11, 16))}</span></div>`
+        + '<div class="rsAnReply mdBody">' + mdToHTML(t.ai_text || v.probe || '') + '</div>'
+        + '<div class="rsAnNext">它没有消耗当前那一问 —— 想好了直接回答就行。</div>';
+    }
+    const hitTxt = (v.hit || []).map(k => dimName(k) || k);
+    const head = `<div class="rsAnHead">
+      ${v.focus ? '<span class="rsAnStep">关注「' + esc(dimName(v.focus) || (v.focus === 'refine' ? '打磨' : v.focus)) + '」</span>' : ''}
+      ${hitTxt.length ? '<span class="rsAnTag ok">讲到 ' + hitTxt.length + ' 块</span>' : '<span class="rsAnTag warn">这块还没讲到</span>'}
+      <span class="rsAnWhen">${esc(String(t.created_at || '').slice(11, 16))}</span></div>`;
+    const cur = coachState();
+    const lastQ = cur.pending && cur.pending.probe === v.probe;
+    const hint = !lastQ ? ''
+      : (hitTxt.length
+        ? '<div class="rsAnNext">✅ 这几块你讲到了。AI 已经换了关注点 —— 左栏高亮的那一条就是它接下来要问的。</div>'
+        : '<div class="rsAnNext">还差一点。AI 只挑了<b>最关键的那个缺口</b>，按左栏那个问题再答一次就行。</div>');
     return head + verdictHTML(v) + hint;
   }
 
-  /* si = 当前级序号；si < 0 表示「存档浏览」。
-     ⚠️ 正常对话中（si >= 0）判定**一律不内联** —— 内联会把左边的题越推越远，
-        100 轮对话后用户要滚一整屏才看得到问题。判定只在右栏显示选中那一轮的。
-        存档浏览没有右栏，所以那儿仍然内联摊开。 */
-  function turnHTML(t, si) {
+  /* hist = 是否「存档浏览」（没有右栏，判定要内联摊开）。
+     正常对话里判定**一律不内联** —— 内联会把左边的题越推越远，
+     几十轮对话后用户要滚一整屏才看得到问题。 */
+  function turnHTML(t, hist) {
     let v = {};
     try { v = JSON.parse(t.verdict || '{}'); } catch (e) {}
     const isChat = v.kind === 'chat';
-    const hist = si < 0;
-    const hasV = !isChat && ((v.hit || []).length + (v.missed || []).length + (v.wrong || []).length > 0 || !!(v.scaffold || ''));
-    const mark = isChat
-      ? '<span class="rsTurnTag chat">问了一句</span>'
-      : (v.ok === true ? '<span class="rsTurnTag ok">到位</span>'
-        : (v.ok === false ? '<span class="rsTurnTag warn">还差一点</span>' : ''));
+    const isHint = v.kind === 'hint';
+    const hasV = !isChat && !isHint && ((v.hit || []).length > 0);
+    const hitTxt = (v.hit || []).map(k => dimName(k) || k);
+    const focusLbl = v.focus ? (dimName(v.focus) || (v.focus === 'refine' ? '打磨' : '')) : '';
+    const mark = isChat ? '<span class="rsTurnTag chat">问了一句</span>'
+      : isHint ? '<span class="rsTurnTag hint">💡 提示</span>'
+        : (v.focus ? '<span class="rsTurnTag ai">AI 关注「' + esc(focusLbl || v.focus) + '」</span>' : '');
     const sel = !hist && selId === t.id ? ' sel' : '';
     const hd = `<div class="rsTurnHd">${mark}
-      ${hist && v.step_t ? '<span class="rsStepTag">第 ' + ((Number(v.step_idx) || 0) + 1) + ' 级 · ' + esc(v.step_t) + '</span>' : ''}
+      ${hitTxt.length && hist ? '<span class="rsStepTag">你讲到：' + esc(hitTxt.join('、')) + '</span>' : ''}
+      ${v.step_t ? '<span class="rsStepTag">第 ' + ((Number(v.step_idx) || 0) + 1) + ' 级 · ' + esc(v.step_t) + '</span>' : ''}
       <span class="rsTurnTime">${esc(String(t.created_at || '').slice(11, 16))}</span>
-      ${hasV && !hist ? '<span class="rsTurnGo">看解析 ›</span>' : ''}
+      ${hasV && !hist ? '<span class="rsTurnGo">看判定 ›</span>' : ''}
     </div>`;
-    const bubble = `<div class="rsSay"><span class="rsWho">我</span><div class="rsBubble">${esc(t.user_text)}</div></div>
-      <div class="rsAi"><span class="rsWho ai">AI</span><div class="rsBubble ai mdBody">${mdToHTML(t.ai_text)}</div></div>`;
-    if (hist) return `<div class="rsTurn${isChat ? ' chat' : (v.ok ? ' ok' : '')}">${hd}${bubble}${verdictHTML(v)}</div>`;
-    return `<div class="rsTurn${isChat ? ' chat' : (v.ok ? ' ok' : '')}${sel}" data-rs-turn="${t.id}"${hasV ? ' title="点这轮看右栏解析"' : ''}>
+    /* AI 的提问本身就是一轮（user_text 为空）→ 只画 AI 那一半，
+       别留一个空的"我"气泡在那里 */
+    const bubble = (t.user_text
+      ? `<div class="rsSay"><span class="rsWho">我</span><div class="rsBubble">${esc(t.user_text)}</div></div>` : '')
+      + `<div class="rsAi"><span class="rsWho ai">AI</span><div class="rsBubble ai mdBody">${mdToHTML(t.ai_text)}</div></div>`;
+    const cls = 'rsTurn' + (isChat ? ' chat' : (isHint ? ' hint' : (v.focus === 'refine' ? ' refine' : '')));
+    if (hist) return `<div class="${cls}">${hd}${bubble}${verdictHTML(v)}</div>`;
+    return `<div class="${cls}${sel}" data-rs-turn="${t.id}"${hasV ? ' title="点这轮看右栏判定"' : ''}>
       ${hd}${bubble}</div>`;
   }
   /* 判定结果。
@@ -619,21 +683,40 @@
     </div>`;
   }
 
-  async function send() {
+  /* 提交一句话 / 点「下一问」/ 点「卡住了」都走这里。
+     force = 这次不提交内容，只要下一个问题（或换一个问题）。 */
+  async function send(force, hint) {
     if (busy) return;
     const ta = document.getElementById('rsSay');
-    const text = String(ta.value || '').trim();
-    if (!text) return toast('先写下你的理解');
-    busy = true; draw();
+    const text = String((ta && ta.value) || '').trim();
+    if (!force && !hint && !text) return toast('先写下你的理解');
+    const draft = text;                 // AI 想问题的时候用户可能已经在写了，这段话要带过去
+    busy = true;
+    busyMsg = hint ? '💡 只给方向，不给答案…' : 'AI 正在读你说的话、挑下一个缺口…';
+    draw();
     try {
       const r = await api('/api/restate-round/' + cur.round.id + '/turn', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text })
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(force ? { force: true } : (hint ? { hint: true, draft } : { text }))
       });
-      cur.turns.push(r.turn);
-      selId = r.turn.id;        // 右栏自动跟上最新一轮
+      if (r.turns) cur.turns = r.turns; else if (r.turn) cur.turns.push(r.turn);
+      if (r.coach) cur.coach = r.coach;
+      if (r.turn) selId = r.turn.id;
+      /* 提示那一轮不进 pending，pending.hint 由服务端补；这里再兜一次，
+         保证"刚才那条提示"永远挂在左栏那一问下面（刷新后也一样） */
+      if (hint) adoptHint();
+      if (!force && !hint && ta) { try { ta.value = ''; } catch (e) {} }
     } catch (e) { toast(e.message); }
-    busy = false; draw();
+    busy = false; busyMsg = '';
+    draw();
     scrollThreadToEnd();        // 只滚对话栏，不再把整页拉回顶部
+  }
+  /* 开局/刷新后没有 pending 时，问第一句。已有 pending 绝不覆盖（刷新不能顶掉眼前那一问） */
+  function askNext(force) {
+    if (busy || !cur || !cur.round) return;
+    const p = (cur.coach && cur.coach.pending) || null;
+    if (!force && p) return;
+    send(true, false);
   }
   async function ask() {
     if (busy) return;
@@ -650,18 +733,6 @@
     } catch (e) { toast(e.message); }
     busy = false; draw();
     scrollThreadToEnd();
-  }
-  async function moveStep(action) {
-    if (busy) return;
-    busy = true;
-    try {
-      const r = await api('/api/restate-round/' + cur.round.id + '/step', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action })
-      });
-      cur.round = r.round;
-      selId = 0;                // 换级后右栏回到「当前级最近一轮」，别把上一级的判定留着
-    } catch (e) { toast(e.message); }
-    busy = false; draw();
   }
   async function finish() {
     if (busy) return;
@@ -720,8 +791,9 @@
         const res = await api('/api/tutorials/' + tid + '/restate/round', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ point_idx: idx })
         });
-        cur = { round: res.round, point: res.point, turns: [] };
+        cur = { round: res.round, point: res.point, turns: res.turns || [], coach: res.coach || null };
         view = 'talk'; draw();
+        if (!cur.coach || !cur.coach.pending) askNext(true);
       } catch (e) { toast(e.message); }
     });
     document.getElementById('rsAll').addEventListener('click', drawNotes);
@@ -741,7 +813,7 @@
           <div class="rsNoteB mdBody">${mdToHTML(n.mine)}</div>
           ${n.line ? '<p class="rsLine">' + esc(n.line) + '</p>' : ''}
         </div>`).join('')}</div>`
-        : '<p class="muted">还没有沉淀。先挑一个知识点走一遍阶梯吧。</p>'}
+        : '<p class="muted">还没有沉淀。先挑一个知识点和 AI 聊几轮吧。</p>'}
       <div class="toolbarRow"><button class="btn" id="rsNB">← 返回</button></div>
     </div>`;
     document.getElementById('rsNB').addEventListener('click', () => { view = 'pick'; draw(); });

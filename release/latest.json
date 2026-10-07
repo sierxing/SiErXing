@@ -1,14 +1,14 @@
 {
-  "version": "1.10.14",
-  "buildVer": "52da864700ef",
-  "payload": "release/payload-1.10.14.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.14.sxar?ref=main",
+  "version": "1.10.15",
+  "buildVer": "4e7ce296a7d3",
+  "payload": "release/payload-1.10.15.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.15.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "21584936870dc9ff41d87615ee567e0e8848ca8e6cd2569db6cee9bd83b3e546",
-  "size": 607197,
-  "unpackedSize": 2245823,
-  "publishedAt": "2026-10-06T12:57:18.533Z",
-  "notes": "教程结构体检（截断自动续写/拒收并说清原因）+ 失败任务一键重试 + 教程页截断告警条",
+  "sha256": "c9b88615a39dcc8fc61eba62665d810f6fb81986cb3f398954579ab8a2451724",
+  "size": 614603,
+  "unpackedSize": 2265065,
+  "publishedAt": "2026-10-07T10:13:09.165Z",
+  "notes": "用自己的话改成 AI 判断掌握情况的引导模式：覆盖清单+AI自选焦点，不再走固定四级阶梯",
   "exeRequired": false
 }
