@@ -368,3 +368,30 @@ body.rsResizing,body.rsResizing *{cursor:col-resize!important; user-select:none!
 .rsNoteB{font-size:13.5px; line-height:1.8;}
 .rsNoteB>*:first-child{margin-top:0;}
 .rsNoteB>*:last-child{margin-bottom:0;}
+
+/* ---------- 对话历史（会话管理）----------
+   一个知识点下可以有很多次对话：默认用创建时间当名字、可改名、可继续、可删。
+   以前这里只是只读的"存档"，翻出来也接不上，等于历史没用。 */
+.rsChipConv{background:var(--accent-soft); border-color:var(--accent-border); color:var(--accent); font-weight:600;}
+.rsConvs{display:flex; flex-direction:column; gap:10px;}
+.rsConv{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:11px 14px;}
+.rsConv.live{border-color:var(--accent-border); background:var(--accent-soft);}
+.rsConvHd{display:flex; align-items:center; gap:9px; flex-wrap:wrap;}
+.rsConvName{font-weight:700; font-size:13.5px; cursor:text; padding:2px 5px; border-radius:6px;}
+.rsConvName:hover{background:var(--bg);}
+.rsConvMeta{font-size:11.5px; color:var(--muted);}
+.rsConvActs{margin-left:auto; display:flex; gap:5px; flex-wrap:wrap;}
+.rsConvInput{
+  font:inherit; font-weight:700; font-size:13.5px; padding:3px 8px; border-radius:7px;
+  border:1px solid var(--accent); background:var(--bg); color:var(--text); min-width:170px;
+}
+.rsConvInput:focus{outline:none;}
+.rsConvBody{margin-top:11px; padding-top:11px; border-top:1px dashed var(--border);}
+.rsConvBody .rsThread{max-height:none;}
+/* 左栏底部：换个知识点是次要动作，别和主按钮挤在一排（4 个会换行、剩一个孤零零） */
+.rsNavFoot{flex:none; padding:0 13px 9px; background:var(--soft);}
+.rsLink{
+  background:none; border:none; padding:2px 0; cursor:pointer;
+  font-size:11.5px; color:var(--muted); font-family:inherit;
+}
+.rsLink:hover{color:var(--accent); text-decoration:underline;}

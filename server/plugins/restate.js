@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS restate_rounds (
   turns INTEGER NOT NULL DEFAULT 0,
   draft TEXT NOT NULL DEFAULT '',      /* 用户自己写的整理稿（内化的主体） */
   kept TEXT NOT NULL DEFAULT '[]',     /* AI 认定他真讲对了的地方 */
+  title TEXT NOT NULL DEFAULT '',      /* 对话名。空 = 用创建时间当名字（用户可以改） */
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -200,6 +201,8 @@ function coachOf(rid) {
   };
 }
 function saveCoach(rid, st) {
+  /* 对话已被删掉就别写了（同上：没有外键，会变成幽灵行） */
+  if (!db.prepare('SELECT 1 FROM restate_rounds WHERE id = ?').get(Number(rid))) return;
   const now = nowISO();
   db.prepare('INSERT INTO restate_coach (round_id, hit, focus, pending, back, level, verdict, weak, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(round_id) DO UPDATE SET hit = excluded.hit, focus = excluded.focus, pending = excluded.pending, back = excluded.back, level = excluded.level, verdict = excluded.verdict, weak = excluded.weak, updated_at = excluded.updated_at')
     .run(Number(rid), JSON.stringify((st && st.hit) || []), String((st && st.focus) || ''),
@@ -505,6 +508,9 @@ async function coachTurnOnce(r, point, dims, st, history, userText, hint) {
     run: signal => coachTurn(base, dims, 90000, signal)
   });
   const now = nowISO();
+  /* AI 跑完时这个对话可能已经被用户删了（删对话时那一轮还在跑）。
+     这时候不能再往里写 —— restate_coach 没有外键，写进去就成了一条指不到轮次的幽灵行。 */
+  if (!db.prepare('SELECT 1 FROM restate_rounds WHERE id = ?').get(Number(r.id))) return { insertId: null, gone: true };
   /* hint 那一轮不进 turns（它是插在当前问题上的提示，不是新一轮问答），
      但要让用户看得到 → 存成 kind='hint' 的一轮，ai_text 就是提示本身。 */
   const ver = {
@@ -807,12 +813,13 @@ module.exports = {
   init(ctx) {
     bind(ctx);
     db.exec(SCHEMA);
-    /* 老库补列：1.10.16 起 restate_coach 多了 back/level/verdict/weak，restate_rounds 多了 draft/kept */
+    /* 老库补列：restate_coach 多了 back/level/verdict/weak；restate_rounds 多了 draft/kept/title */
     try {
       const rc = db.prepare('PRAGMA table_info(restate_rounds)').all().map(c => c.name);
       if (rc.length) {
         if (!rc.includes('draft')) db.exec("ALTER TABLE restate_rounds ADD COLUMN draft TEXT NOT NULL DEFAULT '';");
         if (!rc.includes('kept')) db.exec("ALTER TABLE restate_rounds ADD COLUMN kept TEXT NOT NULL DEFAULT '[]';");
+        if (!rc.includes('title')) db.exec("ALTER TABLE restate_rounds ADD COLUMN title TEXT NOT NULL DEFAULT '';");
       }
       const cc = db.prepare('PRAGMA table_info(restate_coach)').all().map(c => c.name);
       if (cc.length) {
@@ -821,6 +828,10 @@ module.exports = {
         if (!cc.includes('verdict')) db.exec("ALTER TABLE restate_coach ADD COLUMN verdict TEXT NOT NULL DEFAULT '';");
         if (!cc.includes('weak')) db.exec("ALTER TABLE restate_coach ADD COLUMN weak TEXT NOT NULL DEFAULT '';");
       }
+      /* 完整性清扫：删对话/删目标时如果撞上"AI 还在跑"，可能留下指不到轮次的
+         对话记录与引导状态（restate_coach/restate_turns 都没有外键）。启动时清一次。 */
+      db.exec('DELETE FROM restate_turns WHERE round_id NOT IN (SELECT id FROM restate_rounds)');
+      db.exec('DELETE FROM restate_coach WHERE round_id NOT IN (SELECT id FROM restate_rounds)');
     } catch (e) {}
   },
 
@@ -906,6 +917,23 @@ module.exports = {
         if (!point) return sendJSON(res, 400, { error: '知识点不存在，先提炼大纲' });
         const now = nowISO();
         const fresh = !!(body && body.fresh);
+        /* 指定了某一轮 → 回到那个对话接着聊（"会话历史"里点「继续」走这条）。
+           同一个知识点只留一个「进行中」：把这个点开，别的归档；沉淀过的内容不受影响。 */
+        const wantId = Number((body && body.round_id) || 0);
+        if (wantId) {
+          const one = db.prepare('SELECT * FROM restate_rounds WHERE id = ? AND tutorial_id = ?').get(wantId, t.id);
+          if (!one) return sendJSON(res, 404, { error: '这个对话不存在（可能已被删除）' });
+          db.prepare("UPDATE restate_rounds SET status = 'archived', updated_at = ? WHERE tutorial_id = ? AND point_idx = ? AND status = 'active' AND id <> ?")
+            .run(now, t.id, one.point_idx, one.id);
+          if (one.status !== 'active') db.prepare("UPDATE restate_rounds SET status = 'active', updated_at = ? WHERE id = ?").run(now, one.id);
+          const p2 = pts[one.point_idx] || { title: one.point_title };
+          const back = db.prepare('SELECT * FROM restate_rounds WHERE id = ?').get(one.id);
+          return sendJSON(res, 200, {
+            round: roundOut(back), point: p2, turns: turnsOf(one.id),
+            coach: (() => { const c = coachOf(one.id); c.dims = dimsOf(p2); return c; })(),
+            resumed: true, reopened: true
+          });
+        }
         // 同一知识点已有进行中的轮次 → 直接续接，把对话原样带回来。
         // （以前这里无条件把所有 active 轮次归档，导致"换个知识点再回来"，
         //   上一个点的对话被归档、新开一轮空的，看起来像记录丢了。）
@@ -946,6 +974,38 @@ module.exports = {
           turns: turnsOf(r.id),
           coach: (() => { const c = coachOf(r.id); c.dims = dimsOf(point); return c; })()
         });
+      }
+    },
+    /* 对话改名（会话历史里用）。名字为空 = 回到默认的"日期时间"名 */
+    {
+      method: 'POST',
+      pattern: /^\/api\/restate-round\/(\d+)\/rename$/,
+      handler: async (req, res, u) => {
+        const m = u.pathname.match(/^\/api\/restate-round\/(\d+)\/rename$/);
+        if (!m || req.method !== 'POST') return false;
+        const r = db.prepare('SELECT * FROM restate_rounds WHERE id = ?').get(Number(m[1]));
+        if (!r) return sendJSON(res, 404, { error: '对话不存在' });
+        const body = await readBody(req).catch(() => ({}));
+        const title = String((body && body.title) || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+        db.prepare('UPDATE restate_rounds SET title = ? WHERE id = ?').run(title, r.id);
+        const after = db.prepare('SELECT * FROM restate_rounds WHERE id = ?').get(r.id);
+        return sendJSON(res, 200, { ok: true, round: roundOut(after) });
+      }
+    },
+    /* 删掉一个对话（连同它的对话记录与引导状态）。不可恢复，前端会先确认。 */
+    {
+      method: 'DELETE',
+      pattern: /^\/api\/restate-round\/(\d+)$/,
+      handler: async (req, res, u) => {
+        const m = u.pathname.match(/^\/api\/restate-round\/(\d+)$/);
+        if (!m || req.method !== 'DELETE') return false;
+        const id = Number(m[1]);
+        const r = db.prepare('SELECT * FROM restate_rounds WHERE id = ?').get(id);
+        if (!r) return sendJSON(res, 404, { error: '对话不存在' });
+        db.prepare('DELETE FROM restate_turns WHERE round_id = ?').run(id);
+        db.prepare('DELETE FROM restate_coach WHERE round_id = ?').run(id);
+        db.prepare('DELETE FROM restate_rounds WHERE id = ?').run(id);
+        return sendJSON(res, 200, { ok: true, deleted: id });
       }
     },
     /* 移动阶梯：next 下一级 / prev 回退一级 / skip 跳过本级（都只是改指针，不调 AI） */
@@ -992,6 +1052,8 @@ module.exports = {
           st.hit = [...new Set(st.hit.concat(Array.isArray(p0.hit) ? p0.hit : []))];
         }
         const turn = await coachTurnOnce(r, point, dims, st, history, userText, hint);
+        /* 跑这一轮的工夫里对话被删了 → 明确告诉前端，别假装成功 */
+        if (turn && turn.gone) return sendJSON(res, 404, { error: '这个对话已经被删除了' });
         return sendJSON(res, 200, {
           turn: turn && turn.insertId ? db.prepare('SELECT * FROM restate_turns WHERE id = ?').get(Number(turn.insertId)) : null,
           coach: (() => { const c = coachOf(r.id); c.dims = dims; return c; })(),

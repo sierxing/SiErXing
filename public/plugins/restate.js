@@ -86,6 +86,28 @@
     if (v && typeof v === 'object') return v;
     try { const o = JSON.parse(String(v || '{}')); return (o && typeof o === 'object') ? o : {}; } catch (e) { return {}; }
   }
+  /* ---------- 对话名 ----------
+     默认用「创建时间」当名字（用户没起名时）。时间必须转本地时区：
+     库里存的是 toISOString() 的 UTC，直接切字符串会差 8 小时。 */
+  function fmtTime(iso, withDate) {
+    const d = new Date(String(iso || ''));
+    if (isNaN(d.getTime())) return '';
+    const p2 = n => String(n).padStart(2, '0');
+    const hm = p2(d.getHours()) + ':' + p2(d.getMinutes());
+    if (!withDate) return hm;
+    const today = new Date();
+    const sameDay = d.getFullYear() === today.getFullYear() && d.getMonth() === today.getMonth() && d.getDate() === today.getDate();
+    if (sameDay) return '今天 ' + hm;
+    return (d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' + hm;
+  }
+  const convName = r => String((r && r.title) || '').trim() || (fmtTime(r && r.created_at, true) || '未命名对话');
+  const hasMine = r => !!(r && String(r.mine || '').trim());
+  const isActive = r => r && r.status === 'active';
+  const convCount = idx => rounds.filter(r => Number(r.point_idx) === idx).length;
+  const lastConvOf = idx => {
+    const rs = rounds.filter(r => Number(r.point_idx) === idx);
+    return rs.length ? rs[rs.length - 1] : null;
+  };
   /* 掌握档位的说法（别写"0/1/2/3"给用户看） */
   const LEVEL_TXT = ['还没开口', '能说出关键词', '能讲清机制', '能自己讲成一段'];
   const levelTxt = n => LEVEL_TXT[Math.max(0, Math.min(3, Number(n) || 0))];
@@ -171,10 +193,11 @@
     }
   }
 
-  function headHTML(title) {
+  function headHTML(title, extra) {
     return `<div class="jdHead">
       <a class="back" href="#/t/${tid}">← 返回教程</a>
       <span class="mapTitle">🧠 用自己的话</span>
+      ${extra || ''}
       <span class="chip gray">${esc(title || '')}</span>
     </div>`;
   }
@@ -183,9 +206,9 @@
     else if (view === 'talk') drawTalk();
     else if (view === 'draft') drawDraft();
     else if (view === 'notes') drawNotes();
-    else if (view === 'hist') drawHistory(histIdx);
+    else if (view === 'convs') drawConvs(histIdx);
     else drawDone();
-    if (view !== 'hist') window.scrollTo(0, 0);
+    if (view !== 'convs') window.scrollTo(0, 0);
   }
 
   /* ---------- 知识架构：先看全局，再逐点深入 ---------- */
@@ -248,12 +271,14 @@
               <span class="rsPtBody"><b>${esc(p.title)} ${branchTagOf(p)}</b><span>${esc(p.summary || '')}</span>
                 <span class="rsPtSteps">覆盖清单：${esc(dl.map(x => x.name).join(' · '))}</span>
                 ${live ? `<span class="rsPtLive">✍️ 没做完，已说 ${liveTurns} 条 —— 点「继续」接着来</span>` : ''}
-                ${rs.length ? `<span class="rsPtHist">🗨 ${rs.length} 轮对话 · 共 ${rs.reduce((a, r) => a + (Number(r.turns) || 0), 0)} 条
-                  <button class="btn tiny" data-rs-hist="${i}">看对话</button></span>` : ''}</span></div>
+                ${rs.length ? `<span class="rsPtHist">🗨 ${rs.length} 个对话 · 共 ${rs.reduce((a, r) => a + (Number(r.turns) || 0), 0)} 条
+                  · 最近 ${esc(fmtTime((lastConvOf(i) || {}).updated_at || (lastConvOf(i) || {}).created_at, true))}
+                  <button class="btn tiny" data-rs-hist="${i}">对话历史</button></span>` : ''}</span></div>
             <div class="rsPtR">
               ${pr.done ? '<span class="rsTag ok">已沉淀 ' + pr.done + ' 版</span>' : ''}
               ${live ? '<span class="rsTag act">进行中</span>' : ''}
-              <button class="btn small primary" data-rs-go="${i}">${live ? '继续' : (pr.done ? '再来一轮' : '开始')}</button>
+              <button class="btn small primary" data-rs-go="${i}">${live ? '继续' : (rs.length ? '新对话' : '开始')}</button>
+              ${(!live && rs.length) ? `<button class="btn small" data-rs-hist="${i}" title="回到之前的某个对话继续">历史 ${rs.length}</button>` : ''}
             </div>
           </div>`;
         }).join('')}</div>
@@ -283,7 +308,7 @@
     if (wv2) wv2.addEventListener('click', () => drawWeave());
     app.querySelectorAll('[data-rs-hist]').forEach(b => b.addEventListener('click', async e => {
       e.stopPropagation();
-      await drawHistory(Number(b.getAttribute('data-rs-hist')));
+      await drawConvs(Number(b.getAttribute('data-rs-hist')));
     }));
     app.querySelectorAll('[data-rs-go]').forEach(b => b.addEventListener('click', async () => {
       const i = Number(b.getAttribute('data-rs-go'));
@@ -297,6 +322,7 @@
         // 续接已有轮次时对话全被清空 —— 表现就是"换个知识点再回来，记录没了"。
         cur = { round: r.round, point: r.point, turns: r.turns || [], coach: r.coach || null };
         selId = 0;
+        await reload();          // 服务端可能把别的对话归档了（一个点只留一个进行中）
         view = 'talk';
         draw();
         if (r.resumed) toast('接着上次那一轮继续');
@@ -375,37 +401,174 @@
   }
 
   /* ---------- 对话存档（只读）：任何一轮都能翻回去看 ---------- */
-  async function drawHistory(idx) {
-    view = 'hist';
+  /* ---------- 会话管理 ----------
+     一个知识点下可以有很多次对话。默认用创建时间当名字，用户可以改；
+     可以「继续」任意一个（把它重新置为进行中）、看结果、看当时的对话，也可以删掉。
+     以前这里只是只读的"对话存档"，翻出来也接不上，等于历史没用。 */
+  async function drawConvs(idx) {
+    view = 'convs';
     histIdx = idx;
     app.innerHTML = '<p class="muted">加载对话…</p>';
     const point = points[idx] || { title: '' };
-    const rs = roundsOf(idx);
-    const blocks = [];
-    for (const r of rs) {
-      let turns = [];
-      try { const x = await api('/api/restate-round/' + r.id); turns = x.turns || []; } catch (e) {}
-      let gaps = [];
-      gaps = listOf(r.gaps);
-      const badge = r.status === 'active' ? '<span class="rsTag act">进行中</span>'
-        : (DONE(r) ? '<span class="rsTag ok">已沉淀</span>' : '<span class="rsTag">已归档</span>');
-      blocks.push(`<div class="rsHistBlk">
-        <div class="rsHistT">${esc(String(r.created_at || '').slice(0, 16).replace('T', ' '))} ${badge}
-          <span class="muted">${turns.length} 条 · 走到第 ${(Number(r.step_idx) || 0) + 1} 级</span></div>
-        ${turns.length ? `<div class="rsThread">${turns.map(t => turnHTML(t, -1)).join('')}</div>` : '<p class="muted">这轮还没说话。</p>'}
-        ${DONE(r) ? `<div class="rsMine"><div class="rsMineT">🗣 这一轮沉淀的「我的话」</div><div class="rsMineB mdBody">${mdToHTML(r.mine)}</div></div>
-          ${r.line ? '<p class="rsLine">' + esc(r.line) + '</p>' : ''}
-          ${gaps.length ? '<div class="rsGaps">' + gaps.map(g => '<div class="rsGap"><b>' + esc(g.key) + '</b><span>' + esc(g.why || '') + '</span></div>').join('') + '</div>' : ''}` : ''}
-      </div>`);
-    }
+    const rs = roundsOf(idx);                 // 最新的在前
+    const live = rs.find(isActive);
+
+    const rowHTML = r => {
+      const badge = isActive(r) ? '<span class="rsTag act">进行中</span>'
+        : (hasMine(r) ? '<span class="rsTag ok">已沉淀</span>' : '<span class="rsTag">已归档</span>');
+      const n = Number(r.turns) || 0;
+      const named = !!String(r.title || '').trim();
+      return `<div class="rsConv${isActive(r) ? ' live' : ''}" data-conv="${r.id}">
+        <div class="rsConvHd">
+          <span class="rsConvName" data-cname="${r.id}" title="${named ? '双击可以改名' : '这个名字是按创建时间自动取的，可以改'}">${esc(convName(r))}</span>
+          ${badge}
+          <span class="rsConvMeta">${n ? n + ' 条' : '还没开口'} · ${esc(fmtTime(r.updated_at || r.created_at, true))}${named ? '' : ' 创建'}</span>
+          <span class="rsConvActs">
+            <button class="btn tiny primary" data-copen="${r.id}">${isActive(r) ? '继续' : '接着聊'}</button>
+            ${hasMine(r) ? `<button class="btn tiny" data-cresult="${r.id}">看结果</button>` : ''}
+            ${n ? `<button class="btn tiny" data-cturns="${r.id}">看对话</button>` : ''}
+            <button class="btn tiny" data-cedit="${r.id}" title="重命名">✏️</button>
+            <button class="btn tiny" data-cdel="${r.id}" title="删除这个对话">🗑</button>
+          </span>
+        </div>
+        <div class="rsConvBody" hidden></div>
+      </div>`;
+    };
+
     app.innerHTML = `<div class="jdPage rsPage">
-      ${headHTML('对话存档')}
-      <div class="rsSec"><div class="rsSecT">${esc(point.title || '')}</div>
-        <p class="hint" style="margin:0;">共 ${rs.length} 轮。退出页面、刷新、关掉浏览器都不会丢。</p></div>
-      <div class="rsHists">${blocks.join('') || '<p class="muted">还没有对话。</p>'}</div>
-      <div class="toolbarRow"><button class="btn" id="rsHBack">← 返回</button></div>
+      ${headHTML('对话历史')}
+      <div class="rsSec">
+        <div class="rsSecT">${esc(point.title || '')}</div>
+        <p class="hint" style="margin:0;">共 ${rs.length} 个对话。退出页面、刷新、关掉浏览器都不会丢；点「继续」就能接着上次聊。</p>
+        <div class="toolbarRow" style="margin-top:10px;">
+          <button class="btn primary" id="rsNewConv">＋ 新建对话</button>
+          ${live ? '<span class="muted">（当前有个没聊完的，新建会把它收起来，随时还能回来）</span>' : ''}
+        </div>
+      </div>
+      <div class="rsConvs">${rs.length ? rs.map(rowHTML).join('') : '<p class="muted">还没有对话。点上面的「新建对话」开始。</p>'}</div>
+      <div class="toolbarRow"><button class="btn" id="rsHBack">← 返回知识点</button></div>
     </div>`;
+
     document.getElementById('rsHBack').addEventListener('click', () => { view = 'pick'; draw(); });
+    document.getElementById('rsNewConv').addEventListener('click', e => newConv(e.currentTarget, idx));
+
+    /* 继续 / 接着聊：把它重新置为进行中并进去。沉淀过的内容不受影响。 */
+    app.querySelectorAll('[data-copen]').forEach(b => b.addEventListener('click', async () => {
+      const id = Number(b.getAttribute('data-copen'));
+      b.disabled = true;
+      try {
+        const r = await api('/api/tutorials/' + tid + '/restate/round', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ point_idx: idx, round_id: id })
+        });
+        cur = { round: r.round, point: r.point, turns: r.turns || [], coach: r.coach || null };
+        selId = 0;
+        await reload();          // 重新置为进行中会让原来那个归档 → 列表要跟着更新
+        view = 'talk';
+        draw();
+        if (!cur.coach || !cur.coach.pending) askNext(true);
+      } catch (e) { toast(e.message); b.disabled = false; }
+    }));
+    /* 看结果：沉淀过的那一版 */
+    app.querySelectorAll('[data-cresult]').forEach(b => b.addEventListener('click', async () => {
+      const id = Number(b.getAttribute('data-cresult'));
+      b.disabled = true;
+      try {
+        await loadRound(id);
+        view = 'done';
+        draw();
+      } catch (e) { toast(e.message); b.disabled = false; }
+    }));
+    /* 看对话：就地展开当时的记录，不用跳走 */
+    app.querySelectorAll('[data-cturns]').forEach(b => b.addEventListener('click', async () => {
+      const id = Number(b.getAttribute('data-cturns'));
+      const box = app.querySelector('[data-conv="' + id + '"] .rsConvBody');
+      if (!box) return;
+      if (!box.hidden) { box.hidden = true; b.textContent = '看对话'; return; }
+      if (!box.dataset.loaded) {
+        box.innerHTML = '<p class="muted">加载…</p>';
+        try {
+          const x = await api('/api/restate-round/' + id);
+          const turns = x.turns || [];
+          const r = rs.find(y => y.id === id) || {};
+          let gaps = [], kept = [];
+          gaps = listOf(r.gaps); kept = listOf(r.kept);
+          box.innerHTML = (turns.length ? `<div class="rsThread">${turns.map(t => turnHTML(t, -1)).join('')}</div>`
+              : '<p class="muted">这个对话还没说过话。</p>')
+            + (hasMine(r) ? `<div class="rsMine"><div class="rsMineT">🗣 这个对话沉淀的「我的话」</div><div class="rsMineB mdBody">${mdToHTML(r.mine)}</div></div>
+              ${r.line ? '<p class="rsLine">' + esc(r.line) + '</p>' : ''}` : '');
+          box.dataset.loaded = '1';
+        } catch (e) { box.innerHTML = '<p class="muted">' + esc(e.message) + '</p>'; }
+      }
+      box.hidden = false;
+      b.textContent = '收起';
+    }));
+    /* 重命名：就地变成一个输入框 */
+    app.querySelectorAll('[data-cedit]').forEach(b => b.addEventListener('click', () => {
+      const id = Number(b.getAttribute('data-cedit'));
+      const span = app.querySelector('[data-cname="' + id + '"]');
+      const r = rs.find(y => y.id === id) || {};
+      if (!span || span.dataset.editing) return;
+      span.dataset.editing = '1';
+      span.innerHTML = `<input class="rsConvInput" maxlength="40" value="${esc(String(r.title || ''))}"
+        placeholder="${esc(fmtTime(r.created_at, true) || '对话名')}">`;
+      const inp = span.querySelector('input');
+      inp.focus(); inp.select();
+      let committing = false;
+      const commit = async () => {
+        if (committing) return;
+        committing = true;
+        const v = String(inp.value || '').trim();
+        try {
+          const x = await api('/api/restate-round/' + id + '/rename', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: v })
+          });
+          const t = rounds.find(y => y.id === id);
+          if (t) t.title = (x.round && x.round.title) || '';
+          if (cur && cur.round && cur.round.id === id) cur.round.title = (x.round && x.round.title) || '';
+          toast(v ? '已改名：' + v : '已恢复成默认名字');
+        } catch (e) { toast(e.message); }
+        draw();
+      };
+      inp.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); commit(); }
+        else if (e.key === 'Escape') { e.preventDefault(); span.dataset.editing = ''; draw(); }
+      });
+      inp.addEventListener('blur', () => { if (span.dataset.editing) commit(); });
+    }));
+    /* 删除：先确认，说清会删掉什么 */
+    app.querySelectorAll('[data-cdel]').forEach(b => b.addEventListener('click', async () => {
+      const id = Number(b.getAttribute('data-cdel'));
+      const r = rs.find(y => y.id === id) || {};
+      const n = Number(r.turns) || 0;
+      const warn = '删掉这个对话？\n\n「' + convName(r) + '」' + (n ? '（' + n + ' 条对话记录）' : '')
+        + (hasMine(r) ? '，包括它沉淀的那版「我的话」' : '') + '\n\n删了就找不回来了。';
+      if (!confirm(warn)) return;
+      b.disabled = true;
+      try {
+        await api('/api/restate-round/' + id, { method: 'DELETE' });
+        rounds = rounds.filter(y => y.id !== id);
+        if (cur && cur.round && cur.round.id === id) { cur = null; }
+        toast('已删除');
+      } catch (e) { toast(e.message); }
+      draw();
+    }));
+  }
+  /* 新建对话：把当前没聊完的那个收起来（不删），另开一个干净的 */
+  async function newConv(btn, idx) {
+    btn.disabled = true;
+    try {
+      const r = await api('/api/tutorials/' + tid + '/restate/round', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ point_idx: idx, fresh: true })
+      });
+      cur = { round: r.round, point: r.point, turns: r.turns || [], coach: r.coach || null };
+      selId = 0;
+      await reload();          // 新对话要进历史列表（不然 rounds 还是旧的，列表里看不到它）
+      view = 'talk';
+      draw();
+      askNext(true);
+    } catch (e) { toast(e.message); btn.disabled = false; }
   }
 
   /* ---------- 覆盖清单 ----------
@@ -472,7 +635,8 @@
     const pos = positionOf(Number(cur.round.point_idx || 0));
 
     app.innerHTML = `<div class="jdPage rsPage rsTalkPage">
-      ${headHTML(focusName ? ('AI 当前关注「' + focusName + '」') : '让它读你说的话')}
+      ${headHTML(focusName ? ('AI 当前关注「' + focusName + '」') : '让它读你说的话',
+        '<span class="chip rsChipConv" title="当前对话（可以改名）">🗨 ' + esc(convName(cur.round)) + '</span>')}
       <div class="rsPanes" id="rsPanes">
         <aside class="rsPane rsPaneQ">
           <div class="rsPaneT">🧭 上下文</div>
@@ -493,7 +657,10 @@
           <div class="rsNav">
             <button class="btn tiny" id="rsHint" title="不给答案，只把方向指出来">💡 卡住了</button>
             <button class="btn tiny primary" id="rsNext">${askQ ? '换一个问法 →' : '下一问 →'}</button>
-            <button class="btn tiny" id="rsBack">换个知识点</button>
+            <button class="btn tiny" id="rsConvs" title="回到这个知识点的对话历史">🗨 历史</button>
+          </div>
+          <div class="rsNavFoot">
+            <button class="rsLink" id="rsBack">← 换个知识点</button>
           </div>
         </aside>
         <div class="rsSplit" data-k="q"></div>
@@ -558,6 +725,8 @@
     const fb = document.getElementById('rsFinish');
     if (fb) fb.addEventListener('click', finish);
     document.getElementById('rsBack').addEventListener('click', () => { cur = null; view = 'pick'; draw(); });
+    const cv = document.getElementById('rsConvs');
+    if (cv) cv.addEventListener('click', () => drawConvs(Number((cur.round && cur.round.point_idx) || 0)));
     const lt = document.getElementById('rsLatest');
     if (lt) lt.addEventListener('click', scrollThreadToEnd);
     initSplit();
@@ -888,7 +1057,7 @@
       </div>
     </div>`;
     const wh = document.getElementById('rsWHist');
-    if (wh) wh.addEventListener('click', () => drawHistory(Number(r.point_idx || 0)));
+    if (wh) wh.addEventListener('click', () => drawConvs(Number(r.point_idx || 0)));
     const cp = document.getElementById('rsCopy');
     if (cp) cp.addEventListener('click', async () => {
       try { await navigator.clipboard.writeText(r.mine || ''); toast('已复制'); }

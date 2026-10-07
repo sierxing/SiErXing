@@ -1,14 +1,14 @@
 {
-  "version": "1.10.17",
-  "buildVer": "6e8bb1530463",
-  "payload": "release/payload-1.10.17.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.17.sxar?ref=main",
+  "version": "1.10.18",
+  "buildVer": "a20bf59ad11c",
+  "payload": "release/payload-1.10.18.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.18.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "617fd34a8caea8fdee5a4ff52beb755dddcad23dbcfa68b1f5316d9345fb6266",
-  "size": 623127,
-  "unpackedSize": 2290250,
-  "publishedAt": "2026-10-07T13:44:46.562Z",
-  "notes": "修「用自己的话」里 AI 回复显示成一坨 JSON：模型输出被写断时不再把 {\"answer\":… 当正文吐出来，解释改成纯文本两段式（截断也能正常显示），并加了抢救式解析",
+  "sha256": "dd95bd8b729a934eba23ab0901f86ff1e31c06650bde5d1e5e2aed7fbdee4445",
+  "size": 627398,
+  "unpackedSize": 2305591,
+  "publishedAt": "2026-10-07T14:15:46.896Z",
+  "notes": "用自己的话加对话历史：一个知识点下可以开多个对话，默认用日期时间命名、可改名、可继续、可删除；删对话时正在跑的那一轮不再留下幽灵记录",
   "exeRequired": false
 }
