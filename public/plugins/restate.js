@@ -51,9 +51,16 @@
     }
     return FALLBACK_DIMS;
   };
+  /* 以**服务端那份清单**为准：它才是 AI 判定 hit/focus 时用的那份。
+     两边各算一份的话，服务端挑到前端清单里没有的维度时，界面会出现光秃秃的
+     「AI 关注「link」」，而且 ✓ 永远凑不齐。 */
+  function curDims() {
+    const c = (cur && cur.coach) || {};
+    return (c.dims && c.dims.length) ? c.dims : dimsOfPoint(cur && cur.point);
+  }
   function coachState() {
     const c = (cur && cur.coach) || {};
-    const dims = dimsOfPoint(cur && cur.point);
+    const dims = curDims();
     const hit = (c.hit && c.hit.length) ? c.hit : collectHit();
     /* level/verdict/weak 可能只存在最新那一次的判定里（服务端存的 state 优先） */
     const lv = Number.isFinite(Number(c.level)) && c.level !== null && c.level !== undefined ? Number(c.level) : lastJudge().level;
@@ -122,7 +129,7 @@
     }
     return out;
   }
-  const dimName = k => { const d = dimsOfPoint(cur && cur.point).find(x => x.key === k); return d ? d.name : (k === 'refine' ? '打磨' : ''); };
+  const dimName = k => { const d = curDims().find(x => x.key === k); return d ? d.name : (k === 'refine' ? '打磨' : ''); };
   function progressOf(idx) {
     const rs = rounds.filter(r => Number(r.point_idx) === idx && r.mine);
     return { done: rs.length, active: rounds.some(r => Number(r.point_idx) === idx && r.status === 'active') };

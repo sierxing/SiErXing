@@ -1,14 +1,14 @@
 {
-  "version": "1.10.18",
-  "buildVer": "a20bf59ad11c",
-  "payload": "release/payload-1.10.18.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.18.sxar?ref=main",
+  "version": "1.10.19",
+  "buildVer": "7cfbc7d145cf",
+  "payload": "release/payload-1.10.19.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.19.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "dd95bd8b729a934eba23ab0901f86ff1e31c06650bde5d1e5e2aed7fbdee4445",
-  "size": 627398,
-  "unpackedSize": 2305591,
-  "publishedAt": "2026-10-07T14:15:46.896Z",
-  "notes": "用自己的话加对话历史：一个知识点下可以开多个对话，默认用日期时间命名、可改名、可继续、可删除；删对话时正在跑的那一轮不再留下幽灵记录",
+  "sha256": "f31bb6434e91df931ae33b22427258335fb28cc88a85ef26259e870e5af6fcd8",
+  "size": 629901,
+  "unpackedSize": 2311772,
+  "publishedAt": "2026-10-07T14:56:42.570Z",
+  "notes": "修「用自己的话」对话驴头不对马嘴：每答一句不再重复出现两遍、AI 不再把上一轮的旧话贴回来；AI 现在能看到完整往来（含自己问过什么）不会重复问；连续说不知道会给个能踩住的台阶。另修同步导入可能静默丢数据",
   "exeRequired": false
 }

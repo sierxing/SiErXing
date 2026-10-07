@@ -167,10 +167,18 @@ function normArc(v, pts) {
   if (a.weave && typeof a.weave === 'object') out.weave = a.weave;
   return out;
 }
+/* 读知识点时**在源头把 dims 补齐**：老数据没有 dims（或者只有旧的 steps）。
+   补在这里，服务端挑 focus 用的、接口返回给前端的、前端画覆盖清单用的就是同一份 ——
+   两边各算一份的话，服务端挑到清单里没有的维度时，界面会出现光秃秃的「AI 关注「link」」，
+   而且 ✓ 永远凑不齐。 */
 function pointsOf(tid) {
   const r = db.prepare('SELECT points FROM restate_points WHERE tutorial_id = ?').get(Number(tid));
   if (!r) return [];
-  try { const a = JSON.parse(r.points || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; }
+  let arr = [];
+  try { const a = JSON.parse(r.points || '[]'); arr = Array.isArray(a) ? a : []; } catch (e) { arr = []; }
+  return arr.map(p => (p && Array.isArray(p.dims) && p.dims.length >= 3)
+    ? p
+    : Object.assign({}, p, { dims: normDims(p && p.dims, p) }));
 }
 function savePoints(tid, pts) {
   const now = nowISO();
@@ -283,7 +291,13 @@ function normDims(v, point) {
     });
   }
   if (out.length >= 3) return out;
-  /* 老 points 没 dims：用通用底座，但把 summary 当成「gist」的 ask，别的照旧 */
+  /* 老 points 只有 steps（缘起/轮廓/关键/串讲）→ 就映射成这一套，**别退到通用底座**：
+     退到底座会让服务端挑的 focus（比如 link）在前端那份清单里根本不存在，
+     界面上就会出现光秃秃的「AI 关注「link」」，而且 ✓ 永远凑不齐（清单卡在 1/4 之类）。
+     映射后两端用的是同一份清单（前端的 dimsOfPoint 做的是同一件事）。 */
+  /* 老 points 只有 steps（缘起/轮廓/关键/串讲）→ 也走通用底座，**不把那套固定阶梯名再摆出来**。
+     这份清单会补在 pointsOf 里（源头），所以服务端挑 focus 用的、前端画清单用的是同一份，
+     不会再出现清单里没有的维度（界面上光秃秃的「AI 关注「link」」）。 */
   return COVER_DIMS.map(d => ({
     key: d.key, name: d.name, ask: d.ask, probe: d.probe
   }));
@@ -344,10 +358,22 @@ function buildPointsPrompt(tut) {
    和每日刷题的「🧭 AI 引导提炼思路」同一套机制，用户明确要求对齐它。
    关键差别（相对老的固定四级阶梯）：维度清单是**检查表不是剧本**，
    AI 每轮先读用户已经讲过的话，把讲到的标进 hit，跳过已覆盖的，只补最关键的那一块。 */
-function buildCoachPrompt(tut, point, dims, history, userText, arc, hitSoFar, hintMode) {
+function buildCoachPrompt(tut, point, dims, history, userText, arc, hitSoFar, hintMode, stuck) {
   const L = [];
   L.push('你是一位耐心的学习教练。用户正在把一个知识点**用自己的话讲出来**——他看得懂，但说不出来，这正是最常见的假掌握。');
   L.push('');
+  /* 连着好几次"不知道"说明问题问得太高或太绕了。这时候继续换着法子问更基础的东西
+     只会让他更挫败（真实反馈：问到最后用户说"我还是没搞懂啊，这是在讲啥啊"）。
+     给他一个能站住的落脚点，再确认他跟上了没有 —— 仍然不是把整段答案倒给他。 */
+  if (Number(stuck) >= 3) {
+    L.push('【他已经连着 ' + Number(stuck) + ' 次说"不知道/不懂"了 —— 这一轮必须换打法】');
+    L.push('- 不许再问更基础、更绕、或者换个说法的同一个问题（那只会让他更挫败）；');
+    L.push('- 开头先**用一句话说清"我们现在在弄的这件事到底是什么"**（大白话，让他知道自己到底在学什么，别用术语）；');
+    L.push('- 再用**两三句大白话正面讲清当前这一小块**（给一个能站住的落脚点，用日常比喻，别把整张图一次倒完）；');
+    L.push('- 讲完只问一个"他跟上没有"的小确认问题（点头就能答的那种），别又开一个新话题；');
+    L.push('- 语气上先接住他的挫败：他不知道不是他的问题，是这个点本来就缺个入口。');
+    L.push('');
+  }
   L.push('【最重要：不要按清单顺序从头问】');
   L.push('下面给的是一份「值得覆盖到」的检查表，**不是剧本**。你必须先读他刚说的话，自己判断：');
   L.push('- 他已经讲到的维度，**跳过，不要再问一遍**（这是最招人烦的错：用户明明已经讲清楚了，你还逼他重说）；');
@@ -378,8 +404,13 @@ function buildCoachPrompt(tut, point, dims, history, userText, arc, hitSoFar, hi
   }
   if (history && history.length) {
     L.push('');
-    L.push('【他前面说过的话（判断已覆盖到哪些维度时用）】');
-    for (const h of history.slice(-6)) L.push('- ' + String(h).slice(0, 220));
+    L.push('【你们刚才的往来（最近的在后）—— 已经问过的**不要再问一遍**，他已经答过的**不要再让他重说**】');
+    for (const h of history.slice(-8)) {
+      /* 兼容老调用（history 可能是纯字符串） */
+      if (typeof h === 'string') { L.push('我：' + String(h).slice(0, 200)); continue; }
+      if (h.u) L.push('我：' + String(h.u).slice(0, 200));
+      if (h.a) L.push('AI：' + String(h.a).slice(0, 260));
+    }
   }
   if (userText) {
     L.push('');
@@ -405,6 +436,7 @@ function buildCoachPrompt(tut, point, dims, history, userText, arc, hitSoFar, hi
   L.push('5. say 用平实的话肯定他刚才**说的那一个具体点**，不要空泛夸（「很好」是废话）。');
   L.push('6. 若他已经把剩下的维度都覆盖到了，done 填 true。');
   L.push('7. 语气平实，别用「太棒了」「完美」这类空话。');
+  L.push('7.5 **不要重复**：上面【你们刚才的往来】里 AI 问过的问题，换个说法再问一遍也算重复。');
   L.push('8. 涉及代码一律用 ``` 围栏包裹（注明语言）。');
   L.push('9. 如果他这一轮明显在**复述原文或你的话**（照抄关键词、只列名词不讲关系、答非所问），');
   L.push('   那不算真讲到 —— 这类别给 hit，要在 weak 里点名，并让 probe 逼他用自己的类比重讲一遍。');
@@ -495,8 +527,8 @@ async function coachTurn(basePrompt, dims, timeoutMs, signal) {
 
 /* 引导模式的核心：跑一轮 AI，存 hit/focus/pending。
    hint=true 时只给方向（不消耗 pending 的那一问，也不推进 hit）。 */
-async function coachTurnOnce(r, point, dims, st, history, userText, hint) {
-  const base = buildCoachPrompt(tutOf(r.tutorial_id) || { title: '', content: '' }, point, dims, history, userText, arcOf(r.tutorial_id), st.hit, hint);
+async function coachTurnOnce(r, point, dims, st, history, userText, hint, answerTurnId, stuck) {
+  const base = buildCoachPrompt(tutOf(r.tutorial_id) || { title: '', content: '' }, point, dims, history, userText, arcOf(r.tutorial_id), st.hit, hint, stuck);
   const focusName = (() => { const d = dimOfKey(dims, st.focus); return d ? d.name : '打磨'; })();
   const turn = await aiJob({
     title: (hint ? '给个提示 · ' : '接着引导 · ') + String(point.title || '').slice(0, 24),
@@ -520,10 +552,19 @@ async function coachTurnOnce(r, point, dims, st, history, userText, hint) {
     say: turn.say, probe: turn.probe, missed: [], wrong: [], scaffold: '',
     ok: false, ai_text: [turn.say, turn.probe].filter(Boolean).join('\n\n') || '……'
   };
-  const prev = turnsOf(r.id);
-  const ins = db.prepare('INSERT INTO restate_turns (round_id, seq, user_text, ai_text, verdict, created_at) VALUES (?,?,?,?,?,?)')
-    .run(r.id, prev.length + 1, hint ? '' : (userText || ''), ver.ai_text, JSON.stringify(ver), now);
-  if (!hint) db.prepare('UPDATE restate_rounds SET turns = ?, updated_at = ? WHERE id = ?').run(prev.length + 1, now, r.id);
+  let ins;
+  if (answerTurnId) {
+    /* 他那一句已经在路由里落库了 —— 这里只把 AI 这一半补上去，不再另起一行。
+       （以前是再插一行，于是同一句回答出现两遍、AI 那遍还是旧话） */
+    db.prepare('UPDATE restate_turns SET ai_text = ?, verdict = ? WHERE id = ?')
+      .run(ver.ai_text, JSON.stringify(ver), Number(answerTurnId));
+    ins = { lastInsertRowid: Number(answerTurnId) };
+  } else {
+    const prev = turnsOf(r.id);
+    ins = db.prepare('INSERT INTO restate_turns (round_id, seq, user_text, ai_text, verdict, created_at) VALUES (?,?,?,?,?,?)')
+      .run(r.id, prev.length + 1, hint ? '' : (userText || ''), ver.ai_text, JSON.stringify(ver), now);
+    if (!hint) db.prepare('UPDATE restate_rounds SET turns = ?, updated_at = ? WHERE id = ?').run(prev.length + 1, now, r.id);
+  }
   st.focus = turn.focus;
   if (!hint) {
     st.hit = [...new Set(st.hit.concat(turn.hit || []))];
@@ -1029,29 +1070,35 @@ module.exports = {
         const dims = dimsOf(point);
         const st = coachOf(r.id);
         const prev = turnsOf(r.id);
-        const history = prev.filter(x => x.user_text).map(x => x.user_text);
+        /* 给 AI 的上下文：**往来一起给**（我：… / AI：…）。
+           以前只把他自己说过的话给过去，AI 看不到自己问过什么 → 就会把同一个问题再问一遍。 */
+        const history = prev.map(x => ({ u: String(x.user_text || ''), a: String(x.ai_text || '') }))
+          .filter(x => x.u || x.a);
+        /* 他连着说了几次"不知道"？连着 3 次以上就不能再往下问更基础的东西了（见 buildCoachPrompt）。 */
+        const GIVEUP = /^\s*(不知道|不懂|不清楚|不会|没学过|没搞懂|没懂|忘了|不记得|没起过|说不出来|答不上来|想不起来)/;
+        const said = prev.map(x => String(x.user_text || '').trim()).filter(Boolean);
+        if (userText) said.push(String(userText).trim());   // 他刚说的这句也算
+        let stuck = 0;
+        for (let i = said.length - 1; i >= 0; i--) {
+          if (GIVEUP.test(said[i]) || said[i].replace(/\s/g, '').length <= 4) stuck++; else break;
+        }
         /* 只有真的答了一句（或明确要提示/要下一问）才继续；否则 400，
            否则用户误触一次就会白白烧掉一次 AI 调用 */
         if (!userText && !hint && !force) return sendJSON(res, 400, { error: '先写下你的理解' });
-        if (userText && st.pending) {
-          /* 把「刚才那一问」和这个回答配成一轮：那一问问的时候还没人答，
-             进不了 turns，所以先存在 pending 里（否则第一问会在页面上凭空消失）。 */
-          const p0 = st.pending;
-          const now = nowISO();
-          const ver = {
-            kind: 'coach',
-            focus: String(p0.focus || ''), hit: Array.isArray(p0.hit) ? p0.hit : [],
-            read: String(p0.read || ''), probe: String(p0.probe || ''), say: String(p0.say || ''),
-            missed: strList(p0.missed), wrong: normWrong(p0.wrong), scaffold: String(p0.scaffold || ''),
-            ok: false, ai_text: String(p0.ai_text || p0.say || p0.probe || '')
-          };
+        /* 用户答了一句：**先把他这句落下来**（AI 还没回），AI 回来后补上它那一半。
+           以前这里是"把上一问和这一答配成一轮"再让 AI 另插一轮 —— 结果每一答都出现两遍，
+           而且 AI 那一遍放的是上一轮的旧话（用户看到的"驴头不对马嘴"就是这个）。
+           他的原话必须一进来就存住：AI 那一步可能要 30 秒，中途刷新/失败也不能丢。 */
+        let answerTurnId = 0;
+        if (userText && !hint) {
+          const now0 = nowISO();
           const ins = db.prepare('INSERT INTO restate_turns (round_id, seq, user_text, ai_text, verdict, created_at) VALUES (?,?,?,?,?,?)')
-            .run(r.id, prev.length + 1, userText, ver.ai_text, JSON.stringify(ver), now);
-          db.prepare('UPDATE restate_rounds SET turns = ?, updated_at = ? WHERE id = ?').run(prev.length + 1, now, r.id);
-          st.pending = null;
-          st.hit = [...new Set(st.hit.concat(Array.isArray(p0.hit) ? p0.hit : []))];
+            .run(r.id, prev.length + 1, userText, '', JSON.stringify({ kind: 'coach', ok: false }), now0);
+          answerTurnId = Number(ins.lastInsertRowid);
+          db.prepare('UPDATE restate_rounds SET turns = ?, updated_at = ? WHERE id = ?').run(prev.length + 1, now0, r.id);
+          st.pending = null;   // 那一问已经被这一答消费掉了
         }
-        const turn = await coachTurnOnce(r, point, dims, st, history, userText, hint);
+        const turn = await coachTurnOnce(r, point, dims, st, history, userText, hint, answerTurnId, stuck);
         /* 跑这一轮的工夫里对话被删了 → 明确告诉前端，别假装成功 */
         if (turn && turn.gone) return sendJSON(res, 404, { error: '这个对话已经被删除了' });
         return sendJSON(res, 200, {

@@ -210,8 +210,8 @@ module.exports = function createSync(ctx) {
     return c;
   }
   /** 把远端快照落到本地库（调用前必须已确认不冲突或用户选了云端） */
-  function importRemote(snap) {
-    applySnapshot(snap);
+  function importRemote(snap, opts) {
+    applySnapshot(snap, opts);
     if (syncImages()) {
       const src = path.join(WORK_DIR, 'uploads');
       if (fs.existsSync(src)) {
@@ -278,16 +278,25 @@ module.exports = function createSync(ctx) {
     try { return db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name); } catch (e) { return []; }
   }
 
-  function applySnapshot(snap) {
+  function applySnapshot(snap, opts) {
+    const force = !!(opts && opts.force);
     if (!snap || snap.format !== 'sierxing-sync' || !snap.data) throw new Error('不是有效的同步快照');
-    // 安全阀：远端快照的目标数明显少于本地时拒绝导入（避免空快照/误删把本地数据清空）
-      try {
-        const localGoals = db.prepare('SELECT COUNT(*) AS c FROM goals').get().c || 0;
-        const remoteGoals = Array.isArray(snap.data.goals) ? snap.data.goals.length : 0;
-        if (localGoals >= 1 && remoteGoals < localGoals) {
-          throw new Error('已拒绝导入：远端快照只有 ' + remoteGoals + ' 个目标，本地有 ' + localGoals + ' 个（如需强制导入，请先在本机删掉多余目标）');
-        }
-      } catch (e) { if (/已拒绝导入/.test(e.message)) throw e; }
+    /* 安全阀：导入是**整表替换**（下面每个表都先 DELETE 再灌），所以远端快照比本地
+         少的那部分行会被直接抹掉。以前只比 goals 一张表 —— 结果对话记录、刷题记录这类
+         "本地刚产生、但快照里还没有"的行会被静默删掉（真实翻过：一次自动上传把本地
+         刚聊的一轮对话抹了）。现在逐表比，任何一张表明显变少就拒绝导入。
+         宁可让用户手动选，也不能悄悄丢数据。 */
+      const shrink = [];
+      for (const t of SYNC_TABLES) {
+        let localN = 0;
+        try { localN = db.prepare(`SELECT COUNT(*) AS c FROM ${t}`).get().c || 0; } catch (e) { continue; }
+        const remoteN = Array.isArray(snap.data[t]) ? snap.data[t].length : 0;
+        if (localN >= 1 && remoteN < localN) shrink.push(t + '（本地 ' + localN + ' → 远端 ' + remoteN + '）');
+      }
+      if (shrink.length && !force) {
+        throw new Error('已拒绝导入：远端快照比本地少，导进去会丢这些数据 —— ' + shrink.slice(0, 4).join('、')
+          + (shrink.length > 4 ? ' 等' : '') + '。如果这确实是你要的（比如你在别的设备上删过），请先在本机确认后再手动导入。');
+      }
       backup();   // 导入前先备份，出问题可回滚
     db.exec('BEGIN');
     try {
@@ -377,7 +386,21 @@ module.exports = function createSync(ctx) {
            以前只合文件不合库，合完又直接用本地快照盖掉，等于白合。 */
         await git(['pull', '--rebase', '--autostash', 'origin', branch()], 120000);
         const merged = readLocalSnapshot();
-        if (merged) importRemote(merged);
+        if (merged) {
+          try {
+            importRemote(merged);
+          } catch (e) {
+            /* 导入是整表替换，安全阀拒绝时会抛（远端比本地少，导进去会丢数据）。
+               这时候**不能**继续拿本地快照上传（云端那份就没了），也不能硬导。
+               当成冲突处理：停下来，让用户在「设置 → 多端同步」里二选一。 */
+            if (/已拒绝导入/.test(e.message)) {
+              const c = markConflicted(st.rHead, st.snap);
+              c.reason = e.message;
+              return { ok: true, conflict: c };
+            }
+            throw e;
+          }
+        }
         writeConflict(null);
       }
       if (st.remoteMoved && (opts && opts.force)) {
@@ -443,7 +466,9 @@ module.exports = function createSync(ctx) {
       throw new Error('拉取失败：' + friendlyGitError(p.err || p.out));
     }
     const remote = readLocalSnapshot() || st.snap;
-    importRemote(remote);
+    /* 这是用户在冲突对话框里**亲口选的**「用云端覆盖本地」→ 强制导入。
+       安全阀只拦"自动导入"，不拦用户自己的决定（导入前已经 backup，可回滚）。 */
+    importRemote(remote, { force: true });
     setBase(await localHead(), localChangeAt());
     writeConflict(null);
     setSetting('sync_last_at', new Date().toISOString());
