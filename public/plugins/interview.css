@@ -1,0 +1,117 @@
+/* 思而行 · 模拟面试（interview）
+   布局沿用「用自己的话」的教训：状态钉左边、对话在右边；点评跟在回答下面。
+   复用 rs* 那套（jdPage / jdHead / rsSec / rsDims / rsThread / rsBubble / rsNav / pfChip），
+   这里只补这个组件自己的东西。 */
+
+.ivPage{max-width:min(1180px,100%);}
+.ivRunPage{max-width:min(1340px,100%);}
+body:has(.ivRunPage) .wrap{max-width:1400px;}
+
+/* ---------- 准备阶段的卡片 ---------- */
+.ivCard{background:var(--card); border:1px solid var(--border); border-radius:14px; padding:14px 16px; margin-top:12px;}
+.ivCardHd{display:flex; align-items:baseline; gap:9px; flex-wrap:wrap;}
+.ivCardT{font-weight:700; font-size:14.5px;}
+.ivCardT .muted{font-weight:400; font-size:11.5px;}
+.ivCardHd .btn{margin-left:auto;}
+.ivOk{font-size:11.5px; color:var(--ok, #16a34a); font-weight:600;}
+.ivNeed{font-size:11.5px; color:var(--warn); font-weight:600;}
+.ivCardBody{margin-top:10px;}
+
+/* JD 粘贴区 */
+.ivPaste{
+  border:1.5px dashed var(--border); border-radius:12px; padding:22px 18px; text-align:center;
+  color:var(--text); cursor:text; background:var(--bg); transition:border-color .12s, background .12s;
+}
+.ivPaste:hover,.ivPaste.over{border-color:var(--accent); background:var(--accent-soft);}
+.ivPasteI{font-size:26px; margin-bottom:6px;}
+.ivPaste .muted{font-size:11.5px; margin-top:6px;}
+.ivJdText{
+  font-size:13px; line-height:1.85; white-space:pre-wrap; overflow-wrap:anywhere;
+  background:var(--bg); border:1px solid var(--border); border-radius:10px; padding:11px 13px;
+  max-height:340px; overflow-y:auto;
+}
+.ivJdText>*:first-child{margin-top:0;}
+.ivJdText>*:last-child{margin-bottom:0;}
+
+/* 项目 */
+.ivPathRow{display:flex; gap:8px;}
+.ivInput{
+  flex:1; min-width:0; font:inherit; font-size:13px; padding:8px 11px; border-radius:9px;
+  border:1px solid var(--border); background:var(--bg); color:var(--text);
+}
+.ivInput:focus{outline:none; border-color:var(--accent);}
+.ivDigest{margin-top:12px;}
+.ivDigestWhat{margin:0 0 8px; font-size:13.5px; line-height:1.8;}
+.ivChips{display:flex; flex-wrap:wrap; gap:5px; margin-bottom:9px;}
+.ivMods{display:flex; flex-direction:column; gap:5px; margin-bottom:9px;}
+.ivMod{font-size:12.5px; line-height:1.7; display:flex; gap:8px;}
+.ivMod b{flex:none; color:var(--accent); min-width:88px;}
+.ivBlock{margin-top:9px; padding:9px 11px; border-radius:10px; background:var(--bg); border:1px solid var(--border);}
+.ivBlock.warn{background:rgba(231,140,60,.08); border-color:rgba(231,140,60,.35);}
+.ivBlockT{font-size:12px; font-weight:700; margin-bottom:5px;}
+.ivBlock ul{margin:0; padding-left:18px; font-size:12.5px; line-height:1.8;}
+.ivPlanBox{margin-bottom:10px;}
+.ivMax{font-size:12px; color:var(--muted); margin-left:auto;}
+.ivMax input{
+  width:56px; font:inherit; font-size:12px; padding:3px 6px; border-radius:7px;
+  border:1px solid var(--border); background:var(--bg); color:var(--text);
+}
+
+/* ---------- 面试中：左栏 + 对话 ---------- */
+.ivPanes{
+  display:grid; gap:0; align-items:start;
+  grid-template-columns:300px minmax(0,1fr);
+  min-height:430px;
+}
+.ivPaneQ{display:flex; flex-direction:column; max-height:calc(100vh - 178px); margin-right:14px;
+  background:var(--card); border:1px solid var(--border); border-radius:14px; overflow:hidden;}
+.ivPaneQ .rsPaneT{flex:none;}
+.ivPaneBody{flex:1; min-height:0; overflow-y:auto; padding:12px 13px;}
+.ivPaneC{
+  display:flex; flex-direction:column; height:calc(100vh - 178px); min-height:430px;
+  background:var(--card); border:1px solid var(--border); border-radius:14px; padding:13px 14px;
+}
+.ivPaneC .rsThread{flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; margin-bottom:10px; padding-right:2px;}
+.ivPaneC .rsInput{flex:none; margin:0; border-top:1px solid var(--border); padding-top:11px;}
+.ivFocus{margin:11px 0 0; font-size:12px; line-height:1.7; color:var(--muted);}
+.ivDigestFold{margin-top:11px; font-size:12.5px; line-height:1.75;}
+.ivDigestFold summary{cursor:pointer; font-weight:600; color:var(--text);}
+.ivDigestFold p{margin:8px 0 6px;}
+.ivDigestFold ul{margin:0; padding-left:18px;}
+
+/* 回答下面的当场点评 —— 这是别处没有的信息，跟在回答下面最自然 */
+.ivFb{
+  margin:6px 0 0 26px; padding:9px 12px; border-radius:10px;
+  background:var(--bg); border:1px solid var(--border); border-left:3px solid var(--accent-border);
+}
+.ivFbNote{font-size:12.5px; line-height:1.7; margin-bottom:7px;}
+.ivFbRow{display:flex; flex-wrap:wrap; gap:5px; align-items:center;}
+.ivFbWrong{margin-top:7px; font-size:12px; line-height:1.75; color:var(--text);}
+.ivFbWrong>div{padding:5px 8px; border-radius:8px; background:rgba(220,80,80,.07); margin-top:5px;}
+.ivFbWrong b{color:var(--muted); font-weight:600; margin-right:4px;}
+
+/* ---------- 总评 ---------- */
+.ivScoreTop{display:flex; align-items:center; gap:18px;}
+.ivScoreBig{
+  font-size:44px; font-weight:800; line-height:1; letter-spacing:-1px;
+  color:var(--muted);
+}
+.ivScoreBig span{font-size:14px; font-weight:600; margin-left:3px;}
+.ivScoreBig.good{color:var(--ok, #16a34a);}
+.ivScoreBig.mid{color:var(--warn);}
+.ivScoreBig.bad{color:#dc5050;}
+.ivScoreLv{font-size:15px; font-weight:700;}
+.ivScoreVd{font-size:12.5px; color:var(--muted); margin-top:4px;}
+.ivSummary{margin:13px 0 0; font-size:13.5px; line-height:1.9;}
+.ivWeak{display:flex; flex-direction:column; gap:6px;}
+.ivWeakI{display:flex; gap:9px; font-size:13px; line-height:1.75; padding:8px 11px; border-radius:9px; background:var(--bg); border:1px solid var(--border);}
+.ivWeakI b{flex:none; width:16px; color:var(--warn);}
+.ivAdvice{margin:0; padding-left:20px; font-size:13px; line-height:1.9;}
+
+/* 窄屏：并排放下不，改成上下 */
+@media (max-width:900px){
+  .ivPanes{grid-template-columns:1fr;}
+  .ivPaneQ{margin:0 0 12px; max-height:none;}
+  .ivPaneC{height:auto; min-height:0;}
+  .ivPaneC .rsThread{max-height:60vh;}
+}
