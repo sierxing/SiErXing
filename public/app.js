@@ -896,7 +896,7 @@ function showNodePanel(id, rerender) {
   if (npAdd) npAdd.addEventListener('click', () => {
     const sel = div.querySelector('#npSrcPick');
     const sid = sel && sel.value ? Number(sel.value) : 0;
-    if (!sid) return toast('资料库还是空的：先收集信息源或上传图片资料');
+    if (!sid) return toast('资料库还是空的：可以先「收集信息源」「导入代码库」或上传图片资料');
     const src = (state.sources || []).find(x => Number(x.id) === sid);
     if (!src) return toast('没找到这条资料');
     const list = safeParse(n.sources, []).slice();
@@ -4534,6 +4534,14 @@ async function startExpand(id, feedback, answers) {
     rerenderCurrent();
   }
 }
+/* 资料搜集是**可选**的：用户在问卷里选过「不用」就别再催他。
+   以前这里的文案默认"人人都要收集信息源"，对"搞懂自己项目源码"这类目标完全是误导。 */
+function collectPrefHint() {
+  const p = String((state.goal && state.goal.collect_pref) || '');
+  if (p === 'no') return '你说过这次不用搜集资料 —— 需要时随时可以在这里找，或导入代码库';
+  if (p === 'later') return '你说过先不搜集 —— 想找的话点「收集信息源」';
+  return '可选：按搜集方案找真实资料，规划会优先依据（不收集也能规划）';
+}
 function sourceItemHTML(s) {
   const body = String(s.content || s.snippet || '').trim();
   const star = Number(s.quality) === 1;
@@ -4561,7 +4569,7 @@ function srcPanelHTML() {
     <div class="spHead">
       ${foldBtn('sources', srcClosed)}
       <span class="spTitle">信息源</span><span class="spCount">${list.length}</span>
-      <span class="spHint">按你的搜集方案找真实资料，规划时优先依据</span>
+      <span class="spHint">${collectPrefHint()}</span>
       <div class="spacer"></div>
         <button class="btn small" id="collectBtn">${list.length ? '重新收集' : '收集信息源'}</button>
         <button class="btn small" id="collectPlanBtn" title="说明/选择这次搜什么：AI 按目标推荐搜集方案，可逐条勾选、改写、加自己的">⚙ 搜集方案</button>
@@ -5059,7 +5067,7 @@ function renderGoal() {
     html += `<div class="emptyBox" style="margin-top:8px;">
       <div class="ebIcon">🧭</div>
       <div class="ebTitle">还没有路径</div>
-      <div class="ebText">${g.status === 'failed' ? '上次规划失败。' : ''}收集信息源后点「开始 AI 规划」，AI 会生成 阶段 → 小目标 → 任务 的可视化路径。</div>
+      <div class="ebText">${g.status === 'failed' ? '上次规划失败。' : ''}点「开始 AI 规划」：AI 会先问你几个问题摸清情况，再生成 阶段 → 小目标 → 任务 的路径。<br><span class="muted">想让它依据真实资料的话，可以先「收集信息源」或「导入代码库」（可选，不弄也能规划）。</span></div>
       <button class="btn primary" id="emptyPlanBtn">开始 AI 规划</button>
     </div>`;
   }

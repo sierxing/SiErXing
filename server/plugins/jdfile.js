@@ -7,6 +7,7 @@
  */
 'use strict';
 const { parseEbook, MAX_FILE } = require('./lib/ebook-parse');
+const { resolveRoot, readProject, buildStudyDigestPrompt, digestToText } = require('./lib/code-digest');
 let db, nowISO, safeParse, sendJSON, readBody, getSetting, setSetting, backup, log;
 let fs, path, os, spawn, APP_DIR, DATA_DIR, UPLOAD_DIR, PUBLIC_DIR;
 let getGoal, sourcesOf, aiText, aiTextFiles, currentModel, currentVisionModel, tasks;
@@ -203,6 +204,66 @@ module.exports = {
       }
       if (added) { db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), g.id); backup(); }
       return sendJSON(res, 200, { ok: true, added, skipped, total: list.length, goal: getGoal(g.id), sources: sourcesOf(g.id) });
+    }
+  },
+  {
+    /* 导入代码库：给一个本机路径 → 只读读完 → AI 出「怎么读懂它」的摘要 → 进资料库。
+       为什么要有这条：目标是"搞懂某个项目的源码"时，唯一的一手资料就是这个代码库本身，
+       去网上搜 JD/面经毫无意义。摘要是**学习导向**的（要掌握哪些概念、按什么顺序读），
+       规划会直接照它排阶段。 */
+    method: 'POST',
+    pattern: /^\/api\/goals\/(\d+)\/code-repo$/,
+    handler: async (req, res, u, ctx) => {
+      const m = u.pathname.match(/^\/api\/goals\/(\d+)\/code-repo$/);
+      if (!m || req.method !== 'POST') return false;
+      const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(Number(m[1]));
+      if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+      const body = await readBody(req).catch(() => ({}));
+      const raw = String(body.path || '').trim();
+      if (!raw) return sendJSON(res, 400, { error: '请填写代码库路径' });
+      const root = resolveRoot(raw);                     // 不存在 / 不是目录 → 400 说清楚
+      const proj = readProject(root, { limit: 22, perFile: 12000, total: 46000 });
+      if (!proj.files.length) return sendJSON(res, 400, { error: '这个目录里没找到可读的代码文件（.env / 密钥 / node_modules 一律不读）' });
+      const name = String(root).split(/[\\/]/).filter(Boolean).pop() || '代码库';
+      const title = '代码库：' + name;
+
+      /* 已经导过同一个路径就不重复导（用户常手滑点两次） */
+      const dup = db.prepare("SELECT id FROM sources WHERE goal_id = ? AND site = '导入的代码库' AND url = ? LIMIT 1").get(g.id, root);
+      if (dup && !body.force) {
+        return sendJSON(res, 200, { ok: true, already: true, goal: getGoal(g.id), sources: sourcesOf(g.id) });
+      }
+
+      const job = tasks.begin({ type: 'jdfile', title: '读懂代码库 · ' + name, note: root, goalId: g.id, message: 'AI 正在读这个代码库，整理成学习路径能用的摘要' });
+      let txt = '';
+      try {
+        const t0 = Date.now();
+        const iv = setInterval(() => {
+          const sec = Math.round((Date.now() - t0) / 1000);
+          job.progress(Math.min(93, Math.round(100 * (1 - Math.exp(-sec / 18)))), 'AI 正在读这个代码库（已等 ' + sec + ' 秒）');
+        }, 1500);
+        try { txt = await aiText(buildStudyDigestPrompt(root, proj.files, proj.all, g.title), currentModel(), 300000, null, job.signal); }
+        finally { clearInterval(iv); }
+        job.done(txt);
+      } catch (e) { job.fail(e); throw e; }
+
+      const d = extractJSON(txt);
+      if (!d || typeof d !== 'object') throw new Error('代码库摘要没生成出来，点重试再来一次');
+      const digestText = digestToText(d);
+      if (!digestText) throw new Error('代码库摘要没生成出来，点重试再来一次');
+      const fileList = proj.files.map(f => f.path);
+      const snippet = '读了 ' + proj.files.length + ' 个文件：' + fileList.slice(0, 8).join('、') + (fileList.length > 8 ? ' 等' : '');
+      const now = nowISO();
+      db.prepare('INSERT INTO sources (goal_id,title,url,site,kind,snippet,content,published_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+        .run(g.id, title, root, '导入的代码库', '代码库', snippet.slice(0, 300), digestText, '', now);
+      /* 也写进「提炼汇总」：规划时按 4000 字带进去（原始资料列表只带 700 字，装不下） */
+      db.prepare('INSERT INTO source_digests (goal_id,topic,title,content,sources_count,created_at) VALUES (?,?,?,?,?,?)')
+        .run(g.id, '代码库', title, digestText, 1, now);
+      db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(now, g.id);
+      backup();
+      return sendJSON(res, 200, {
+        ok: true, read: proj.files.length, files: fileList,
+        digest: d, goal: getGoal(g.id), sources: sourcesOf(g.id)
+      });
     }
   },
   {

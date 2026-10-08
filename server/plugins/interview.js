@@ -16,6 +16,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { listCodeFiles, readCodeFiles } = require('../code-read');
+/* 路径解析与"挑哪些文件"和「信息源导入 → 代码库」共用一份实现 */
+const { resolveRoot, pickProjectFiles } = require('./lib/code-digest');
 
 let db, nowISO, safeParse, sendJSON, readBody, getSetting, setSetting, backup, log;
 let getGoal, aiText, aiTextFiles, currentModel, currentVisionModel, tasks;
@@ -121,45 +123,7 @@ function sessOut(r) {
 }
 function touch(id) { db.prepare('UPDATE interview_sessions SET updated_at = ? WHERE id = ?').run(nowISO(), Number(id)); }
 
-/* ---------- 项目读取 ---------- */
-/* 用户给的是本机路径：~ 展开、必须是目录、软链解开后作为只读根。
-   code-read 那边还有一层白名单（.env/密钥/node_modules 不可见、路径不得逃出根）。 */
-function resolveRoot(p) {
-  let s = String(p || '').trim();
-  if (!s) throw new Error('请填写项目路径');
-  if (s === '~') s = os.homedir();
-  else if (s.startsWith('~/')) s = path.join(os.homedir(), s.slice(2));
-  s = path.resolve(s);
-  let real = s;
-  try { real = fs.realpathSync(s); } catch (e) { throw new Error('路径不存在：' + s); }
-  let st = null;
-  try { st = fs.statSync(real); } catch (e) { throw new Error('读不到这个路径：' + s); }
-  if (!st.isDirectory()) throw new Error('这不是一个目录：' + s);
-  return real;
-}
-/* 从文件列表里挑「最像门面」的几个文件给 AI 读：README/package.json/入口文件 + 顶层优先 */
-function pickProjectFiles(root) {
-  const all = listCodeFiles(root).filter(f => f && f.path);
-  const base = p => String(p).split('/').pop().toLowerCase();
-  const score = f => {
-    const pth = String(f.path), b = base(pth), depth = pth.split('/').length;
-    let s = 0;
-    if (/^readme(\.md|\.txt)?$/.test(b)) s += 140;
-    /* 锚到「整个文件名」或后面跟点：不锚的话 `pom` 会把 pomodoro.js 也当成 pom.xml，
-       `go` 会把 google.js 当成 go.mod —— 真实踩过（挑出来的全是 pomodoro）。 */
-    if (/^(package|requirements|pyproject|composer|go|pom|build\.gradle)(\.|$)/.test(b)) s += 110;
-    if (/^(app|index|main|server|manage|cli)\.(js|ts|mjs|cjs|py|go|java|rb)$/.test(b)) s += 90;
-    if (/(^|\/)(src|server|app|lib|core|api)\//.test(pth)) s += 30;
-    if (depth <= 2) s += 26;
-    if (/\.(md|json|yml|yaml|toml|sql)$/.test(b)) s += 10;
-    /* 大文件只**轻微**降权：真正的预算封顶在 readCodeFiles（单文件 12KB / 总 46KB）。
-       以前按 size/6000 最多扣 40 分，结果 server.js 这种核心大文件被 pomodoro.css 挤掉了。 */
-    s -= Math.min(12, Math.round((f.size || 0) / 20000));
-    return s;
-  };
-  const sorted = all.slice().sort((a, b) => score(b) - score(a));
-  return sorted.slice(0, 22).map(f => f.path);
-}
+/* ---------- 项目读取（实现见 lib/code-digest.js） ---------- */
 function buildProjectDigestPrompt(goal, root, files) {
   const L = [];
   L.push('你在帮一位求职者准备技术面试。下面是他的一个真实项目（只读读取，密钥类内容已脱敏）。');

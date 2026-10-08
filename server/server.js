@@ -407,6 +407,8 @@ function pluginCtx() {
   const gcols = db.prepare('PRAGMA table_info(goals)').all().map(c => c.name);
   if (!gcols.includes('clarify')) db.exec("ALTER TABLE goals ADD COLUMN clarify TEXT NOT NULL DEFAULT '';");
   if (!gcols.includes('clarify_answers')) db.exec("ALTER TABLE goals ADD COLUMN clarify_answers TEXT NOT NULL DEFAULT '';");
+  /* 用户在问卷里选的「要不要搜集外部资料」：'' 没问过 / yes / no / later */
+  if (!gcols.includes('collect_pref')) db.exec("ALTER TABLE goals ADD COLUMN collect_pref TEXT NOT NULL DEFAULT '';");
   if (!gcols.includes('clarify_stage')) db.exec("ALTER TABLE goals ADD COLUMN clarify_stage TEXT NOT NULL DEFAULT '';");
   if (!gcols.includes('constraints')) db.exec("ALTER TABLE goals ADD COLUMN constraints TEXT NOT NULL DEFAULT '[]';");
   if (!gcols.includes('plugins')) db.exec("ALTER TABLE goals ADD COLUMN plugins TEXT NOT NULL DEFAULT '{}';");
@@ -1565,21 +1567,39 @@ function goalHeader(goal) {
 }
 function buildClarifyPrompt(goal) {
   const lines = [];
-  lines.push('你是资深职业路径规划师。在制定规划前，你必须先做一份**完整的规划前问卷**，充分了解用户的真实情况与真实水平。');
-  lines.push('问卷质量直接决定规划是否贴合用户——宁可多问，也不要凭假设规划。');
+  lines.push('你是资深的学习与成长路径规划师。规划前要先做一份**规划前问卷**，摸清用户的真实情况与真实水平。');
+  lines.push('问卷质量直接决定规划是否贴合用户 —— 宁可多问，也不要凭假设规划。');
   lines.push('');
   lines.push(goalHeader(goal));
   lines.push(digestsBlock(goal));
   lines.push(sourcesBlock(goal, 30, 180));
   lines.push('');
-  lines.push('【问卷要求】生成 10-14 道题，按下面 6 个板块组织（每题带 section 字段）：');
-  lines.push('  1. 现状与目标：为什么要学、期望达成的具体目标、目标岗位/方向细分、目标公司/城市倾向；');
-  lines.push('  2. 真实水平（重点）：让用户用「可验证的证据」而非感觉来描述水平，例如能独立完成过什么、做过什么项目/练习、学到哪一章、上次系统学习是什么时候；');
-  lines.push('  3. 水平自测（必出 2-3 题）：针对该方向的核心基础出**客观小测题**（type=quiz）——给出 4 个选项、1 个正确答案（answer 填选项的 v）与一句解析（explain）。题目要能区分「完全不会 / 一知半解 / 已掌握」，用于校准规划起点（例如看代码说输出、概念辨析、命令/语法判断）。');
+  lines.push('【最重要的一步：先判断这是什么类型的目标，再照它出题】');
+  lines.push('**不要默认用户在求职找工作。**先看目标本身属于哪一类，只问这一类真正需要知道的：');
+  lines.push('  · 求职 / 转行：才问目标岗位细分、目标公司或城市、投递节奏；');
+  lines.push('  · 读懂某个项目 / 代码库的源码（如「搞懂我这个项目的源码」）：问清他现在这门语言/框架的基础、');
+  lines.push('    有没有翻过这个库、想读到什么程度（能改 bug / 能独立加功能 / 只为能讲清楚）、手上有没有别的资料；');
+  lines.push('    这一类的核心资料就是代码库本身，**不要问去哪找工作、也不要让他去搜 JD/面经**；');
+  lines.push('  · 学一门技能 / 考证 / 考研：问基础、目标分数或等级、手上已有的教材与课程；');
+  lines.push('  · 认知 / 通识 / 兴趣（如「理解经济怎么运转」）：问已有的认知起点、最想搞清的困惑；');
+  lines.push('  · 做产品 / 副业 / 习惯养成：问现状、可用时间、怎么算做成。');
+  lines.push('凡是与这个目标无关的板块，**直接不要出题**（比如"读懂自己的项目源码"就不该问目标公司、城市、薪资、投递时间）。');
+  lines.push('');
+  lines.push('【问卷要求】生成 8-14 道题，按下面组织（每题带 section 字段）：');
+  lines.push('  1. 现状与目标（**按目标类型定制**）：为什么想做这件事、想达成的具体结果（要能验收）、这次的范围边界（不做什么）；');
+  lines.push('  2. 真实水平（重点）：让用户用「可验证的证据」而非感觉来描述，例如能独立完成过什么、做过什么项目/练习、学到哪一章、上次动手是什么时候、卡在哪一步；');
+  lines.push('  3. 水平自测（必出 2-3 题）：针对这个目标**真正绕不开的基础**出客观小测题（type=quiz）——给出 4 个选项、1 个正确答案（answer 填选项的 v）与一句解析（explain）。题目要能区分「完全不会 / 一知半解 / 已掌握」，用来校准规划起点（例如看代码说输出、概念辨析、命令/语法判断）；');
   lines.push('  4. 时间与节奏：每周可投入小时数、可学习的时间段、单次可专注时长、期限是否硬性、能接受的总周期；');
-  lines.push('  5. 偏好与资源：学习方式偏好（视频/文档/项目驱动）、是否接受付费课程、英语阅读能力、是否有可用的设备/环境；');
-  lines.push('  6. 风险与心态：最容易放弃的环节、过往失败的学习经历、最担心的事、需要什么样的反馈与督促。');
-  lines.push('  7. 电子书需求（必出 2 题，id 固定为 q_ebook_want / q_ebook_books）：先问搜集信息源时要不要顺带找电子书（single，3 个选项，v 固定为 auto/list/no：auto=公版书自动下载入库，list=只要书单自己找，no=不需要），再问想看的具体书名或方向（text，placeholder 给例子，找不到就留空、规划时会按目标推荐）。');
+  lines.push('  5. 偏好与资源：学习方式偏好（视频/文档/动手做）、英语阅读能力、**手上已经有什么资料/环境/工具**；');
+  lines.push('  6. 风险与心态：最容易卡住或放弃的环节、过往失败的经历、最担心的事、需要什么样的反馈与督促。');
+  lines.push('  7. 资料搜集（必出 1 题，id 固定为 q_collect）：问这次**要不要让 AI 去网上搜集外部资料**。');
+  lines.push('     type=single，选项的 v 固定为这三个：');
+  lines.push('       v=yes   「要 —— 让 AI 按目标去网上找真实资料」');
+  lines.push('       v=no    「不用 —— 我有自己的资料（项目源码 / 教材 / 内部文档），或只靠这个目标本身」');
+  lines.push('       v=later 「先不用，需要时再说」');
+  lines.push('     desc 写清：选「不用」也不会影响规划，AI 会直接依据目标与你的回答来排。');
+  lines.push('  8. 电子书（**只在目标确实涉及读书 / 系统学习时才出**，id 固定为 q_ebook_want）：问要不要顺带找电子书（single，v 固定为 auto/list/no：auto=公版书自动下载入库，list=只要书单自己找，no=不需要）。');
+  lines.push('     如果这个目标的一手资料是代码库、项目、内部文档或已有教材，**就不要出这一题**。');
   lines.push('  另外：必须有一题专门问「有没有必须遵守的硬性约束」（如只能周末学、预算上限、必须用某语言/工具、不能熬夜、期限不能变等），以便用户把约束写清楚。');
   lines.push('');
   lines.push('【题目类型】');
@@ -2246,13 +2266,18 @@ async function finishVersion(goal, vid, reason, useAI = true) {
  * 规则：标题无目标 → 暂存并与后续的目标合并；目标无标题 → 并入上一个阶段；
  *       丢弃空阶段；每个阶段小目标最多 4 个。
  */
+/* 字段名兜底：模型偶尔把 title 写成 name（阶段名 / 小目标名都遇到过）。
+   真实翻过：整份骨架的阶段全用 name，规范化只认 title → 全被过滤掉，
+   最后报"没有可用阶段"，用户白等一场。这里统一取 title || name。 */
+const titleOf = o => String((o && (o.title != null ? o.title : o.name)) || '').trim();
 function normalizeSkeleton(stages) {
   const out = [];
   let pending = null;
   for (const raw of (Array.isArray(stages) ? stages : [])) {
     if (!raw || typeof raw !== 'object') continue;
-    const title = String(raw.title || '').trim();
-    const goals = (Array.isArray(raw.goals) ? raw.goals : []).filter(g => g && String(g.title || '').trim());
+    const title = titleOf(raw);
+    const goals = (Array.isArray(raw.goals) ? raw.goals : []).filter(g => g && titleOf(g))
+      .map(g => (g.title ? g : Object.assign({}, g, { title: titleOf(g) })));
     if (title && !goals.length) { pending = { title, detail: raw.detail || '', sources: raw.sources || [] }; continue; }
     if (!title && goals.length) {
       const last = out[out.length - 1];
@@ -2331,12 +2356,21 @@ function streamClarify(req, res, goal) {
       const txt = await aiTextProgress(buildClarifyPrompt(goal), model, 300000, send, '问题', sig);
       const data = extractJSON(txt);
       if (!data || !Array.isArray(data.questions) || !data.questions.length) throw new Error('澄清问题生成失败，请重试');
-      // 电子书需求题是搜集前的必问：AI 漏掉就补固定版（id 固定，前端/答案解析都认这两个 id）
-      if (!data.questions.some(q => q && /ebook/i.test(String(q.id || '') + String(q.title || '')))) {
-        data.questions.push(
-          { id: 'q_ebook_want', section: '偏好与资源', type: 'single', title: '搜集信息源时，要不要顺带找电子书？', desc: '公版书可自动下载入库', options: [{ v: 'auto', label: '要，公版书自动下载入库' }, { v: 'list', label: '只要书单，我自己找书导入' }, { v: 'no', label: '不需要' }] },
-          { id: 'q_ebook_books', section: '偏好与资源', type: 'text', title: '想看的具体书名 / 方向（可选，找不到就留空）', desc: '留空则 AI 按目标推荐', placeholder: '例如：国富论；曼昆《经济学原理》；行为经济学入门' }
-        );
+      /* 「要不要搜集外部资料」是必问的开关：AI 漏了就补固定版（id 固定，前后端都认）。
+         以前这里硬塞的是「要不要找电子书」两题 —— 对"读懂自己项目源码"这类目标纯属添乱，
+         而且电子书需求本来就属于"收集信息源"那一步（收集面板里会问，见 /ebooks/pref），
+         目标类型不对时不该被问。 */
+      if (!data.questions.some(q => q && String(q.id || '') === 'q_collect')) {
+        data.questions.push({
+          id: 'q_collect', section: '资料搜集', type: 'single',
+          title: '这次要不要让 AI 去网上搜集外部资料？',
+          desc: '选「不用」也不影响规划：AI 会直接依据目标与你的回答来排',
+          options: [
+            { v: 'yes', label: '要 —— 让 AI 按目标去网上找真实资料' },
+            { v: 'no', label: '不用 —— 我有自己的资料（项目源码 / 教材 / 内部文档），或只靠这个目标本身' },
+            { v: 'later', label: '先不用，需要时再说' }
+          ]
+        });
       }
       db.prepare('UPDATE goals SET clarify = ?, clarify_stage = ?, status = ?, error = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(data), 'clarify', 'clarify', '', nowISO(), goal.id);
       backup();
@@ -2438,6 +2472,12 @@ function streamPlan(req, res, goal, answers) {
       clearPlanDraft(goal.id, 'skeleton');   // 全新规划：旧草稿作废，失败时会写入新的
       const pend = goalPending(goal.id);
       if (answers && pend) appendGoalQa(goal.id, pend.stage, pend.data.questions, answers);
+      /* 问卷里那题「要不要搜集外部资料」的答案落到 goals.collect_pref：
+         目标页据此决定是"催你去收集"还是"安静地跳过"，别再默认人人都要搜集。 */
+      if (answers && answers.q_collect) {
+        const v = String(answers.q_collect).toLowerCase();
+        if (['yes', 'no', 'later'].includes(v)) db.prepare('UPDATE goals SET collect_pref = ? WHERE id = ?').run(v, goal.id);
+      }
       send({ status: answers ? '正在结合你的补充回答生成路径骨架…' : '正在结合你的回答生成路径骨架…' });
       const planPrompt = buildSkeletonPrompt(goal);
       let skeletonText = await aiTextProgress(planPrompt, model, 600000, send, '阶段/小目标', sig);

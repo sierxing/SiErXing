@@ -1,14 +1,14 @@
 {
-  "version": "1.10.24",
-  "buildVer": "e8c7d17c8f05",
-  "payload": "release/payload-1.10.24.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.24.sxar?ref=main",
+  "version": "1.10.25",
+  "buildVer": "cf75ae6171a9",
+  "payload": "release/payload-1.10.25.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.25.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "f0b66e11a8db215ecf5e051ca8aa14d42f854bc663cb83fd0fec7b834284861c",
-  "size": 654505,
-  "unpackedSize": 2400329,
-  "publishedAt": "2026-10-08T13:12:22.398Z",
-  "notes": "模拟面试加「现场补救」：遇到不会的题点「🤔 不会，讲一下」，AI 当场切到教学把这道题讲明白（这题在考什么/正面答案/面试里30秒怎么答/最常见的错误答法），讲完可以直接答或点「换个问法再问一遍」；补救过的题在总评里单独列出",
+  "sha256": "4e540a461d143ea1717eb60d3712d6bb77267edbd748d152e4c7c73bc82f54ad",
+  "size": 660235,
+  "unpackedSize": 2417881,
+  "publishedAt": "2026-10-08T14:32:45.874Z",
+  "notes": "规划不再默认求职：问卷按目标类型出题（读懂代码库/学技能/考证…），要不要搜集资料由你选；信息源导入支持导入代码库（AI 出「要掌握哪些概念、按什么顺序读」的摘要，规划直接照它排）。另修两个真 bug：流式输出被截断不会续写（规划/问卷/教程一长就断）、阶段字段写成 name 会被整个丢掉",
   "exeRequired": false
 }

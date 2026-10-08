@@ -445,37 +445,61 @@ async function openaiText(c, opts) {
     }
     return text;
   }
-  // 流式解析（SSE）
-  const reader = res.body.getReader();
-  const dec = new TextDecoder();
-  let buf = '', text = '', lastThink = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    const lines = buf.split('\n');
-    buf = lines.pop();
-    for (const raw of lines) {
-      const line = raw.trim();
-      if (!line || !line.startsWith('data:')) continue;
-      const payload = line.slice(5).trim();
-      if (payload === '[DONE]') continue;
-      let j;
-      try { j = JSON.parse(payload); } catch (e) { continue; }
-      const delta = j.choices && j.choices[0] && (j.choices[0].delta || j.choices[0].message);
-      if (!delta) continue;
-      if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
-        lastThink += delta.reasoning_content;
-        onEvent({ thinking: lastThink.replace(/\s+/g, ' ').slice(-60) });
-      } else if (typeof delta.reasoning === 'string' && delta.reasoning) {
-        lastThink += delta.reasoning;
-        onEvent({ thinking: lastThink.replace(/\s+/g, ' ').slice(-60) });
-      }
-      if (typeof delta.content === 'string' && delta.content) {
-        text += delta.content;
-        onEvent({ text: delta.content });
+  /* 流式解析（SSE）。**要记 finish_reason** —— 模型因为输出上限被截断时
+     （finish_reason=length），这段文本是断的；长 JSON（规划骨架、问卷、教程）会直接解析失败。
+     以前流式这条路完全不处理截断（只有非流式的 openaiLongText 会续写），
+     真实翻过：规划骨架写一半断掉 → 报"没有可用阶段"。 */
+  const readStream = async r0 => {
+    const reader = r0.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '', text = '', lastThink = '', finish = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (!line || !line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (payload === '[DONE]') continue;
+        let j;
+        try { j = JSON.parse(payload); } catch (e) { continue; }
+        const ch = j.choices && j.choices[0];
+        if (ch && ch.finish_reason) finish = ch.finish_reason;
+        const delta = ch && (ch.delta || ch.message);
+        if (!delta) continue;
+        if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
+          lastThink += delta.reasoning_content;
+          onEvent({ thinking: lastThink.replace(/\s+/g, ' ').slice(-60) });
+        } else if (typeof delta.reasoning === 'string' && delta.reasoning) {
+          lastThink += delta.reasoning;
+          onEvent({ thinking: lastThink.replace(/\s+/g, ' ').slice(-60) });
+        }
+        if (typeof delta.content === 'string' && delta.content) {
+          text += delta.content;
+          onEvent({ text: delta.content });
+        }
       }
     }
+    return { text, finish };
+  };
+  let text = '', rounds = 0;
+  let messages = [{ role: 'user', content: messageContent(prompt, images) }];
+  for (;;) {
+    const r = await readStream(await openaiRequest(c, { model: mdl, messages, stream: true, max_tokens: maxTokens }, timeoutMs, signal));
+    text += r.text;
+    if (r.finish !== 'length') break;
+    rounds++;
+    if (rounds >= 4) throw new Error('AI 输出过长（多次续写仍未写完）：请把这次要求拆小一点，分多次提');
+    if (onEvent) { try { onEvent({ thinking: '输出较长，正在继续生成（第 ' + (rounds + 1) + ' 段）…' }); } catch (e2) {} }
+    /* 续写只带尾部做衔接：不带全文，省上下文（和非流式那条路一致） */
+    messages = [
+      { role: 'user', content: messageContent(prompt, images) },
+      { role: 'assistant', content: text },
+      { role: 'user', content: '（上一条被输出上限截断了）请**直接从最后一个字符接着往下写**，不要重复已输出的内容、不要重新开头、不要加任何说明或前后缀。' + CONTINUE_SUFFIX }
+    ];
   }
   if (!text) throw new Error('AI 没有返回内容（检查模型名/额度，或稍后重试）');
   return text;

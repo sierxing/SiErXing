@@ -95,6 +95,16 @@ function drawJDPage() {
       ${state.jdBusy ? `<div class="jpBusy"><span class="spinner"></span> ${esc(state.jdStatus || '正在处理…')}</div>` : ''}
     </div>
     ${jobs.length ? jdJobsHTML(jobs) : ''}
+    <div class="jdRepo" id="jdRepo">
+      <div class="jdRepoHd"><span>📦 导入代码库</span>
+        <span class="muted">目标是「搞懂某个项目的源码」时，唯一的一手资料就是这个代码库本身 —— 不用再去网上搜</span></div>
+      <div class="jdRepoRow">
+        <input id="jdRepoPath" placeholder="本机路径，例如 /home/you/my-project 或 ~/code/app" spellcheck="false">
+        <button class="btn small primary" id="jdRepoBtn">读取并导入</button>
+      </div>
+      <div class="jpNote">只读读取：.env / 密钥 / node_modules / .git 一律不读，路径不会离开这台机器。AI 会整理出「要掌握哪些概念、按什么顺序读、哪里最容易看懵」，规划会直接照它排阶段。</div>
+      <div id="jdRepoMsg" class="muted" style="margin-top:6px;"></div>
+    </div>
     <div class="jdList">${list.length ? list.map(jdCardHTML).join('') : '<div class="muted" style="padding:20px 4px;">还没有资料。粘贴一张截图，或拖入文件 / 文件夹试试。</div>'}</div>
   </div>`;
   const paste = document.getElementById('jdPaste');
@@ -123,6 +133,34 @@ function drawJDPage() {
   const di = document.getElementById('jdDir');
   di.setAttribute('webkitdirectory', '');
   di.addEventListener('change', () => { const arr = Array.from(di.files || []).map(f => ({ file: f, rel: f.webkitRelativePath || f.name })); di.value = ''; if (arr.length) jdRouteFiles(arr); });
+  /* 导入代码库：给一个本机路径，AI 读完出「怎么读懂它」的摘要，进资料库 */
+  const repoBtn = document.getElementById('jdRepoBtn');
+  if (repoBtn) {
+    const msg = document.getElementById('jdRepoMsg');
+    repoBtn.addEventListener('click', async () => {
+      const pth = String((document.getElementById('jdRepoPath') || {}).value || '').trim();
+      if (!pth) return toast('先填代码库路径');
+      repoBtn.disabled = true;
+      const oldTxt = repoBtn.textContent;
+      repoBtn.textContent = 'AI 正在读…';
+      if (msg) msg.textContent = '正在读取并整理（几十秒，别关页面）…';
+      try {
+        const r = await api('/api/goals/' + state.goal.id + '/code-repo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: pth }) });
+        if (r.already) { toast('这个代码库已经导过了（删掉旧的可以重导）'); if (msg) msg.textContent = ''; }
+        else {
+          if (r.sources) state.goal.sources = r.sources;
+          toast('已导入：读了 ' + (r.read || 0) + ' 个文件');
+          if (msg) {
+            const d = r.digest || {};
+            msg.innerHTML = '<b>读完了</b>（' + (r.read || 0) + ' 个文件）—— ' + esc(String(d.what || '').slice(0, 120))
+              + '　<a href="#/g/' + state.goal.id + '">回目标页看资料与规划 →</a>';
+          }
+        }
+      } catch (e) { toast(e.message); if (msg) msg.textContent = ''; }
+      repoBtn.disabled = false;
+      repoBtn.textContent = oldTxt;
+    });
+  }
   const imp = document.getElementById('jdImportFile');
 
   if (imp) imp.addEventListener('change', async () => {
