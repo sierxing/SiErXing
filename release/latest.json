@@ -1,14 +1,14 @@
 {
-  "version": "1.10.20",
-  "buildVer": "5a493af260a3",
-  "payload": "release/payload-1.10.20.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.20.sxar?ref=main",
+  "version": "1.10.21",
+  "buildVer": "be2a046f7dec",
+  "payload": "release/payload-1.10.21.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.21.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "ea4adbbe252b921279530aec4ee7253c5bae053e9614d0fcf363069fa88685d7",
-  "size": 632410,
-  "unpackedSize": 2320623,
-  "publishedAt": "2026-10-08T03:54:00.845Z",
-  "notes": "修每日刷题「今日复习」AI 永远排不出来：提示词给的是题号、解析却拿内部 id 去配（100 道里 99 道不同），每道都被当成编的 id 丢掉；另加「复习池」点开看全部题目卡片，可手动加入今日复习",
+  "sha256": "dcb459a8e43cbd993cfe28f6beb298c0a522370b5d70fc765618dd1120691219",
+  "size": 630414,
+  "unpackedSize": 2313936,
+  "publishedAt": "2026-10-08T07:49:07.367Z",
+  "notes": "用自己的话去掉和对话重复的内容：删掉「📋 解析反馈」右栏，左栏收敛成纯状态（掌握档位+覆盖清单+提示），不再重复那一问/AI 判断/接回自己的话；修拖动调宽方向反了（往左拖左栏反而变宽）",
   "exeRequired": false
 }

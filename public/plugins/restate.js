@@ -19,7 +19,6 @@
   let busy = false;
   let busyMsg = '';
   let histIdx = -1;        // 对话存档当前看的知识点
-  let selId = 0;           // 右栏正在看哪一轮的解析（0 = 跟最新走）
 
   const DONE = r => r && r.status === 'done' && r.mine;
   /* 某个知识点做过的所有轮次（含对话条数），最新的在前 —— 对话不会因为退出而丢 */
@@ -186,7 +185,6 @@
       cur.coach = r.coach;
       adoptHint();
     }
-    selId = 0;
   }
   /* 提示那一轮不进 coach.pending（它只是挂在当前那一问下面），所以刷新后要从 turns 里捞回来。
      否则"刚才那条提示"会随刷新消失 —— 而它恰恰是用户最需要留着的那句。 */
@@ -205,7 +203,7 @@
       <a class="back" href="#/t/${tid}">← 返回教程</a>
       <span class="mapTitle">🧠 用自己的话</span>
       ${extra || ''}
-      <span class="chip gray">${esc(title || '')}</span>
+      ${title ? `<span class="chip gray">${esc(title)}</span>` : ''}
     </div>`;
   }
   function draw() {
@@ -328,8 +326,7 @@
         // ⚠️ 必须用服务端返回的 turns。之前写死 turns:[]，
         // 续接已有轮次时对话全被清空 —— 表现就是"换个知识点再回来，记录没了"。
         cur = { round: r.round, point: r.point, turns: r.turns || [], coach: r.coach || null };
-        selId = 0;
-        await reload();          // 服务端可能把别的对话归档了（一个点只留一个进行中）
+            await reload();          // 服务端可能把别的对话归档了（一个点只留一个进行中）
         view = 'talk';
         draw();
         if (r.resumed) toast('接着上次那一轮继续');
@@ -469,8 +466,7 @@
           body: JSON.stringify({ point_idx: idx, round_id: id })
         });
         cur = { round: r.round, point: r.point, turns: r.turns || [], coach: r.coach || null };
-        selId = 0;
-        await reload();          // 重新置为进行中会让原来那个归档 → 列表要跟着更新
+            await reload();          // 重新置为进行中会让原来那个归档 → 列表要跟着更新
         view = 'talk';
         draw();
         if (!cur.coach || !cur.coach.pending) askNext(true);
@@ -570,8 +566,7 @@
         body: JSON.stringify({ point_idx: idx, fresh: true })
       });
       cur = { round: r.round, point: r.point, turns: r.turns || [], coach: r.coach || null };
-      selId = 0;
-      await reload();          // 新对话要进历史列表（不然 rounds 还是旧的，列表里看不到它）
+        await reload();          // 新对话要进历史列表（不然 rounds 还是旧的，列表里看不到它）
       view = 'talk';
       draw();
       askNext(true);
@@ -606,8 +601,6 @@
       </div>
     </div>`;
   }
-  /* 解释之后接回自己的话 —— 那一块单独抽出来，两处渲染共用 */
-  const backHTML = (b) => `<div class="rsBack">刚才你问的那点，AI 答完了 —— 现在<b>轮到你用自己的话</b>说一遍：${esc(b)}</div>`;
   /* 当前该回的那一问：优先用服务端 pending（它才是"正等着你回答"的那一问） */
   function pendingAsk() {
     const c = coachState();
@@ -623,27 +616,11 @@
     /* 叫 askQ 不叫 ask：同名会把下面的 ask() 函数遮蔽掉，
        结果「不明白，问一句」按钮永远绑不上事件（点着没反应）。 */
     const askQ = pendingAsk();
-    const last = [...turns].reverse().find(x => {
-      const v = objOf(x.verdict);
-      return v.kind === 'ask';
-    });
     const spoke = turns.some(x => x.user_text);
-    const focusName = dimName(c.focus) || (c.focus === 'refine' ? '打磨' : '');
-    const allDone = !!(askQ && askQ.done) || (!askQ && c.dims.every(d => c.hit.indexOf(d.key) >= 0) && spoke);
-    /* 「解释完接回自己那句话」只渲染一处：pending 上有就用它，没有就用服务端独立存的那份。
-       之前挂在 askQ 分支里，结果那一问在时反而看不到 —— 正好是最常出现的情况。 */
-    const backQ = String((askQ && askQ.back) || c.back || '');
-    // 右栏解释哪一轮：默认跟着**最新一条**（就是你眼前这条），发送后自动选中新轮。
-    // 之前默认取「当前级最近一条」，结果右栏停在第 39 轮、中间栏已滚到第 44 轮，两边对不上。
-    // 归一化成具体 id，这样 turnHTML 能把它高亮出来 —— 右栏在讲哪条，中间栏得看得出来。
-    if (!selId && turns.length) selId = turns[turns.length - 1].id;
-    const selTurn = turns.find(t => t.id === selId) || turns[turns.length - 1] || last || null;
-    const selNo = turns.indexOf(selTurn) + 1;   // 1 起；0 = 没有
     const pos = positionOf(Number(cur.round.point_idx || 0));
 
     app.innerHTML = `<div class="jdPage rsPage rsTalkPage">
-      ${headHTML(focusName ? ('AI 当前关注「' + focusName + '」') : '让它读你说的话',
-        '<span class="chip rsChipConv" title="当前对话（可以改名）">🗨 ' + esc(convName(cur.round)) + '</span>')}
+      ${headHTML('', '<span class="chip rsChipConv" title="当前对话（可以改名）">🗨 ' + esc(convName(cur.round)) + '</span>')}
       <div class="rsPanes" id="rsPanes">
         <aside class="rsPane rsPaneQ">
           <div class="rsPaneT">🧭 上下文</div>
@@ -651,15 +628,11 @@
             <div class="rsPaneTopic">${esc(point.title || '')}</div>
             ${pos ? '<div class="rsPos">📍 ' + esc(pos) + '</div>' : ''}
             ${ladderHTML()}
-            <div class="rsQ">
-              <div class="rsQT"><span class="rsQBadge">${esc(focusName || '等你先说')}</span>${allDone ? '<span class="rsQFinal">可以收尾了</span>' : ''}</div>
-              ${askQ
-                ? `<p class="rsQQ">${esc(askQ.probe)}</p>
-                   ${askQ.read ? `<div class="rsRead">AI 判断你<i>${esc(askQ.read)}</i>，现在补这一块</div>` : ''}
-                   ${askQ.hint ? `<details class="rsKey" open><summary>刚才的提示（只给方向，不是答案）</summary><p>${esc((askQ.hint.probe || askQ.hint.say || ''))}</p></details>` : ''}`
-                : '<p class="rsQQ muted">' + (busy ? 'AI 正在读你说的话、想下一个问题…' : (spoke ? '覆盖清单上的点已经讲到了 —— 点「下一问」让它继续追问，或直接收尾。' : '点下面「下一问」，AI 会挑最该先弄清的那一条问你。')) + '</p>'}
-              ${backQ ? backHTML(backQ) : ''}
-            </div>
+            ${askQ && askQ.hint
+              ? `<div class="rsQ"><details class="rsKey" open><summary>刚才的提示（只给方向，不是答案）</summary><p>${esc((askQ.hint.probe || askQ.hint.say || ''))}</p></details></div>`
+              : (!askQ && !busy
+                ? '<p class="rsQQ muted">' + (spoke ? '覆盖清单上的点都讲到了 —— 点「下一问」让它继续追问，或直接收尾。' : '点下面「下一问」，AI 会挑最该先弄清的那一条问你。') + '</p>'
+                : '')}
           </div>
           <div class="rsNav">
             <button class="btn tiny" id="rsHint" title="不给答案，只把方向指出来">💡 卡住了</button>
@@ -693,31 +666,8 @@
             </div>
           </div>
         </section>
-        <div class="rsSplit" data-k="a"></div>
-
-        <aside class="rsPane rsPaneA">
-          <div class="rsPaneT">📋 解析反馈<span class="rsPaneN" id="rsAnWhich">${selNo ? '第 ' + selNo + ' 轮' : ''}</span></div>
-          <div class="rsPaneBody" id="rsAnalysis">${analysisHTML(selTurn)}</div>
-        </aside>
       </div>
     </div>`;
-
-    // 点对话里的任意一轮 → 右栏显示那一轮的解析；再点一次回到「跟随最新」
-    app.querySelectorAll('[data-rs-turn]').forEach(el => el.addEventListener('click', () => {
-      const id = Number(el.getAttribute('data-rs-turn'));
-      const list = cur.turns || [];
-      const lastId = list.length ? list[list.length - 1].id : 0;
-      selId = (selId === id) ? lastId : id;
-      app.querySelectorAll('[data-rs-turn]').forEach(x => x.classList.toggle('sel', Number(x.getAttribute('data-rs-turn')) === selId));
-      const t = list.find(x => x.id === selId) || selTurn;
-      const box = document.getElementById('rsAnalysis');
-      if (box) box.innerHTML = analysisHTML(t);
-      const which = document.getElementById('rsAnWhich');
-      if (which) {
-        const i = list.indexOf(t);
-        which.textContent = i >= 0 ? '第 ' + (i + 1) + ' 轮' : '';
-      }
-    }));
 
     const ta = document.getElementById('rsSay');
     ta.addEventListener('keydown', e => {
@@ -741,15 +691,15 @@
     setTimeout(() => { if (!busy) ta.focus(); }, 30);
   }
   /* ---------- 三栏宽度可拖动 ----------
-     宽度写在 CSS 变量 --rs-col-q / --rs-col-a 上，存在 localStorage。
+     宽度写在 CSS 变量 --rs-col-q 上，存在 localStorage。
      两侧都夹住，中栏永远留够宽度 —— 否则拖过头会把对话挤成一条缝。 */
   const COL_KEY = 'sierxing-restate-cols-v1';
-  const COL_DEF = { q: 300, a: 344 };
-  const COL_MIN = { q: 210, a: 236 };
+  const COL_DEF = { q: 320 };
+  const COL_MIN = { q: 210 };
   function colCfg() {
     let o = {};
     try { o = JSON.parse(localStorage.getItem(COL_KEY) || '{}') || {}; } catch (e) { o = {}; }
-    return { q: clampCol('q', o.q), a: clampCol('a', o.a) };
+    return { q: clampCol('q', o.q) };
   }
   function clampCol(k, v) {
     const n = Number(v);
@@ -759,7 +709,6 @@
     const c = cfg || colCfg(), el = document.getElementById('rsPanes');
     if (!el) return;
     el.style.setProperty('--rs-col-q', c.q + 'px');
-    el.style.setProperty('--rs-col-a', c.a + 'px');
   }
   function initSplit() {
     const el = document.getElementById('rsPanes');
@@ -772,17 +721,20 @@
         const k = h.getAttribute('data-k');
         const cfg = colCfg();
         const box = el.getBoundingClientRect();
-        // 非中间部分 = 两个把手(6px×2) + 面板之间的外边距(7px×2)
-        const chrome = 26;
+        // 只有一个把手(6px) + 中栏两侧的外边距(7px×2)
+        const chrome = 20;
         const startX = e.clientX, startW = cfg[k];
-        const other = k === 'q' ? cfg.a : cfg.q;
-        const MID_MIN = 360;
-        const maxW = Math.max(COL_MIN[k], box.width - chrome - other - MID_MIN);
+        const MID_MIN = 420;
+        const maxW = Math.max(COL_MIN[k], box.width - chrome - MID_MIN);
         document.body.classList.add('rsResizing');
-        h.setPointerCapture && h.setPointerCapture(e.pointerId);
+        /* setPointerCapture 对合成事件会抛（pointerId 不存在）—— 包一层，
+           免得监听器没绑上、拖动直接失效 */
+        try { h.setPointerCapture && h.setPointerCapture(e.pointerId); } catch (err) {}
         const move = ev => {
           const d = ev.clientX - startX;
-          cfg[k] = Math.min(Math.max(k === 'q' ? startW - d : startW + d, COL_MIN[k]), maxW);
+          /* 把手就在左栏右边：往右拖(d>0)左栏变宽、往左拖变窄。
+             以前写成 startW - d —— 方向是反的，往左拖左栏反而变宽、边界往右跑。 */
+          cfg[k] = Math.min(Math.max(startW + d, COL_MIN[k]), maxW);
           cfg[k] = Math.round(cfg[k]);
           applyCols(cfg);
         };
@@ -809,46 +761,6 @@
     const el = document.getElementById('rsThread');
     if (el) el.scrollTop = el.scrollHeight;
   }
-  /* 右栏：选中那一轮的判定 —— AI 判断你讲到了什么、还挑了哪个缺口。
-     正常对话里判定**一律不内联**（内联会把左边的题越推越远，几十轮后要滚一整屏才看得到问题），
-     只在右栏显示选中那一轮的；存档浏览没有右栏，所以那儿仍然内联摊开。 */
-  function analysisHTML(t) {
-    if (!t) {
-      return `<div class="rsAnNone"><span class="rsEmptyI">📋</span>
-        <p>你说完一段，这里会显示 AI 对<b>那一轮</b>的判断：你已经讲到哪些、它挑了哪个缺口接着问。</p>
-        <p class="muted">对话再长也不会把左边的题挤走，点中间任意一轮就能回看。</p></div>`;
-    }
-    let v = {};
-    v = objOf(t.verdict);
-    if (v.kind === 'chat') {
-      return `<div class="rsAnHead"><span class="rsAnStep">你问了一句</span>
-        <span class="rsAnWhen">${esc(String(t.created_at || '').slice(11, 16))}</span></div>`
-        + '<div class="rsAnChat"><b>你问的</b>' + esc(t.user_text) + '</div>'
-        + '<div class="rsAnReply mdBody">' + mdToHTML(t.ai_text) + '</div>';
-    }
-    if (v.kind === 'hint') {
-      return `<div class="rsAnHead"><span class="rsAnStep">💡 只给方向，不给答案</span>
-        <span class="rsAnWhen">${esc(String(t.created_at || '').slice(11, 16))}</span></div>`
-        + '<div class="rsAnReply mdBody">' + mdToHTML(t.ai_text || v.probe || '') + '</div>'
-        + '<div class="rsAnNext">它没有消耗当前那一问 —— 想好了直接回答就行。</div>';
-    }
-    const hitTxt = (v.hit || []).map(k => dimName(k) || k);
-    const head = `<div class="rsAnHead">
-      ${v.focus ? '<span class="rsAnStep">关注「' + esc(dimName(v.focus) || (v.focus === 'refine' ? '打磨' : v.focus)) + '」</span>' : ''}
-      ${hitTxt.length ? '<span class="rsAnTag ok">讲到 ' + hitTxt.length + ' 块</span>' : '<span class="rsAnTag warn">这块还没讲到</span>'}
-      <span class="rsAnWhen">${esc(String(t.created_at || '').slice(11, 16))}</span></div>`;
-    const cur = coachState();
-    const lastQ = cur.pending && cur.pending.probe === v.probe;
-    const hint = !lastQ ? ''
-      : (hitTxt.length
-        ? '<div class="rsAnNext">✅ 这几块你讲到了。AI 已经换了关注点 —— 左栏高亮的那一条就是它接下来要问的。</div>'
-        : '<div class="rsAnNext">还差一点。AI 只挑了<b>最关键的那个缺口</b>，按左栏那个问题再答一次就行。</div>');
-    return head + verdictHTML(v) + hint;
-  }
-
-  /* hist = 是否「存档浏览」（没有右栏，判定要内联摊开）。
-     正常对话里判定**一律不内联** —— 内联会把左边的题越推越远，
-     几十轮对话后用户要滚一整屏才看得到问题。 */
   function turnHTML(t, hist) {
     let v = {};
     v = objOf(t.verdict);
@@ -860,12 +772,10 @@
     const mark = isChat ? '<span class="rsTurnTag chat">问了一句</span>'
       : isHint ? '<span class="rsTurnTag hint">💡 提示</span>'
         : (v.focus ? '<span class="rsTurnTag ai">AI 关注「' + esc(focusLbl || v.focus) + '」</span>' : '');
-    const sel = !hist && selId === t.id ? ' sel' : '';
     const hd = `<div class="rsTurnHd">${mark}
       ${hitTxt.length && hist ? '<span class="rsStepTag">你讲到：' + esc(hitTxt.join('、')) + '</span>' : ''}
       ${v.step_t ? '<span class="rsStepTag">第 ' + ((Number(v.step_idx) || 0) + 1) + ' 级 · ' + esc(v.step_t) + '</span>' : ''}
       <span class="rsTurnTime">${esc(String(t.created_at || '').slice(11, 16))}</span>
-      ${hasV && !hist ? '<span class="rsTurnGo">看判定 ›</span>' : ''}
     </div>`;
     /* AI 的提问本身就是一轮（user_text 为空）→ 只画 AI 那一半，
        别留一个空的"我"气泡在那里 */
@@ -873,9 +783,10 @@
       ? `<div class="rsSay"><span class="rsWho">我</span><div class="rsBubble">${esc(t.user_text)}</div></div>` : '')
       + `<div class="rsAi"><span class="rsWho ai">AI</span><div class="rsBubble ai mdBody">${mdToHTML(t.ai_text)}</div></div>`;
     const cls = 'rsTurn' + (isChat ? ' chat' : (isHint ? ' hint' : (v.focus === 'refine' ? ' refine' : '')));
+    /* 历史（对话存档/历史）里仍把当时的判定一并摊开；当前对话里只留 AI 说的话，
+       判定那套已经在左栏的覆盖清单和掌握档位上了，不再重复一份。 */
     if (hist) return `<div class="${cls}">${hd}${bubble}${verdictHTML(v)}</div>`;
-    return `<div class="${cls}${sel}" data-rs-turn="${t.id}"${hasV ? ' title="点这轮看右栏判定"' : ''}>
-      ${hd}${bubble}</div>`;
+    return `<div class="${cls}">${hd}${bubble}</div>`;
   }
   /* 判定结果。
      之前把 hit / missed / wrong / 方向 一律平铺成整行，4-5 行下来 AI 的回复框
@@ -928,7 +839,6 @@
       });
       if (r.turns) cur.turns = r.turns; else if (r.turn) cur.turns.push(r.turn);
       if (r.coach) cur.coach = r.coach;
-      if (r.turn) selId = r.turn.id;
       /* 提示那一轮不进 pending，pending.hint 由服务端补；这里再兜一次，
          保证"刚才那条提示"永远挂在左栏那一问下面（刷新后也一样） */
       if (hint) adoptHint();
@@ -959,7 +869,6 @@
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text })
       });
       cur.turns.push(r.turn);
-      selId = r.turn.id;
       /* back 由服务端存进 coach.back，这里只把它显示出来 */
       if (r.back) { cur.coach = cur.coach || { hit: [], focus: '', pending: null }; cur.coach.back = r.back; }
       try { ta.value = ''; } catch (e) {}
