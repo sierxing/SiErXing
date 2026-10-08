@@ -1,14 +1,14 @@
 {
-  "version": "1.10.22",
-  "buildVer": "8f468f54065f",
-  "payload": "release/payload-1.10.22.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.22.sxar?ref=main",
+  "version": "1.10.23",
+  "buildVer": "5cc516f657b2",
+  "payload": "release/payload-1.10.23.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.23.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "55ab4b63c2608caecd1164467145d7391340c57d25af226ccebac0bf54ed53d0",
-  "size": 650686,
-  "unpackedSize": 2386704,
-  "publishedAt": "2026-10-08T09:45:10.954Z",
-  "notes": "新增组件「🎤 模拟面试」：把岗位 JD（可粘贴截图，AI 识别成文字）和你的项目路径交给 AI，它当面试官一轮轮问你、当场点评（好在哪/漏了什么/哪里说反了），最后给总评与补课清单",
+  "sha256": "57b915dd8d80850eb10d631cfc68c1111acade52dc14f454f4e309f9fa1d27fd",
+  "size": 650824,
+  "unpackedSize": 2387120,
+  "publishedAt": "2026-10-08T09:50:41.402Z",
+  "notes": "模拟面试：贴截图识别失败时报错说清是哪种原因（图不清晰 vs 模型不支持看图），不再一律甩「模型不支持」误导用户去改设置",
   "exeRequired": false
 }

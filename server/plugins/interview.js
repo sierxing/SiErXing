@@ -477,11 +477,16 @@ module.exports = {
             });
           } catch (e) {
             const msg = String((e && e.message) || e);
-            /* 最常见的坑：识图模型配的是纯文本模型 → 接口直接拒掉图片。
-               报错要说清「去改哪个设置」，别甩一句 API 400 让用户猜。 */
-            if (/image|vision|multimodal|content|400|不支持|invalid/i.test(msg)) {
-              throw new Error('这个模型读不了图（当前识图模型：' + (vision || '未配置') + '）。'
-                + '去「设置 → AI 接入 → 识图模型」换一个支持视觉的模型；或者干脆把 JD 的文字直接贴进来（一样能用）。'
+            /* 两种失败要分开说，否则会误导（实测踩过：拿一张 1×1 的图去试，
+               报的是 "unsupported image"，如果一律说成"模型不支持看图"，
+               用户会白跑一趟设置页去换模型）。 */
+            if (/unsupported image|invalid.{0,24}image|image.{0,24}invalid|too small/i.test(msg)) {
+              throw new Error('这张图识别不了（太小、格式不支持，或者截图不完整）。'
+                + '换一张清晰的招聘截图再试；也可以直接把 JD 文字贴进来。原始报错：' + msg.slice(0, 120));
+            }
+            if (/vision|multimodal|不支持.*图|image/i.test(msg)) {
+              throw new Error('这个模型好像读不了图（当前识图模型：' + (vision || '未配置') + '）。'
+                + '去「设置 → AI 接入 → 识图模型」换一个支持视觉的模型；或者直接把 JD 文字贴进来（一样能用）。'
                 + ' 原始报错：' + msg.slice(0, 120));
             }
             throw e;

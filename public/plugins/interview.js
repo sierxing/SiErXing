@@ -184,7 +184,7 @@
                <div class="ivPasteI">📋</div>
                <div><b>点这里，然后 Ctrl/⌘+V 粘贴招聘截图</b></div>
                <div class="muted">也支持直接粘贴文字；可拖入图片。截图由 AI 识别成文字，图片本身不保存。</div>
-               <div class="muted">贴截图需要「设置 → AI 接入 → 识图模型」配一个支持视觉的模型；没配就直接贴文字，效果一样。</div>
+               <div class="muted">截图识别不了时，去「设置 → AI 接入 → 识图模型」换个支持看图的模型；或者直接贴文字，效果一样。</div>
              </div>`}
       </div>
     </div>`;
