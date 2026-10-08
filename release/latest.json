@@ -1,14 +1,14 @@
 {
-  "version": "1.10.19",
-  "buildVer": "7cfbc7d145cf",
-  "payload": "release/payload-1.10.19.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.19.sxar?ref=main",
+  "version": "1.10.20",
+  "buildVer": "5a493af260a3",
+  "payload": "release/payload-1.10.20.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.20.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "f31bb6434e91df931ae33b22427258335fb28cc88a85ef26259e870e5af6fcd8",
-  "size": 629901,
-  "unpackedSize": 2311772,
-  "publishedAt": "2026-10-07T14:56:42.570Z",
-  "notes": "修「用自己的话」对话驴头不对马嘴：每答一句不再重复出现两遍、AI 不再把上一轮的旧话贴回来；AI 现在能看到完整往来（含自己问过什么）不会重复问；连续说不知道会给个能踩住的台阶。另修同步导入可能静默丢数据",
+  "sha256": "ea4adbbe252b921279530aec4ee7253c5bae053e9614d0fcf363069fa88685d7",
+  "size": 632410,
+  "unpackedSize": 2320623,
+  "publishedAt": "2026-10-08T03:54:00.845Z",
+  "notes": "修每日刷题「今日复习」AI 永远排不出来：提示词给的是题号、解析却拿内部 id 去配（100 道里 99 道不同），每道都被当成编的 id 丢掉；另加「复习池」点开看全部题目卡片，可手动加入今日复习",
   "exeRequired": false
 }

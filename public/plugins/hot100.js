@@ -149,7 +149,8 @@ function drawDailyPage() {
   </div>
   <div class="secCard">
     <div class="secHead"><span>🔁 今日复习</span><span class="chip gray">AI 按你的遗忘风险排</span><div class="spacer"></div>
-      ${pool ? `<span class="muted" style="font-size:12px;">复习池 ${pool} 道${rv.overdue ? ' · ' + rv.overdue + ' 道该复习了' : ''}</span>` : ''}
+      ${pool ? `<button class="pfPoolBtn" id="poolBtn" title="看看池子里到底有哪几道，可以自己加进今天">
+        🔁 复习池 <b>${pool}</b> 道${rv.overdue ? ' · <i>' + rv.overdue + ' 道该复习了</i>' : ''} <span class="pfPoolMore">看全部 ›</span></button>` : ''}
       <button class="btn tiny" id="planBtn" ${pool ? '' : 'disabled'}>${plan ? '换个排法' : 'AI 排今天练哪几道'}</button></div>
     ${plan ? `
       <div class="pfPlan">
@@ -253,6 +254,9 @@ function drawDailyPage() {
       toast(done ? '已标记完成 ✓' : '已取消完成');
     } catch (e) { toast(e.message); }
   }));
+  /* 复习池：点开看池子里有哪几道（卡片），可以手动加进今天的复习 */
+  const poolBtn = document.getElementById('poolBtn');
+  if (poolBtn) poolBtn.addEventListener('click', () => openReviewPool(g));
   /* 排期：AI 现排一份（挑不出来按风险分兜底），已练完的不会被覆盖 */
   const planBtn = document.getElementById('planBtn');
   if (planBtn) planBtn.addEventListener('click', async () => {
@@ -986,6 +990,60 @@ function pitCardHTML(c) {
            <button class="pfBtn sm ghost danger" data-pitdel="${c.id}" title="删掉这张卡">删除</button>`}
     </div>
   </div>`;
+}
+/** 复习池：点开看池子里到底有哪几道（卡片形式），可以手动加进今天的复习。
+ *  以前这里只有一句「复习池 5 道」的死数字 —— 用户知道有 5 道，却看不见是哪 5 道。 */
+async function openReviewPool(g) {
+  const L = openLayer('🔁 复习池', '按遗忘风险从高到低', { foot: false });
+  const cardHTML = p => {
+    const days = (p.days === null || p.days === undefined)
+      ? '还没复习过' : (p.days === 0 ? '今天刚练过' : '距上次复习 ' + p.days + ' 天');
+    return `<div class="pfPoolCard${p.in_today ? ' in' : ''}">
+      <div class="pfTaskTop">${diffChipHTML(p.difficulty)}
+        <span class="pfTaskT"><b>#${p.fid}</b> ${esc(p.title || '')}</span></div>
+      <div class="pfTaskTop"><span class="pfSub">遗忘风险</span>
+        <span class="pfChip risk ${riskClass(p.risk)}">${p.risk}</span>
+        <div class="pfBar ${riskClass(p.risk)}"><i style="width:${Math.max(4, Math.min(100, Number(p.risk) || 0))}%"></i></div></div>
+      <div class="pfTaskWhy">${esc((p.why || []).join('、'))}</div>
+      <div class="pfPoolMeta">${esc(days)} · 复习 ${p.reviews} 次${p.last_score >= 0 ? ' · 上次盲写 ' + p.last_score + '%' : ' · 没盲写验证过'}</div>
+      ${p.pitfall_open ? `<div><span class="pfChip hit">⚠ ${p.pitfall_open} 张易错卡未攻克</span></div>` : ''}
+      <div class="pfTaskFoot">
+        ${p.done_today ? '<span class="pfChip fixed">✓ 今天练过了</span>'
+          : (p.in_today ? '<span class="pfChip">已在今日清单</span>' : '')}
+        <div class="spacer"></div>
+        ${p.in_today ? '' : `<button class="pfBtn sm" data-pooladd="${p.pid}">加入今日复习</button>`}
+        <a class="pfBtn sm go" href="#/p/${p.pid}">去练 →</a>
+      </div>
+    </div>`;
+  };
+  const render = async () => {
+    L.body.innerHTML = '<div class="pfEmpty">加载…</div>';
+    let d = null;
+    try { d = await api('/api/reviews/pool?goal_id=' + g.id); }
+    catch (e) { L.body.innerHTML = '<div class="pfEmpty">读不到复习池：' + esc(e.message) + '</div>'; return; }
+    if (!d.items.length) {
+      L.body.innerHTML = '<div class="pfEmpty"><span class="pfEi">🔁</span>复习池还是空的。<br>做对一道题就会自动进来（记一次「通过」即可）。</div>';
+      return;
+    }
+    L.body.innerHTML = `<div class="pfPool">
+      <div class="pfPoolTop">共 <b>${d.pool}</b> 道${d.overdue ? ' · <b>' + d.overdue + '</b> 道风险偏高该复习了' : ''}
+        <div class="spacer"></div><span class="pfSub">风险高的先练；想练哪道也可以自己加</span></div>
+      <div class="pfPoolGrid">${d.items.map(cardHTML).join('')}</div></div>`;
+    L.body.querySelectorAll('[data-pooladd]').forEach(b => b.addEventListener('click', async () => {
+      const pid = Number(b.getAttribute('data-pooladd'));
+      b.disabled = true; b.textContent = '加入中…';
+      try {
+        const r = await api('/api/reviews/plan/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ goal_id: g.id, pid }) });
+        state.review = await api('/api/reviews/plan?goal_id=' + g.id);
+        drawDailyPage();
+        toast(r.already ? '这道已经在今天的清单里了' : '已加入今日复习');
+        await render();
+      } catch (e) { toast(e.message); b.disabled = false; b.textContent = '加入今日复习'; }
+    }));
+    /* 点「去练」直接跳题目页，顺手把浮层收掉（不然它盖在题目页上） */
+    L.body.querySelectorAll('a.pfBtn.go').forEach(a => a.addEventListener('click', () => L.close()));
+  };
+  await render();
 }
 /** 通用浮层。返回 {mask, win, body, foot, close} */
 function openLayer(title, sub, opts) {

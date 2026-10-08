@@ -800,6 +800,57 @@ module.exports = {
     }
   },
   {
+    /* 复习池明细：给"复习池 N 道"点开看的卡片列表。
+       单开一个接口而不是塞进 /api/reviews/plan —— 那个是主视图每次都要拉的，
+       把 40 道题的明细塞进去纯属浪费。 */
+    method: 'GET', pattern: /^\/api\/reviews\/pool$/,
+    handler: async (req, res, u, ctx) => {
+      if (u.pathname !== '/api/reviews/pool' || req.method !== 'GET') return false;
+      const gid = Number(u.searchParams.get('goal_id')) || 0;
+      const cands = reviewCandidates(gid);
+      const plan = todayPlan(gid);
+      const inPlan = new Map();
+      for (const it of (plan ? plan.items : [])) inPlan.set(Number(it.pid), !!it.done);
+      return sendJSON(res, 200, {
+        pool: cands.length,
+        overdue: cands.filter(c => c.risk >= 60).length,
+        items: cands.map(c => ({
+          pid: c.problem_id, fid: c.fid, title: c.title, difficulty: c.difficulty,
+          risk: c.risk, why: c.why || [],
+          days: c.last_review_at ? daysSince(c.last_review_at) : null,
+          reviews: c.reviews, attempts: c.attempts, passed: c.passed,
+          last_score: c.last_score, last_verdict: c.last_verdict || '',
+          pitfall_open: c.pitfall_open || 0, pitfall_weight: c.pitfall_weight || 0,
+          in_today: inPlan.has(c.problem_id),
+          done_today: inPlan.get(c.problem_id) === true
+        }))
+      });
+    }
+  },
+  {
+    /* 手动把一道题加进今天的复习清单（用户自己点的，不受 AI 的"宁少勿多"约束） */
+    method: 'POST', pattern: /^\/api\/reviews\/plan\/add$/,
+    handler: async (req, res, u, ctx) => {
+      if (u.pathname !== '/api/reviews/plan/add' || req.method !== 'POST') return false;
+      const body = await readBody(req).catch(() => ({}));
+      const gid = Number(body.goal_id) || 0;
+      const pid = Number(body.pid);
+      const c = reviewCandidates(gid).find(x => x.problem_id === pid);
+      if (!c) return sendJSON(res, 404, { error: '这道题不在复习池里' });
+      const plan = todayPlan(gid);
+      const items = plan ? plan.items.slice() : [];
+      if (items.some(x => Number(x.pid) === pid)) return sendJSON(res, 200, { plan, already: true });
+      /* 今天已经练过的那些先留着；新加的接在后面 */
+      if (items.length >= 12) return sendJSON(res, 400, { error: '今天已经排了 12 道，够多了 —— 先练掉几道再加' });
+      items.push({
+        pid, reason: '你自己加进来的（' + (c.why[0] || '想再练一遍') + '）',
+        risk: c.risk, fid: c.fid, title: c.title, difficulty: c.difficulty,
+        pitfall_open: c.pitfall_open, last_score: c.last_score, done: false, at: ''
+      });
+      return sendJSON(res, 200, { plan: savePlan(gid, items, plan ? plan.note : ''), added: pid });
+    }
+  },
+  {
     /* 重新排（AI 出主意；挑不出来按风险分兜底） */
     method: 'POST', pattern: /^\/api\/reviews\/plan$/,
     handler: async (req, res, u, ctx) => {
@@ -1904,7 +1955,8 @@ async function planTodayReviews(goalId, size) {
     '- 已经掌握牢（风险 <20）的一律不要排。',
     '输出格式（严格）：只输出一个 JSON 对象，不要代码围栏、不要额外文字。',
     '{"note":"今天整体状况的一句话点评（像教练，别超过 40 字）",',
-    ' "picks":[{"id":题目id,"reason":"为什么今天该练它（不超过 25 字，要具体，点出风险来源）"}]}', '',
+    ' "picks":[{"fid":题号,"reason":"为什么今天该练它（不超过 25 字，要具体，点出风险来源）"}]}',
+    '（fid 就是候选行里 # 后面那个数字，原样填，别自己编号、别改成数组下标）', '',
     '=== 候选（按遗忘风险从高到低） ===',
     pool.map(line).join('\n'), '',
     '注意：风险分只是参考，你也要看这些题的知识点是否成串、是不是同一个坑反复踩。现在给出 JSON。'
@@ -1916,14 +1968,21 @@ async function planTodayReviews(goalId, size) {
     if (!j) throw new Error('AI 没给出 JSON');
     note = String(j.note || '').slice(0, 200);
     const raw = Array.isArray(j.picks) ? j.picks : [];
+    /* 候选行给 AI 看的是「题号」（#49 这种，即 fid），它返回的自然是题号。
+       以前却拿 problem_id 去配 —— 100 道题里 99 道 id≠fid，于是每一道都被
+       当成"AI 编的 id"丢掉，每次都退回规则兜底（用户看到的"AI 没选出有效的题"）。
+       现在两种都收，fid 优先；配上以后统一换算成内部的 problem_id 存进清单。 */
+    const byFid = new Map(pool.map(c => [String(c.fid), c]));
+    const byPid = new Map(pool.map(c => [String(c.problem_id), c]));
     const seen = new Set();
     picks = [];
     for (const p of raw) {
-      const id = Number(p && p.id);
-      const c = pool.find(x => x.problem_id === id);
-      if (!c || seen.has(id)) continue;      // AI 编了 id 或重复挑同一道 → 丢掉
-      seen.add(id);
-      picks.push({ pid: id, reason: String(p.reason || '').slice(0, 120) || c.why.join('、'), risk: c.risk, fid: c.fid, title: c.title, difficulty: c.difficulty, pitfall_open: c.pitfall_open, last_score: c.last_score });
+      const rawKey = (p && p.fid != null) ? p.fid : (p && p.id);
+      const key = String(rawKey == null ? '' : rawKey).trim();
+      const c = byFid.get(key) || byPid.get(key);
+      if (!c || seen.has(c.problem_id)) continue;      // AI 编了题号或重复挑同一道 → 丢掉
+      seen.add(c.problem_id);
+      picks.push({ pid: c.problem_id, reason: String(p.reason || '').slice(0, 120) || c.why.join('、'), risk: c.risk, fid: c.fid, title: c.title, difficulty: c.difficulty, pitfall_open: c.pitfall_open, last_score: c.last_score });
       if (picks.length >= n) break;
     }
     if (!picks.length) throw new Error('AI 没选出有效的题');
