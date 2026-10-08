@@ -131,7 +131,7 @@
             <span class="rsConvName">${esc(sessName(s))}</span>
             ${statusTag(s)}
             <span class="rsConvMeta">${Number(s.rounds) || 0} 轮${s.score >= 0 ? ' · ' + s.score + ' 分' : ''} · ${esc(fmtTime(s.updated_at || s.created_at, true))}
-              ${s.has_jd ? ' · 有JD' : ''}${s.has_project ? ' · 有项目' : ''}</span>
+              ${s.has_jd ? ' · 有JD' : ''}${s.has_project ? ' · 有项目' : ''}${Number(s.remedied) ? ' · 📖补救 ' + s.remedied + ' 题' : ''}</span>
             <span class="rsConvActs">
               <button class="btn tiny primary" data-ivopen="${s.id}">${statusOf(s) === 'run' ? '继续' : '打开'}</button>
               <button class="btn tiny" data-ivedit="${s.id}" title="重命名">✏️</button>
@@ -352,16 +352,32 @@
       ${(v.wrong || []).length ? `<div class="ivFbWrong">${v.wrong.map(w => '<div><b>你说的</b>' + esc(w.said || '—') + ' <b>→ 正确</b>' + esc(w.right || '—') + '</div>').join('')}</div>` : ''}
     </div>`;
   }
-  function turnHTML(t) {
+  /* opts.lastAskId：当前正等着回答的那道题 —— 只有它有「不会，讲一下」。
+     opts.retryable：讲解完还没答，可以「换个问法再问一遍」。 */
+  function turnHTML(t, opts) {
+    const o = opts || {};
     if (t.role === 'answer') {
       return `<div class="rsTurn">
         <div class="rsSay"><span class="rsWho">我</span><div class="rsBubble">${esc(t.text)}</div></div>
         ${verdictHTML(objOf(t.verdict))}
       </div>`;
     }
+    if (t.role === 'explain') {
+      return `<div class="rsTurn ivExplainTurn">
+        <div class="rsTurnHd"><span class="rsTurnTag explain">📖 现场讲解</span>
+          <span class="rsTurnTime">${esc(fmtTime(t.created_at))}</span></div>
+        <div class="rsAi"><span class="rsWho ai">AI</span><div class="rsBubble ai mdBody ivExplainBubble">${mdToHTML(t.text)}</div></div>
+        ${o.retryable ? `<div class="ivExplainActs">
+          <button class="btn tiny" data-ivretry="${t.id}">🔁 换个问法再问一遍</button>
+          <span class="muted">或者直接用刚讲的思路，在下面回答这道题</span>
+        </div>` : ''}
+      </div>`;
+    }
+    /* ask */
     return `<div class="rsTurn">
       <div class="rsTurnHd"><span class="rsTurnTag ai">面试官</span>
-        <span class="rsTurnTime">${esc(fmtTime(t.created_at))}</span></div>
+        <span class="rsTurnTime">${esc(fmtTime(t.created_at))}</span>
+        ${(o.canExplain && Number(t.id) === Number(o.lastAskId)) ? `<button class="ivAskWhy" data-ivexplain="${t.id}" title="不会就点这里：切到教学，把这道题讲明白，再让你答一遍">🤔 不会，讲一下</button>` : ''}</div>
       <div class="rsAi"><span class="rsWho ai">AI</span><div class="rsBubble ai mdBody">${mdToHTML(t.text)}</div></div>
     </div>`;
   }
@@ -371,7 +387,12 @@
     const d = digestOf(s);
     const asked = turns.filter(t => t.role === 'ask').length;
     const answered = turns.filter(t => t.role === 'answer').length;
-    const waiting = turns.length && turns[turns.length - 1].role === 'ask';
+    const lastTurn = turns.length ? turns[turns.length - 1] : null;
+    /* 球在求职者这边：最后一条是问题，或者刚讲完（讲完就该他答了） */
+    const waiting = !!lastTurn && (lastTurn.role === 'ask' || lastTurn.role === 'explain');
+    const lastAsk = turns.slice().reverse().find(t => t.role === 'ask') || null;
+    const canExplain = !!lastAsk && waiting && lastTurn.role === 'ask' && !busy;
+    const retryable = !!lastTurn && lastTurn.role === 'explain' && !busy;
     app.innerHTML = `<div class="jdPage ivPage ivRunPage">
       ${headHTML(sessName(s), '<span class="chip rsChipConv">🎤 第 ' + Math.min(asked, nf(s.max_rounds)) + '/' + (nf(s.max_rounds) || 8) + ' 问</span>')}
       <div class="ivPanes">
@@ -393,10 +414,10 @@
           <div class="rsNavFoot"><button class="rsLink" id="ivHist2">← 历史面试（${sessions.length}）</button></div>
         </aside>
         <section class="ivPaneC">
-          <div class="rsThread" id="ivThread">${turns.length ? turns.map(turnHTML).join('') : '<div class="rsEmpty">面试还没开始</div>'}</div>
+          <div class="rsThread" id="ivThread">${turns.length ? turns.map(t => turnHTML(t, { lastAskId: lastAsk && lastAsk.id, canExplain, retryable })).join('') : '<div class="rsEmpty">面试还没开始</div>'}</div>
           ${busy ? `<div class="rsBusy" id="ivBusyTxt">${esc(busyMsg)}</div>` : ''}
           <div class="rsInput">
-            <textarea id="ivSay" rows="3" placeholder="像真的面试一样回答（Ctrl/⌘+Enter 发送）。也可以反问面试官。" ${waiting ? '' : 'disabled'}></textarea>
+            <textarea id="ivSay" rows="3" placeholder="${lastTurn && lastTurn.role === 'explain' ? '用刚讲的思路回答这道题（也可以点上面「换个问法再问一遍」）' : '像真的面试一样回答（Ctrl/⌘+Enter 发送）。也可以反问面试官。'}" ${waiting ? '' : 'disabled'}></textarea>
             <div class="rsInputBtns">
               <button class="btn primary" id="ivSend" ${(!waiting || busy) ? 'disabled' : ''}>${busy ? '面试官在听…' : (waiting ? '回答' : '等面试官提问…')}</button>
               <span class="muted">${waiting ? '答完它当场点评，再问下一题' : ''}</span>
@@ -412,6 +433,21 @@
     }
     const sd = document.getElementById('ivSend');
     if (sd) sd.addEventListener('click', sendAnswer);
+    /* 现场补救：不会 → 单独讲一遍（不计轮次，不算他答过） */
+    app.querySelectorAll('[data-ivexplain]').forEach(btn => btn.addEventListener('click', () => {
+      const id = Number(btn.getAttribute('data-ivexplain'));
+      act('面试官切到教学，正在把这道题讲明白…', async () => {
+        const r = await api('/api/interviews/' + cur.session.id + '/explain', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ turn_id: id }) });
+        cur.session = r.session; cur.turns = r.turns || [];
+      });
+    }));
+    /* 讲完换个问法再问一遍 */
+    app.querySelectorAll('[data-ivretry]').forEach(btn => btn.addEventListener('click', () => {
+      act('正在换个问法…', async () => {
+        const r = await api('/api/interviews/' + cur.session.id + '/retry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        cur.session = r.session; cur.turns = r.turns || [];
+      });
+    }));
     const rp = document.getElementById('ivReport');
     if (rp) rp.addEventListener('click', () => act('面试官正在写总评…', async () => {
       const r = await api('/api/interviews/' + cur.session.id + '/report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
@@ -467,9 +503,13 @@
       ${(rp.strengths || []).length ? `<div class="rsSec"><div class="rsSecT">✅ 长处</div><div class="ivChips">${rp.strengths.map(x => '<span class="pfChip hit">' + esc(x) + '</span>').join('')}</div></div>` : ''}
       ${(rp.weak || []).length ? `<div class="rsSec"><div class="rsSecT">⚠️ 最该补的</div><div class="ivWeak">${rp.weak.map((x, i) => '<div class="ivWeakI"><b>' + (i + 1) + '</b><span>' + esc(x) + '</span></div>').join('')}</div></div>` : ''}
       ${(rp.advice || []).length ? `<div class="rsSec"><div class="rsSecT">🧭 下一步怎么补</div><ul class="ivAdvice">${rp.advice.map(x => '<li>' + esc(x) + '</li>').join('')}</ul></div>` : ''}
+      ${(s.remedied || []).length ? `<div class="rsSec"><div class="rsSecT">📖 现场补救过的（${s.remedied.length} 题）</div>
+        <p class="muted" style="margin:0 0 8px;">这几道当场说不会、靠讲解才接住的 —— 不算真会，建议隔天自己再答一遍。</p>
+        <div class="ivWeak">${s.remedied.map((x, i) => '<div class="ivWeakI"><b>' + (i + 1) + '</b><span>' + esc(x.asked || '（题目）') + '</span></div>').join('')}</div>
+      </div>` : ''}
       <div class="rsSec">
         <div class="rsSecT">整场问答（${turns.filter(t => t.role === 'ask').length} 问）</div>
-        <div class="rsThread">${turns.map(turnHTML).join('')}</div>
+        <div class="rsThread">${turns.map(t => turnHTML(t, {})).join('')}</div>
       </div>
       <div class="toolbarRow">
         <button class="btn primary" id="ivAgain">再来一场</button>

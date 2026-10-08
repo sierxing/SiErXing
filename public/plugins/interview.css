@@ -115,3 +115,18 @@ body:has(.ivRunPage) .wrap{max-width:1400px;}
   .ivPaneC{height:auto; min-height:0;}
   .ivPaneC .rsThread{max-height:60vh;}
 }
+
+/* ---------- 现场补救：不会的题单独讲 ----------
+   面试里最该有的功能：卡住了就地讲明白，再让他答一遍，而不是干耗着。 */
+.ivAskWhy{
+  margin-left:auto; font-family:inherit; font-size:11.5px; cursor:pointer;
+  padding:3px 10px; border-radius:999px;
+  background:var(--bg); border:1px solid var(--border); color:var(--muted);
+}
+.ivAskWhy:hover{border-color:var(--accent); color:var(--accent); background:var(--accent-soft);}
+.rsTurnTag.explain{background:rgba(231,140,60,.14); color:var(--warn);}
+.ivExplainTurn .rsBubble.ai{
+  background:rgba(231,140,60,.07); border-color:rgba(231,140,60,.4);
+}
+.ivExplainActs{display:flex; align-items:center; gap:9px; flex-wrap:wrap; margin:8px 0 0 26px;}
+.ivExplainActs .muted{font-size:11.5px;}

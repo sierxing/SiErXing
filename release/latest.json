@@ -1,14 +1,14 @@
 {
-  "version": "1.10.23",
-  "buildVer": "5cc516f657b2",
-  "payload": "release/payload-1.10.23.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.23.sxar?ref=main",
+  "version": "1.10.24",
+  "buildVer": "e8c7d17c8f05",
+  "payload": "release/payload-1.10.24.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.24.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "57b915dd8d80850eb10d631cfc68c1111acade52dc14f454f4e309f9fa1d27fd",
-  "size": 650824,
-  "unpackedSize": 2387120,
-  "publishedAt": "2026-10-08T09:50:41.402Z",
-  "notes": "模拟面试：贴截图识别失败时报错说清是哪种原因（图不清晰 vs 模型不支持看图），不再一律甩「模型不支持」误导用户去改设置",
+  "sha256": "f0b66e11a8db215ecf5e051ca8aa14d42f854bc663cb83fd0fec7b834284861c",
+  "size": 654505,
+  "unpackedSize": 2400329,
+  "publishedAt": "2026-10-08T13:12:22.398Z",
+  "notes": "模拟面试加「现场补救」：遇到不会的题点「🤔 不会，讲一下」，AI 当场切到教学把这道题讲明白（这题在考什么/正面答案/面试里30秒怎么答/最常见的错误答法），讲完可以直接答或点「换个问法再问一遍」；补救过的题在总评里单独列出",
   "exeRequired": false
 }

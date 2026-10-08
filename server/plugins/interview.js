@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS interview_sessions (
   focus TEXT NOT NULL DEFAULT '',            /* 这次面试重点问什么（一句话） */
   plan TEXT NOT NULL DEFAULT '[]',           /* 考点清单：[{key,name,why,level}] */
   covered TEXT NOT NULL DEFAULT '[]',        /* 已经问过的考点 key */
+  remedied TEXT NOT NULL DEFAULT '[]',       /* 现场讲解补救过的题：[{turn,point,asked}] */
   rounds INTEGER NOT NULL DEFAULT 0,
   max_rounds INTEGER NOT NULL DEFAULT 8,
   summary TEXT NOT NULL DEFAULT '',
@@ -103,6 +104,7 @@ function listSessions(goalId) {
   return rows.map(r => ({
     id: r.id, title: r.title, status: r.status, rounds: r.rounds, max_rounds: r.max_rounds,
     score: r.score, has_jd: !!String(r.jd_text || '').trim(), has_project: !!String(r.project_digest || '').trim(),
+    remedied: (safeParse(r.remedied) || []).length,
     project_path: r.project_path, created_at: r.created_at, updated_at: r.updated_at
   }));
 }
@@ -112,6 +114,7 @@ function sessOut(r) {
   const o = Object.assign({}, r);
   o.plan = safeParse(r.plan) || [];
   o.covered = safeParse(r.covered) || [];
+  o.remedied = safeParse(r.remedied) || [];
   o.project_files = safeParse(r.project_files) || [];
   o.report = safeParse(r.report) || {};
   return o;
@@ -295,6 +298,50 @@ function buildInterviewPrompt(s, goal, turns, userText, maxed) {
   return L.join('\n');
 }
 
+/* ---------- 现场补救：不会的题单独讲 ---------- */
+/* 这一轮**切到教学**：目标是让他马上能用自己的话答出来，而不是听一堂课。
+   输出纯文本（Markdown）—— 长 prose 塞 JSON 容易被写断（见 1.10.17 的教训）。 */
+function buildExplainPrompt(s, goal, turn, point) {
+  const L = [];
+  L.push('你现在**从面试官切到教学**：求职者说这道题他不会，你要现场把他讲会。');
+  L.push('目标是让他**马上能用自己的话答出来**，不是听一堂完整的课。');
+  L.push('');
+  L.push('【刚才那道题】');
+  L.push(clip(turn.text, 900));
+  if (point) L.push('【它考的考点】' + point.name + (point.why ? '（' + point.why + '）' : '') + '｜难度 ' + (point.level || '进阶'));
+  L.push('');
+  L.push('【他的背景】');
+  L.push('目标：' + clip((goal && goal.title) || '（未填）', 100));
+  if (String(s.jd_text || '').trim()) L.push('岗位 JD：' + clip(s.jd_text, 700));
+  if (String(s.project_digest || '').trim()) L.push('他的项目：' + clip(s.project_digest, 900));
+  L.push('');
+  L.push('【按这个结构讲（不要写小标题以外的废话）】');
+  L.push('1. 这题到底在考什么 —— 一两句点破（别复述题目）；');
+  L.push('2. 正面把答案讲出来：结论 → 为什么 → 具体怎么做/举个例子。涉及代码用 ``` 围栏，贴关键几行就行；');
+  L.push('3. **面试里该怎么答** —— 给一个 30 秒能说完的版本（分点或"结论+一句理由+一个例子"），让他能直接照着说；');
+  L.push('4. 最常见的错误答法是什么（一句话）。');
+  L.push('');
+  L.push('要求：只讲这一题相关的，不要扩散成整章教程；长度 400~700 字；用大白话，少堆术语；');
+  L.push('如果他项目里正好有对应的东西，就指着他的项目讲（那样他更容易记住）。');
+  L.push('直接输出正文（Markdown），不要 JSON、不要代码围栏包整篇。');
+  return L.join('\n');
+}
+/* 讲完之后换个问法再问一遍 —— 检验他到底接住没有 */
+function buildRetryPrompt(s, goal, turn, explainText) {
+  const L = [];
+  L.push('你是面试官。刚才这题他没答上来，你已经在上一轮**给他讲过**了。');
+  L.push('现在**把同一道题换个问法再问一遍**，检验他到底接住没有。');
+  L.push('');
+  L.push('【原来那道题】' + clip(turn.text, 700));
+  L.push('【你刚才的讲解（要点）】' + clip(explainText, 1200));
+  L.push('');
+  L.push('【要求】');
+  L.push('1. 考的必须是同一个考点，但**问法要变**：换成具体场景、给个例子让他判断、或者让他对比/取舍；');
+  L.push('2. 别提示答案、别说"我刚讲过"；');
+  L.push('3. 只输出这一个问题本身（可以带一句很短的前置语），不要 JSON、不要点评。');
+  return L.join('\n');
+}
+
 /* ---------- 总评 ---------- */
 function buildReportPrompt(s, goal, turns) {
   const L = [];
@@ -304,10 +351,19 @@ function buildReportPrompt(s, goal, turns) {
   L.push('【岗位 JD】' + clip(s.jd_text, 1200));
   if (String(s.project_digest || '').trim()) L.push('【他的项目】' + clip(s.project_digest, 900));
   L.push('');
+  const remedied = safeParse(s.remedied) || [];
+  if (remedied.length) {
+    const plan = safeParse(s.plan) || [];
+    const names = remedied.map(x => { const p = plan.find(y => y.key === x.point); return p ? p.name : (x.point || '（未知考点）'); });
+    L.push('【这场里有 ' + remedied.length + ' 道题他当场说不会，是靠你现场讲解才接住的】' + names.join('、'));
+    L.push('总评里要**如实反映**这一点：这些不是"会"，是"刚补的"—— 归到最该补的短板里，并建议他隔天自测一遍。');
+    L.push('');
+  }
   L.push('【整场问答】');
   for (const t of (turns || [])) {
     if (t.role === 'ask') L.push('面试官：' + clip(t.text, 320));
     else if (t.role === 'answer') L.push('求职者：' + clip(t.text, 600));
+    else if (t.role === 'explain') L.push('（他答不上来，你现场讲解了：' + clip(t.text, 300) + '）');
     else if (t.role === 'feedback') L.push('（当场点评：' + clip(t.text, 240) + '）');
   }
   L.push('');
@@ -363,6 +419,11 @@ module.exports = {
   init(ctx) {
     bind(ctx);
     db.exec(SCHEMA);
+    /* 老库补列（1.10.22 建的表没有 remedied） */
+    try {
+      const c = db.prepare('PRAGMA table_info(interview_sessions)').all().map(x => x.name);
+      if (c.length && !c.includes('remedied')) db.exec("ALTER TABLE interview_sessions ADD COLUMN remedied TEXT NOT NULL DEFAULT '[]';");
+    } catch (e) {}
   },
 
   onGoalDelete(goalId, ctx) {
@@ -660,6 +721,80 @@ module.exports = {
             .run('ready_report', wrap || '这场先到这。点「给总评」看整场评价。', t, r.id);
         }
         return sendJSON(res, 200, { session: sessOut(sessOf(r.id)), turns: turnsOf(r.id), done });
+      }
+    },
+    /* 现场补救①：这道题不会 → 单独讲一遍（不计入轮次，不算他答过） */
+    {
+      method: 'POST', pattern: /^\/api\/interviews\/(\d+)\/explain$/,
+      handler: async (req, res, u) => {
+        const m = u.pathname.match(/^\/api\/interviews\/(\d+)\/explain$/);
+        const r = sessOf(m[1]);
+        if (!r) return sendJSON(res, 404, { error: '这场面试不存在' });
+        const body = await readBody(req).catch(() => ({}));
+        const all = turnsOf(r.id);
+        const turnId = Number(body.turn_id) || (all.slice().reverse().find(t => t.role === 'ask') || {}).id || 0;
+        const askTurn = all.find(t => Number(t.id) === turnId && t.role === 'ask');
+        if (!askTurn) return sendJSON(res, 404, { error: '找不到那道题' });
+        const av = safeParse(askTurn.verdict) || {};
+        const plan = safeParse(r.plan) || [];
+        const point = plan.find(p => p.key === av.point) || null;
+        const goal = (getGoal && getGoal(r.goal_id)) || null;
+        const txt = await aiJob({
+          title: '现场讲解 · ' + clip(point ? point.name : '这道题', 20), note: clip(r.title || '模拟面试', 40),
+          goalId: r.goal_id, nodeId: r.node_id,
+          message: '面试官切到教学，正在把这道题讲明白',
+          run: signal => aiText(buildExplainPrompt(r, goal, askTurn, point), currentModel(), 300000, null, signal)
+        });
+        if (!sessOf(r.id)) return sendJSON(res, 404, { error: '这场面试已经被删除了' });
+        const text = clip(txt, 6000);
+        if (!text) throw new Error('讲解没生成出来，点重试再来一次');
+        const now = nowISO();
+        const seq = turnsOf(r.id).length + 1;
+        db.prepare('INSERT INTO interview_turns (session_id,seq,role,text,verdict,created_at) VALUES (?,?,?,?,?,?)')
+          .run(r.id, seq, 'explain', text, JSON.stringify({ point: av.point || '', for_turn: askTurn.id }), now);
+        /* 记进 remedied：总评要据此说清"哪些是刚补的、不是真会" */
+        const remedied = safeParse(r.remedied) || [];
+        if (!remedied.some(x => Number(x.turn) === Number(askTurn.id))) {
+          remedied.push({ turn: askTurn.id, point: av.point || '', asked: clip(askTurn.text, 120) });
+          db.prepare('UPDATE interview_sessions SET remedied = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(remedied), now, r.id);
+        } else {
+          touch(r.id);
+        }
+        return sendJSON(res, 200, { session: sessOut(sessOf(r.id)), turns: turnsOf(r.id) });
+      }
+    },
+    /* 现场补救②：讲完换个问法再问一遍（检验他到底接住没有） */
+    {
+      method: 'POST', pattern: /^\/api\/interviews\/(\d+)\/retry$/,
+      handler: async (req, res, u) => {
+        const m = u.pathname.match(/^\/api\/interviews\/(\d+)\/retry$/);
+        const r = sessOf(m[1]);
+        if (!r) return sendJSON(res, 404, { error: '这场面试不存在' });
+        const body = await readBody(req).catch(() => ({}));
+        const all = turnsOf(r.id);
+        const lastAsk = all.slice().reverse().find(t => t.role === 'ask');
+        if (!lastAsk) return sendJSON(res, 400, { error: '还没开始问' });
+        /* 先看有没有题正等着他答 —— 这个要先判，否则换了问法之后再点，会被误报成"还没讲解过" */
+        if (all[all.length - 1].role === 'ask') return sendJSON(res, 400, { error: '已经有一道题在等你了，先答它' });
+        /* 再找这道题后面那条讲解（拿它当"刚讲过什么"的上下文） */
+        const exp = all.filter(t => t.role === 'explain' && Number((safeParse(t.verdict) || {}).for_turn) === Number(lastAsk.id)).pop();
+        if (!exp) return sendJSON(res, 400, { error: '这道题还没讲解过 —— 先点「不会，讲一下」' });
+        const goal = (getGoal && getGoal(r.goal_id)) || null;
+        const txt = await aiJob({
+          title: '换个问法再问一遍', note: clip(r.title || '模拟面试', 40),
+          goalId: r.goal_id, nodeId: r.node_id,
+          message: '面试官正在把同一道题换个问法再问一次',
+          run: signal => aiText(buildRetryPrompt(r, goal, lastAsk, exp.text), currentModel(), 240000, null, signal)
+        });
+        if (!sessOf(r.id)) return sendJSON(res, 404, { error: '这场面试已经被删除了' });
+        const q = clip(txt, 1200);
+        if (!q) throw new Error('没问出来，点重试再来一次');
+        const av = safeParse(lastAsk.verdict) || {};
+        const now = nowISO();
+        db.prepare('INSERT INTO interview_turns (session_id,seq,role,text,verdict,created_at) VALUES (?,?,?,?,?,?)')
+          .run(r.id, turnsOf(r.id).length + 1, 'ask', q, JSON.stringify({ point: av.point || '', retry_of: lastAsk.id }), now);
+        touch(r.id);
+        return sendJSON(res, 200, { session: sessOut(sessOf(r.id)), turns: turnsOf(r.id) });
       }
     },
     /* 总评 */
