@@ -483,13 +483,23 @@ async function loadGoal(id) {
   state.digests = (digestsRes && digestsRes.digests) || [];
 }
 function buildTree(nodes) {
+  const list = Array.isArray(nodes) ? nodes : [];
   const byId = {};
-  for (const n of nodes) byId[n.id] = { ...n, sourcesArr: safeParse(n.sources, []), children: [] };
+  for (const n of list) byId[n.id] = { ...n, sourcesArr: safeParse(n.sources, []), children: [] };
   const roots = [];
-  for (const n of Object.values(byId)) {
-    if (n.parent_id && byId[n.parent_id]) byId[n.parent_id].children.push(n);
-    else roots.push(n);
+  for (const n of list) {
+    const x = byId[n.id];
+    if (x.parent_id && byId[x.parent_id]) byId[x.parent_id].children.push(x);
+    else roots.push(x);
   }
+  /* ⚠️ 必须显式按 sort_order 排序。曾经直接遍历 Object.values(byId) 组装，
+     而节点 id 是数字键 —— JS 对象对数字键按数值升序枚举，等于永远按 id
+     排序、把 sort_order 整个丢掉：AI 对话里显示「移动」了节点、服务端也
+     确实改了 sort_order，界面顺序却纹丝不动（看起来像没生效）。
+     id 只用来给同序号的节点兜底。 */
+  const byOrder = (a, b) => ((a.sort_order || 0) - (b.sort_order || 0)) || ((a.id || 0) - (b.id || 0));
+  roots.sort(byOrder);
+  for (const n of list) byId[n.id].children.sort(byOrder);
   return roots;
 }
 function subtreeProgress(node) {

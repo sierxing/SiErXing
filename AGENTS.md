@@ -223,6 +223,8 @@ SDK（`public/sdk.js`，全部接口就这些）：`registerPlugin / getPlugins 
 
 14. **HTML 教程的正文在 `<iframe id="tutFrame">` 里，而且是固定高度、滚动发生在 iframe 内部**。主文档不滚。任何要「找标题 / 读滚动位置 / 跳转」的功能都必须走 `tutDoc()` / `tutWin()` / `tutRoot()` / `tutHeadEl()` 这四个入口，直接 `document.querySelector('.tutBody')` + `window.scrollY` 会**静默失效**。
 
+15. **`buildTree` 组装节点树时不能只遍历 `Object.values(byId)`**：节点 id 是数字键，JS 对象对数字键按**数值升序**枚举 —— 等于永远按 id 排序、把 `sort_order` 整个丢掉。曾导致「AI 对话里显示移动了节点、数据库也确实改了 `sort_order`，界面顺序却纹丝不动」。兄弟节点必须显式按 `sort_order`（id 兜底）排序（`renderGoal` / `renderMapPage` / 版本对比三处都走 `buildTree`，修一处即全修）。
+
 ---
 
 ## 8. 打包 exe 与在线更新（`scripts/build-exe.js`）

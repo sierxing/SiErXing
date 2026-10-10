@@ -2778,10 +2778,10 @@ function buildChatPrompt(goal, message, sessionId) {
   lines.push('   - 如果不需要修改路线图，ops 代码块里写 [] 即可。');
   lines.push('   - 不要输出除正文和 ops 代码块以外的内容（不要输出 JSON 信封）。');
   lines.push('3. 支持的操作：');
-  lines.push('   - {"op":"add","parent_id":<父节点id>,"title":"","detail":"","artifact":"","acceptance":"","hours":"","sources":[{"name":"","note":""}]}（任一节点的直接子任务不要超过 10 个）');
+  lines.push('   - {"op":"add","parent_id":<父节点id>,"title":"","detail":"","artifact":"","acceptance":"","hours":"","sources":[{"name":"","note":""}]}（任一节点的直接子任务不要超过 10 个；要插到指定位置就加 "after":<兄弟节点id> 放到它后面，或 "before":<兄弟节点id> 放到它前面；不加则追加到末尾）');
   lines.push('   - {"op":"update","id":<id>,"title":"","detail":"","artifact":"","acceptance":"","hours":""}（只填要改的字段）');
   lines.push('   - {"op":"delete","id":<id>}');
-  lines.push('   - {"op":"move","id":<id>,"parent_id":<新父节点id>}');
+  lines.push('   - {"op":"move","id":<id>,"parent_id":<新父节点id>}（同一父节点内调整先后顺序也用它：加 "after":<兄弟节点id> 放到它后面，或 "before":<兄弟节点id> 放到它前面；不加则移到末尾）');
   lines.push('   - {"op":"status","id":<id>,"status":"todo|doing|done"}');
     lines.push('   - {"op":"constraint","text":"约束内容"}（用户提出长期性要求时使用，如「以后不要安排付费资源」「我只有周末能学」；这类要求应记为约束而不是改节点）');
   lines.push('   - {"op":"add_source","title":"资料标题","kind":"JD|面经|大纲|笔记|资料","content":"资料正文（尽量完整）","url":"可选链接","site":"来源（可选，默认 对话添加）"}（用户口述/粘贴一份资料时，直接存进资料库）');
@@ -2794,6 +2794,24 @@ function buildChatPrompt(goal, message, sessionId) {
   lines.push('6. 新增任务必须带 detail（怎么做，60-120 字）与 hours；依据已确认的问答与用户现状。');
   lines.push('7. 不要编造 id；只输出 JSON，不要输出其他内容。');
   return lines.join('\n');
+}
+/* 把节点放到父节点下的指定位置，并归一化这一组兄弟的 sort_order。
+   定位支持 after / before（兄弟节点 id）或 index（0 起）；都不给就追加到末尾。
+   旧行为只会「追加到 MAX+1」——表达不了「插到某节点前面」，反复移动序号还会
+   无限增长，所以 AI 答应「按位置插入」时永远做不到。 */
+function placeSibling(goalId, parentId, nodeId, op) {
+  const sibs = db.prepare('SELECT id FROM nodes WHERE goal_id = ? AND IFNULL(parent_id, 0) = IFNULL(?, 0) AND id != ? ORDER BY sort_order, id')
+    .all(goalId, parentId, nodeId);
+  let idx = sibs.length;
+  const afterId = Number(op.after || op.after_id || 0);
+  const beforeId = Number(op.before || op.before_id || 0);
+  if (afterId) { const i = sibs.findIndex(x => x.id === afterId); if (i >= 0) idx = i + 1; }
+  else if (beforeId) { const i = sibs.findIndex(x => x.id === beforeId); if (i >= 0) idx = i; }
+  else if (op.index != null && String(op.index).trim() !== '') idx = Math.max(0, Math.min(Number(op.index) || 0, sibs.length));
+  sibs.splice(idx, 0, { id: nodeId });
+  const stmt = db.prepare('UPDATE nodes SET sort_order = ? WHERE id = ?');
+  sibs.forEach((x, i) => stmt.run(i, x.id));
+  return idx;
 }
 function applyChatOps(goalId, ops) {
   const applied = [], errors = [];
@@ -2808,6 +2826,7 @@ function applyChatOps(goalId, ops) {
         const order = db.prepare('SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM nodes WHERE goal_id = ? AND IFNULL(parent_id, 0) = IFNULL(?, 0)').get(goalId, parent ? parent.id : null).n;
         insertNode(goalId, parent ? parent.id : null, level, op.title || '新任务', op.detail || '', op.sources || [], order, { artifact: op.artifact, acceptance: op.acceptance, hours: op.hours });
         const nid = db.prepare('SELECT last_insert_rowid() AS id').get().id;
+        if (op.after != null || op.before != null || op.index != null) placeSibling(goalId, parent ? parent.id : null, nid, op);
         applied.push({ op: 'add', id: nid, title: String(op.title || '新任务').slice(0, 60), parent_id: parent ? parent.id : 0 });
       } else if (kind === 'update') {
         const n = nodeOf(op.id);
@@ -2829,9 +2848,12 @@ function applyChatOps(goalId, ops) {
         if (op.parent_id && !parent) { errors.push('目标父节点不存在：' + op.parent_id); continue; }
         const newParentId = parent ? parent.id : null;
         if (newParentId === n.id) { errors.push('不能移动到自身'); continue; }
+        let anc = parent, cyc = false;
+        while (anc) { if (anc.id === n.id) { cyc = true; break; } anc = anc.parent_id ? nodeOf(anc.parent_id) : null; }
+        if (cyc) { errors.push('不能移动到自己的子节点下'); continue; }
         const level = parent ? Math.min(parent.level + 1, 5) : 0;
-        const order = db.prepare('SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM nodes WHERE goal_id = ? AND IFNULL(parent_id, 0) = IFNULL(?, 0)').get(goalId, newParentId).n;
-        db.prepare('UPDATE nodes SET parent_id = ?, level = ?, sort_order = ?, updated_at = ? WHERE id = ?').run(newParentId, level, order, nowISO(), n.id);
+        db.prepare('UPDATE nodes SET parent_id = ?, level = ?, updated_at = ? WHERE id = ?').run(newParentId, level, nowISO(), n.id);
+        placeSibling(goalId, newParentId, n.id, op);
         const fix = (id, lv) => {
           for (const c of db.prepare('SELECT id FROM nodes WHERE parent_id = ?').all(id)) {
             const cl = Math.min(lv + 1, 5);
