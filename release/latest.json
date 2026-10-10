@@ -1,14 +1,14 @@
 {
-  "version": "1.10.27",
-  "buildVer": "ad3178d62efc",
-  "payload": "release/payload-1.10.27.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.27.sxar?ref=main",
+  "version": "1.10.29",
+  "buildVer": "d1fd6863c495",
+  "payload": "release/payload-1.10.29.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.29.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "ad4f8876ab8625c8c3a0bcf3101901485be83da38bd351a2ff95d069a1ca1a39",
-  "size": 673362,
-  "unpackedSize": 2465363,
-  "publishedAt": "2026-10-10T08:05:34.306Z",
-  "notes": "新增组件「🎯 今日任务」：像游戏任务栏，AI 按你的推进情况和每个任务的预计耗时，排今天推进哪几个节点、每个拆成哪几小步、各要多久；勾完自动推进节点状态、完成率实时缩，时间不够可以点「今天只有 1 小时」重排",
+  "sha256": "557f3b914a2b1a070cc28113a442b93adeef2b2123da24da07d98cf09a967218",
+  "size": 675474,
+  "unpackedSize": 2470968,
+  "publishedAt": "2026-10-10T08:43:42.603Z",
+  "notes": "修按目标组件开关三处：关掉的组件在「只改本目标」里找不到（开不回来）、没启用的组件会显示成 goalComp_xxx、目标页工具栏排满后「自定义工具栏」进不去（含 1.10.28 的 AI 移动节点修复）",
   "exeRequired": false
 }

@@ -2921,7 +2921,9 @@ function mdToHTML(text) {
    否则 ⋯ 菜单点它会 getElementById 落空、点了没反应。 */
 const BAR_NS = {
   tut:  { key: 'sierxing-tutbar-v5',  old: 'sierxing-tutbar-v4', bar: 'tutFavBar',  more: 'tutMoreBtn' },
-  goal: { key: 'sierxing-goalbar-v1', old: '',                  bar: 'goalFavBar', more: 'goalMoreBtn' },
+  /* alwaysMore：目标页的 ⋯ 常驻。以前按钮全都摆得下时 ⋯ 会被藏掉，
+     于是「自定义工具栏…」永远进不去（排布满了就再也改不了）。 */
+  goal: { key: 'sierxing-goalbar-v1', old: '',                  bar: 'goalFavBar', more: 'goalMoreBtn', alwaysMore: true },
   prob: { key: 'sierxing-probbar-v1', old: '',                  bar: 'probFavBar', more: 'probMoreBtn', alwaysMore: true },
 };
 let BAR_DRAG = null;        // 当前拖的东西：{k:'b'|'f', id, ns}
@@ -3026,6 +3028,21 @@ function barDropIndex(bar, x, skipEl) {
     if (x < r.left + r.width / 2) return i;
   }
   return items.length;
+}
+/* 收藏栏条目的显示名。
+   收藏栏配置是**跨目标共享**的（sierxing-goalbar-v1），所以里面会留着「当前目标没启用」
+   的组件按钮（如 goalComp_hot100）。这种按钮不在 DOM 里，labels 里就没有它，
+   以前直接回落成按钮 id —— 界面上就会冒出 goalComp_hot100 这种鬼东西。
+   这里从组件元数据把名字找回来 —— 任何路径都不会再露出按钮 id。
+   （这类条目正常不会再被列出来：没启用就是没有。） */
+function barItemLabel(id, labels) {
+  if (labels && labels[id]) return labels[id];
+  const m = String(id || '').match(/^goalComp_(.+)$/);
+  if (m) {
+    const meta = (window.SiErXing && SiErXing.serverPlugins ? SiErXing.serverPlugins() : []).find(x => x.id === m[1]);
+    return meta ? ((meta.icon || '🧩') + ' ' + (meta.name || m[1])) : m[1];
+  }
+  return String(id || '');
 }
 function barFolderChip(f) {
   const chip = document.createElement('button');
@@ -3286,6 +3303,8 @@ function openBarFolderPanel(fid, ns) {
   (scope && scope.parentElement ? scope.parentElement : document).querySelectorAll('[data-tbtn]')
     .forEach(b => { labels[b.id] = b.textContent.trim(); });
   document.querySelectorAll('[data-tbtn]').forEach(b => { if (!labels[b.id]) labels[b.id] = b.textContent.trim(); });
+  /* 当前目标没启用的组件（按钮不在 DOM 里）：根本不列出来 —— 没开启就是没有 */
+  const avail = new Set(Object.keys(labels));
   const m = document.createElement('div');
   m.id = 'barFolderDlg';
   m.dataset.barNs = nsc;
@@ -3296,9 +3315,11 @@ function openBarFolderPanel(fid, ns) {
     paint();
   };
   const paint = () => {
-    m.querySelector('#tfpList').innerHTML = (f.buttons || []).map((id, i) =>
+    const shown = (f.buttons || []).map((id, i) => ({ id, i })).filter(x => avail.has(x.id));
+    const availN = shown.length;
+    m.querySelector('#tfpList').innerHTML = shown.map(({ id, i }) =>
       `<div class="tfpRow" draggable="true" data-tfpid="${esc(id)}"><span class="tfpGrip" title="拖动排序">⠿</span>
-       <span class="tfpName">${esc(labels[id] || id)}</span>
+       <span class="tfpName">${esc(barItemLabel(id, labels))}</span>
        <button class="btn tiny" data-tfp-up="${i}" ${i === 0 ? 'disabled' : ''} title="上移">↑</button>
        <button class="btn tiny" data-tfp-down="${i}" ${i === f.buttons.length - 1 ? 'disabled' : ''} title="下移">↓</button>
        <button class="btn tiny" data-tfp-out="${esc(id)}" title="移出收藏夹，回到收藏栏">↩ 移出</button></div>`).join('')
@@ -3322,7 +3343,7 @@ function openBarFolderPanel(fid, ns) {
       st.off = st.off.filter(x => x !== id);
       if (!st.order.includes(barTok('b', id))) st.order.push(barTok('b', id));
       commit();
-      toast(`「${labels[id] || id}」已移回收藏栏`);
+      toast(`「${barItemLabel(id, labels)}」已移回收藏栏`);
     }));
     // 面板内横向拖动排序
     let from = -1;
@@ -3357,7 +3378,7 @@ function openBarFolderPanel(fid, ns) {
       });
     });
   };
-  m.innerHTML = `<div class="tdHead"><span>📁 ${esc(f.name)}</span><span class="muted" style="font-weight:400">${f.buttons.length} 个</span>
+  m.innerHTML = `<div class="tdHead"><span>📁 ${esc(f.name)}</span><span class="muted" style="font-weight:400">${availN} 个</span>
     <button class="btn tiny" id="tfpRename">重命名</button><button class="btn tiny" id="tfpX">×</button></div>
     <div class="tdBody"><p class="hint" style="margin-top:0;">↑↓ 或直接拖动排序；「移出」把按钮放回收藏栏（也可直接把收藏栏按钮拖回这里）。</p>
     <div class="tfpList" id="tfpList"></div></div>`;
@@ -3520,23 +3541,29 @@ function openBarEditor(ns) {
   const paint = () => {
     const loose = looseOf(st.order);
     const inBar = loose.map(t => t.slice(2));
+    /* 当前目标没启用的组件（按钮不在 DOM 里）：它其实不在工具栏上，
+       不该以"钉着 #N"的样子出现在这里 —— 收进下面那条说明。
+       注意 data-bar-up/down 用的仍是 loose 里的下标，所以这里只跳过渲染、不重排数组。 */
+    const avail = new Set(ids);
+    const notMine = inBar.filter(id => !avail.has(id));
     m.querySelector('#barBarList').innerHTML = loose.map((t, i) => {
       const id = t.slice(2);
+      if (!avail.has(id)) return '';
       return `<div class="impItem"><input type="checkbox" data-bar-pick="${esc(id)}" checked>
-       <b>${esc(labels[id] || id)}</b><span class="muted">#${i + 1}</span>
+       <b>${esc(barItemLabel(id, labels))}</b><span class="muted">#${i + 1}</span>
        <span style="flex:1"></span>
        <button class="btn tiny" data-bar-up="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
        <button class="btn tiny" data-bar-down="${i}" ${i === loose.length - 1 ? 'disabled' : ''}>↓</button>
        <button class="btn tiny danger" data-bar-del="${esc(id)}" title="取消钉选，收进 ⋯">×</button></div>`; }).join('')
       + ids.filter(id => !inBar.includes(id) && !folderOf(id)).map(id =>
       `<div class="impItem"><input type="checkbox" data-bar-pick="${esc(id)}">
-       <b>${esc(labels[id] || id)}</b><span class="muted">在 ⋯ 里</span>
+       <b>${esc(barItemLabel(id, labels))}</b><span class="muted">在 ⋯ 里</span>
        <span style="flex:1"></span>
        ${(st.folders || []).map(f => `<button class="btn tiny" data-bar-tof="${esc(f.id)}:${esc(id)}" title="收到「${esc(f.name)}」">📁 ${esc(f.name)}</button>`).join('')}
-      </div>`).join('');
+      </div>`).join('')
     m.querySelector('#barFolderList').innerHTML = (st.folders || []).map(f =>
       `<div class="impItem"><span>📁</span><b>${esc(f.name)}</b>
-       <span class="muted">${f.buttons.length} 个：${esc(f.buttons.map(id => labels[id] || id).join('、') || '空')}</span>
+       <span class="muted">${f.buttons.filter(id => avail.has(id)).length} 个：${esc(f.buttons.filter(id => avail.has(id)).map(id => barItemLabel(id, labels)).join('、') || '空')}</span>
        <span style="flex:1"></span>
        <button class="btn tiny" data-fdl-open="${esc(f.id)}">打开</button>
        <button class="btn tiny" data-fdl-rename="${esc(f.id)}">重命名</button>
@@ -8131,20 +8158,27 @@ function goalPluginsHTML(g) {
   if (!window.SiErXing) return '';
   return `<button class="btn small" data-tbtn id="goalPluginsBtn" title="为本目标开关组件（只改本目标）">🧩 组件</button>`;
 }
+/* 「只改本目标」的组件清单。
+   ⚠️ 必须**不看当前是否启用**：这里列的是"能开的组件"，不是"已经开着的组件"。
+   以前第一段用的是 SiErXing.goalEntries(pg)，而那个函数已经按 goalEntry.show()
+   （对多数组件就是 pluginEnabled）过滤过 —— 于是某个目标里**关掉的组件在这儿找不到**，
+   既开不回来、也看不到，用户只能看到"没单独设置过的仍按全局默认走"这句提示发呆。
+   真实反馈：AIPM 目标里找不到「每日刷题」，单独开/关都不行。
+   所以改成：以服务端组件元数据为准，列出所有「可按目标开关」的组件。 */
 function goalManageableEntries(pg) {
   const out = [];
   const seen = new Set();
-  // 有独立入口的组件（目标页按钮 / 左栏）
+  for (const c of (state.componentList || [])) {
+    if (c.scope === 'core' || c.goalToggle === false) continue;   // 核心组件不可按目标开关
+    if (seen.has(c.id)) continue;
+    seen.add(c.id);
+    out.push({ id: c.id, name: c.name || c.id, icon: c.icon || '🧩' });
+  }
+  // 兜底：服务端元数据还没加载完时，至少把"当前已启用、有独立入口"的列出来
   for (const e of (SiErXing.goalEntries(pg) || [])) {
     if (seen.has(e.id)) continue;
     seen.add(e.id);
     out.push({ id: e.id, name: e.label || e.id, icon: e.icon || '🧩' });
-  }
-  // 基础内置组件（问卷/约束/检索/版本/助手/教程：目标页对应卡片与按钮）
-  for (const c of (state.componentList || [])) {
-    if (c.scope !== 'base' || seen.has(c.id)) continue;
-    seen.add(c.id);
-    out.push({ id: c.id, name: c.name || c.id, icon: c.icon || '🧩' });
   }
   const orderOf = id => {
     const c = (state.componentList || []).find(x => x.id === id);
