@@ -3044,10 +3044,13 @@ function barItemLabel(id, labels) {
   }
   return String(id || '');
 }
-function barFolderChip(f) {
+/* n = 里面"当前目标真的可用"的按钮数（没启用的组件不算，点开也看不到它）。
+   不传就退回配置里的总数（调用方拿不到可用集合时）。 */
+function barFolderChip(f, n) {
   const chip = document.createElement('button');
   chip.className = 'btn small barFolder';
-  chip.textContent = `📁 ${f.name} (${f.buttons.length})`;
+  const cnt = (typeof n === 'number') ? n : (f.buttons || []).length;
+  chip.textContent = `📁 ${f.name} (${cnt})`;
   chip.setAttribute('data-folder', f.id);
   chip.draggable = true;
   chip.title = '点开可上下排序 / 移出按钮；可横向拖动换位置；右键重命名或删除';
@@ -3089,7 +3092,7 @@ function applyBarOverflow(ns) {
     } else if (k === 'f') {
       const f = st.folders.find(x => x.id === id);
       if (!f) return;
-      bar.appendChild(barFolderChip(f));
+      bar.appendChild(barFolderChip(f, (f.buttons || []).filter(id => byId[id]).length));
     }
   });
   bar.appendChild(more);
@@ -3241,8 +3244,10 @@ function bindBarDnD(bar, ns) {
   bar.addEventListener('click', e => {
     const chip = e.target.closest && e.target.closest('[data-folder]');
     if (!chip) return;
-    e.stopPropagation();
-    if (document.querySelector('.moreMenu')) { document.querySelectorAll('.moreMenu').forEach(x => x.remove()); return; }
+    /* 以前这里：如果 ⋯ 菜单开着就"只关菜单、不开文件夹"（还 stopPropagation 挡掉了
+       document 那层的关菜单逻辑）—— 结果是文件夹第一次点没反应，得点两次。
+       现在一次点击把两件事都做完：关掉菜单 + 打开文件夹。 */
+    document.querySelectorAll('.moreMenu').forEach(x => x.remove());
     openBarFolderPanel(chip.getAttribute('data-folder'), nsc);
   });
   bar.addEventListener('contextmenu', e => {
@@ -3314,9 +3319,12 @@ function openBarFolderPanel(fid, ns) {
     applyBarOverflow(nsc);
     paint();
   };
+  /* 只列"当前目标真的可用"的按钮（没启用的组件不显示）。
+     ⚠️ 这个必须能在外层（m.innerHTML 拼头部计数时）也调用 —— 之前把 availN 声明在
+     paint() 里、外面却用它，一打开文件夹就 ReferenceError，表现是"文件夹点不动"。 */
+  const shownList = () => (f.buttons || []).map((id, i) => ({ id, i })).filter(x => avail.has(x.id));
   const paint = () => {
-    const shown = (f.buttons || []).map((id, i) => ({ id, i })).filter(x => avail.has(x.id));
-    const availN = shown.length;
+    const shown = shownList();
     m.querySelector('#tfpList').innerHTML = shown.map(({ id, i }) =>
       `<div class="tfpRow" draggable="true" data-tfpid="${esc(id)}"><span class="tfpGrip" title="拖动排序">⠿</span>
        <span class="tfpName">${esc(barItemLabel(id, labels))}</span>
@@ -3378,7 +3386,7 @@ function openBarFolderPanel(fid, ns) {
       });
     });
   };
-  m.innerHTML = `<div class="tdHead"><span>📁 ${esc(f.name)}</span><span class="muted" style="font-weight:400">${availN} 个</span>
+  m.innerHTML = `<div class="tdHead"><span>📁 ${esc(f.name)}</span><span class="muted" style="font-weight:400">${shownList().length} 个</span>
     <button class="btn tiny" id="tfpRename">重命名</button><button class="btn tiny" id="tfpX">×</button></div>
     <div class="tdBody"><p class="hint" style="margin-top:0;">↑↓ 或直接拖动排序；「移出」把按钮放回收藏栏（也可直接把收藏栏按钮拖回这里）。</p>
     <div class="tfpList" id="tfpList"></div></div>`;

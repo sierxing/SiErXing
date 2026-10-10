@@ -1,14 +1,14 @@
 {
-  "version": "1.10.29",
-  "buildVer": "d1fd6863c495",
-  "payload": "release/payload-1.10.29.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.29.sxar?ref=main",
+  "version": "1.10.30",
+  "buildVer": "5703bbe456fa",
+  "payload": "release/payload-1.10.30.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.30.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "557f3b914a2b1a070cc28113a442b93adeef2b2123da24da07d98cf09a967218",
-  "size": 675474,
-  "unpackedSize": 2470968,
-  "publishedAt": "2026-10-10T08:43:42.603Z",
-  "notes": "修按目标组件开关三处：关掉的组件在「只改本目标」里找不到（开不回来）、没启用的组件会显示成 goalComp_xxx、目标页工具栏排满后「自定义工具栏」进不去（含 1.10.28 的 AI 移动节点修复）",
+  "sha256": "b7c7412c9cd4ae92a414e0262c9497f8c37563d5a0c5b71c2db5ded7a45d268f",
+  "size": 676923,
+  "unpackedSize": 2474212,
+  "publishedAt": "2026-10-10T08:55:09.564Z",
+  "notes": "修顶栏文件夹点不开（上一版把计数变量声明在了 paint() 里、外面却用它，一打开就报 ReferenceError）；⋯ 菜单开着时点文件夹不再被吃掉、一次点击即可打开；文件夹角标和面板计数都按「当前目标真的可用」算",
   "exeRequired": false
 }
