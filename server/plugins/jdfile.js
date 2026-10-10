@@ -9,6 +9,7 @@
 const { parseEbook, MAX_FILE } = require('./lib/ebook-parse');
 const { resolveRoot, readProject, buildStudyDigestPrompt, digestToText } = require('./lib/code-digest');
 const { storeCodeRepoFiles } = require('../code-store');
+const rag = require('../rag');
 let db, nowISO, safeParse, sendJSON, readBody, getSetting, setSetting, backup, log;
 let fs, path, os, spawn, APP_DIR, DATA_DIR, UPLOAD_DIR, PUBLIC_DIR;
 let getGoal, sourcesOf, aiText, aiTextFiles, currentModel, currentVisionModel, tasks;
@@ -203,7 +204,7 @@ module.exports = {
             content, String(s.published_at || ''), nowISO());
         added++;
       }
-      if (added) { db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), g.id); backup(); }
+      if (added) { db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), g.id); rag.autoIndex(g.id); backup(); }
       return sendJSON(res, 200, { ok: true, added, skipped, total: list.length, goal: getGoal(g.id), sources: sourcesOf(g.id) });
     }
   },
@@ -267,6 +268,7 @@ module.exports = {
          AI 助手对话时按问题查阅 —— 摘要是地图，快照是底料，
          用户问"某段逻辑到底怎么写的"时不能只靠摘要。 */
       const stored = storeCodeRepoFiles(db, g.id, Number(sr.lastInsertRowid), root, nowISO);
+      rag.autoIndex(g.id);
       /* 也写进「提炼汇总」：规划时按 4000 字带进去（原始资料列表只带 700 字，装不下） */
       db.prepare('INSERT INTO source_digests (goal_id,topic,title,content,sources_count,created_at) VALUES (?,?,?,?,?,?)')
         .run(g.id, '代码库', title, digestText, 1, now);
@@ -550,6 +552,7 @@ function streamJDImage(req, res, goal, dataUrl, note, reuseSourceId) {
       const jr = db.prepare('INSERT INTO jd_images (goal_id,file,mime,size,title,extracted,status,error,source_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
         .run(goal.id, fname, mime, buf.length, title, JSON.stringify(data), 'done', '', sourceId, t);
       db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(t, goal.id);
+      rag.autoIndex(goal.id);
       backup();
       send({ done: true, notice, jd: { id: Number(jr.lastInsertRowid), file: fname, title, source_id: sourceId }, extracted: data, goal: getGoal(goal.id), sources: sourcesOf(goal.id) });
     } catch (e) {
@@ -648,6 +651,7 @@ function streamEbook(req, res, goal, buf, filename, note, reuseSourceId) {
       send({ status: '正在本地解析电子书…' });
       info = await ingestEbookBuffer(goal, buf, filename, note,
         st => send({ status: st }), reuseSourceId, '');
+      rag.autoIndex(goal.id);
       const jr = db.prepare('SELECT id FROM jd_images WHERE goal_id = ? AND file = ?').get(goal.id, info.file);
       send({ done: true, notice: info.notice, jd: { id: jr ? jr.id : 0, file: info.file, title: info.title, source_id: info.sourceId }, extracted: info.extracted, goal: getGoal(goal.id), sources: sourcesOf(goal.id) });
     } catch (e) {

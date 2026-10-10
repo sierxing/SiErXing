@@ -6263,8 +6263,10 @@ async function renderLibraryPage() {
       <button class="back js-back" data-go="#/g/${g.id}">← 返回目标</button>
       <h2 class="title">📚 资源库</h2>
       <span class="muted" style="font-size:12.5px;">资料 ${sources.length} 条（自己提供 ${own.length} / 网络 ${net.length}）· 汇总 ${digests.length} 篇</span>
+      <span class="muted" id="libRagStatus" style="font-size:12px;"></span>
       <div class="spacer"></div>
       <select id="libGoal" class="libGoalSel">${goalOptions}</select>
+      <button class="btn small" id="libRagBuild" title="把资料切片（配了向量模型则一并向量化）：规划/对话时按问题检索最相关片段">🧲 检索索引</button>
       <button class="btn small" id="libDigest">🧠 ${digests.length ? '重新提炼' : '信息提炼'}</button>
       <label class="btn small">⬆ 导入资料<input type="file" id="libImport" accept=".json,application/json" hidden></label>
       <a class="btn small primary" href="/api/goals/${g.id}/library/export" download>⬇ 一键导出（Markdown）</a>
@@ -6313,6 +6315,24 @@ async function renderLibraryPage() {
 
   const gsel = document.getElementById('libGoal');
   if (gsel) gsel.addEventListener('change', async () => { try { await loadGoal(Number(gsel.value)); } catch (e) {} renderLibraryPage(); });
+  /* 检索索引：状态 + 一键建立（切片/向量化，规划与对话会按问题检索它） */
+  const lrb = document.getElementById('libRagBuild');
+  if (lrb) lrb.addEventListener('click', async () => {
+    try {
+      const r = await api('/api/goals/' + g.id + '/rag/build', { method: 'POST' });
+      toast(r.already ? '索引任务已在运行' : '已开始建立检索索引（左下角任务中心可看进度）');
+    } catch (e) { toast(e.message); }
+  });
+  (async () => {
+    const box = document.getElementById('libRagStatus');
+    if (!box) return;
+    try {
+      const st = await api('/api/rag/status?goalId=' + g.id);
+      box.textContent = st.enabled
+        ? ('· 检索索引：' + st.embedded + '/' + st.chunks + ' 段已向量化' + (st.embConfigured ? '' : '（未配向量模型，按关键词检索）'))
+        : '· 检索增强已关闭（设置 → 检索增强）';
+    } catch (e) {}
+  })();
   const ld = document.getElementById('libDigest');
   if (ld) ld.addEventListener('click', async () => { await startDigest(g.id); renderLibraryPage(); });
   const li = document.getElementById('libImport');
@@ -7331,6 +7351,52 @@ function themeMsgText() {
   };
   return '当前 → 亮色：<b>' + esc(nameOf(themeFor('light'))) + '</b>　·　暗色：<b>' + esc(nameOf(themeFor('dark'))) + '</b>';
 }
+/* ---- 设置页：检索增强（RAG） ---- */
+function ragSettingsHTML(s) {
+  const gopts = (state.goals || []).map(g => `<option value="${g.id}">${esc(g.title)}</option>`).join('')
+    || '<option value="">（还没有目标）</option>';
+  return `<p class="hint" style="margin:-4px 0 12px;">资料一多，把整包资料塞给模型既贵又抓不住重点。开启后：<b>规划、拆任务、对话</b>会先从资料库里检索与当前问题最相关的片段再作答。不配向量模型也能用（关键词检索）；配上「向量模型」即升级为语义检索（问“用户登录怎么做”也能找到 auth 相关段落，哪怕正文没出现“登录”二字）。</p>
+  <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:10px;">
+    <input type="checkbox" id="ragEnabled" ${s.rag_enabled !== false ? 'checked' : ''}> <b>启用检索增强</b>（推荐；关闭则回到「前 N 条资料整段注入」）
+  </label>
+  <div class="field visPickField">
+    <label>向量模型 <span class="muted" style="font-weight:400;">（可选 —— 用于语义检索；不是所有服务商都提供，如 DeepSeek 暂无）</span></label>
+    <div class="ccRow" style="margin-bottom:9px;">
+      <label class="ccWide">API 地址
+        <span class="inWrap"><i>🔗</i><input class="mono" id="embBase" value="${esc(s.emb_base_url || '')}" placeholder="如 https://api.siliconflow.cn/v1" spellcheck="false"></span>
+      </label>
+      <label class="ccWide">API 密钥
+        <span class="inWrap"><i>🔑</i><input type="password" id="embKey" value="" placeholder="${s.emb_has_key ? '已保存（留空则不修改）' : 'sk-…'}" spellcheck="false"></span>
+      </label>
+    </div>
+    <div class="ccRow">
+      <label class="ccWide">向量模型名
+        <span class="inWrap"><i>⌨️</i><input id="embModel" value="${esc(s.emb_model || '')}" placeholder="如 BAAI/bge-m3 / text-embedding-v3" spellcheck="false"></span>
+      </label>
+    </div>
+    <div class="mBtnGrid" id="embOpts" style="margin-top:8px;"><div class="hint">点「获取可用模型」列出该地址支持的模型，点一下填入上面；常用：硅基流动 BAAI/bge-m3、通义千问 text-embedding-v3、OpenAI text-embedding-3-small、本地 Ollama nomic-embed-text。</div></div>
+    <div class="toolbarRow" style="margin-top:9px;">
+      <button class="btn tiny cbtn" id="embFetch">🔄 获取可用模型</button>
+      <button class="btn tiny cbtn" id="embTest">测试向量</button>
+      <button class="btn tiny cbtn primary" id="embSave">保存向量配置</button>
+    </div>
+    <div class="hint" id="embMsg" style="margin-top:6px;"></div>
+  </div>
+  <div class="field" style="margin-top:14px;">
+    <label>索引状态与检索预览</label>
+    <div class="toolbarRow" style="margin-top:6px;">
+      <select id="ragGoalSel" class="libGoalSel">${gopts}</select>
+      <button class="btn small" id="ragBuildBtn">🧲 建立本目标索引</button>
+      <button class="btn small" id="ragRefresh">刷新状态</button>
+    </div>
+    <div class="hint" id="ragStatus" style="margin-top:8px;">加载中…</div>
+    <div class="toolbarRow" style="margin-top:8px;">
+      <input id="ragQ" style="flex:1;min-width:240px;" placeholder="检索预览：输入一个具体问题，看会命中资料库里的哪些片段" spellcheck="false">
+      <button class="btn small" id="ragSearchBtn">检索</button>
+    </div>
+    <div id="ragHits" style="margin-top:8px;"></div>
+  </div>`;
+}
 async function renderSettings() {
   app.innerHTML = '<p class="muted">加载中…</p>';
   if (!state.componentList || !state.componentList.length) { try { await loadComponents(); } catch (e) {} }
@@ -7381,6 +7447,7 @@ async function renderSettings() {
      每条连接里多选模型；具体用哪个模型由「AI 助手」对话栏的模型下拉决定。 */
   const SET_TABS = [
     ['set-ai', '🔌 AI 接入方式'],
+    ['set-rag', '🔍 检索增强'],
     ['set-theme', '🎨 外观主题'],
     ['set-sync', '🔄 多端同步'],
     ['set-service', '🖥 服务与启动'],
@@ -7437,6 +7504,10 @@ async function renderSettings() {
       </div>
     </div>
     <div class="setGrid">
+    <div class="sec" id="set-rag">
+      <div class="secTitle">检索增强（RAG） <span class="secSub">把资料库当知识库：按问题检索片段，而不是整包塞给模型</span></div>
+      ${ragSettingsHTML(s)}
+    </div>
     <div class="sec" id="set-theme">
       <div class="secTitle">外观主题 <span class="secSub">亮色 / 暗色模式各选一个皮肤；只改颜色，不改字体</span></div>
       ${themeSettingsHTML()}
@@ -8136,6 +8207,108 @@ async function renderSettings() {
   };
   bindThemeSel('themeLight', 'light', '亮色');
   bindThemeSel('themeDark', 'dark', '暗色');
+  /* 检索增强（RAG）：开关 / 向量模型 / 索引状态 / 检索预览 */
+  const ragEl = id => document.getElementById(id);
+  const ragSay = (id, t) => { const el = ragEl(id); if (el) el.innerHTML = t; };
+  const refreshRagStatus = async () => {
+    if (!ragEl('ragStatus')) return;
+    const gid = Number((ragEl('ragGoalSel') || {}).value || 0);
+    try {
+      const st = await api('/api/rag/status' + (gid ? '?goalId=' + gid : ''));
+      const emb = st.embConfigured ? '向量模型 <b>' + esc(st.embModel) + '</b>' : '未配置向量模型（当前按关键词检索）';
+      ragSay('ragStatus', '资料 <b>' + st.sources + '</b> 条 · 分块 <b>' + st.chunks + '</b> · 已向量化 <b>' + st.embedded + '</b>'
+        + (st.pending ? ' · 待处理 <b style="color:var(--warn)">' + st.pending + '</b>' : '')
+        + '　·　' + emb + (st.building ? '　·　<span style="color:var(--warn)">正在建立索引…</span>' : ''));
+    } catch (e) { ragSay('ragStatus', '状态读取失败：' + esc(e.message)); }
+  };
+  const ragToggle = ragEl('ragEnabled');
+  if (ragToggle) ragToggle.addEventListener('change', async () => {
+    try {
+      await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rag_enabled: ragToggle.checked }) });
+      toast(ragToggle.checked ? '已开启检索增强' : '已关闭检索增强');
+    } catch (e) { toast('保存失败：' + e.message); }
+  });
+  const embVals = () => ({
+    base: ((ragEl('embBase') || {}).value || '').trim(),
+    key: ((ragEl('embKey') || {}).value || '').trim(),
+    model: ((ragEl('embModel') || {}).value || '').trim()
+  });
+  const embSaveBtn = ragEl('embSave');
+  if (embSaveBtn) embSaveBtn.addEventListener('click', async () => {
+    const v = embVals();
+    if (!v.base || !v.model) { toast('先填地址和向量模型名'); return; }
+    try {
+      const body = { emb_base_url: v.base, emb_model: v.model };
+      if (v.key) body.emb_api_key = v.key;
+      await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const k = ragEl('embKey'); if (k) { k.value = ''; k.placeholder = '已保存（留空则不修改）'; }
+      ragSay('embMsg', '已保存。点「测试向量」验证是否可用。');
+      toast('向量配置已保存');
+    } catch (e) { toast('保存失败：' + e.message); }
+  });
+  const embFetchBtn = ragEl('embFetch');
+  if (embFetchBtn) embFetchBtn.addEventListener('click', async () => {
+    const v = embVals();
+    if (!v.base) { toast('先填 API 地址'); return; }
+    embFetchBtn.disabled = true; embFetchBtn.textContent = '获取中…';
+    ragSay('embMsg', '正在向该地址请求模型列表…');
+    try {
+      const r = await api('/api/ai/models-for', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ baseUrl: v.base, apiKey: v.key, useEmbKey: !v.key }) });
+      const box = ragEl('embOpts');
+      const list = r.models || [];
+      if (box) box.innerHTML = (list.map(m => `<button type="button" class="mBtn" data-embopt="${esc(m)}">${esc(m)}</button>`).join('')) || '<div class="hint">没有可选模型。</div>';
+      ragSay('embMsg', list.length ? ('取到 <b>' + list.length + '</b> 个，点一下填入模型名。' + (r.error ? '（' + esc(r.error) + '）' : '')) : ('<span style="color:var(--warn)">没取到：' + esc(r.error || '接口未返回') + '</span>'));
+    } catch (e) { ragSay('embMsg', '<span style="color:var(--warn)">取列表失败：' + esc(e.message) + '</span>'); }
+    finally { embFetchBtn.disabled = false; embFetchBtn.textContent = '🔄 获取可用模型'; }
+  });
+  const embOptsBox = ragEl('embOpts');
+  if (embOptsBox) embOptsBox.addEventListener('click', e => {
+    const b = e.target.closest('[data-embopt]');
+    if (!b) return;
+    const inp = ragEl('embModel');
+    if (inp) inp.value = b.getAttribute('data-embopt');
+    embOptsBox.querySelectorAll('[data-embopt]').forEach(x => x.classList.toggle('on', x === b));
+  });
+  const embTestBtn = ragEl('embTest');
+  if (embTestBtn) embTestBtn.addEventListener('click', async () => {
+    const v = embVals();
+    if (!v.base || !v.model) { toast('先填地址和向量模型名'); return; }
+    ragSay('embMsg', '正在真实调用向量接口…');
+    try {
+      const r = await api('/api/ai/emb-test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ baseUrl: v.base, model: v.model, apiKey: v.key }) });
+      if (r.ok) {
+        const k = ragEl('embKey'); if (k && v.key) { k.value = ''; k.placeholder = '已保存（留空则不修改）'; }
+        ragSay('embMsg', '✅ <b>向量接口正常</b> · ' + esc(r.model) + ' · 维度 ' + r.dim + '。点「建立本目标索引」开始向量化。');
+      } else ragSay('embMsg', '❌ <b>不可用</b>：' + esc(r.message || ''));
+    } catch (e) { ragSay('embMsg', '❌ 测试失败：' + esc(e.message)); }
+  });
+  const ragBuildBtn = ragEl('ragBuildBtn');
+  if (ragBuildBtn) ragBuildBtn.addEventListener('click', async () => {
+    const gid = Number((ragEl('ragGoalSel') || {}).value || 0);
+    if (!gid) { toast('先选一个目标'); return; }
+    try {
+      const r = await api('/api/goals/' + gid + '/rag/build', { method: 'POST' });
+      toast(r.already ? '索引任务已在运行' : '已开始建立索引（左下角任务中心可看进度）');
+      refreshRagStatus();
+    } catch (e) { toast('启动失败：' + e.message); }
+  });
+  const ragRefreshBtn = ragEl('ragRefresh');
+  if (ragRefreshBtn) ragRefreshBtn.addEventListener('click', refreshRagStatus);
+  const ragSearchBtn = ragEl('ragSearchBtn');
+  if (ragSearchBtn) ragSearchBtn.addEventListener('click', async () => {
+    const gid = Number((ragEl('ragGoalSel') || {}).value || 0);
+    const q = ((ragEl('ragQ') || {}).value || '').trim();
+    if (!gid || !q) { toast('先选目标、输入检索词'); return; }
+    ragSay('ragHits', '检索中…');
+    try {
+      const r = await api('/api/goals/' + gid + '/rag/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ q }) });
+      const hits = r.hits || [];
+      ragSay('ragHits', hits.length
+        ? hits.map(h => `<div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:6px;"><div style="font-size:12px;color:var(--muted);">${Number(h.quality) === 1 ? '★' : ''}[${esc(h.site)}｜${esc(h.kind)}] ${esc(h.title)} · 相关度 ${h.score}</div><div style="font-size:12.5px;margin-top:4px;">${esc(h.text)}</div></div>`).join('')
+        : '<div class="hint">没有命中（可能资料还没入库，或换种说法再试）。</div>');
+    } catch (e) { ragSay('ragHits', '<div class="hint">检索失败：' + esc(e.message) + '</div>'); }
+  });
+  if (ragEl('ragStatus')) refreshRagStatus();
   const sgb = document.getElementById('showGuideBtn');
   if (sgb) sgb.addEventListener('click', () => showGuide(0));
   document.getElementById('backupNow').addEventListener('click', async () => {

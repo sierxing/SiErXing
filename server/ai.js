@@ -581,9 +581,10 @@ async function fetchModelsFor(target) {
     });
   } else if (target.baseUrl) {
     /* 未保存的草稿：用调用方给的地址/密钥，但模型勾选仍取已保存的那条（如果有）。
-       useVisKey：识图专区密钥框空着时，用已存的 vis_api_key（不然每次取列表都得重填）。 */
+       useVisKey：识图专区密钥框空着时，用已存的 vis_api_key（不然每次取列表都得重填）。
+       useEmbKey：检索增强的向量模型配置同理。 */
     const p = providerId ? providerById(providerId) : null;
-    const key = target.apiKey || (target.useVisKey ? ctx.getSetting('vis_api_key', '') : '') || (saved && saved.apiKey) || '';
+    const key = target.apiKey || (target.useVisKey ? ctx.getSetting('vis_api_key', '') : '') || (target.useEmbKey ? ctx.getSetting('emb_api_key', '') : '') || (saved && saved.apiKey) || '';
     c = normalizeConn({
       id: (saved && saved.id) || 'draft',
       name: (saved && saved.name) || (p ? p.name : '草稿'),
@@ -1017,6 +1018,49 @@ const ai = {
     } catch (e) {
       return { ok: false, provider: c.provider, connName: c.connName || '', model: c.model || probe || '', message: e.message };
     }
+  },
+  /* ---- 向量（检索增强用）：OpenAI 兼容 /embeddings，独立配置 ----
+     不是所有服务商都提供向量接口（如 DeepSeek 就没有），所以要单独填一家；
+     地址或模型留空 = 未配置，检索会自动退化为关键词方案。 */
+  embConfig() {
+    const get = ctx.getSetting;
+    const baseUrl = String(get('emb_base_url', '') || '').trim();
+    const apiKey = String(get('emb_api_key', '') || '').trim();
+    const model = String(get('emb_model', '') || '').trim();
+    return { baseUrl, apiKey, model, configured: !!(baseUrl && model) };
+  },
+  async embedTexts(texts, opts) {
+    const c = ai.embConfig();
+    if (!c.configured) throw new Error('未配置向量模型（设置 → 检索增强 → 向量模型）');
+    const list = (Array.isArray(texts) ? texts : [texts]).map(t => String(t == null ? '' : t).slice(0, 8000) || ' ');
+    const o = opts || {};
+    const urls = candidateUrls(c.baseUrl, 'embeddings');
+    let lastErr = null;
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, { method: 'POST', headers: openaiHeaders({ apiKey: c.apiKey }), body: JSON.stringify({ model: c.model, input: list }), signal: o.signal });
+        if (!res.ok) {
+          const txt = await res.text().catch(() => '');
+          lastErr = new Error(httpErrorText(res.status, txt));
+          if ((res.status === 404 || res.status === 400) && url !== urls[urls.length - 1]) continue;
+          throw lastErr;
+        }
+        const j = await res.json().catch(() => null);
+        const data = (j && Array.isArray(j.data)) ? j.data.slice().sort((a, b) => ((a && a.index) || 0) - ((b && b.index) || 0)) : [];
+        const out = data.map(d => (d && Array.isArray(d.embedding)) ? d.embedding : null).filter(Boolean);
+        if (!out.length) throw new Error('向量接口没有返回数据（确认模型名是 embedding 模型）');
+        return out;
+      } catch (e) {
+        lastErr = e;
+        if (e && e.name === 'AbortError') throw e;
+        if (String(e.message || '').includes('fetch failed') || e.cause) {
+          if (url === urls[urls.length - 1]) throw new Error('无法连接向量接口：' + (c.baseUrl || '(未配置)') + '（检查地址、网络或代理）');
+          continue;
+        }
+        throw e;
+      }
+    }
+    throw lastErr || new Error('向量请求失败');
   },
   /** 当前生效配置（隐藏密钥，仅供前端展示状态） */
   status() {

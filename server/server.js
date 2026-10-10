@@ -21,6 +21,7 @@ const createTasks = require('./tasks');
 const { readCodeFiles, buildCodeBlock, listCodeFiles } = require('./code-read');
 const nodeFolders = require('./node-folders');
 const codeStore = require('./code-store');
+const rag = require('./rag');
 
 const APP_DIR = path.resolve(__dirname, '..');
 /* 前端资源版本戳：启动时对 public 下的 js/css 求哈希，发版后浏览器必取新文件。
@@ -193,6 +194,21 @@ CREATE TABLE IF NOT EXISTS code_repo_files (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_crf_goal ON code_repo_files(goal_id);
+/* 知识库检索索引（RAG）：资料按块切分 + 可选向量，可随时重建的派生数据。
+   同样不进 SYNC_TABLES（向量与本机配置/模型相关，各端自己建即可）。 */
+CREATE TABLE IF NOT EXISTS source_chunks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  goal_id INTEGER NOT NULL,
+  source_id INTEGER NOT NULL,
+  seq INTEGER NOT NULL DEFAULT 0,
+  text TEXT NOT NULL DEFAULT '',
+  src_hash TEXT NOT NULL DEFAULT '',
+  vec TEXT NOT NULL DEFAULT '',
+  dim INTEGER NOT NULL DEFAULT 0,
+  model TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chunks_goal ON source_chunks(goal_id, source_id);
 CREATE TABLE IF NOT EXISTS plan_drafts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   goal_id INTEGER NOT NULL,
@@ -232,6 +248,7 @@ function currentVisionModel() {
 const service = createService({ appDir: APP_DIR, port: PORT, log: (...a) => console.log(...a) });
 const update = createUpdate({ appDir: APP_DIR, port: PORT, log: (...a) => console.log(...a) });
 const tasks = createTasks({ log: (...a) => console.log(...a) });
+rag.init({ db, tasks, nowISO, getSetting, log: (...a) => console.log(...a) });
 let sync = null;   // 多端同步（在 backup 定义后初始化）
 
 sync = createSync({
@@ -1635,6 +1652,23 @@ function sourcesBlock(goal, maxItems, maxLen) {
   }
   return lines.join('\n');
 }
+/* 资料库注入（检索增强）：开了 RAG 就按当前问题检索片段，只把最相关的给模型；
+   未启用/未命中/出错时自动回退到原来的「按条数铺开」方式 —— 行为安全可预期。
+   两种情况都会附上标题索引，模型始终知道资料库里还有什么。 */
+async function libraryBlock(goal, query, legacy) {
+  if ((getSetting('rag_enabled', '1') || '1') !== '0') {
+    try {
+      const b = await rag.block(goal, query, { k: 10 });
+      if (b) return b + sourcesIndexBlock(goal, 24, '【资料库其余条目（仅索引，未展开；需要时从检索结果里找）】');
+    } catch (e) { console.log('[rag] 检索失败，回退整段资料：', e.message); }
+  }
+  return sourcesBlock(goal, (legacy && legacy.items) || 30, (legacy && legacy.len) || 180);
+}
+/* 在已有资料块之上，再补一段「按本节点/本阶段检索到的片段」（节点级资料之外的全库补充） */
+async function ragAugment(goal, query, k) {
+  if ((getSetting('rag_enabled', '1') || '1') === '0') return '';
+  try { return await rag.block(goal, query, { k: k || 8 }); } catch (e) { return ''; }
+}
 function goalHeader(goal) {
   const lines = [];
   lines.push('【职业目标】' + goal.title);
@@ -1643,14 +1677,14 @@ function goalHeader(goal) {
   if (goal.materials) lines.push('【用户提供的参考资料（优先采用）】' + goal.materials);
   return lines.join('\n');
 }
-function buildClarifyPrompt(goal) {
+async function buildClarifyPrompt(goal) {
   const lines = [];
   lines.push('你是资深的学习与成长路径规划师。规划前要先做一份**规划前问卷**，摸清用户的真实情况与真实水平。');
   lines.push('问卷质量直接决定规划是否贴合用户 —— 宁可多问，也不要凭假设规划。');
   lines.push('');
   lines.push(goalHeader(goal));
   lines.push(digestsBlock(goal));
-  lines.push(sourcesBlock(goal, 30, 180));
+  lines.push(await libraryBlock(goal, String(goal.title || '') + ' ' + String(goal.profile || '').slice(0, 300), { items: 30, len: 180 }));
   lines.push('');
   lines.push('【最重要的一步：先判断这是什么类型的目标，再照它出题】');
   lines.push('**不要默认用户在求职找工作。**先看目标本身属于哪一类，只问这一类真正需要知道的：');
@@ -1899,7 +1933,7 @@ function askBlock(round, subject) {
   return lines.join('\n');
 }
 /* 某个阶段的小目标偏少时，按知识点补足 */
-function buildStageGoalsPrompt(goal, stage) {
+async function buildStageGoalsPrompt(goal, stage) {
   const lines = [];
   lines.push('你是资深职业路径规划师。下面这个「阶段」的小目标太少，没有覆盖它要掌握的知识点。');
   lines.push('请把它的小目标补足：**阶段说明里提到的每个知识点 / 技术点 / 能力项都要有独立的小目标**（一个知识点一个，不要合并）。');
@@ -1908,7 +1942,7 @@ function buildStageGoalsPrompt(goal, stage) {
   lines.push('');
   lines.push(goalHeader(goal));
   lines.push(digestsBlock(goal));
-  lines.push(sourcesBlock(goal, 40, 200));
+  lines.push(await libraryBlock(goal, String(stage.title || '') + ' ' + String(stage.detail || '').slice(0, 300), { items: 40, len: 200 }));
   lines.push('');
   lines.push('【当前阶段】' + String(stage.title || ''));
   lines.push('阶段说明：' + String(stage.detail || ''));
@@ -1937,7 +1971,7 @@ async function expandThinStages(goal, skeleton, model, send, sig) {
     send({ status: `补足第 ${i + 1}/${stages.length} 个阶段：${String(st.title || '').slice(0, 20)}…` });
     try {
       const before = (st.goals || []).length;
-      const txt = await aiTextProgress(buildStageGoalsPrompt(goal, st), model, 300000, send, '小目标', sig);
+      const txt = await aiTextProgress(await buildStageGoalsPrompt(goal, st), model, 300000, send, '小目标', sig);
       const data = extractJSON(txt);
       const list = Array.isArray(data && data.goals) ? data.goals : (Array.isArray(data) ? data : []);
       const clean = list.filter(x => x && String(x.title || '').trim()).slice(0, 18);
@@ -1952,7 +1986,7 @@ async function expandThinStages(goal, skeleton, model, send, sig) {
   }
   return skeleton;
 }
-function buildSkeletonPrompt(goal) {
+async function buildSkeletonPrompt(goal) {
   const round = db.prepare('SELECT ask_round FROM goals WHERE id = ?').get(goal.id).ask_round || 0;
   const lines = [];
   lines.push('你是资深职业路径规划师。请为目标设计「路径骨架」：只规划 阶段 与 小目标（具体任务稍后单独细化）。');
@@ -1961,7 +1995,7 @@ function buildSkeletonPrompt(goal) {
   lines.push(goalQaBlock(goal));
   lines.push(constraintsBlock(goal));
   lines.push(digestsBlock(goal));
-  lines.push(sourcesBlock(goal, 60, 200));
+  lines.push(await libraryBlock(goal, String(goal.title || '') + ' ' + String(goal.profile || '').slice(0, 400) + ' ' + String(goal.materials || '').slice(0, 200), { items: 60, len: 200 }));
   lines.push(askBlock(round, '路径骨架'));
   lines.push('');
   lines.push('【要求】');
@@ -1988,7 +2022,7 @@ function buildSkeletonPrompt(goal) {
   lines.push('8. 若按上面的「关键机制」需要先提问，则只输出 {"analysis":"你的分析","questions":[...]}，不要输出 stages。');
   return lines.join('\n');
 }
-function buildTasksPrompt(goal, stage, stageIndex) {
+async function buildTasksPrompt(goal, stage, stageIndex) {
   const round = db.prepare('SELECT ask_round FROM goals WHERE id = ?').get(goal.id).ask_round || 0;
   const lines = [];
   lines.push('你是资深职业路径规划师。请为下面这个阶段细化出「具体可执行任务」。');
@@ -1998,6 +2032,8 @@ function buildTasksPrompt(goal, stage, stageIndex) {
   lines.push(constraintsBlock(goal));
   lines.push(digestsBlock(goal));
   lines.push(nodeSourcesBlock(goal, stage, 1000));
+  const aug = await ragAugment(goal, String(stage.title || '') + ' ' + String(stage.detail || '').slice(0, 300), 8);
+  if (aug) lines.push(aug);
   lines.push(sourcesIndexBlock(goal, 16));
   lines.push(askBlock(round, '本阶段任务细化'));
   lines.push('');
@@ -2093,7 +2129,7 @@ function nodeTutorialBlock(node) {
   }
   return lines.join('\n');
 }
-function buildExpandPrompt(goal, node, sources, folderCode) {
+async function buildExpandPrompt(goal, node, sources, folderCode) {
   const levelName = { 0: '阶段', 1: '小目标', 2: '任务', 3: '子任务', 4: '步骤', 5: '步骤' }[node.level] || '节点';
   const lines = [];
   lines.push('你是资深职业路径规划师。请把下面这个节点拆成更细、可直接执行的任务（5-8 个，**最多 10 个**）。');
@@ -2108,6 +2144,8 @@ function buildExpandPrompt(goal, node, sources, folderCode) {
   if (node.artifact) lines.push('节点产出物：' + node.artifact);
   lines.push(digestsBlock(goal));
   lines.push(nodeSourcesBlock(goal, node, 1100));
+  const aug = await ragAugment(goal, String(node.title || '') + ' ' + String(node.detail || '').slice(0, 300), 8);
+  if (aug) lines.push(aug);
   if (folderCode) {
     lines.push('');
     lines.push('【挂载文件夹的源码节选（只读讲解依据，不要复述整段代码）】');
@@ -2208,7 +2246,7 @@ function buildTutorialPrompt(goal, node, format, note, codeBlock) {
   }
   return lines.join('\n');
 }
-function buildRefineNodePrompt(goal, node, kids, feedback, folderCode) {
+async function buildRefineNodePrompt(goal, node, kids, feedback, folderCode) {
   const levelName = { 0: '阶段', 1: '小目标', 2: '任务', 3: '子任务', 4: '步骤', 5: '步骤' }[node.level] || '节点';
   const lines = [];
   lines.push('你是资深职业路径规划师。用户对某个节点的子任务划分提出了意见，请严格按意见调整。');
@@ -2227,6 +2265,8 @@ function buildRefineNodePrompt(goal, node, kids, feedback, folderCode) {
   lines.push('【用户反馈（最高优先级，必须采纳）】' + feedback);
   lines.push(digestsBlock(goal));
   lines.push(nodeSourcesBlock(goal, node, 1000));
+  const aug = await ragAugment(goal, String(node.title || '') + ' ' + String(feedback || '').slice(0, 200), 8);
+  if (aug) lines.push(aug);
   if (folderCode) {
     lines.push('');
     lines.push('【挂载文件夹的源码节选（只读讲解依据，不要复述整段代码）】');
@@ -2431,7 +2471,7 @@ function streamClarify(req, res, goal) {
   (async () => {
     try {
       send({ status: 'AI 正在分析你的情况，准备澄清问题…' });
-      const txt = await aiTextProgress(buildClarifyPrompt(goal), model, 300000, send, '问题', sig);
+      const txt = await aiTextProgress(await buildClarifyPrompt(goal), model, 300000, send, '问题', sig);
       const data = extractJSON(txt);
       if (!data || !Array.isArray(data.questions) || !data.questions.length) throw new Error('澄清问题生成失败，请重试');
       /* 「要不要搜集外部资料」是必问的开关：AI 漏了就补固定版（id 固定，前后端都认）。
@@ -2557,7 +2597,7 @@ function streamPlan(req, res, goal, answers) {
         if (['yes', 'no', 'later'].includes(v)) db.prepare('UPDATE goals SET collect_pref = ? WHERE id = ?').run(v, goal.id);
       }
       send({ status: answers ? '正在结合你的补充回答生成路径骨架…' : '正在结合你的回答生成路径骨架…' });
-      const planPrompt = buildSkeletonPrompt(goal);
+      const planPrompt = await buildSkeletonPrompt(goal);
       let skeletonText = await aiTextProgress(planPrompt, model, 600000, send, '阶段/小目标', sig);
       let skeleton = extractJSON(skeletonText);
       if (skeleton && Array.isArray(skeleton.questions) && skeleton.questions.length) {
@@ -2687,7 +2727,7 @@ function streamPlanTasks(req, res, goal, answers) {
         if (hasTasks) { send({ status: `第 ${i + 1}/${skeleton.length} 阶段已有任务，跳过` }); continue; }
         send({ status: `生成第 ${i + 1}/${skeleton.length} 阶段的任务：${String(st.title || '').slice(0, 22)}…` });
         try {
-          const txt = await aiTextProgress(buildTasksPrompt(goal, st, i), model, 300000, send, '任务', sig);
+          const txt = await aiTextProgress(await buildTasksPrompt(goal, st, i), model, 300000, send, '任务', sig);
           const data = extractJSON(txt);
           if (data && Array.isArray(data.questions) && data.questions.length) {
             saveGoalQuestions(goal.id, 'tasks', data);
@@ -2727,7 +2767,7 @@ function streamPlanTasks(req, res, goal, answers) {
     res.end();
   })();
 }
-function buildRefineSkeletonPrompt(goal, current, feedback) {
+async function buildRefineSkeletonPrompt(goal, current, feedback) {
   const round = db.prepare('SELECT ask_round FROM goals WHERE id = ?').get(goal.id).ask_round || 0;
   const lines = [];
   lines.push('你是资深职业路径规划师。用户对现有路径骨架提出了意见，请按意见调整。');
@@ -2736,7 +2776,7 @@ function buildRefineSkeletonPrompt(goal, current, feedback) {
   lines.push(goalQaBlock(goal));
   lines.push(constraintsBlock(goal));
   lines.push(digestsBlock(goal));
-  lines.push(sourcesBlock(goal, 40, 200));
+  lines.push(await libraryBlock(goal, String(goal.title || '') + ' ' + String(feedback || '').slice(0, 300), { items: 40, len: 200 }));
   lines.push(askBlock(round, '骨架调整'));
   lines.push('');
   lines.push('【现有骨架】');
@@ -2765,7 +2805,7 @@ function streamPlanRefine(req, res, goal, feedback, answers) {
       const current = currentSkeleton(goal.id);
       if (!current.length) throw new Error('还没有骨架可调整');
       send({ status: '正在根据你的意见调整骨架…' });
-      const refinePrompt = buildRefineSkeletonPrompt(goal, current, feedback);
+      const refinePrompt = await buildRefineSkeletonPrompt(goal, current, feedback);
       let txt = await aiTextProgress(refinePrompt, model, 480000, send, '阶段/小目标', sig);
       let plan = extractJSON(txt);
       if (!plan || !Array.isArray(plan.stages) || !plan.stages.length) {
@@ -2821,7 +2861,7 @@ function roadmapOutline(goalId) {
   if (lines.length > 600) lines.push('…（节点过多，仅显示前 600 个）');
   return lines.join('\n');
 }
-function buildChatPrompt(goal, message, sessionId) {
+async function buildChatPrompt(goal, message, sessionId) {
   const lines = [];
     lines.push('你是用户的「目标助理」：不只可以改路线图，还能操作这个目标下的所有可操作信息——管理信息源（添加/删除）、触发信息提炼与信息源收集、修改目标信息（现状/时间/期限/参考资料）、添加规划约束。');
   lines.push('用户让你做这些事时，直接通过下面的 ops 执行，不要只说"你可以去某某页面点一下"。');
@@ -2831,6 +2871,8 @@ function buildChatPrompt(goal, message, sessionId) {
   lines.push(constraintsBlock(goal));
   const dgBlock = digestsBlock(goal);
   if (dgBlock) lines.push(dgBlock);
+  const augBlock = await ragAugment(goal, message, 8);
+  if (augBlock) lines.push(augBlock);
   const srcBlock = chatSourcesBlock(goal);
   if (srcBlock) lines.push(srcBlock);
   const codeBlock = codeContextBlock(goal, message);
@@ -2968,6 +3010,7 @@ function applyChatOps(goalId, ops) {
           const sr = db.prepare('INSERT INTO sources (goal_id,title,url,site,kind,snippet,content,published_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
             .run(goalId, title || '对话添加的资料', String(op.url || ''), siteV, kindV, String(op.snippet || content.slice(0, 300)).slice(0, 300), content, String(op.published_at || ''), nowISO());
           applied.push({ op: 'add_source', id: Number(sr.lastInsertRowid), title: (title || '资料').slice(0, 60) });
+          rag.autoIndex(goalId);
       } else if (kind === 'delete_source') {
           const key = String(op.title || op.title_match || op.id || '').trim();
           if (!key) { errors.push('请给出要删除的资料标题'); continue; }
@@ -3125,7 +3168,7 @@ function streamChat(req, res, goal, message, session) {
       }
       send({ status: '正在理解你的要求…' });
       fullText = await ai.text({
-        prompt: buildChatPrompt(goal, message, sessionId),
+        prompt: await buildChatPrompt(goal, message, sessionId),
         model: model || currentModel(),
         timeoutMs: 420000,
         signal: sig,
@@ -3643,6 +3686,7 @@ async function handleAPI(req, res, u) {
       db.prepare('DELETE FROM nodes WHERE goal_id = ?').run(id);
       db.prepare('DELETE FROM sources WHERE goal_id = ?').run(id);
       db.prepare('DELETE FROM code_repo_files WHERE goal_id = ?').run(id);
+      rag.dropGoal(id);
       db.prepare('DELETE FROM goals WHERE id = ?').run(id);
       db.prepare('DELETE FROM goal_versions WHERE goal_id = ?').run(id);
       db.prepare('DELETE FROM tutorials WHERE goal_id = ?').run(id);
@@ -3683,6 +3727,7 @@ async function handleAPI(req, res, u) {
         const r = await collectForGoal(g, tkSend, sig);
         const list = sourcesOf(id);
         try { res.write(`data: ${JSON.stringify({ done: true, count: r.saved, blocked: r.blocked, sources: list, ebooks: ebSummary })}\n\n`); } catch (e) {}
+        rag.autoIndex(id);
         tk.done({ ok: true });
       } catch (e) {
         tk.fail(e);
@@ -3920,6 +3965,7 @@ function redactText(raw) {
         .run(gid, String(d.topic || '').slice(0, 60), String(d.title || d.topic || '汇总').slice(0, 120), content, srcCount, t);
       digCount++;
     }
+    rag.autoIndex(gid);
     backup();
     return sendJSON(res, 200, { ok: true, goalId: gid, counts: { nodes: nodeCount, sources: srcCount, digests: digCount }, goal: getGoal(gid) });
   }
@@ -3937,6 +3983,7 @@ function redactText(raw) {
         String(body.site || '手动添加').slice(0, 40), String(body.kind || '资料').slice(0, 10),
         String(body.snippet || content.slice(0, 300)).slice(0, 300), content, String(body.published_at || ''), nowISO(), body.quality ? 1 : 0);
     db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), gid);
+    rag.autoIndex(gid);
     backup();
     return sendJSON(res, 200, { ok: true, id: Number(sr.lastInsertRowid), sources: sourcesOf(gid), goal: getGoal(gid) });
   }
@@ -3951,6 +3998,7 @@ function redactText(raw) {
     const kind = body.kind != null ? String(body.kind).slice(0, 10) : row.kind;
     const quality = body.quality != null ? (body.quality ? 1 : 0) : row.quality;
     db.prepare('UPDATE sources SET title=?, content=?, kind=?, quality=? WHERE id=?').run(title || row.title, content, kind, quality, id);
+    rag.autoIndex(row.goal_id);
     backup();
     return sendJSON(res, 200, { ok: true, sources: sourcesOf(row.goal_id) });
   }
@@ -3959,6 +4007,7 @@ function redactText(raw) {
     const sid = Number(sourceDelMatch[1]);
     db.prepare('DELETE FROM sources WHERE id = ?').run(sid);
     db.prepare('DELETE FROM code_repo_files WHERE source_id = ?').run(sid);
+    rag.dropSource(sid);
     backup();
     return sendJSON(res, 200, { ok: true });
   }
@@ -3972,7 +4021,7 @@ function redactText(raw) {
     if (!ids.length) return sendJSON(res, 400, { error: '没有选中的资料' });
     const del = db.prepare('DELETE FROM sources WHERE id = ? AND goal_id = ?');
     let n = 0;
-    for (const id of new Set(ids)) { try { n += del.run(id, gid).changes; } catch (e) {} db.prepare('DELETE FROM code_repo_files WHERE source_id = ?').run(id); }
+    for (const id of new Set(ids)) { try { n += del.run(id, gid).changes; } catch (e) {} db.prepare('DELETE FROM code_repo_files WHERE source_id = ?').run(id); rag.dropSource(id); }
     db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), gid);
     backup();
     return sendJSON(res, 200, { ok: true, deleted: n, sources: sourcesOf(gid) });
@@ -3986,6 +4035,7 @@ function redactText(raw) {
     const files = db.prepare('SELECT file FROM jd_images WHERE goal_id = ?').all(gid);
     db.prepare('DELETE FROM sources WHERE goal_id = ?').run(gid);
     db.prepare('DELETE FROM code_repo_files WHERE goal_id = ?').run(gid);
+    rag.dropGoal(gid);
     db.prepare('DELETE FROM jd_images WHERE goal_id = ?').run(gid);
     let nFile = 0;
     for (const f of files) {
@@ -4040,7 +4090,7 @@ function redactText(raw) {
           // 带用户意见调整现有子任务
           send({ status: '正在根据你的意见调整划分…' });
           const kids = db.prepare('SELECT title, detail, status FROM nodes WHERE parent_id = ? ORDER BY sort_order, id').all(n.id);
-          const txt = await aiText(buildRefineNodePrompt(goal, n, kids, feedback, expandCode), model, 300000);
+          const txt = await aiText(await buildRefineNodePrompt(goal, n, kids, feedback, expandCode), model, 300000);
           const data = extractJSON(txt);
           if (data && Array.isArray(data.questions) && data.questions.length) {
             saveNodeQuestions(n.id, data, feedback);
@@ -4080,7 +4130,7 @@ function redactText(raw) {
           }
           send({ status: '开始制定拆分计划…' });
           var vid = beginVersion(goal.id, reason);
-          const txt = await aiText(buildExpandPrompt(goal, n, null, expandCode), model, 300000);
+          const txt = await aiText(await buildExpandPrompt(goal, n, null, expandCode), model, 300000);
           const data = extractJSON(txt);
           if (data && Array.isArray(data.questions) && data.questions.length) {
             saveNodeQuestions(n.id, data, feedback);
@@ -4750,6 +4800,28 @@ function extractEbookPrefFromAnswers(answers) {
     const gid = Number(u.searchParams.get('goalId') || 0);
     return sendJSON(res, 200, { tasks: tasks.list(gid || 0), status: tasks.status() });
   }
+  /* ---- 检索增强（RAG）：状态 / 重建索引 / 检索预览 ---- */
+  if (p === '/api/rag/status' && method === 'GET') {
+    const gid = Number(u.searchParams.get('goalId') || 0);
+    return sendJSON(res, 200, rag.status(gid || 0));
+  }
+  const ragBuildMatch = p.match(/^\/api\/goals\/(\d+)\/rag\/build$/);
+  if (ragBuildMatch && method === 'POST') {
+    try { return sendJSON(res, 200, { ok: true, ...rag.buildIndex(Number(ragBuildMatch[1])) }); }
+    catch (e) { return sendJSON(res, 400, { error: e.message }); }
+  }
+  const ragSearchMatch = p.match(/^\/api\/goals\/(\d+)\/rag\/search$/);
+  if (ragSearchMatch && method === 'POST') {
+    const gid = Number(ragSearchMatch[1]);
+    const rbody = await readBody(req).catch(() => ({}));
+    const q = String(rbody.q || rbody.query || '').trim();
+    if (!q) return sendJSON(res, 400, { error: '请输入检索词' });
+    const hits = await rag.search(gid, q, { k: Math.min(20, Number(rbody.k) || 8) });
+    return sendJSON(res, 200, {
+      ok: true,
+      hits: hits.map(h => ({ source_id: h.source_id, title: h.title, site: h.site, kind: h.kind, quality: h.quality, score: Math.round((h.score || 0) * 1000) / 1000, text: String(h.text || '').slice(0, 400) }))
+    });
+  }
   const taskCancelMatch = p.match(/^\/api\/tasks\/(\d+)\/cancel$/);
   if (taskCancelMatch && method === 'POST') {
     return sendJSON(res, 200, tasks.cancel(Number(taskCancelMatch[1])));
@@ -5223,6 +5295,22 @@ function extractEbookPrefFromAnswers(answers) {
     const r = await ai.test(body || {});
     return sendJSON(res, 200, r);
   }
+  /* 向量接口测试（检索增强用）：先按请求把配置存下去，再真实嵌一条最短文本 */
+  if (p === '/api/ai/emb-test' && method === 'POST') {
+    let body = {};
+    try { body = await readBody(req); } catch (e) {}
+    const set = (k, v) => { if (v != null) setSetting(k, String(v).trim()); };
+    if (body.baseUrl != null) set('emb_base_url', body.baseUrl);
+    if (body.model != null) set('emb_model', body.model);
+    if (body.apiKey != null && String(body.apiKey).trim() && !/^•+$/.test(String(body.apiKey).trim())) set('emb_api_key', body.apiKey);
+    try {
+      const v = await ai.embedTexts(['检索增强连通性测试']);
+      const dim = (v && v[0] && v[0].length) || 0;
+      return sendJSON(res, 200, { ok: true, dim, model: ai.embConfig().model });
+    } catch (e) {
+      return sendJSON(res, 200, { ok: false, message: e.message });
+    }
+  }
 
   if (p === '/api/backup' && method === 'POST') {
     backup();
@@ -5251,6 +5339,7 @@ function extractEbookPrefFromAnswers(answers) {
     if (!goals.length) return sendJSON(res, 400, { error: '没有可导入的目标' });
     backup();
     db.exec('DELETE FROM nodes; DELETE FROM sources; DELETE FROM goals; DELETE FROM goal_versions; DELETE FROM tutorials; DELETE FROM tutorial_versions; DELETE FROM chats; DELETE FROM chat_sessions; DELETE FROM code_repo_files;');
+    rag.dropAll();
     for (const pl of PLUGINS) { try { if (typeof pl.clearAll === 'function') pl.clearAll(pluginCtx()); } catch (e) {} }
     const insG = db.prepare('INSERT INTO goals (id,title,profile,materials,weekly_hours,deadline,status,error,summary,constraints,plugins,ebook_pref,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
     for (const g of goals) insG.run(g.id != null ? Number(g.id) : null, g.title || '', g.profile || '', g.materials || '', g.weekly_hours || '', g.deadline || '', g.status || 'draft', g.error || '', g.summary || '', typeof g.constraints === 'string' ? g.constraints : JSON.stringify(g.constraints || []), typeof g.plugins === 'string' ? g.plugins : JSON.stringify(g.plugins || {}), typeof g.ebook_pref === 'string' ? g.ebook_pref : JSON.stringify(g.ebook_pref || {}), g.created_at || nowISO(), g.updated_at || nowISO());
@@ -5360,6 +5449,11 @@ function extractEbookPrefFromAnswers(answers) {
       /* 独立识图配置回显（密钥只回有没有，不给明文） */
       vis_base_url: getSetting('vis_base_url', ''),
       vis_has_key: !!getSetting('vis_api_key', ''),
+      /* 检索增强：向量模型独立配置（很多服务商没有 /embeddings，如 DeepSeek） */
+      rag_enabled: (getSetting('rag_enabled', '1') || '1') !== '0',
+      emb_base_url: getSetting('emb_base_url', ''),
+      emb_has_key: !!getSetting('emb_api_key', ''),
+      emb_model: getSetting('emb_model', ''),
       ai_provider: getSetting('ai_provider', 'openai'),
       ai_base_url: getSetting('ai_base_url', ''),
       ai_api_key: getSetting('ai_api_key', '') ? '••••••••' : '',
@@ -5389,6 +5483,12 @@ function extractEbookPrefFromAnswers(answers) {
     if (body.vis_base_url != null) set('vis_base_url', body.vis_base_url);
     if (body.vis_api_key != null && String(body.vis_api_key).trim() && !/^•+$/.test(String(body.vis_api_key).trim())) set('vis_api_key', body.vis_api_key);
     if (body.vis_api_key === '') setSetting('vis_api_key', '');
+    /* 检索增强（RAG）：开关 + 向量模型独立配置（地址/模型留空 = 未配置，退化为关键词检索） */
+    if (body.rag_enabled != null) setSetting('rag_enabled', body.rag_enabled ? '1' : '0');
+    if (body.emb_base_url != null) set('emb_base_url', body.emb_base_url);
+    if (body.emb_model != null) set('emb_model', body.emb_model);
+    if (body.emb_api_key != null && String(body.emb_api_key).trim() && !/^•+$/.test(String(body.emb_api_key).trim())) set('emb_api_key', body.emb_api_key);
+    if (body.emb_api_key === '') setSetting('emb_api_key', '');
     return sendJSON(res, 200, { ok: true, settings: { model: currentModel(), ai_provider: getSetting('ai_provider', 'openai'), ai_base_url: getSetting('ai_base_url', ''), ai_vision_model: getSetting('ai_vision_model', ''), ai_timeout_ms: getSetting('ai_timeout_ms', '300000') } });
   }
 
