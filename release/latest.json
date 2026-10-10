@@ -1,14 +1,14 @@
 {
-  "version": "1.10.33",
-  "buildVer": "957f3ed96df3",
-  "payload": "release/payload-1.10.33.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.33.sxar?ref=main",
+  "version": "1.10.34",
+  "buildVer": "ec2f619095a9",
+  "payload": "release/payload-1.10.34.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.34.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "8f3b7f51afb5c2c6544da1d18fab5f828b60e7e0c68d585111d94746009d8ef7",
-  "size": 687854,
-  "unpackedSize": 2503084,
-  "publishedAt": "2026-10-10T10:04:53.854Z",
-  "notes": "新增 4 款护眼主题（暖沙 / 护眼绿 / 雾蓝 / 夜蓝），并在「设置 → 外观主题」里支持亮色、暗色模式分别选择主题皮肤：只改颜色不改字体，选择立即生效（本机），白天不再被纯白刺眼",
+  "sha256": "6c282eaedee6d0dde3a4be6f471bdab10dcc2a131331264487fd08353be04e75",
+  "size": 698126,
+  "unpackedSize": 2537906,
+  "publishedAt": "2026-10-10T10:33:00.194Z",
+  "notes": "新增检索增强（RAG）：资料一多也不整包塞给模型 —— 规划、拆任务、对话会先从资料库检索最相关的片段；配向量模型（硅基流动/通义/Ollama 等）升级语义检索，不配也能用关键词检索。设置 → 检索增强 里配置与预览",
   "exeRequired": false
 }
