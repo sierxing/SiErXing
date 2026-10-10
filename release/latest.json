@@ -1,14 +1,14 @@
 {
-  "version": "1.10.26",
-  "buildVer": "fbce56e7da2b",
-  "payload": "release/payload-1.10.26.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.26.sxar?ref=main",
+  "version": "1.10.27",
+  "buildVer": "ad3178d62efc",
+  "payload": "release/payload-1.10.27.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.27.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "84b539daecd4e0b0ed859b408947b81346ca0563f9bbdc83ff2f23685e1ce0bc",
-  "size": 662210,
-  "unpackedSize": 2423634,
-  "publishedAt": "2026-10-10T07:27:49.217Z",
-  "notes": "重排节点卡片：一屏看懂「做完的标志」（验收+产出）→「为什么有这一步」（属于哪一级、这一支要达成什么、依据是什么）→「怎么做」（拆成分步）；依据信息源/文件夹/提炼汇总/教程/调整收进折叠区",
+  "sha256": "ad4f8876ab8625c8c3a0bcf3101901485be83da38bd351a2ff95d069a1ca1a39",
+  "size": 673362,
+  "unpackedSize": 2465363,
+  "publishedAt": "2026-10-10T08:05:34.306Z",
+  "notes": "新增组件「🎯 今日任务」：像游戏任务栏，AI 按你的推进情况和每个任务的预计耗时，排今天推进哪几个节点、每个拆成哪几小步、各要多久；勾完自动推进节点状态、完成率实时缩，时间不够可以点「今天只有 1 小时」重排",
   "exeRequired": false
 }

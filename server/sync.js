@@ -35,7 +35,9 @@ const SYNC_TABLES = [
   'quiz_outlines', 'quiz_sessions', 'quiz_records',
   'restate_points', 'restate_arc', 'restate_rounds', 'restate_turns', 'restate_coach',
   /* 模拟面试：JD / 项目摘要 / 问答与总评都是用户自己的东西，跟着同步走 */
-  'interview_sessions', 'interview_turns'
+  'interview_sessions', 'interview_turns',
+  /* 今日任务：每天排的任务栏（按天存，跨设备看到同一份安排） */
+  'quest_days'
 ];
 // 不参与同步的列：题面正文与代码模板体积大，且每台设备用本机 LeetCode 登录态自己抓即可；
 // 多设备之间互相覆盖反而会看到别人的缓存（导入时保留本机已有值）
