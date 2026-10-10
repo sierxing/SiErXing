@@ -1,14 +1,14 @@
 {
-  "version": "1.10.34",
-  "buildVer": "ec2f619095a9",
-  "payload": "release/payload-1.10.34.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.34.sxar?ref=main",
+  "version": "1.10.35",
+  "buildVer": "baaabbff10fd",
+  "payload": "release/payload-1.10.35.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.35.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "6c282eaedee6d0dde3a4be6f471bdab10dcc2a131331264487fd08353be04e75",
-  "size": 698126,
-  "unpackedSize": 2537906,
-  "publishedAt": "2026-10-10T10:33:00.194Z",
-  "notes": "新增检索增强（RAG）：资料一多也不整包塞给模型 —— 规划、拆任务、对话会先从资料库检索最相关的片段；配向量模型（硅基流动/通义/Ollama 等）升级语义检索，不配也能用关键词检索。设置 → 检索增强 里配置与预览",
+  "sha256": "6695ba9ef0ebbe01fec65fc2215ae3f2d8483c6ee2f1d4a8f08071dea9833658",
+  "size": 709053,
+  "unpackedSize": 2574252,
+  "publishedAt": "2026-10-10T10:49:19.314Z",
+  "notes": "新增组件「📌 划线笔记」：像 WPS 那样在教程里划重点——选中文字浮出颜色条，高亮/下划线/写批注卡片；右侧清单列出这篇教程的全部笔记，点一条跳过去；HTML 教程（iframe）同样可用",
   "exeRequired": false
 }
