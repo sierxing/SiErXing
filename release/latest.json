@@ -1,14 +1,14 @@
 {
-  "version": "1.10.31",
-  "buildVer": "a5406b7ff7a8",
-  "payload": "release/payload-1.10.31.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.31.sxar?ref=main",
+  "version": "1.10.32",
+  "buildVer": "1669c457da19",
+  "payload": "release/payload-1.10.32.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.32.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "7feff22f653df6ecd4adc4ec055184d9bb82f62bb6c1b54a08dcb6a401cec6c9",
-  "size": 677666,
-  "unpackedSize": 2475257,
-  "publishedAt": "2026-10-10T09:01:54.729Z",
-  "notes": "修「AI 助手看不到资料库」：对话现在会带上资料库清单与提炼汇总（导入的代码库摘要也能看到并据此改任务）；修 AI 流式调用重复发送两次请求的问题（此前每次对话/规划都按双倍计费）；修 AI 移动节点后界面顺序不生效 + 新增按位置插入/移动",
+  "sha256": "1dfe46e6c871475637095675d40796dc3c344c3ba5d5f9f941c0f4410f4002f2",
+  "size": 682994,
+  "unpackedSize": 2487887,
+  "publishedAt": "2026-10-10T09:29:50.115Z",
+  "notes": "导入代码库现在会连完整源码一起存（只读、脱敏）：AI 助手对话时按你的问题附上相关代码片段和完整文件清单，可以直接问「看 server/ai.js」；以前只导入过摘要的，在原处再点一次「读取并导入」就补存快照。并修锁文件误入快照、package-lock 大小写漏网等",
   "exeRequired": false
 }

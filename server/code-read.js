@@ -29,7 +29,7 @@ function denyFile(base) {
   if (/\.log$/i.test(b)) return true;
   if (/\.(db|sqlite|sqlite3|db-wal|db-shm)$/i.test(b)) return true;
   if (/^(id_rsa|id_ed25519|.*\.pem|.*\.key|secrets?\.json|credentials\.json)$/i.test(b)) return true;
-  if (/lock$/i.test(b) && /package-lock|yarn\.lock|pnpm-lock/i.test(b)) return true;
+  if (/^(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?)$/i.test(b)) return true;
   return false;
 }
 

@@ -8,6 +8,7 @@
 'use strict';
 const { parseEbook, MAX_FILE } = require('./lib/ebook-parse');
 const { resolveRoot, readProject, buildStudyDigestPrompt, digestToText } = require('./lib/code-digest');
+const { storeCodeRepoFiles } = require('../code-store');
 let db, nowISO, safeParse, sendJSON, readBody, getSetting, setSetting, backup, log;
 let fs, path, os, spawn, APP_DIR, DATA_DIR, UPLOAD_DIR, PUBLIC_DIR;
 let getGoal, sourcesOf, aiText, aiTextFiles, currentModel, currentVisionModel, tasks;
@@ -227,10 +228,17 @@ module.exports = {
       const name = String(root).split(/[\\/]/).filter(Boolean).pop() || '代码库';
       const title = '代码库：' + name;
 
-      /* 已经导过同一个路径就不重复导（用户常手滑点两次） */
+      /* 已经导过同一个路径就不重复导（用户常手滑点两次）；
+         但老版本只存了摘要 —— 再点一次顺带补存完整快照，不用重新生成摘要 */
       const dup = db.prepare("SELECT id FROM sources WHERE goal_id = ? AND site = '导入的代码库' AND url = ? LIMIT 1").get(g.id, root);
       if (dup && !body.force) {
-        return sendJSON(res, 200, { ok: true, already: true, goal: getGoal(g.id), sources: sourcesOf(g.id) });
+        let stored = null;
+        try { stored = storeCodeRepoFiles(db, g.id, Number(dup.id), root, nowISO); } catch (e) { stored = null; }
+        return sendJSON(res, 200, {
+          ok: true, already: true,
+          stored: stored ? { files: stored.files, chars: stored.chars, total: stored.total, redacted: stored.secrets } : null,
+          goal: getGoal(g.id), sources: sourcesOf(g.id)
+        });
       }
 
       const job = tasks.begin({ type: 'jdfile', title: '读懂代码库 · ' + name, note: root, goalId: g.id, message: 'AI 正在读这个代码库，整理成学习路径能用的摘要' });
@@ -253,8 +261,12 @@ module.exports = {
       const fileList = proj.files.map(f => f.path);
       const snippet = '读了 ' + proj.files.length + ' 个文件：' + fileList.slice(0, 8).join('、') + (fileList.length > 8 ? ' 等' : '');
       const now = nowISO();
-      db.prepare('INSERT INTO sources (goal_id,title,url,site,kind,snippet,content,published_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+      const sr = db.prepare('INSERT INTO sources (goal_id,title,url,site,kind,snippet,content,published_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
         .run(g.id, title, root, '导入的代码库', '代码库', snippet.slice(0, 300), digestText, '', now);
+      /* 完整快照：把整库可读文件存进 code_repo_files（只读、脱敏），
+         AI 助手对话时按问题查阅 —— 摘要是地图，快照是底料，
+         用户问"某段逻辑到底怎么写的"时不能只靠摘要。 */
+      const stored = storeCodeRepoFiles(db, g.id, Number(sr.lastInsertRowid), root, nowISO);
       /* 也写进「提炼汇总」：规划时按 4000 字带进去（原始资料列表只带 700 字，装不下） */
       db.prepare('INSERT INTO source_digests (goal_id,topic,title,content,sources_count,created_at) VALUES (?,?,?,?,?,?)')
         .run(g.id, '代码库', title, digestText, 1, now);
@@ -262,6 +274,7 @@ module.exports = {
       backup();
       return sendJSON(res, 200, {
         ok: true, read: proj.files.length, files: fileList,
+        stored: { files: stored.files, chars: stored.chars, total: stored.total, redacted: stored.secrets },
         digest: d, goal: getGoal(g.id), sources: sourcesOf(g.id)
       });
     }

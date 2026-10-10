@@ -102,7 +102,7 @@ function drawJDPage() {
         <input id="jdRepoPath" placeholder="本机路径，例如 /home/you/my-project 或 ~/code/app" spellcheck="false">
         <button class="btn small primary" id="jdRepoBtn">读取并导入</button>
       </div>
-      <div class="jpNote">只读读取：.env / 密钥 / node_modules / .git 一律不读，路径不会离开这台机器。AI 会整理出「要掌握哪些概念、按什么顺序读、哪里最容易看懵」，规划会直接照它排阶段。</div>
+      <div class="jpNote">只读读取：.env / 密钥 / node_modules / .git 一律不读，路径不会离开这台机器。AI 会整理出「要掌握哪些概念、按什么顺序读」的摘要；同时把完整代码（已脱敏）存进资料库 —— 之后在对话里直接问具体逻辑（如「看 server/ai.js」）就能查阅。</div>
       <div id="jdRepoMsg" class="muted" style="margin-top:6px;"></div>
     </div>
     <div class="jdList">${list.length ? list.map(jdCardHTML).join('') : '<div class="muted" style="padding:20px 4px;">还没有资料。粘贴一张截图，或拖入文件 / 文件夹试试。</div>'}</div>
@@ -146,13 +146,20 @@ function drawJDPage() {
       if (msg) msg.textContent = '正在读取并整理（几十秒，别关页面）…';
       try {
         const r = await api('/api/goals/' + state.goal.id + '/code-repo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: pth }) });
-        if (r.already) { toast('这个代码库已经导过了（删掉旧的可以重导）'); if (msg) msg.textContent = ''; }
-        else {
+        if (r.already) {
           if (r.sources) state.goal.sources = r.sources;
-          toast('已导入：读了 ' + (r.read || 0) + ' 个文件');
+          if (r.stored && r.stored.files) toast('已补存完整代码快照：' + r.stored.files + ' 个文件');
+          else toast('这个代码库已经导过了（删掉旧的可以重导）');
+          if (msg) msg.textContent = '';
+        } else {
+          if (r.sources) state.goal.sources = r.sources;
+          const st = r.stored || {};
+          toast('已导入：' + (st.files || r.read || 0) + ' 个文件' + (st.files ? '（含完整代码快照）' : ''));
           if (msg) {
             const d = r.digest || {};
-            msg.innerHTML = '<b>读完了</b>（' + (r.read || 0) + ' 个文件）—— ' + esc(String(d.what || '').slice(0, 120))
+            msg.innerHTML = '<b>读完了</b>（完整快照 ' + (st.files || 0) + ' 个文件'
+              + (st.redacted ? '，脱敏 ' + st.redacted + ' 处' : '') + '）—— ' + esc(String(d.what || '').slice(0, 120))
+              + (st.files ? '<br><span class="muted">AI 助手对话时可按你的问题查阅这些代码' + ((st.total || 0) > (st.files || 0) ? '；超出上限的 ' + ((st.total || 0) - (st.files || 0)) + ' 个文件未存' : '') + '。</span>' : '')
               + '　<a href="#/g/' + state.goal.id + '">回目标页看资料与规划 →</a>';
           }
         }

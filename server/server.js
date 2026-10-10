@@ -20,6 +20,7 @@ const createUpdate = require('./update');
 const createTasks = require('./tasks');
 const { readCodeFiles, buildCodeBlock, listCodeFiles } = require('./code-read');
 const nodeFolders = require('./node-folders');
+const codeStore = require('./code-store');
 
 const APP_DIR = path.resolve(__dirname, '..');
 /* 前端资源版本戳：启动时对 public 下的 js/css 求哈希，发版后浏览器必取新文件。
@@ -177,6 +178,21 @@ CREATE TABLE IF NOT EXISTS sources (
   published_at TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );
+/* 导入代码库的完整文件快照（只读、已脱敏）：AI 助手对话时按问题从这里检索。
+   不进 SYNC_TABLES —— 路径与内容跟设备绑定、体积大，各设备自己导入一份即可，
+   跨设备同步互相覆盖没意义（同 review_plans 的理由）。 */
+CREATE TABLE IF NOT EXISTS code_repo_files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  goal_id INTEGER NOT NULL,
+  source_id INTEGER NOT NULL DEFAULT 0,
+  root TEXT NOT NULL DEFAULT '',
+  path TEXT NOT NULL,
+  size INTEGER NOT NULL DEFAULT 0,
+  content TEXT NOT NULL DEFAULT '',
+  truncated INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_crf_goal ON code_repo_files(goal_id);
 CREATE TABLE IF NOT EXISTS plan_drafts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   goal_id INTEGER NOT NULL,
@@ -1523,6 +1539,44 @@ function chatSourcesBlock(goal) {
   }
   return lines.join('\n');
 }
+/* 对话助理的代码上下文：已导入代码库的完整文件清单 + 与本次问题最相关的文件内容。
+   旧版导入只存了摘要、没有快照 —— 这里现场补存一次（目录还在的话），老用户不必重新导入。 */
+function codeContextBlock(goal, message) {
+  const repos = db.prepare("SELECT id, url, title FROM sources WHERE goal_id = ? AND site = '导入的代码库'").all(goal.id);
+  let rows = db.prepare('SELECT path, root, content, truncated FROM code_repo_files WHERE goal_id = ?').all(goal.id);
+  if (!rows.length && repos.length) {
+    for (const s of repos) {
+      try { if (s.url && fs.existsSync(s.url)) codeStore.storeCodeRepoFiles(db, goal.id, s.id, s.url, nowISO); } catch (e) { console.log('[code-store] 现场补存失败：', e.message); }
+    }
+    rows = db.prepare('SELECT path, root, content, truncated FROM code_repo_files WHERE goal_id = ?').all(goal.id);
+  }
+  if (!rows.length && !repos.length) return '';
+  const lines = ['', '【已导入的代码库】'];
+  if (!rows.length) {
+    lines.push('（有导入记录，但快照读不出来：' + repos.map(s => s.url || s.title).join('、') + ' —— 目录可能被移动或删除了，需要重新导入）');
+    return lines.join('\n');
+  }
+  const byRoot = {};
+  for (const f of rows) { const k = f.root || ''; (byRoot[k] = byRoot[k] || []).push(f); }
+  for (const root of Object.keys(byRoot)) {
+    const files = byRoot[root].slice().sort((a, b) => a.path.localeCompare(b.path));
+    lines.push('');
+    lines.push('● ' + (root || '（路径未知）') + '（已存 ' + files.length + ' 个文件的快照）');
+    for (const f of files.slice(0, 400)) lines.push('- ' + f.path);
+    if (files.length > 400) lines.push('…（其余 ' + (files.length - 400) + ' 个文件未列出）');
+  }
+  const picked = codeStore.pickCodeContext(rows, message);
+  if (picked.length) {
+    lines.push('');
+    lines.push('【与本次问题最相关的源码（按关键词自动挑选，已脱敏；超长文件给的是命中处附近的片段）】');
+    for (const f of picked) {
+      lines.push('');
+      lines.push('--- ' + f.path + (f.mid ? '（截断 · 中间片段）' : f.truncated ? '（截断）' : '') + ' ---');
+      lines.push(f.text);
+    }
+  }
+  return lines.join('\n');
+}
 /* 同级其它节点的标题：教程里点名排除，防止把别章节的知识点写进来 */
 function siblingScopeBlock(goal, node) {
   let sibs = [];
@@ -2779,6 +2833,8 @@ function buildChatPrompt(goal, message, sessionId) {
   if (dgBlock) lines.push(dgBlock);
   const srcBlock = chatSourcesBlock(goal);
   if (srcBlock) lines.push(srcBlock);
+  const codeBlock = codeContextBlock(goal, message);
+  if (codeBlock) lines.push(codeBlock);
   const chats = sessionId
     ? db.prepare('SELECT role, content FROM chats WHERE session_id = ? ORDER BY id DESC LIMIT 12').all(sessionId).reverse()
     : db.prepare('SELECT role, content FROM chats WHERE goal_id = ? ORDER BY id DESC LIMIT 12').all(goal.id).reverse();
@@ -2794,8 +2850,8 @@ function buildChatPrompt(goal, message, sessionId) {
   lines.push('【用户的新消息】' + message);
   lines.push('');
   lines.push('【你的任务】');
-  lines.push('0. 不要使用任何工具（不要读取文件、不要执行命令、不要联网）；规划与资料库的全部信息都在本提示里，直接基于它作答。');
-  lines.push('   用户问「资料库里有没有 / 能不能看到 XX（如某个代码库）」时，依据上面【资料库清单】与【资料提炼汇总】如实回答：site=导入的代码库 的条目，就是该代码库已被通读后产出的摘要（含它是什么、目录结构、怎么读），不要说资料库是空的；但你不能逐文件实时读取本机目录，需要更细的内容时，请用户把关键文件发来存进资料库。');
+  lines.push('0. 不要使用任何工具（不要读取文件、不要执行命令、不要联网）；规划、资料库与代码库的全部信息都在本提示里，直接基于它作答。');
+  lines.push('   用户问「资料库里有没有 / 能不能看到 XX（如某个代码库）」时，依据上面【资料库清单】【资料提炼汇总】【已导入的代码库】如实回答，不要说资料库是空的：每个代码库都存了完整文件快照（脱敏），并已按本次问题附上最相关文件的内容。要看别的文件时，请用户在消息里直接写文件路径或关键词（如「看 server/ai.js」），下一轮就会带上；你不能写文件、不能执行命令。');
     lines.push('1. 判断用户意图：只是咨询/提问 → 直接回答，不要修改；要求修改路线图 / 管理资料 / 改目标信息 → 执行对应 ops。');
   lines.push('   用户口述或粘贴了一段资料（JD、笔记、经验）想留档 → 用 add_source 存进资料库；只是想让你参考着改规划 → 不用存。');
   lines.push('2. 输出格式（必须严格遵守，便于界面实时渲染）：');
@@ -2918,6 +2974,7 @@ function applyChatOps(goalId, ops) {
           const row = db.prepare("SELECT id,title FROM sources WHERE goal_id = ? AND title LIKE ? LIMIT 1").get(goalId, '%' + key.slice(0, 40) + '%');
           if (!row) { errors.push('没找到资料：' + key.slice(0, 30)); continue; }
           db.prepare('DELETE FROM sources WHERE id = ?').run(row.id);
+          db.prepare('DELETE FROM code_repo_files WHERE source_id = ?').run(row.id);
           applied.push({ op: 'delete_source', id: row.id, title: String(row.title).slice(0, 60) });
       } else if (kind === 'update_goal' || kind === 'goal') {
           const f = op.fields || op;
@@ -3585,6 +3642,7 @@ async function handleAPI(req, res, u) {
     if (method === 'DELETE') {
       db.prepare('DELETE FROM nodes WHERE goal_id = ?').run(id);
       db.prepare('DELETE FROM sources WHERE goal_id = ?').run(id);
+      db.prepare('DELETE FROM code_repo_files WHERE goal_id = ?').run(id);
       db.prepare('DELETE FROM goals WHERE id = ?').run(id);
       db.prepare('DELETE FROM goal_versions WHERE goal_id = ?').run(id);
       db.prepare('DELETE FROM tutorials WHERE goal_id = ?').run(id);
@@ -3898,7 +3956,9 @@ function redactText(raw) {
   }
   const sourceDelMatch = p.match(/^\/api\/sources\/(\d+)$/);
   if (sourceDelMatch && method === 'DELETE') {
-    db.prepare('DELETE FROM sources WHERE id = ?').run(Number(sourceDelMatch[1]));
+    const sid = Number(sourceDelMatch[1]);
+    db.prepare('DELETE FROM sources WHERE id = ?').run(sid);
+    db.prepare('DELETE FROM code_repo_files WHERE source_id = ?').run(sid);
     backup();
     return sendJSON(res, 200, { ok: true });
   }
@@ -3912,7 +3972,7 @@ function redactText(raw) {
     if (!ids.length) return sendJSON(res, 400, { error: '没有选中的资料' });
     const del = db.prepare('DELETE FROM sources WHERE id = ? AND goal_id = ?');
     let n = 0;
-    for (const id of new Set(ids)) { try { n += del.run(id, gid).changes; } catch (e) {} }
+    for (const id of new Set(ids)) { try { n += del.run(id, gid).changes; } catch (e) {} db.prepare('DELETE FROM code_repo_files WHERE source_id = ?').run(id); }
     db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), gid);
     backup();
     return sendJSON(res, 200, { ok: true, deleted: n, sources: sourcesOf(gid) });
@@ -3925,6 +3985,7 @@ function redactText(raw) {
     const nSrc = db.prepare('SELECT COUNT(*) AS n FROM sources WHERE goal_id = ?').get(gid).n;
     const files = db.prepare('SELECT file FROM jd_images WHERE goal_id = ?').all(gid);
     db.prepare('DELETE FROM sources WHERE goal_id = ?').run(gid);
+    db.prepare('DELETE FROM code_repo_files WHERE goal_id = ?').run(gid);
     db.prepare('DELETE FROM jd_images WHERE goal_id = ?').run(gid);
     let nFile = 0;
     for (const f of files) {
@@ -5189,7 +5250,7 @@ function extractEbookPrefFromAnswers(answers) {
     const goals = Array.isArray(body.goals) ? body.goals : [];
     if (!goals.length) return sendJSON(res, 400, { error: '没有可导入的目标' });
     backup();
-    db.exec('DELETE FROM nodes; DELETE FROM sources; DELETE FROM goals; DELETE FROM goal_versions; DELETE FROM tutorials; DELETE FROM tutorial_versions; DELETE FROM chats; DELETE FROM chat_sessions;');
+    db.exec('DELETE FROM nodes; DELETE FROM sources; DELETE FROM goals; DELETE FROM goal_versions; DELETE FROM tutorials; DELETE FROM tutorial_versions; DELETE FROM chats; DELETE FROM chat_sessions; DELETE FROM code_repo_files;');
     for (const pl of PLUGINS) { try { if (typeof pl.clearAll === 'function') pl.clearAll(pluginCtx()); } catch (e) {} }
     const insG = db.prepare('INSERT INTO goals (id,title,profile,materials,weekly_hours,deadline,status,error,summary,constraints,plugins,ebook_pref,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
     for (const g of goals) insG.run(g.id != null ? Number(g.id) : null, g.title || '', g.profile || '', g.materials || '', g.weekly_hours || '', g.deadline || '', g.status || 'draft', g.error || '', g.summary || '', typeof g.constraints === 'string' ? g.constraints : JSON.stringify(g.constraints || []), typeof g.plugins === 'string' ? g.plugins : JSON.stringify(g.plugins || {}), typeof g.ebook_pref === 'string' ? g.ebook_pref : JSON.stringify(g.ebook_pref || {}), g.created_at || nowISO(), g.updated_at || nowISO());

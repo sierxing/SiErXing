@@ -34,6 +34,7 @@ SiErXing/
 │   ├── update.js      更新检查与一键更新
 │   ├── tasks.js       后台长任务
 │   ├── code-read.js   ★ 教程讲源码时的只读代码访问 + 密钥脱敏
+│   ├── code-store.js  ★ 导入代码库的完整快照存取 + 对话检索挑选（供 AI 助手查代码）
 │   └── plugins/       ★ 服务端组件（自动加载）
 │       ├── index.js         加载器 + 接口约定（改组件先读这个）
 │       ├── lib/             组件内部共享库（如 ebook-parse.js 零依赖电子书解析）
@@ -172,7 +173,9 @@ SDK（`public/sdk.js`，全部接口就这些）：`registerPlugin / getPlugins 
 
 ## 6. 数据表
 
-`goals / nodes / plan_drafts / goal_versions / tutorials / sources / source_digests / chats / chat_sessions / settings`，以及各组件自建表（`quiz_*` 等，已加入 `sync.js` 的 `SYNC_TABLES`）。
+`goals / nodes / plan_drafts / goal_versions / tutorials / sources / source_digests / chats / chat_sessions / settings / code_repo_files`，以及各组件自建表（`quiz_*` 等，已加入 `sync.js` 的 `SYNC_TABLES`）。
+
+- `code_repo_files` 存「导入代码库」的完整文件快照（只读、脱敏），供 AI 助手对话时按问题检索（`server/code-store.js`）。**它故意不进 `SYNC_TABLES`**：路径与内容跟设备绑定、体积大，各设备自己导入一份即可，同步互相覆盖没意义（同 `review_plans` 的理由）。
 
 - 建表语句在 `server/server.js`，用 `db.exec` 幂等执行；新表记得加进 `server/sync.js` 的 `SYNC_TABLES`，否则多端同步会漏。
 - `goals.plugins` 是 JSON 文本，存**目标级**组件开关；列缺失时有 `ALTER TABLE` 兜底。
