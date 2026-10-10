@@ -429,22 +429,10 @@ async function openaiText(c, opts) {
   // 不传时很多接口默认只给 4k 左右，长教程会被拦腰截断。
   const maxTokens = Number(opts.maxTokens) || 16000;
   if (!useStream) return openaiLongText(c, { model: mdl, prompt, images, timeoutMs, signal, onEvent, maxTokens });
-  const body = {
-    model: mdl,
-    messages: [{ role: 'user', content: messageContent(prompt, images) }],
-    stream: true,
-    max_tokens: maxTokens
-  };
-  const res = await openaiRequest(c, body, timeoutMs, signal);
-  if (!useStream) {
-    const j = await res.json().catch(() => null);
-    const text = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
-    if (typeof text !== 'string') {
-      const err = (j && j.error && j.error.message) || '返回内容为空（检查模型名是否正确）';
-      throw new Error('AI 返回异常：' + err);
-    }
-    return text;
-  }
+  /* ⚠️ 这里不要有「试发一次」的 fetch：曾经非流式分支提前 return 后，下面还留着
+     一份旧的一次性请求代码，结果每次流式调用都向 AI 发两次相同请求、第一次的
+     响应被直接丢弃 —— 对话/规划/教程全走这条，等于用户付双倍费用。
+     流式请求统一由下面的 for(;;) 循环发起（它还要处理 finish_reason=length 的续写）。 */
   /* 流式解析（SSE）。**要记 finish_reason** —— 模型因为输出上限被截断时
      （finish_reason=length），这段文本是断的；长 JSON（规划骨架、问卷、教程）会直接解析失败。
      以前流式这条路完全不处理截断（只有非流式的 openaiLongText 会续写），

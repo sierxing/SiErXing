@@ -225,6 +225,10 @@ SDK（`public/sdk.js`，全部接口就这些）：`registerPlugin / getPlugins 
 
 15. **`buildTree` 组装节点树时不能只遍历 `Object.values(byId)`**：节点 id 是数字键，JS 对象对数字键按**数值升序**枚举 —— 等于永远按 id 排序、把 `sort_order` 整个丢掉。曾导致「AI 对话里显示移动了节点、数据库也确实改了 `sort_order`，界面顺序却纹丝不动」。兄弟节点必须显式按 `sort_order`（id 兜底）排序（`renderGoal` / `renderMapPage` / 版本对比三处都走 `buildTree`，修一处即全修）。
 
+16. **对话助理的提示词必须自带资料库**：`buildChatPrompt` 不附【资料提炼汇总】与【资料库清单】时，用户问「资料库里有没有 / 能不能看到 XX」模型只会瞎答「看不到」——哪怕「导入的代码库」摘要就躺在库里（导入代码库会同时写 `sources` 和 `source_digests` 两份）。资料多的目标里，清单要保证「自己提供 / 导入的代码库」完整列出（不能按 id 截前 N 条把最后的代码库挤没），网络资料只列标题。回归方法：假 AI 服务器抓提示词全文。
+
+17. **`ai.js` 流式路径不要「试发一次再正式发」**：`openaiText` 的非流式分支已提前 `return openaiLongText(...)` 之后，曾残留一份旧的一次性请求代码（`const res = await openaiRequest(...)` 及其后永远为假的 `if (!useStream)` 分支）——每次流式调用（对话 / 规划 / 教程全走这条）都会向 AI 发**两次**相同请求、第一次响应被丢弃，用户付双倍费用。流式请求只能由下面的 `for(;;)` 循环发起（它还要处理 `finish_reason=length` 的续写）。回归方法：假 AI 服务器数请求数，一次对话应当只有 1 个 POST。
+
 ---
 
 ## 8. 打包 exe 与在线更新（`scripts/build-exe.js`）

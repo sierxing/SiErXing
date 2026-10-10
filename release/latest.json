@@ -1,14 +1,14 @@
 {
-  "version": "1.10.30",
-  "buildVer": "5703bbe456fa",
-  "payload": "release/payload-1.10.30.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.30.sxar?ref=main",
+  "version": "1.10.31",
+  "buildVer": "a5406b7ff7a8",
+  "payload": "release/payload-1.10.31.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.31.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "b7c7412c9cd4ae92a414e0262c9497f8c37563d5a0c5b71c2db5ded7a45d268f",
-  "size": 676923,
-  "unpackedSize": 2474212,
-  "publishedAt": "2026-10-10T08:55:09.564Z",
-  "notes": "修顶栏文件夹点不开（上一版把计数变量声明在了 paint() 里、外面却用它，一打开就报 ReferenceError）；⋯ 菜单开着时点文件夹不再被吃掉、一次点击即可打开；文件夹角标和面板计数都按「当前目标真的可用」算",
+  "sha256": "7feff22f653df6ecd4adc4ec055184d9bb82f62bb6c1b54a08dcb6a401cec6c9",
+  "size": 677666,
+  "unpackedSize": 2475257,
+  "publishedAt": "2026-10-10T09:01:54.729Z",
+  "notes": "修「AI 助手看不到资料库」：对话现在会带上资料库清单与提炼汇总（导入的代码库摘要也能看到并据此改任务）；修 AI 流式调用重复发送两次请求的问题（此前每次对话/规划都按双倍计费）；修 AI 移动节点后界面顺序不生效 + 新增按位置插入/移动",
   "exeRequired": false
 }

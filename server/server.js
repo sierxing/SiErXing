@@ -1499,6 +1499,30 @@ function sourcesIndexBlock(goal, maxTitles, scopeNote) {
   for (const x of all.slice(0, maxTitles || 20)) lines.push('- [' + x.site + '｜' + x.kind + '] ' + x.title);
   return lines.join('\n');
 }
+/* 对话助理的资料库清单：和「节点级规划」的视角不同 —— 用户常问「资料库里有没有 /
+   能不能看到 XX」，所以「自己提供 + 导入的代码库」必须排前面完整列出（代码库的
+   摘要正文就在条目里），不能按 id 截前 N 条把代码库挤没；网络资料只列标题，
+   结论交给上面的提炼汇总。若非如此，资料一多，「导入的代码库」永远进不了提示词，
+   助手就会答「资料库是空的 / 看不到源码」。 */
+function chatSourcesBlock(goal) {
+  const all = sourcesOf(goal.id);
+  if (!all.length) return '';
+  const isOwn = s => s.site === '用户提供的图片' || s.site === '用户提供的电子书' || s.site === '导入的资料' || s.site === '导入的代码库' || s.site === '待找书单';
+  const own = all.filter(isOwn);
+  const net = all.filter(s => !isOwn(s));
+  const line = s => '- ' + (Number(s.quality) === 1 ? '★' : '') + '[' + s.site + '｜' + s.kind + '] ' + s.title
+    + (String(s.url || '').startsWith('/') ? '（本机路径：' + s.url + '）' : '');
+  const lines = ['', `【资料库清单（共 ${all.length} 条：自己提供 ${own.length} / 网络检索 ${net.length}）】`];
+  for (const s of own.slice(0, 40)) lines.push(line(s));
+  if (own.length > 40) lines.push('- …（其余 ' + (own.length - 40) + ' 条略）');
+  if (net.length) {
+    lines.push('');
+    lines.push('【网络检索资料（仅列前 ' + Math.min(net.length, 20) + ' 条标题；完整结论见上面的提炼汇总）】');
+    for (const s of net.slice(0, 20)) lines.push(line(s));
+    if (net.length > 20) lines.push('- …（其余 ' + (net.length - 20) + ' 条略）');
+  }
+  return lines.join('\n');
+}
 /* 同级其它节点的标题：教程里点名排除，防止把别章节的知识点写进来 */
 function siblingScopeBlock(goal, node) {
   let sibs = [];
@@ -2751,6 +2775,10 @@ function buildChatPrompt(goal, message, sessionId) {
   lines.push(goalHeader(goal));
   lines.push(goalQaBlock(goal));
   lines.push(constraintsBlock(goal));
+  const dgBlock = digestsBlock(goal);
+  if (dgBlock) lines.push(dgBlock);
+  const srcBlock = chatSourcesBlock(goal);
+  if (srcBlock) lines.push(srcBlock);
   const chats = sessionId
     ? db.prepare('SELECT role, content FROM chats WHERE session_id = ? ORDER BY id DESC LIMIT 12').all(sessionId).reverse()
     : db.prepare('SELECT role, content FROM chats WHERE goal_id = ? ORDER BY id DESC LIMIT 12').all(goal.id).reverse();
@@ -2766,7 +2794,8 @@ function buildChatPrompt(goal, message, sessionId) {
   lines.push('【用户的新消息】' + message);
   lines.push('');
   lines.push('【你的任务】');
-  lines.push('0. 不要使用任何工具（不要读取文件、不要执行命令、不要联网）；规划的全部信息都在本提示里，直接基于它作答。');
+  lines.push('0. 不要使用任何工具（不要读取文件、不要执行命令、不要联网）；规划与资料库的全部信息都在本提示里，直接基于它作答。');
+  lines.push('   用户问「资料库里有没有 / 能不能看到 XX（如某个代码库）」时，依据上面【资料库清单】与【资料提炼汇总】如实回答：site=导入的代码库 的条目，就是该代码库已被通读后产出的摘要（含它是什么、目录结构、怎么读），不要说资料库是空的；但你不能逐文件实时读取本机目录，需要更细的内容时，请用户把关键文件发来存进资料库。');
     lines.push('1. 判断用户意图：只是咨询/提问 → 直接回答，不要修改；要求修改路线图 / 管理资料 / 改目标信息 → 执行对应 ops。');
   lines.push('   用户口述或粘贴了一段资料（JD、笔记、经验）想留档 → 用 add_source 存进资料库；只是想让你参考着改规划 → 不用存。');
   lines.push('2. 输出格式（必须严格遵守，便于界面实时渲染）：');
