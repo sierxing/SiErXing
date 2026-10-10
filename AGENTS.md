@@ -133,8 +133,10 @@ SiErXing.registerPlugin({
 
 SDK（`public/sdk.js`，全部接口就这些）：`registerPlugin / getPlugins / findPlugin / pluginEnabled / goalEntries / matchRoute / setServerPlugins / serverPlugins / provide / host`。
 
-### 3.3 样式组件
-`public/plugins/xxx.css` 里覆盖 CSS 变量即可换肤，服务端 js 只声明元数据（`kind: 'theme'`）。
+### 3.3 样式组件（主题皮肤）
+`public/plugins/xxx.css` 里覆盖 CSS 变量即可换肤，服务端 js 只声明元数据（`kind: 'theme'`，可加 `mode: 'light' | 'dark'` 标注适用模式）。
+
+**亮 / 暗模式各用哪个主题**在「设置 → 外观主题」里选，存本机 `localStorage.sierxing-theme-map`（显示偏好，不做多端同步）。前端按当前模式挂 `link[data-theme-style]`；**组件管理页的开关对主题已不生效**（`applyComponentStyles` 会把主题样式过滤掉）。改这块注意：切换昼夜（`applyTheme`）与系统深浅色变化（`matchMedia` change）都要重挂主题样式。
 
 ---
 

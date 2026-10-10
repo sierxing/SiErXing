@@ -1,0 +1,36 @@
+/* ============================================================
+   思而行 · 主题组件：夜蓝（Night Blue）
+   ------------------------------------------------------------------
+   深蓝夜色 + 柔和浅蓝点缀：比纯黑碳黑更柔和，夜里亮暗对比不刺眼。
+   只覆盖颜色变量与 accents 着色（不改字体、不改布局）。
+   适用模式：dark（在「设置 → 外观主题」里选给暗色模式）
+   ============================================================ */
+:root,
+:root[data-theme="dark"],
+:root[data-theme="light"]{
+  --bg:#121826;              /* 页面底色：深蓝夜 */
+  --card:#1a2232;            /* 卡片：比底色抬一层，边界柔和 */
+  --soft:#212b3d;
+  --border:#2d3a4f;
+
+  --text:#dde5f0;            /* 浅蓝灰：比纯白柔和 */
+  --muted:#8fa0b8;
+
+  --accent:#7ba3d4;          /* 月色蓝 */
+  --accent-2:#95b9e4;
+  --accent-soft:#1d2b40;
+  --accent-border:#365070;
+
+  --ok:#5fbf92;
+  --warn:#e0b96b;
+  --danger:#e58a8a;
+
+  --shadow-sm:0 1px 2px rgba(0,0,0,.4);
+  --shadow:0 4px 16px rgba(0,0,0,.38);
+  --shadow-lg:0 16px 44px rgba(0,0,0,.5);
+}
+
+.logo{ box-shadow:0 4px 14px rgba(123,163,212,.30); }
+.btn.primary{ box-shadow:0 3px 12px rgba(123,163,212,.26); }
+.mtnode-root, .mtnode-root:hover{ box-shadow:0 10px 28px rgba(123,163,212,.24); }
+.selBox{ background:rgba(123,163,212,.16); }

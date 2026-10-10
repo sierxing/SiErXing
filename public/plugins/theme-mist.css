@@ -1,0 +1,36 @@
+/* ============================================================
+   思而行 · 主题组件：雾蓝（Mist Blue）
+   ------------------------------------------------------------------
+   冷灰蓝底 + 石板灰字 + 雾蓝点缀：清爽低对比，光线强的环境也不刺眼。
+   只覆盖颜色变量与 accents 着色（不改字体、不改布局）。
+   适用模式：light（在「设置 → 外观主题」里选给亮色模式）
+   ============================================================ */
+:root,
+:root[data-theme="dark"],
+:root[data-theme="light"]{
+  --bg:#edf1f6;              /* 页面底色：冷灰蓝 */
+  --card:#f7f9fc;            /* 卡片：近白但不刺眼的蓝白 */
+  --soft:#e3e9f1;
+  --border:#d2dae5;
+
+  --text:#303a47;            /* 石板灰：深而不黑 */
+  --muted:#6e7a8b;
+
+  --accent:#4e7ba6;          /* 雾蓝 */
+  --accent-2:#6f9ac2;
+  --accent-soft:#e2ecf5;
+  --accent-border:#c3d6e6;
+
+  --ok:#48806a;
+  --warn:#a8812f;
+  --danger:#b05552;
+
+  --shadow-sm:0 1px 2px rgba(52,74,100,.06);
+  --shadow:0 4px 16px rgba(52,74,100,.08);
+  --shadow-lg:0 16px 44px rgba(52,74,100,.13);
+}
+
+.logo{ box-shadow:0 4px 14px rgba(78,123,166,.30); }
+.btn.primary{ box-shadow:0 3px 12px rgba(78,123,166,.26); }
+.mtnode-root, .mtnode-root:hover{ box-shadow:0 10px 28px rgba(78,123,166,.28); }
+.selBox{ background:rgba(78,123,166,.14); }

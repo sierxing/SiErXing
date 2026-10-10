@@ -1,14 +1,14 @@
 {
-  "version": "1.10.32",
-  "buildVer": "1669c457da19",
-  "payload": "release/payload-1.10.32.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.32.sxar?ref=main",
+  "version": "1.10.33",
+  "buildVer": "957f3ed96df3",
+  "payload": "release/payload-1.10.33.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.33.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "1dfe46e6c871475637095675d40796dc3c344c3ba5d5f9f941c0f4410f4002f2",
-  "size": 682994,
-  "unpackedSize": 2487887,
-  "publishedAt": "2026-10-10T09:29:50.115Z",
-  "notes": "导入代码库现在会连完整源码一起存（只读、脱敏）：AI 助手对话时按你的问题附上相关代码片段和完整文件清单，可以直接问「看 server/ai.js」；以前只导入过摘要的，在原处再点一次「读取并导入」就补存快照。并修锁文件误入快照、package-lock 大小写漏网等",
+  "sha256": "8f3b7f51afb5c2c6544da1d18fab5f828b60e7e0c68d585111d94746009d8ef7",
+  "size": 687854,
+  "unpackedSize": 2503084,
+  "publishedAt": "2026-10-10T10:04:53.854Z",
+  "notes": "新增 4 款护眼主题（暖沙 / 护眼绿 / 雾蓝 / 夜蓝），并在「设置 → 外观主题」里支持亮色、暗色模式分别选择主题皮肤：只改颜色不改字体，选择立即生效（本机），白天不再被纯白刺眼",
   "exeRequired": false
 }

@@ -17,11 +17,40 @@ const AI_PRESETS = [
 
 const state = { goals: [], goal: null, sources: [], planning: false, collecting: false, collectStatus: '', expanded: {}, filter: '', models: [], model: '', showNew: false, showEdit: false, mapScale: 1, mapTx: 40, mapTy: 40, _drag: null, _suppressClick: false };
 
-/* ============ 主题（白天/黑夜） ============ */
+/* ============ 主题（白天/黑夜 + 亮暗各自的皮肤） ============ */
 function currentThemeEff() {
   const t = localStorage.getItem('sierxing-theme') || 'auto';
   if (t !== 'auto') return t;
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+/* 亮 / 暗模式可以各指定一个主题组件（「设置 → 外观主题」里选）。
+   主题是显示偏好：只存本机 localStorage（sierxing-theme-map），不做多端同步 ——
+   不同设备屏幕不同，硬同步过去反而别扭。 */
+function themeMap() {
+  try { return JSON.parse(localStorage.getItem('sierxing-theme-map') || '{}') || {}; } catch (e) { return {}; }
+}
+function themeFor(mode) { const m = themeMap(); return String((mode === 'dark' ? m.dark : m.light) || ''); }
+function setThemeFor(mode, id) {
+  const m = themeMap();
+  if (id) m[mode] = String(id); else delete m[mode];
+  try { localStorage.setItem('sierxing-theme-map', JSON.stringify(m)); } catch (e) {}
+  applyThemeStyles();
+}
+/* 按当前（亮/暗）模式挂对应的主题皮肤 CSS；另一模式的皮肤卸载掉，
+   避免两套变量同时生效互相打架。 */
+function applyThemeStyles() {
+  try {
+    const id = themeFor(currentThemeEff());
+    const want = id ? assetUrl('/plugins/' + id + '.css') : '';
+    document.querySelectorAll('link[data-theme-style]').forEach(l => { if (l.getAttribute('href') !== want) l.remove(); });
+    if (want && !document.querySelector('link[data-theme-style][href="' + want + '"]')) {
+      const l = document.createElement('link');
+      l.rel = 'stylesheet';
+      l.href = want;
+      l.setAttribute('data-theme-style', '1');
+      document.head.appendChild(l);
+    }
+  } catch (e) { console.warn('主题样式加载失败：' + e.message); }
 }
 function applyTheme() {
   const t = localStorage.getItem('sierxing-theme') || 'auto';
@@ -29,11 +58,14 @@ function applyTheme() {
   else document.documentElement.setAttribute('data-theme', t);
   const btn = document.getElementById('themeBtn') || document.getElementById('railTheme');
   if (btn) btn.textContent = currentThemeEff() === 'dark' ? '☀️' : '🌙';
+  applyThemeStyles();
 }
 function toggleTheme() {
   localStorage.setItem('sierxing-theme', currentThemeEff() === 'dark' ? 'light' : 'dark');
   applyTheme();
 }
+/* 系统深浅色变化时（auto 档）跟着换皮肤 */
+try { window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if ((localStorage.getItem('sierxing-theme') || 'auto') === 'auto') applyTheme(); }); } catch (e) {}
 /* 教程页跟随主题：切换后重新渲染 */
 try { const rr0 = parseRoute(); if (rr0.view === 'tutorial') renderTutorialPage(rr0.id); } catch (e) {}
 applyTheme();
@@ -6141,7 +6173,11 @@ function assetUrl(u) {
   } catch (e) { return u; }
 }
 function applyComponentStyles(styles) {
-  const want = new Set((styles || []).map(assetUrl));
+  /* 主题皮肤不走这条通道：由 applyThemeStyles() 按亮 / 暗模式单独挂载。
+     这里把主题组件的 CSS 过滤掉 —— 否则「组件管理页里开着主题开关」会绕过分模式选择。 */
+  const themeIds = new Set(((state.componentList || []).filter(c => c.kind === 'theme' || c.scope === 'theme')).map(c => c.id));
+  const isThemeStyle = u => { const m = /\/plugins\/([^/?#]+)\.css/.exec(String(u)); return !!(m && themeIds.has(m[1])); };
+  const want = new Set((styles || []).filter(u => !isThemeStyle(u)).map(assetUrl));
   // 移除不再需要的
   document.querySelectorAll('link[data-component-style]').forEach(l => {
     if (!want.has(l.getAttribute('href'))) l.remove();
@@ -6156,6 +6192,21 @@ function applyComponentStyles(styles) {
     document.head.appendChild(l);
   }
 }
+/* 老用户迁移：以前是「在组件页开一个主题」，现在改成按亮/暗模式分别选。
+   升级后第一次读到组件列表时，把已开启的主题按其 mode 填进对应模式；之后不再自动改。 */
+function seedThemeMapOnce(r) {
+  try {
+    if (localStorage.getItem('sierxing-theme-map') != null) return;
+    const map = {};
+    for (const c of (r.components || [])) {
+      if (!(c.kind === 'theme' || c.scope === 'theme')) continue;
+      if ((r.enabled || {})[c.id] !== true) continue;
+      const mode = c.mode === 'dark' ? 'dark' : 'light';
+      if (!map[mode]) map[mode] = c.id;
+    }
+    localStorage.setItem('sierxing-theme-map', JSON.stringify(map));
+  } catch (e) {}
+}
 async function loadComponents() {
   try {
     state.componentCats = await api('/api/component-categories').catch(() => ({ categories: [], used: {}, map: {} }));
@@ -6164,7 +6215,9 @@ async function loadComponents() {
     state.componentList = r.components || [];
     state.componentPins = r.pins || state.componentPins || [];
     SiErXing.setServerPlugins(r.components || []);
+    seedThemeMapOnce(r);
     applyComponentStyles(r.styles || []);
+    applyThemeStyles();
   } catch (e) { console.warn('组件加载失败：' + e.message); }
 }
 /* ============ 资源库（汇总 MD + 全部资料，按规划归类，可一键导出） ============ */
@@ -6342,7 +6395,7 @@ const card = (c) => `<div class="cmpCard ${c.scope === 'core' ? 'isCore' : ''}">
         ${c.author ? `<span class="cmpAuthor">by ${esc(c.author)}</span>` : ''}
       </div>
       <div class="cmpOps">
-        ${sw(c)}</div>
+        ${(c.kind === 'theme' || c.scope === 'theme') ? '<a class="btn tiny" href="#/settings/theme">去设置里选</a>' : sw(c)}</div>
     </div>
     <div class="cmpDesc">${esc(c.desc || '')}</div>
     <div class="cmpCatRow">
@@ -6360,7 +6413,7 @@ const card = (c) => `<div class="cmpCard ${c.scope === 'core' ? 'isCore' : ''}">
 const modHint = (k, list) => {
   const hints = [];
   if (k === '核心组件') hints.push('应用的基础能力，无法关闭。');
-  if (list.some(c => c.kind === 'theme')) hints.push('主题组件通过覆盖设计变量换肤（同时只生效一个）；开启即立即应用，关掉则回到默认外观。');
+  if (list.some(c => c.kind === 'theme')) hints.push('主题皮肤在「设置 → 外观主题」里分别为亮色 / 暗色模式选择；这里的开关对它不再生效。');
   if (list.some(c => !c.builtin)) hints.push('独立文件组件，可以导出分享给别人，也可以卸载。带「按目标启用」的组件可在新建目标时勾选。');
   if (!hints.length) hints.push('全局开关 = 新目标的默认值；已在目标里单独设置过的，以目标自己的设置为准、互不干扰。');
   return `<p class="hint" style="margin:0 0 8px;">${hints.join('')}</p>`;
@@ -7248,8 +7301,39 @@ function aiStatusBoxHTML(st) {
   ${st.model ? ' · 默认模型 ' + esc(st.model) : ''}
   ${st.hint ? '<br><span style="color:var(--warn)">' + esc(st.hint) + '</span>' : ''}`;
 }
+/* ---- 设置页：外观主题（亮 / 暗各选一个皮肤，只改颜色） ---- */
+function themeSettingsHTML() {
+  const comps = (state.componentList || []).filter(c => c.kind === 'theme' || c.scope === 'theme');
+  const optsFor = mode => {
+    const cur = themeFor(mode);
+    const head = `<option value="" ${cur ? '' : 'selected'}>默认（内置${mode === 'light' ? '亮色' : '暗色'}）</option>`;
+    return head + comps.map(c => {
+      const tag = c.mode === 'dark' ? '深色' : c.mode === 'light' ? '浅色' : '';
+      return `<option value="${esc(c.id)}" ${cur === c.id ? 'selected' : ''}>${esc((c.icon || '🎨') + ' ' + c.name + (tag ? '（' + tag + '）' : ''))}</option>`;
+    }).join('');
+  };
+  return `<p class="hint" style="margin:-4px 0 12px;">只是换颜色（字体、布局不动）：白天挑一个柔和的浅色主题，晚上挑一个不那么黑的深色主题。选择立即生效，只影响这台设备。</p>
+  <div class="ccRow">
+    <label class="ccWide">☀️ 亮色模式用
+      <span class="inWrap"><select id="themeLight">${optsFor('light')}</select></span>
+    </label>
+    <label class="ccWide">🌙 暗色模式用
+      <span class="inWrap"><select id="themeDark">${optsFor('dark')}</select></span>
+    </label>
+  </div>
+  <div class="hint" id="themeMsg" style="margin-top:8px;">${themeMsgText()}</div>`;
+}
+function themeMsgText() {
+  const nameOf = id => {
+    if (!id) return '默认配色';
+    const c = (state.componentList || []).find(x => x.id === id);
+    return c ? c.name : id;
+  };
+  return '当前 → 亮色：<b>' + esc(nameOf(themeFor('light'))) + '</b>　·　暗色：<b>' + esc(nameOf(themeFor('dark'))) + '</b>';
+}
 async function renderSettings() {
   app.innerHTML = '<p class="muted">加载中…</p>';
+  if (!state.componentList || !state.componentList.length) { try { await loadComponents(); } catch (e) {} }
   const [s, st] = await Promise.all([
     api('/api/settings'),
     api('/api/ai/status')
@@ -7297,6 +7381,7 @@ async function renderSettings() {
      每条连接里多选模型；具体用哪个模型由「AI 助手」对话栏的模型下拉决定。 */
   const SET_TABS = [
     ['set-ai', '🔌 AI 接入方式'],
+    ['set-theme', '🎨 外观主题'],
     ['set-sync', '🔄 多端同步'],
     ['set-service', '🖥 服务与启动'],
     ['set-update', '⬆ 版本与更新'],
@@ -7352,6 +7437,10 @@ async function renderSettings() {
       </div>
     </div>
     <div class="setGrid">
+    <div class="sec" id="set-theme">
+      <div class="secTitle">外观主题 <span class="secSub">亮色 / 暗色模式各选一个皮肤；只改颜色，不改字体</span></div>
+      ${themeSettingsHTML()}
+    </div>
     ${await serviceSectionHTML()}
     ${await updateSectionHTML()}
     ${await syncSectionHTML()}
@@ -8009,6 +8098,8 @@ async function renderSettings() {
      比销毁重建稳。保存重绘后停在刚才看的那块。 */
   const tabsBox = document.getElementById('setTabs');
   const tabIds = state._setTabs || [];
+  /* 组件页的「去设置里选」带着 /theme 进来，直接停在外观主题页签 */
+  if (/^#\/settings\/theme/.test(location.hash || '')) state.settingsTab = 'set-theme';
   const markTab = id => tabsBox && tabsBox.querySelectorAll('.setTab').forEach(b =>
     b.classList.toggle('on', b.getAttribute('data-tab') === id));
   const applyTab = () => {
@@ -8031,6 +8122,20 @@ async function renderSettings() {
     applyTab();
     window.scrollTo(0, 0);
   }
+  /* 外观主题：亮 / 暗各选一个皮肤（只存本机） */
+  const bindThemeSel = (id, mode, label) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', () => {
+      setThemeFor(mode, el.value);
+      const now = currentThemeEff() === mode;
+      toast(now ? ('已应用' + label + '主题') : ('已设置' + label + '主题（切到' + (mode === 'dark' ? '暗色' : '亮色') + '模式时生效）'));
+      const msg = document.getElementById('themeMsg');
+      if (msg) msg.innerHTML = themeMsgText();
+    });
+  };
+  bindThemeSel('themeLight', 'light', '亮色');
+  bindThemeSel('themeDark', 'dark', '暗色');
   const sgb = document.getElementById('showGuideBtn');
   if (sgb) sgb.addEventListener('click', () => showGuide(0));
   document.getElementById('backupNow').addEventListener('click', async () => {

@@ -11,6 +11,7 @@ module.exports = {
   category: '主题与样式',
   icon: '🌑',
   kind: 'theme',
+  mode: 'dark',
   scope: 'theme',
   desc: '深色碳黑 + 青绿点缀：低亮度、低干扰，适合长时间阅读与夜间使用',
   order: 200,

@@ -1,0 +1,37 @@
+/* ============================================================
+   思而行 · 主题组件：暖沙（Warm Sand）
+   ------------------------------------------------------------------
+   浅色护眼主题：暖米黄底 + 低对比深棕字 + 陶土色点缀。
+   只覆盖颜色变量与accents着色（不改字体、不改布局）。
+   适用模式：light（在「设置 → 外观主题」里选给亮色模式）
+   ============================================================ */
+:root,
+:root[data-theme="dark"],
+:root[data-theme="light"]{
+  --bg:#f5f0e6;              /* 页面底色：暖米黄，比纯白柔和不刺眼 */
+  --card:#fbf8f1;            /* 卡片：略带米色的纸面，避免纯白反光 */
+  --soft:#efe8da;
+  --border:#e2dac9;
+
+  --text:#3c362c;            /* 深棕灰：不用纯黑，长读不累 */
+  --muted:#8a8070;
+
+  --accent:#a9683a;          /* 陶土棕 */
+  --accent-2:#c08a4a;        /* 麦黄 */
+  --accent-soft:#f4e9db;
+  --accent-border:#e2cdb2;
+
+  --ok:#4e7a58;
+  --warn:#a97e2a;
+  --danger:#b0523c;
+
+  --shadow-sm:0 1px 2px rgba(96,78,48,.06);
+  --shadow:0 4px 16px rgba(96,78,48,.08);
+  --shadow-lg:0 16px 44px rgba(96,78,48,.14);
+}
+
+/* 点缀色跟随陶土棕（默认紫色光晕在这套底色上会突兀） */
+.logo{ box-shadow:0 4px 14px rgba(169,104,58,.30); }
+.btn.primary{ box-shadow:0 3px 12px rgba(169,104,58,.26); }
+.mtnode-root, .mtnode-root:hover{ box-shadow:0 10px 28px rgba(169,104,58,.28); }
+.selBox{ background:rgba(169,104,58,.13); }

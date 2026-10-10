@@ -378,7 +378,7 @@ function allComponents() {
       scope: p.scope || (kind === 'theme' ? 'theme' : 'extra'), order: p.order || 100,
       defaultEnabled: !!p.defaultEnabled, goalToggle: p.goalToggle !== false,
       version: p.version || '1.0.0', author: p.author || '',
-      kind, hasStyle,
+      kind, mode: p.mode || '', hasStyle,
       style: hasStyle ? '/plugins/' + p.id + '.css' : '',
       builtin: !!p.builtin, removable: !p.builtin && p.removable !== false, client: p.client || '',
       file: p.__file || ''

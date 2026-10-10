@@ -1,0 +1,36 @@
+/* ============================================================
+   思而行 · 主题组件：护眼绿（Eye-care Green）
+   ------------------------------------------------------------------
+   经典豆沙绿底 + 墨绿字 + 竹青点缀：低亮度、低饱和，白天久看最省眼。
+   只覆盖颜色变量与 accents 着色（不改字体、不改布局）。
+   适用模式：light（在「设置 → 外观主题」里选给亮色模式）
+   ============================================================ */
+:root,
+:root[data-theme="dark"],
+:root[data-theme="light"]{
+  --bg:#e9f1e4;              /* 页面底色：豆沙绿 */
+  --card:#f4f8ef;            /* 卡片：更浅一点的绿白 */
+  --soft:#dfe9d8;
+  --border:#cfdec6;
+
+  --text:#2e3a2d;            /* 墨绿灰：比纯黑柔和 */
+  --muted:#6f7f68;
+
+  --accent:#4a7c59;          /* 竹青 */
+  --accent-2:#6a9c78;
+  --accent-soft:#e0ece2;
+  --accent-border:#bfd6c4;
+
+  --ok:#3f7d54;
+  --warn:#a8822c;
+  --danger:#b0544a;
+
+  --shadow-sm:0 1px 2px rgba(58,80,52,.06);
+  --shadow:0 4px 16px rgba(58,80,52,.08);
+  --shadow-lg:0 16px 44px rgba(58,80,52,.13);
+}
+
+.logo{ box-shadow:0 4px 14px rgba(74,124,89,.30); }
+.btn.primary{ box-shadow:0 3px 12px rgba(74,124,89,.26); }
+.mtnode-root, .mtnode-root:hover{ box-shadow:0 10px 28px rgba(74,124,89,.28); }
+.selBox{ background:rgba(74,124,89,.14); }

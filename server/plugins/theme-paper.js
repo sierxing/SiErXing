@@ -10,6 +10,7 @@ module.exports = {
   category: '主题与样式',
   icon: '📜',
   kind: 'theme',
+  mode: 'light',
   scope: 'theme',
   desc: '暖色纸感浅色主题：米白底 + 朱红点缀 + 圆角卡片，护眼耐看',
   order: 201,
