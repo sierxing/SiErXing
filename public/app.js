@@ -804,6 +804,15 @@ function findLibSource(ref) {
   }
   return null;
 }
+/* 把一段「怎么做」的文字拆成分步：优先按换行，其次按句号/分号。
+   用户看一整段 80 字的话会直接跳过，拆成 3-4 条才看得进去。 */
+function splitSteps(text) {
+  const t = String(text || '').replace(/\r/g, '').trim();
+  if (!t) return [];
+  let parts = t.split(/\n+/).map(x => x.trim()).filter(Boolean);
+  if (parts.length === 1) parts = t.split(/[。；;]/).map(x => x.trim()).filter(x => x.length >= 4);
+  return parts.map(x => x.replace(/^[0-9]+[.、)]\s*/, '').trim()).filter(Boolean).slice(0, 8);
+}
 function showNodePanel(id, rerender) {
   const rerenderFn = rerender || renderGoal;
   const n = state.goal.nodes.find(x => x.id === id);
@@ -818,6 +827,26 @@ function showNodePanel(id, rerender) {
   div.setAttribute('data-node', String(id));
   try { if (localStorage.getItem('sierxing-node-full') === '1') div.classList.add('full'); } catch (e) {}
   // 不再使用灰色遮罩（点击空白处仍会关闭面板）
+  /* 节点卡片：先让人一眼看懂「这是什么 / 怎么算做完 / 为什么有这一步 / 怎么做」，
+     其余（依据、文件夹、汇总、教程、调整）收进折叠区。
+     以前是 11 块平铺堆着，"为什么有这个任务"压根没显示，只能自己猜。 */
+  const P = (state.goal.nodes || []).find(x => Number(x.id) === Number(n.parent_id)) || null;
+  const GP = P ? ((state.goal.nodes || []).find(x => Number(x.id) === Number(P.parent_id)) || null) : null;
+  const sibs = (state.goal.nodes || []).filter(x => Number(x.parent_id) === Number(n.parent_id) && Number(x.level) === Number(n.level))
+    .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0) || (a.id - b.id));
+  const pos = sibs.findIndex(x => Number(x.id) === Number(n.id)) + 1;
+  const scope = GP || P;                       // 这一支属于哪个阶段（任务→小目标→阶段）
+  const whyLines = [];
+  if (pos && sibs.length > 1) whyLines.push('它是这一级里的第 ' + pos + '/' + sibs.length + ' 步' + (P ? '（' + P.title + '）' : ''));
+  else if (P) whyLines.push('它属于「' + P.title + '」');
+  if (scope && scope.detail) {
+    /* 阶段的说明常常是一大段（150+ 字）—— 全塞进"为什么"卡里会把重点淹掉，
+       截到 110 字够交代来由；想看全文去那一级的卡片。 */
+    const d = String(scope.detail).replace(/\s+/g, ' ').trim();
+    whyLines.push('这一支要达成的是：' + (d.length > 110 ? d.slice(0, 110) + '…' : d));
+  }
+  const evid = srcs.map(x => String(x.note || '').trim()).filter(Boolean);
+  const steps = splitSteps(n.detail);
   div.innerHTML = `
     <div class="npHead">
       <span class="chip">${LEVEL_NAME[n.level] || ''}</span>
@@ -825,49 +854,81 @@ function showNodePanel(id, rerender) {
       <button class="btn tiny" id="npFull" title="全屏 / 退出全屏">${(() => { try { return localStorage.getItem('sierxing-node-full') === '1' ? '⛶ 退出全屏' : '⛶ 全屏'; } catch (e) { return '⛶ 全屏'; } })()}</button>
       <button class="btn tiny" id="npClose">×</button>
     </div>
-    <div class="npStatus">
-      ${['todo', 'doing', 'done'].map(s => `<button class="btn small ${n.status === s ? 'primary' : ''}" data-np-status="${s}">${ST_LABEL[s][0]}</button>`).join('')}
+
+    ${(pos || P || scope) ? `<div class="npWhere">${esc([LEVEL_NAME[n.level] || '', P && P.title ? '属于「' + P.title + '」' : '', (pos && sibs.length > 1) ? '第 ' + pos + '/' + sibs.length + ' 步' : '', n.hours ? '预计 ' + n.hours : ''].filter(Boolean).join(' · '))}</div>` : ''}
+
+    <div class="npTop">
+      <div class="npStatus">
+        ${['todo', 'doing', 'done'].map(x => `<button class="btn small ${n.status === x ? 'primary' : ''}" data-np-status="${x}">${ST_LABEL[x][0]}</button>`).join('')}
+      </div>
     </div>
-    ${(n.hours || n.artifact || n.acceptance) ? `<div class="npFacts">
-      ${n.hours ? `<div class="npFact"><span class="npFactLabel">预计投入</span><span>${esc(n.hours)}</span></div>` : ''}
-      ${n.artifact ? `<div class="npFact"><span class="npFactLabel">产出物</span><span>${esc(n.artifact)}</span></div>` : ''}
-      ${n.acceptance ? `<div class="npFact"><span class="npFactLabel">验收标准</span><span>${esc(n.acceptance)}</span></div>` : ''}
+
+    ${(n.acceptance || n.artifact) ? `<div class="npDone">
+      <div class="npDoneHd">✅ 做完的标志</div>
+      ${n.acceptance ? `<div class="npDoneAcc">${esc(n.acceptance)}</div>` : ''}
+      ${n.artifact ? `<div class="npDoneArt"><span>产出物</span>${esc(n.artifact)}</div>` : ''}
     </div>` : ''}
-    ${n.detail ? `<div class="npDetail">${esc(n.detail)}</div>` : ''}
-    <div class="npSrcTitle">依据信息源（${srcs.length}）</div>
-    <div class="npSrcList">${srcs.length ? srcs.map((s, i) => {
-      const lib = findLibSource(s);
-      const body = lib ? String(lib.content || lib.snippet || '') : '';
-      const isStar = !!(lib && Number(lib.quality) === 1);
-      return `<div class="npSrc ${isStar ? 'isStar' : ''}"><div class="npSrcName">${isStar ? '★' : (s.source_id ? '🔗' : '📎')} ${esc(s.name || s.title || '')}${isStar ? '<span class="chip ok" style="margin-left:6px;">优质</span>' : ''}</div>${s.note ? `<div class="npSrcNote">${esc(s.note)}</div>` : ''}${body ? `<details class="npSrcBody"><summary>查看资料库正文（${body.length} 字）</summary><div class="mdBody">${mdToHTML(body.slice(0, 4000))}</div></details>` : ''}<button class="btn tiny danger npsrcDel" data-npsrc-del="${i}">移除</button></div>`;
-    }).join('') : '<div class="muted" style="font-size:12.5px;">未标注资料（本节点只依据提炼汇总与资料索引）</div>'}</div>
-    <div class="npSrcAdd">
-      <select id="npSrcPick">${(state.sources || []).map(x => `<option value="${x.id}">${esc('[' + x.kind + '] ' + String(x.title).slice(0, 40))}</option>`).join('')}</select>
-      <button class="btn tiny" id="npSrcAdd">＋ 关联资料库</button>
-      <button class="btn tiny" id="npSrcNew">＋ 手动写一条</button>
+
+    ${whyLines.length ? `<div class="npWhy">
+      <div class="npWhyHd">💡 为什么有这一步</div>
+      ${whyLines.map(x => '<div class="npWhyLine">' + esc(x) + '</div>').join('')}
+      ${evid.length ? `<div class="npWhyLine"><span class="npWhyK">这一步的依据</span>${esc(evid.slice(0, 3).join('；'))}</div>` : ''}
+    </div>` : ''}
+
+    ${steps.length ? `<div class="npHow">
+      <div class="npWhyHd">🔧 怎么做</div>
+      ${steps.length > 1
+        ? '<ol class="npSteps">' + steps.map(x => '<li>' + esc(x) + '</li>').join('') + '</ol>'
+        : '<p class="npHowP">' + esc(steps[0]) + '</p>'}
+    </div>` : ''}
+
+    <div class="npFold">
+      <details class="npFD">
+        <summary>📎 依据信息源（${srcs.length}）<span class="npFDHint">${srcs.length ? '这条任务的硬指标是从这儿来的' : '未标注资料'}</span></summary>
+        <div class="npSrcList">${srcs.length ? srcs.map((x, i) => {
+          const lib = findLibSource(x);
+          const body = lib ? String(lib.content || lib.snippet || '') : '';
+          const isStar = !!(lib && Number(lib.quality) === 1);
+          return `<div class="npSrc ${isStar ? 'isStar' : ''}"><div class="npSrcName">${isStar ? '★' : (x.source_id ? '🔗' : '📎')} ${esc(x.name || x.title || '')}${isStar ? '<span class="chip ok" style="margin-left:6px;">优质</span>' : ''}<button class="btn tiny danger npsrcDel" data-npsrc-del="${i}">移除</button></div>${x.note ? `<div class="npSrcNote">${esc(x.note)}</div>` : ''}${body ? `<details class="npSrcBody"><summary>查看资料库正文（${body.length} 字）</summary><div class="mdBody">${mdToHTML(body.slice(0, 4000))}</div></details>` : ''}</div>`;
+        }).join('') : '<div class="muted" style="font-size:12.5px;">未标注资料（本节点只依据提炼汇总与资料索引）</div>'}</div>
+        <div class="npSrcAdd">
+          <select id="npSrcPick">${(state.sources || []).map(x => `<option value="${x.id}">${esc('[' + x.kind + '] ' + String(x.title).slice(0, 40))}</option>`).join('')}</select>
+          <button class="btn tiny" id="npSrcAdd">＋ 关联资料库</button>
+          <button class="btn tiny" id="npSrcNew">＋ 手动写一条</button>
+        </div>
+      </details>
+
+      <details class="npFD">
+        <summary>🗂 关联文件夹<span class="npFDHint">挂在哪一级，哪一级和它的子节点可见</span></summary>
+        <div id="npFolders"><span class="muted" style="font-size:12.5px;">加载中…</span></div>
+        <div class="npSrcAdd"><button class="btn tiny" id="npFolderAdd">＋ 关联文件夹</button></div>
+      </details>
+
+      ${(() => {
+        const txt = (n.title || '') + ' ' + (n.detail || '');
+        const rel = (state.digests || []).map(d => ({ d, score: kwScore(txt, (d.title || '') + ' ' + String(d.content || '').slice(0, 1500)) }))
+          .filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 2);
+        return rel.length ? `<details class="npFD"><summary>📄 相关提炼汇总（${rel.length}）</summary>` + rel.map(({ d }) => `<details class="npSrcBody"><summary>${esc(d.title || d.topic)}</summary><div class="mdBody">${mdToHTML(d.content || '')}</div></details>`).join('') + '</details>' : '';
+      })()}
+
+      <details class="npFD"${tuts.length ? '' : ' open'}>
+        <summary>📘 学习教程（${tuts.length}）<span class="npFDHint">${tuts.length ? '' : '还没有：可以生成一份覆盖这个任务知识点的完整教程'}</span></summary>
+        <div class="npTut">
+          ${tuts.length ? tuts.map(t => `<div class="npTutRow"><a class="npTutItem" href="#/t/${t.id}"><span class="npTutName">${esc(t.title)}</span><span class="chip gray">${t.format === 'html' ? 'HTML' : 'MD'}</span></a><button class="btn tiny danger" data-tut-del="${t.id}" title="删除这份教程">×</button></div>`).join('') : ''}
+          <button class="btn small primary" id="npTutBtn" style="margin-top:8px;">📘 生成完整教程（HTML / Markdown）</button>
+          ${(goalCompOn(goalCtx(), 'tutbookmark') && window.TutBookmark) ? window.TutBookmark.nodeImportHTML() : ''}
+        </div>
+      </details>
+
+      <details class="npFD">
+        <summary>💬 对当前划分有意见？让 AI 改</summary>
+        <div class="npAdjust">
+          <textarea id="npFeedback" placeholder="例如：划分太粗了，再拆细一点 / 跳过「X」（我已经会了）/ 顺序改成先 A 后 B / 删掉「Y」/ 增加关于 Z 的任务…"></textarea>
+          <button class="btn small primary" id="npAdjustBtn" style="margin-top:8px;">提交给 AI 调整</button>
+        </div>
+      </details>
     </div>
-    <div class="npSrcTitle" style="margin-top:10px;">📁 文件夹资料<span class="muted" style="font-weight:400;">（挂在哪一级，哪一级和它的子节点可见，其它分支看不到）</span></div>
-    <div id="npFolders"><span class="muted" style="font-size:12.5px;">加载中…</span></div>
-    <div class="npSrcAdd">
-      <button class="btn tiny" id="npFolderAdd">＋ 关联文件夹</button>
-    </div>
-    ${(() => {
-      const txt = (n.title || '') + ' ' + (n.detail || '');
-      const rel = (state.digests || []).map(d => ({ d, score: kwScore(txt, (d.title || '') + ' ' + String(d.content || '').slice(0, 1500)) }))
-        .filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 2);
-      return rel.length ? `<div class="npSrcTitle">📄 相关提炼汇总</div>` + rel.map(({ d }) => `<details class="npSrcBody"><summary>${esc(d.title || d.topic)}</summary><div class="mdBody">${mdToHTML(d.content || '')}</div></details>`).join('') : '';
-    })()}
-    <div class="npTut">
-      <div class="npSrcTitle">📘 学习教程（${tuts.length}）</div>
-      ${tuts.length ? tuts.map(t => `<div class="npTutRow"><a class="npTutItem" href="#/t/${t.id}"><span class="npTutName">${esc(t.title)}</span><span class="chip gray">${t.format === 'html' ? 'HTML' : 'MD'}</span></a><button class="btn tiny danger" data-tut-del="${t.id}" title="删除这份教程">×</button></div>`).join('') : '<div class="muted" style="font-size:12.5px;">还没有教程：生成一份「掌握该任务知识点」的完整教程</div>'}
-      <button class="btn small primary" id="npTutBtn" style="margin-top:8px;">📘 生成完整教程（HTML / Markdown）</button>
-      ${(goalCompOn(goalCtx(), 'tutbookmark') && window.TutBookmark) ? window.TutBookmark.nodeImportHTML() : ''}
-    </div>
-    <div class="npAdjust">
-      <div class="npSrcTitle">💬 对当前划分有意见？直接告诉 AI，它会按你的意见调整</div>
-      <textarea id="npFeedback" placeholder="例如：划分太粗了，再拆细一点 / 跳过「X」（我已经会了）/ 顺序改成先 A 后 B / 删掉「Y」/ 增加关于 Z 的任务…"></textarea>
-      <button class="btn small primary" id="npAdjustBtn">提交给 AI 调整</button>
-    </div>
+
     <div class="npOps">
       <button class="btn small" id="npEdit">编辑</button>
       <button class="btn small danger" id="npDel">删除</button>

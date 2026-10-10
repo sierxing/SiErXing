@@ -1,14 +1,14 @@
 {
-  "version": "1.10.25",
-  "buildVer": "cf75ae6171a9",
-  "payload": "release/payload-1.10.25.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.25.sxar?ref=main",
+  "version": "1.10.26",
+  "buildVer": "fbce56e7da2b",
+  "payload": "release/payload-1.10.26.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.26.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "4e540a461d143ea1717eb60d3712d6bb77267edbd748d152e4c7c73bc82f54ad",
-  "size": 660235,
-  "unpackedSize": 2417881,
-  "publishedAt": "2026-10-08T14:32:45.874Z",
-  "notes": "规划不再默认求职：问卷按目标类型出题（读懂代码库/学技能/考证…），要不要搜集资料由你选；信息源导入支持导入代码库（AI 出「要掌握哪些概念、按什么顺序读」的摘要，规划直接照它排）。另修两个真 bug：流式输出被截断不会续写（规划/问卷/教程一长就断）、阶段字段写成 name 会被整个丢掉",
+  "sha256": "84b539daecd4e0b0ed859b408947b81346ca0563f9bbdc83ff2f23685e1ce0bc",
+  "size": 662210,
+  "unpackedSize": 2423634,
+  "publishedAt": "2026-10-10T07:27:49.217Z",
+  "notes": "重排节点卡片：一屏看懂「做完的标志」（验收+产出）→「为什么有这一步」（属于哪一级、这一支要达成什么、依据是什么）→「怎么做」（拆成分步）；依据信息源/文件夹/提炼汇总/教程/调整收进折叠区",
   "exeRequired": false
 }
