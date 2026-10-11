@@ -514,6 +514,7 @@ async function loadGoal(id) {
   state.goal = goal;
   state.sources = sources || [];
   state.digests = (digestsRes && digestsRes.digests) || [];
+  citeCacheUpdate(id);   // 正文里 [id] 引用解释用（目标页/对话页）
 }
 function buildTree(nodes) {
   const list = Array.isArray(nodes) ? nodes : [];
@@ -886,7 +887,7 @@ function showNodePanel(id, rerender) {
     /* 阶段的说明常常是一大段（150+ 字）—— 全塞进"为什么"卡里会把重点淹掉，
        截到 110 字够交代来由；想看全文去那一级的卡片。 */
     const d = String(scope.detail).replace(/\s+/g, ' ').trim();
-    whyLines.push('这一支要达成的是：' + (d.length > 110 ? d.slice(0, 110) + '…' : d));
+    whyLines.push(rewriteCites('这一支要达成的是：' + esc(d.length > 110 ? d.slice(0, 110) + '…' : d)));
   }
   const evid = srcs.map(x => String(x.note || '').trim()).filter(Boolean);
   const steps = splitSteps(n.detail);
@@ -908,8 +909,8 @@ function showNodePanel(id, rerender) {
 
     ${(n.acceptance || n.artifact) ? `<div class="npDone">
       <div class="npDoneHd">✅ 做完的标志</div>
-      ${n.acceptance ? `<div class="npDoneAcc">${esc(n.acceptance)}</div>` : ''}
-      ${n.artifact ? `<div class="npDoneArt"><span>产出物</span>${esc(n.artifact)}</div>` : ''}
+      ${n.acceptance ? `<div class="npDoneAcc">${rewriteCites(esc(n.acceptance))}</div>` : ''}
+      ${n.artifact ? `<div class="npDoneArt"><span>产出物</span>${rewriteCites(esc(n.artifact))}</div>` : ''}
     </div>` : ''}
 
     ${whyLines.length ? `<div class="npWhy">
@@ -921,7 +922,7 @@ function showNodePanel(id, rerender) {
     ${steps.length ? `<div class="npHow">
       <div class="npWhyHd">🔧 怎么做</div>
       ${steps.length > 1
-        ? '<ol class="npSteps">' + steps.map(x => '<li>' + esc(x) + '</li>').join('') + '</ol>'
+        ? '<ol class="npSteps">' + steps.map(x => '<li>' + rewriteCites(esc(x)) + '</li>').join('') + '</ol>'
         : '<p class="npHowP">' + esc(steps[0]) + '</p>'}
     </div>` : ''}
 
@@ -1432,6 +1433,9 @@ function tutThemedHTML(html) {
   a{color:${v.accent};}`;
   const css = `<style id="sx-theme">
   html{background:${v.bg} !important;color-scheme:${dark ? 'dark' : 'light'};}${elFallback}
+  sup.cite{font-size:.68em;vertical-align:super;line-height:0;color:${v.accent};background:${v.card};
+    border:1px solid ${v.border};border-radius:4px;padding:0 2.5px;margin:0 1px;cursor:pointer;}
+  sup.cite:hover{color:#fff;background:${v.accent};}
   </style>`;
   const t = String(html || '');
   if (/<\/head>/i.test(t)) return t.replace(/<\/head>/i, css + '</head>');
@@ -1987,6 +1991,7 @@ function openTutVersions(tid) {
       try {
         const r = await api('/api/tutorials/versions/' + b.getAttribute('data-vprev'));
         const v = r.version || {};
+        await ensureCiteCache(state.tutGoalId || (state.goal && state.goal.id) || 0);   // 预览正文里的 [id] 引用也要能解释
         body.innerHTML = `<button class="btn tiny" data-vback>← 返回列表</button>
           <div class="tutVerPrevMeta">${esc(v.reason || '')} · ${esc(fmtDate(v.created_at))}</div>`
           + (isHtml
@@ -1994,7 +1999,7 @@ function openTutVersions(tid) {
             : `<div class="tutBody mdBody">${mdToHTML(v.content || '')}</div>`);
         if (isHtml) {
           const fr = body.querySelector('.tutVerFrame');
-          if (fr) fr.srcdoc = tutThemedHTML(cleanHtmlForFrame(v.content || ''));
+          if (fr) fr.srcdoc = withCiteHook(tutThemedHTML(rewriteCites(cleanHtmlForFrame(v.content || ''))));
         }
         body.querySelector('[data-vback]').addEventListener('click', paint);
       } catch (err) { toast(err.message); }
@@ -2935,7 +2940,162 @@ function mdToHTML(text) {
     if (!buf.length) i++;
     if (buf.length) html += '<p>' + buf.map(x => mdInline(mdEscape(x))).join('<br>') + '</p>';
   }
-  return html;
+  return rewriteCites(html);
+}
+/* ============ AI 引用的上标标注（[节点id] → 点击查看引用了什么） ============
+   AI 写规划/教程时会用 `[2410]` 这种格式交叉引用别的节点（路线图提示词就是 `[id] 标题`
+   的形式，模型照着抄）。裸数字既看不出引用了什么、又影响观感。这里：
+     1. 凡是 `[数字]` 且该 id 真实存在（当前目标的节点 / 资料 / 提炼汇总），渲染成上标 ⧉；
+     2. 点一下弹出小卡片说明它到底是什么；教程正文在 iframe 里，由 withCiteHook 注入的
+        转发脚本调到 window.__openCite（iframe 里点不到主文档的监听）；
+     3. 只在 mdToHTML 统一出口 + 节点面板 + 教程 iframe 三处套 rewriteCites ——
+        新增渲染入口时记得同样处理（AI 生成的内容都可能带这种引用）。 */
+function citeCacheUpdate(gid) {
+  state.citeCache = state.citeCache || {};
+  if (state.goal && Number(state.goal.id) === Number(gid)) {
+    state.citeCache[gid] = { nodes: state.goal.nodes || [], sources: state.sources || [], digests: state.digests || [], at: Date.now() };
+  }
+  return state.citeCache[gid] || null;
+}
+async function ensureCiteCache(gid) {
+  state.citeCache = state.citeCache || {};
+  if (!gid) return null;
+  const cur = citeCacheUpdate(gid);
+  if (cur && Date.now() - (cur.at || 0) < 5 * 60 * 1000) return cur;
+  try {
+    const [{ goal }, { sources }, dg] = await Promise.all([
+      api('/api/goals/' + gid),
+      api('/api/goals/' + gid + '/sources'),
+      api('/api/goals/' + gid + '/digests').catch(() => ({ digests: [] }))
+    ]);
+    state.citeCache[gid] = { nodes: (goal && goal.nodes) || [], sources: sources || [], digests: (dg && dg.digests) || [], at: Date.now() };
+    return state.citeCache[gid];
+  } catch (e) { return cur || null; }
+}
+
+/* 把 `[数字]` 引用换成上标（点一下解释它是什么）。全部标注、不预筛 id ——
+   引用了不存在的 id 时也能让用户点开看到"这条引用指向已删除/不存在的节点"，
+   比留个裸数字好。**只有 <pre> 整段代码块跳过**（arr[1024] 这种不是引用）；
+   AI 写教程时常把引用包进行内代码 `[2410]`，那种要转 —— 线上教程里 37 处
+   引用全是行内代码样式，跳过就等于没转。 */
+function rewriteCites(html) {
+  let t = String(html || '');
+  const pres = [];
+  t = t.replace(/<pre[\s\S]*?<\/pre>/gi, m => { pres.push(m); return '\u0000CITE' + (pres.length - 1) + '\u0000'; });
+  t = t.replace(/\[(\d{3,7})\]/g, (m, id) => '<sup class="cite" data-cite="' + id + '" title="点击查看引用了什么">⧉</sup>');
+  t = t.replace(/\u0000CITE(\d+)\u0000/g, (m, i) => pres[Number(i)]);
+  return t;
+}
+function citeChain(n, nodes) {
+  const byId = {};
+  for (const x of nodes) byId[x.id] = x;
+  const parts = []; let cur = n;
+  while (cur) { parts.unshift(String(cur.title || '').slice(0, 30)); cur = cur.parent_id ? byId[cur.parent_id] : null; }
+  return parts.join(' › ');
+}
+function citeResolve(id) {
+  const gid = (state.goal && state.goal.id) || state.tutGoalId || 0;
+  const c = (state.citeCache || {})[gid];
+  if (!c) return '';
+  const n = c.nodes.find(x => String(x.id) === String(id));
+  if (n) {
+    const det = String(n.detail || '');
+    const inCur = (state.goal && state.goal.nodes || []).some(x => Number(x.id) === Number(id));
+    return `<div class="citePopHead"><span class="chip gray">节点</span><span>${esc(n.title)}</span></div>
+      <div class="citePopMeta">${esc(citeChain(n, c.nodes))}${n.hours ? ' · ' + esc(n.hours) : ''} · ${ST_LABEL[n.status] ? ST_LABEL[n.status][0] : '未开始'}</div>
+      ${det ? `<div class="citePopBody">${esc(det.slice(0, 500))}${det.length > 500 ? '…' : ''}</div>` : ''}
+      <div class="citePopOps">${inCur ? `<button class="btn tiny primary" data-cite-node="${n.id}">打开节点详情</button>` : `<a class="btn tiny" href="#/g/${gid}">去所在目标查看</a>`}</div>`;
+  }
+  const s = c.sources.find(x => String(x.id) === String(id));
+  if (s) {
+    const body = String(s.content || s.snippet || '').replace(/\s+/g, ' ').slice(0, 600);
+    return `<div class="citePopHead"><span class="chip gray">资料</span>${Number(s.quality) === 1 ? '<span class="chip ok">★ 优质</span>' : ''}<span>${esc(s.title)}</span></div>
+      <div class="citePopMeta">${esc(s.site)}｜${esc(s.kind)}</div>
+      <div class="citePopBody">${esc(body)}${body.length >= 600 ? '…' : ''}</div>
+      <div class="citePopOps"><a class="btn tiny" href="#/library">到资源库查看全文</a></div>`;
+  }
+  const d = c.digests.find(x => String(x.id) === String(id));
+  if (d) {
+    const body = String(d.content || '').replace(/\s+/g, ' ').slice(0, 600);
+    return `<div class="citePopHead"><span class="chip gray">提炼汇总</span><span>${esc(d.title || d.topic || '')}</span></div>
+      <div class="citePopMeta">依据 ${d.sources_count || 0} 条资料 · ${esc(fmtDate(d.created_at))}</div>
+      <div class="citePopBody">${esc(body)}${body.length >= 600 ? '…' : ''}</div>`;
+  }
+  return '';
+}
+function citePopClose() { const el = document.getElementById('citePop'); if (el) el.remove(); }
+function citePopOpen(id, x, y) {
+  citePopClose();
+  const d = document.createElement('div');
+  d.id = 'citePop';
+  d.className = 'citePop';
+  d.innerHTML = '<div class="citePopHead"><span class="chip gray">引用</span></div><div class="citePopEmpty">正在查这条引用是什么…</div>';
+  d.style.visibility = 'hidden';   // 内容到位前不显示，避免占位尺寸乱跳/定位一抖一抖
+  document.body.appendChild(d);
+  const M = 10;
+  const place = () => {
+    const r = d.getBoundingClientRect();
+    /* x/y 是上标左边缘/下边缘的视口坐标：默认在标记下方；
+       下方放不下就翻到上方，再整体夹回视口内 —— 位置可预期，永远完整可见。 */
+    const px = Math.max(M, Math.min(Number(x) || 40, Math.max(M, window.innerWidth - r.width - M)));
+    const y0 = Number(y) || 40;
+    const below = y0 + r.height + 8;
+    let py = below;
+    if (below > window.innerHeight - M) {
+      const above = y0 - r.height - 8;
+      py = above >= M ? above : Math.max(M, Math.min(below, window.innerHeight - r.height - M));
+    }
+    py = Math.max(M, Math.min(py, Math.max(M, window.innerHeight - r.height - M)));
+    d.style.left = Math.round(px) + 'px';
+    d.style.top = Math.round(py) + 'px';
+  };
+  place();
+  (async () => {
+    const gid = (state.goal && state.goal.id) || state.tutGoalId || 0;
+    if (gid && !((state.citeCache || {})[gid])) await ensureCiteCache(gid);
+    if (!document.getElementById('citePop')) return;   // 已经关掉了
+    const body = citeResolve(id);
+    d.innerHTML = body || '<div class="citePopHead"><span class="chip gray">引用</span></div><div class="citePopEmpty">没找到 id=' + esc(id) + ' 对应的内容：它可能引用了已被删除的节点或别的目标里的东西。</div>';
+    place();
+    d.style.visibility = 'visible';
+  })();
+}
+document.addEventListener('click', e => {
+  const nodeBtn = e.target.closest && e.target.closest('[data-cite-node]');
+  if (nodeBtn) {
+    const id = Number(nodeBtn.getAttribute('data-cite-node'));
+    citePopClose();
+    const n = (state.goal && state.goal.nodes || []).find(x => Number(x.id) === id);
+    if (n) showNodePanel(id, typeof renderGoal === 'function' ? renderGoal : null);
+    else toast('这个节点不在当前目标里');
+    return;
+  }
+  const mark = e.target.closest && e.target.closest('.cite');
+  if (mark) {
+    const id = mark.getAttribute('data-cite');
+    if (document.__citeOpenFor === id) { citePopClose(); document.__citeOpenFor = ''; return; }
+    document.__citeOpenFor = id;
+    const r = mark.getBoundingClientRect();
+    citePopOpen(id, r.left, r.bottom);
+    return;
+  }
+  if (document.__citeOpenFor) { document.__citeOpenFor = ''; citePopClose(); }
+});
+/* iframe（HTML 教程）里的引用上标：iframe 文档里点不到主文档的监听，由注入脚本转发到这里 */
+window.__openCite = (id, x, y) => { document.__citeOpenFor = id; citePopOpen(id, x, y); };
+/* 弹窗关闭：点别处 / Esc / 窗口尺寸变化。
+   刻意**不**监听 scroll —— 固定定位的弹窗本就钉在原处，而教学页有"恢复上次
+   阅读位置"这类延迟滚动，监听 scroll 会把刚点开的弹窗直接关掉（线上就这么闪没的）。 */
+window.addEventListener('resize', citePopClose);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') citePopClose(); });
+/* 教程 iframe：注入引用上标的点击转发脚本（沙箱已开 allow-scripts / allow-same-origin） */
+function withCiteHook(html) {
+  const js = `<script>document.addEventListener('click',function(e){var c=e.target&&e.target.closest&&e.target.closest('sup.cite');if(!c)return;e.preventDefault();` +
+    `var r=c.getBoundingClientRect(),fr=window.frameElement;var x=r.left+(fr?fr.getBoundingClientRect().left:0),y=r.bottom+(fr?fr.getBoundingClientRect().top:0);` +
+    `try{window.parent.__openCite(c.getAttribute('data-cite'),x,y);}catch(err){}});</script>`;
+  const t = String(html || '');
+  if (/<\/body>/i.test(t)) return t.replace(/<\/body>/i, js + '</body>');
+  return t + js;
 }
 /* 顶栏收藏栏（教程页 / 路线图页共用一套实现）：钉选 + 收藏夹 + 横向拖拽排序，其余收进 ⋯
    每条栏按 ns（命名空间）分开存，互不干扰：
@@ -3682,6 +3842,7 @@ async function renderTutorialPage(tid) {
   state.tutGoalId = t ? t.goal_id : 0;   // 侧边栏绑定到该目标的会话（刷新也不丢记录）
   state.tutGoal = goal || null;          // 教程语境目标：组件开关按它判定，不串到别的目标
   state.tutUpdatedAt = t ? (t.updated_at || '') : '';   // 任务轮询用它判断内容是否真变了
+  await ensureCiteCache(t ? t.goal_id : 0);   // 正文里的 [id] 引用要能解释成节点/资料
   const isHtml = t.format === 'html';
   try { state.tutFmt = t.format; state.tutNodeId = node ? node.id : 0; } catch (e) {}
   const sizeK = Math.max(1, Math.round((t.content || '').length / 1000));
@@ -3734,7 +3895,7 @@ async function renderTutorialPage(tid) {
       } catch (e) { console.warn('[tutorial] 截断体检失败', e); }
     };
     fr.addEventListener('load', build, { once: true });
-    fr.setAttribute('srcdoc', tutThemedHTML(cleanHtmlForFrame(t.content)));
+    fr.setAttribute('srcdoc', withCiteHook(tutThemedHTML(rewriteCites(cleanHtmlForFrame(t.content)))));
     setTimeout(build, 1500);   // 兜底：万一 load 没触发
   }
   setTimeout(() => { try { tutTocBuild(tid); } catch (e) {} }, 200);   // 侧边目录大纲
