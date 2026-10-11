@@ -61,6 +61,15 @@ const SYNC_SETTINGS = [
 module.exports = function createSync(ctx) {
   const { db, APP_DIR, DATA_DIR, getSetting, setSetting, backup, log = () => {} } = ctx;
   const WORK_DIR = path.join(DATA_DIR, 'sync');
+  /* 产出库文件本体（blob）：与 uploads 一样跟着 Git 同步，
+     目录结构在 outlib_nodes 表里、文件内容在这里，各管各的。 */
+  const OUTLIB_DIR = path.join(DATA_DIR, 'outlib-files');
+  const OUTLIB_SYNC_DIR = path.join(WORK_DIR, 'outlib-files');
+  /* 单文件同步上限 + 总容量上限：产出多是简历/作品集这类大文件，
+     全量塞进 Git 会让仓库迅速膨胀、超大文件还会被服务端拒绝。
+     超限的文件跳过同步、只同步它的目录结构（下载时本机仍可取到），并在日志里说明。 */
+  const OUTLIB_MAX_FILE = 20 * 1024 * 1024;     // 单个文件 20MB
+  const OUTLIB_MAX_TOTAL = 200 * 1024 * 1024;   // 本次同步产出库总上限 200MB
   const SNAP_NAME = 'sierxing-sync.json';
   const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 
@@ -221,6 +230,44 @@ module.exports = function createSync(ctx) {
     return c;
   }
   /** 把远端快照落到本地库（调用前必须已确认不冲突或用户选了云端） */
+  /* 产出库文件 → 同步目录。
+     用「本地没有才拷」而不是每次全量覆盖：省 IO，也避免正在用的文件被改动。 */
+  function syncOutlibFiles() {
+    if (!fs.existsSync(OUTLIB_DIR)) return;
+    fs.mkdirSync(OUTLIB_SYNC_DIR, { recursive: true });
+    let total = 0, skipped = 0;
+    for (const f of fs.readdirSync(OUTLIB_DIR)) {
+      const src = path.join(OUTLIB_DIR, f), dst = path.join(OUTLIB_SYNC_DIR, f);
+      try {
+        const st = fs.statSync(src);
+        if (!st.isFile()) continue;
+        if (st.size > OUTLIB_MAX_FILE) { skipped++; continue; }
+        if (total + st.size > OUTLIB_MAX_TOTAL) { skipped++; continue; }
+        if (fs.existsSync(dst)) {
+          const ds = fs.statSync(dst);
+          if (ds.size === st.size) continue;          // 大小一致认为已是最新
+        }
+        fs.copyFileSync(src, dst);
+        total += st.size;
+      } catch (e) { skipped++; }
+    }
+    if (skipped) log('[sync] 产出库：有 ' + skipped + ' 个文件超过大小上限未上传（目录结构仍会同步）');
+  }
+
+  /* 同步目录 → 本机：别的设备拉下来的产出文件落回 blob 目录 */
+  function importOutlibFiles() {
+    if (!fs.existsSync(OUTLIB_SYNC_DIR)) return;
+    fs.mkdirSync(OUTLIB_DIR, { recursive: true });
+    for (const f of fs.readdirSync(OUTLIB_SYNC_DIR)) {
+      const src = path.join(OUTLIB_SYNC_DIR, f), dst = path.join(OUTLIB_DIR, f);
+      try {
+        if (!fs.statSync(src).isFile()) continue;
+        if (fs.existsSync(dst)) continue;             // 本机已有同名 blob，不覆盖
+        fs.copyFileSync(src, dst);
+      } catch (e) {}
+    }
+  }
+
   function importRemote(snap, opts) {
     applySnapshot(snap, opts);
     if (syncImages()) {
@@ -232,6 +279,7 @@ module.exports = function createSync(ctx) {
         }
       }
     }
+    importOutlibFiles();
   }
 
   async function ensureRepo() {
@@ -429,6 +477,7 @@ module.exports = function createSync(ctx) {
           try { fs.copyFileSync(path.join(UPLOAD_DIR, f), path.join(dest, f)); } catch (e) {}
         }
       }
+      syncOutlibFiles();
       await git(['add', '-A'], 60000);
       const commit = await git(['commit', '-m', `sync: ${reason || 'update'} @ ${new Date().toLocaleString('zh-CN')}`], 60000);
       if (!commit.ok && !/nothing to commit|no changes added/i.test(commit.out + commit.err)) {

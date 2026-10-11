@@ -1,0 +1,90 @@
+/* 思而行 · 产出库（📦 outlib）样式：左侧文件夹树 + 右侧产出列表 */
+.olWrap{display:flex; gap:14px; align-items:stretch; margin-top:14px;}
+.olSide{flex:0 0 208px; background:var(--card); border:1px solid var(--border); border-radius:var(--r); padding:10px; box-shadow:var(--shadow-sm);}
+.olSideTitle{font-size:12px; color:var(--muted); padding:2px 6px 8px; font-weight:700;}
+.olTree{display:flex; flex-direction:column; gap:1px; max-height:56vh; overflow:auto;}
+.olNode{display:flex; align-items:center; gap:6px; padding:5px 7px; border-radius:var(--r-sm); cursor:pointer; font-size:13px; border:1px solid transparent;}
+.olNode:hover{background:var(--soft);}
+.olNode.sel{background:var(--accent-soft); border-color:var(--accent-border); color:var(--accent); font-weight:600;}
+.olNode.drop{background:var(--accent-soft); border-color:var(--accent); border-style:dashed;}
+.olNode .olNm{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.olNode .olCt{font-size:11px; color:var(--muted); font-weight:400;}
+.olTw{width:16px; height:16px; display:inline-flex; align-items:center; justify-content:center; color:var(--muted); font-size:9px; flex:0 0 16px; border-radius:4px;}
+.olTw:hover{background:var(--border); color:var(--text);}
+.olSp{flex:0 0 14px;}
+
+.olMain{flex:1; min-width:0; display:flex; flex-direction:column; gap:10px;}
+.olCrumb{display:flex; align-items:center; gap:4px; flex-wrap:wrap; font-size:12.5px; color:var(--muted);}
+.olCrumb a{color:var(--accent); cursor:pointer; text-decoration:none; padding:2px 6px; border-radius:6px;}
+.olCrumb a:hover{background:var(--accent-soft);}
+.olCrumb .olSep{opacity:.5;}
+.olCrumb .olCur{color:var(--text); font-weight:600; padding:2px 6px;}
+
+.olBar{display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
+.olBar .olCount{font-size:12px; color:var(--muted);}
+
+.olList{background:var(--card); border:1px solid var(--border); border-radius:var(--r); overflow:hidden; box-shadow:var(--shadow-sm);}
+.olList.dropping{border-color:var(--accent); border-style:dashed; background:var(--accent-soft);}
+.olRow{display:flex; align-items:center; gap:10px; padding:8px 12px; border-bottom:1px solid var(--border); cursor:default;}
+.olRow:last-child{border-bottom:none;}
+.olRow:hover{background:var(--soft);}
+.olRow.picked{background:var(--accent-soft);}
+.olRow.dragOver{box-shadow:inset 0 2px 0 var(--accent);}
+/* 拖拽排序：上/下插入用一条线，拖进文件夹用整行描边 */
+.olRow.dropBefore{box-shadow:inset 0 3px 0 var(--accent); background:var(--accent-soft);}
+.olRow.dropAfter{box-shadow:inset 0 -3px 0 var(--accent); background:var(--accent-soft);}
+.olRow.dropInto{box-shadow:inset 0 0 0 2px var(--accent); background:var(--accent-soft);}
+.olRow.dragging{opacity:.35;}
+.olDropLine{height:0; border-top:2px dashed var(--accent); margin:2px 0;}
+.olIc{flex:0 0 22px; text-align:center; font-size:16px; line-height:1;}
+.olNm{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13.5px;}
+.olRow .olMeta{flex:0 0 auto; font-size:11.5px; color:var(--muted); display:flex; gap:12px; align-items:center;}
+.olOps{flex:0 0 auto; display:flex; gap:4px; opacity:0; transition:opacity .12s;}
+.olRow:hover .olOps,.olRow.picked .olOps{opacity:1;}
+.olOps button{background:none; border:none; cursor:pointer; color:var(--muted); font-size:13px; padding:3px 5px; border-radius:6px; line-height:1;}
+.olOps button:hover{background:var(--border); color:var(--text);}
+.olOps button.danger:hover{background:var(--danger); color:#fff;}
+.olIn{flex:1; min-width:0; font:inherit; font-size:13.5px; padding:3px 7px; border:1px solid var(--accent); border-radius:6px; background:var(--bg); color:var(--text);}
+.olEmpty{padding:34px 20px; text-align:center; color:var(--muted); font-size:13px;}
+.olEmpty .ebIcon{font-size:30px; margin-bottom:6px;}
+.olDrop{padding:30px 20px; text-align:center; color:var(--accent); font-size:13px; font-weight:600;}
+
+.olPreview{margin-top:12px; background:var(--card); border:1px solid var(--border); border-radius:var(--r); box-shadow:var(--shadow-sm); overflow:hidden;}
+.olPvHead{display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid var(--border); font-size:12.5px; color:var(--muted);}
+.olPvBody{padding:12px; max-height:62vh; overflow:auto;}
+.olPvBody img{max-width:100%; display:block; margin:0 auto; border-radius:var(--r-sm);}
+.olPvBody iframe{width:100%; height:60vh; border:none; border-radius:var(--r-sm);}
+.olPvBody pre{white-space:pre-wrap; word-break:break-all; font-size:12px; line-height:1.6; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+
+.olUpload{position:fixed; inset:0; background:rgba(10,12,20,.5); display:flex; align-items:center; justify-content:center; z-index:70; backdrop-filter:blur(2px);}
+.olUpCard{background:var(--card); border-radius:var(--r-lg); box-shadow:var(--shadow-lg); width:min(420px,92vw); padding:18px;}
+.olUpCard h4{font-size:14px; margin-bottom:10px;}
+.olBar2{height:6px; border-radius:999px; background:var(--soft); overflow:hidden; margin-top:12px;}
+.olBar2 i{display:block; height:100%; width:0; background:linear-gradient(90deg,var(--accent),var(--accent-2)); transition:width .15s;}
+.olUpTxt{font-size:12px; color:var(--muted); margin-top:8px; word-break:break-all;}
+
+/* 添加产出弹窗：独立拖放区，与列表的拖拽排序彻底隔离 */
+.olModal{position:fixed; inset:0; background:rgba(10,12,20,.5); display:flex; align-items:center; justify-content:center; z-index:80; backdrop-filter:blur(2px);}
+.olModalCard{background:var(--card); border-radius:var(--r-lg); box-shadow:var(--shadow-lg); width:min(560px,94vw); padding:20px;}
+.olModalCard h4{font-size:15px; margin-bottom:4px;}
+.olModalTip{font-size:12.5px; color:var(--muted); margin-bottom:14px;}
+.olDropZone{border:2px dashed var(--accent-border); border-radius:var(--r); padding:30px 20px; text-align:center; cursor:pointer; background:var(--soft); transition:all .15s;}
+.olDropZone:hover{border-color:var(--accent); background:var(--accent-soft);}
+.olDropZone.over{border-color:var(--accent); background:var(--accent-soft); border-style:solid;}
+.olDzIcon{font-size:32px; margin-bottom:8px;}
+.olDzMain{font-size:14px; font-weight:600; color:var(--accent);}
+.olDzSub{font-size:12px; color:var(--muted); margin-top:4px;}
+.olModalOps{display:flex; align-items:center; gap:8px; margin-top:16px; flex-wrap:wrap;}
+.olModalOps .spacer{flex:1;}
+
+/* 右键菜单：文件/文件夹的操作都收在这里，右键直接出，不用找按钮 */
+.olMenu{position:fixed; z-index:90; min-width:170px; background:var(--card); border:1px solid var(--border); border-radius:var(--r); box-shadow:var(--shadow-lg); padding:5px;}
+.olMenu button{display:flex; align-items:center; gap:8px; width:100%; text-align:left; background:none; border:none; cursor:pointer; color:var(--text); font-size:13px; padding:7px 10px; border-radius:var(--r-sm); line-height:1.4; font-family:inherit;}
+.olMenu button:hover{background:var(--accent-soft); color:var(--accent);}
+.olMenu button.danger:hover{background:var(--danger); color:#fff;}
+.olMenu .olMsep{height:1px; background:var(--border); margin:5px 2px;}
+.olMenu button:disabled{opacity:.42; cursor:not-allowed;}
+.olMenu button:disabled:hover{background:none; color:var(--text);}
+/* 有右键菜单后，行尾那排小图标只在选中态显示，不再抢注意力 */
+.olRow .olOps{opacity:0;}
+.olRow.picked .olOps{opacity:1;}

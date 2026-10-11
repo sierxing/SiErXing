@@ -75,7 +75,94 @@ const ASSET_V = (() => {
   } catch (e) {}
 })();
 const PORT = Number(process.env.PORT || 3213);
-const KEEP_BACKUPS = 30;
+const KEEP_BACKUPS = 30;          // 默认保留份数（用户可在设置里改，见 keepBackups()）
+
+/** 实际要保留的份数：设置项 backup_keep 可覆盖，非法值回落默认 */
+function keepBackups() {
+  const n = parseInt(getSetting('backup_keep', ''), 10);
+  return (n >= 1 && n <= 500) ? n : KEEP_BACKUPS;
+}
+/** 列出现有备份（新的在前）：{name, time, size} */
+function backupList() {
+  let names = [];
+  try { names = fs.readdirSync(BACKUP_DIR).filter(f => /^sierxing-[0-9]{8}-[0-9]{6}\.db$/.test(f)); } catch (e) { return []; }
+  names.sort().reverse();     // 文件名就是时间戳，字典序倒排 = 由新到旧
+  return names.map(n => {
+    let size = 0, time = '';
+    try { const st = fs.statSync(path.join(BACKUP_DIR, n)); size = st.size; time = st.mtime.toISOString(); } catch (e) {}
+    return { name: n, size, time };
+  });
+}
+/** 按当前保留份数裁掉最旧的 */
+function pruneBackups() {
+  const keep = keepBackups();
+  let files = [];
+  try { files = fs.readdirSync(BACKUP_DIR).filter(f => f.startsWith('sierxing-')).sort(); } catch (e) { return; }
+  while (files.length > keep) { try { fs.unlinkSync(path.join(BACKUP_DIR, files.shift())); } catch (e) {} }
+}
+
+  /* ---- 备份对比：只比「用户看得懂」的核心表，噪音表（分块/向量/统计）不比 ----
+     主键不统一，所以每张表显式指定主键与「代表性字段」用于生成人类可读的摘要。 */
+  const BK_DIFF_TABLES = [
+    { t: 'goals',             pk: 'id',     label: '目标',     title: 'title' },
+    { t: 'nodes',             pk: 'id',     label: '节点',     title: 'title' },
+    { t: 'sources',           pk: 'id',     label: '信息源',   title: 'title' },
+    { t: 'outlib_nodes',      pk: 'id',     label: '产出',     title: 'name' },
+    { t: 'tutorials',         pk: 'id',     label: '教程',     title: 'title' },
+    { t: 'quiz_records',      pk: 'id',     label: '测验记录', title: 'point' },
+    { t: 'interview_sessions',pk: 'id',     label: '模拟面试', title: 'title' },
+    { t: 'chats',             pk: 'id',     label: '对话',     title: 'content' },
+    { t: 'settings',          pk: 'key',    label: '设置',     title: 'key' },
+    { t: 'problems',          pk: 'id',     label: '刷题',     title: 'title' },
+    { t: 'restate_points',    pk: 'tutorial_id', label: '用自己的话', title: 'points' },
+  ];
+  function bkOpen(name) {
+    const f = path.join(BACKUP_DIR, name);
+    if (!/^sierxing-[0-9]{8}-[0-9]{6}\.db$/.test(name)) throw new Error('备份名不合法');
+    if (!fs.existsSync(f)) throw new Error('这份备份已经不在了');
+    return new (require('node:sqlite').DatabaseSync)(f, { readOnly: true });
+  }
+  function bkShort(v) {
+    v = String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
+    return v.length > 40 ? v.slice(0, 40) + '…' : v;
+  }
+  /** 比较两份备份：返回 {from,to,items:[{table,label,added,removed,changed,samples}]} */
+  function backupDiff(fromName, toName) {
+    const A = bkOpen(fromName), B = bkOpen(toName);
+    const items = [];
+    try {
+      for (const cfg of BK_DIFF_TABLES) {
+        const has = d => { try { return !!d.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(cfg.t); } catch (e) { return false; } };
+        if (!has(A) || !has(B)) continue;
+        const ra = A.prepare(`SELECT * FROM ${cfg.t}`).all();
+        const rb = B.prepare(`SELECT * FROM ${cfg.t}`).all();
+        const key = r => String(r[cfg.pk]);
+        const ma = new Map(ra.map(r => [key(r), r]));
+        const mb = new Map(rb.map(r => [key(r), r]));
+        let added = 0, removed = 0, changed = 0;
+        const samples = [];
+        for (const [k, rbw] of mb) {
+          const rao = ma.get(k);
+          if (!rao) { added++; if (samples.length < 5) samples.push({ type: 'add', text: bkShort(rbw[cfg.title]) }); continue; }
+          if (JSON.stringify(rao) !== JSON.stringify(rbw)) {
+            changed++;
+            if (samples.length < 5) {
+              const before = bkShort(rao[cfg.title]), after = bkShort(rbw[cfg.title]);
+              samples.push({ type: 'edit', text: before === after ? after : `${before} → ${after}` });
+            }
+          }
+        }
+        for (const k of ma.keys()) {
+          if (!mb.has(k)) { removed++; if (samples.length < 5) samples.push({ type: 'del', text: bkShort(ma.get(k)[cfg.title]) }); }
+        }
+        if (added || removed || changed) items.push({ table: cfg.t, label: cfg.label, added, removed, changed, samples });
+      }
+    } finally {
+      try { A.close(); } catch (e) {}
+      try { B.close(); } catch (e) {}
+    }
+    return { from: fromName, to: toName, items };
+  }
 const APP_NAME = '思而行';
 
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
@@ -551,8 +638,7 @@ function backup() {
   // 历史上 WAL 旁文件曾被外部删掉导致读写分裂，已不再用 WAL。
   try {
     fs.copyFileSync(DB_PATH, path.join(BACKUP_DIR, `sierxing-${stamp()}.db`));
-    const files = fs.readdirSync(BACKUP_DIR).filter(f => f.startsWith('sierxing-')).sort();
-    while (files.length > KEEP_BACKUPS) fs.unlinkSync(path.join(BACKUP_DIR, files.shift()));
+    pruneBackups();
   } catch (e) { console.error('备份失败:', e.message); }
 }
 function sendJSON(res, code, obj) {
@@ -5361,6 +5447,64 @@ function extractEbookPrefFromAnswers(answers) {
     backup();
     const count = fs.readdirSync(BACKUP_DIR).filter(x => x.startsWith('sierxing-')).length;
     return sendJSON(res, 200, { ok: true, count });
+  }
+  /* 某次备份 vs 上一次备份，差了什么 */
+  if (p === '/api/backup/diff' && method === 'GET') {
+    const name = String(u.searchParams.get('name') || '');
+    const list = backupList();                      // 由新到旧
+    const i = list.findIndex(x => x.name === name);
+    if (i < 0) return sendJSON(res, 404, { error: '这份备份已经不在了' });
+    const cur = list[i];
+    const prev = list[i + 1];                      // 时间上更早的那一份
+    if (!prev) return sendJSON(res, 200, { first: true, name: cur.name, items: [] });
+    return sendJSON(res, 200, { first: false, name: cur.name, prev: prev.name, ...backupDiff(prev.name, cur.name) });
+  }
+  /* 备份列表：设置页「最近备份」用 */
+  if (p === '/api/backup/list' && method === 'GET') {
+    const items = backupList();
+    const totalBytes = items.reduce((a, x) => a + (x.size || 0), 0);
+    return sendJSON(res, 200, {
+      items, keep: keepBackups(), totalBytes,
+      dir: BACKUP_DIR, dbSize: (() => { try { return fs.statSync(DB_PATH).size; } catch (e) { return 0; } })()
+    });
+  }
+  /* 改保留份数：立刻按新值裁掉多出来的 */
+  if (p === '/api/backup/keep' && method === 'POST') {
+    const body = await readBody(req);
+    const n = parseInt(body.keep, 10);
+    if (!(n >= 1 && n <= 500)) return sendJSON(res, 400, { error: '保留份数需在 1~500 之间' });
+    setSetting('backup_keep', String(n));
+    pruneBackups();
+    return sendJSON(res, 200, { ok: true, keep: n, count: backupList().length });
+  }
+  /* 删掉某一份备份（只认备份目录里的合法文件名，防路径逃逸） */
+  if (p === '/api/backup/delete' && method === 'POST') {
+    const body = await readBody(req);
+    const name = String(body.name || '');
+    if (!/^sierxing-[0-9]{8}-[0-9]{6}\.db$/.test(name)) return sendJSON(res, 400, { error: '备份名不合法' });
+    const f = path.join(BACKUP_DIR, name);
+    if (!fs.existsSync(f)) return sendJSON(res, 404, { error: '这份备份已经不在了' });
+    fs.unlinkSync(f);
+    return sendJSON(res, 200, { ok: true });
+  }
+  /* 恢复某一份备份：先把「当前状态」存一份再覆盖，安全网先铺好 */
+  if (p === '/api/backup/restore' && method === 'POST') {
+    const body = await readBody(req);
+    const name = String(body.name || '');
+    if (!/^sierxing-[0-9]{8}-[0-9]{6}\.db$/.test(name)) return sendJSON(res, 400, { error: '备份名不合法' });
+    const src = path.join(BACKUP_DIR, name);
+    if (!fs.existsSync(src)) return sendJSON(res, 404, { error: '这份备份已经不在了' });
+    // 校验能不能当库打开，避免用一个坏文件把现有数据顶掉
+    try {
+      const probe = new (require('node:sqlite').DatabaseSync)(src, { readOnly: true });
+      probe.prepare('SELECT COUNT(*) c FROM goals').get();
+      probe.close();
+    } catch (e) {
+      return sendJSON(res, 400, { error: '这份备份读不出来（可能已损坏），已取消恢复' });
+    }
+    try { fs.copyFileSync(DB_PATH, path.join(BACKUP_DIR, `sierxing-${stamp()}.db`)); } catch (e) {}
+    fs.copyFileSync(src, DB_PATH);
+    return sendJSON(res, 200, { ok: true, needRestart: true });
   }
   if (p === '/api/export/json' && method === 'GET') {
     const goals = db.prepare('SELECT * FROM goals ORDER BY id').all();

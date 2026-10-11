@@ -2156,3 +2156,37 @@ body{padding-left:78px;}
 }
 .tutTocTab:hover{color:var(--accent); border-color:var(--accent-border);}
 @media (max-width:1420px){ .tutTocTab{display:none;} }
+
+/* ============ 设置 · 数据备份 ============ */
+.bkTip{display:flex;gap:9px;align-items:flex-start;background:var(--soft);border:1px solid var(--border);border-radius:var(--r);padding:9px 12px;margin:10px 0 14px;font-size:12.5px;color:var(--muted);line-height:1.6;}
+.bkTip b{color:var(--text);}
+.bkTool{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;}
+.bkGroup{display:flex;align-items:center;gap:6px;}
+.bkToolSep{width:1px;height:20px;background:var(--border);flex:0 0 1px;}
+.bkLbl{font-size:12.5px;color:var(--muted);white-space:nowrap;}
+#backupKeep{width:auto;min-width:74px;padding:4px 8px;height:28px;}
+
+.bkHead{display:flex;align-items:baseline;gap:8px;margin:2px 0 8px;font-size:13.5px;font-weight:700;}
+.bkList{border:1px solid var(--border);border-radius:var(--r);overflow:hidden;background:var(--card);box-shadow:var(--shadow-sm);}
+.bkRow{display:grid;grid-template-columns:24px 152px 76px 1fr auto;gap:10px;align-items:center;padding:0 12px;height:40px;border-top:1px solid var(--border);}
+.bkRow:first-child{border-top:none;}
+.bkRow.bkRowHead{height:34px;background:var(--soft);font-size:11.5px;color:var(--muted);font-weight:600;letter-spacing:.03em;}
+.bkRow:not(.bkRowHead):hover{background:var(--soft);}
+.bkCk{display:flex;align-items:center;justify-content:center;}
+.bkTime{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;font-variant-numeric:tabular-nums;}
+.bkSize{font-size:12px;color:var(--muted);text-align:right;font-variant-numeric:tabular-nums;}
+.bkBadge{display:inline-flex;align-items:center;height:18px;padding:0 7px;border-radius:999px;background:var(--accent-soft);color:var(--accent);border:1px solid var(--accent-border);font-size:11px;font-weight:600;}
+/* 设置页的表格里，操作列常显：不像文件管理器那样靠悬停发现 */
+.bkActs{display:flex;gap:6px;justify-content:flex-end;}
+.bkEmpty{padding:26px 16px;text-align:center;color:var(--muted);font-size:12.5px;}
+.bkDiffRow{border-top:1px dashed var(--accent-border);padding:10px 14px 11px 46px;background:var(--accent-soft);font-size:12.5px;}
+.bkDiffTop{display:flex;align-items:center;gap:8px;margin-bottom:5px;}
+.bkDiffTop b{font-size:12.5px;}
+.bkDiffItem{display:flex;gap:8px;align-items:baseline;padding:2px 0;flex-wrap:wrap;}
+.bkDiffItem>b{min-width:58px;font-weight:600;}
+.bkNum{font-variant-numeric:tabular-nums;font-weight:700;}
+.bkNum.add{color:var(--ok);}
+.bkNum.del{color:var(--danger);}
+.bkNum.mod{color:var(--warn);}
+.bkSamples{color:var(--muted);min-width:0;flex:1;}
+.bkFoot{font-size:11.5px;color:var(--muted);margin-top:8px;}

@@ -7686,12 +7686,29 @@ async function renderSettings() {
     ${await syncSectionHTML()}
     <div class="sec" id="set-data">
       <div class="secTitle">数据备份</div>
-      <div class="toolbarRow">
-        <button class="btn" id="backupNow">立即备份</button>
-        <a class="btn" href="/api/export/json">导出全部 JSON</a>
-        <label class="btn">导入 JSON<input type="file" accept=".json" id="importJson" hidden></label>
+      <div class="bkTip">
+        <span>🛡️</span>
+        <span><b>每次改动都会自动备份</b>，不用手动点。备份存在数据目录的 <code>backups/</code>，导入会覆盖现有全部数据（导入前也会自动备份一份）。</span>
       </div>
-      <p class="hint" style="margin-top:10px;">每次改动都会自动备份到数据目录下的 backups/（保留最近 30 份）。导入会覆盖现有全部数据（导入前会自动备份）。</p>
+      <div class="bkTool">
+        <div class="bkGroup">
+          <button class="btn" id="backupNow">立即备份</button>
+          <a class="btn" href="/api/export/json">导出 JSON</a>
+          <label class="btn">导入 JSON<input type="file" accept=".json" id="importJson" hidden></label>
+        </div>
+        <span class="bkToolSep"></span>
+        <div class="bkGroup"><button class="btn danger" id="bkDelSel" disabled>删除选中</button></div>
+        <span class="spacer"></span>
+        <div class="bkGroup">
+          <span class="bkLbl">保留最近</span>
+          <select class="btn" id="backupKeep">
+            ${[5, 10, 20, 30, 50, 100].map(n => `<option value="${n}"${n === 30 ? ' selected' : ''}>${n} 份</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="bkHead">最近备份<span class="spacer"></span><span class="bkLbl" id="backupStat"></span></div>
+      <div id="backupList"><div class="bkEmpty">正在读取…</div></div>
+      <div class="bkFoot" id="backupFoot"></div>
     </div>
     <div class="sec" id="set-store">
       <div class="secTitle">数据存储路径 <span class="secSub">默认在程序目录下；C 盘吃紧就搬到 D 盘 / 移动硬盘</span></div>
@@ -8481,8 +8498,165 @@ async function renderSettings() {
   const sgb = document.getElementById('showGuideBtn');
   if (sgb) sgb.addEventListener('click', () => showGuide(0));
   document.getElementById('backupNow').addEventListener('click', async () => {
-    try { const r = await api('/api/backup', { method: 'POST' }); toast('已备份，共 ' + r.count + ' 份'); } catch (e) { toast(e.message); }
+    try { const r = await api('/api/backup', { method: 'POST' }); toast('已备份，共 ' + r.count + ' 份'); await loadBackupList(); } catch (e) { toast(e.message); }
   });
+
+  /* ---- 最近备份：列表 + 保留份数 + 恢复/删除 ---- */
+  function fmtBytes(b) {
+    b = Number(b || 0);
+    if (b < 1024) return b + ' B';
+    if (b < 1048576) return (b / 1024).toFixed(0) + ' KB';
+    if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
+    return (b / 1073741824).toFixed(2) + ' GB';
+  }
+  function fmtBkTime(name) {
+    const m = String(name || '').match(/sierxing-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})\.db/);
+    if (!m) return name;
+    return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
+  }
+  let bkSel = new Set();                      // 勾选中的备份名
+  function syncDelSel() {
+    const b = document.getElementById('bkDelSel');
+    if (!b) return;
+    const n = bkSel.size;
+    b.disabled = n === 0;
+    b.textContent = n ? `删除选中（${n}）` : '删除选中';
+  }
+  async function loadBackupList() {
+    const box = document.getElementById('backupList');
+    if (!box) return;
+    let r;
+    try { r = await api('/api/backup/list'); } catch (e) { box.innerHTML = '<p class="muted" style="padding:6px 0;">读取失败：' + esc(e.message) + '</p>'; return; }
+    const sel = document.getElementById('backupKeep');
+    if (sel && !sel.dataset.touched) {
+      sel.innerHTML = [...new Set([5, 10, 20, 30, 50, 100, r.keep])].sort((a, b) => a - b)
+        .map(n => `<option value="${n}"${n === r.keep ? ' selected' : ''}>${n} 份</option>`).join('');
+    }
+    const stat = document.getElementById('backupStat');
+    if (stat) stat.textContent = `共 ${r.items.length} 份 · 占用 ${fmtBytes(r.totalBytes)}`;
+    const foot = document.getElementById('backupFoot');
+    if (foot) foot.textContent = `当前数据库 ${fmtBytes(r.dbSize)} · 恢复会先把现在的数据另存一份再覆盖，确认后需重启应用`;
+    if (!r.items.length) { box.innerHTML = '<div class="bkEmpty">还没有备份。改点东西就会自动备份，或点上面「立即备份」。</div>'; return; }
+    const vis = r.items.slice(0, 40);
+    const allOn = vis.length > 0 && vis.every(it => bkSel.has(it.name));
+    box.innerHTML = '<div class="bkList">' +
+      `<div class="bkRow bkRowHead">
+        <span class="bkCk"><input type="checkbox" id="bkAll"${allOn ? ' checked' : ''}></span>
+        <span>备份时间</span><span style="text-align:right;">大小</span><span></span><span style="text-align:right;">操作</span>
+      </div>` +
+      vis.map((it, i) => `<div class="bkRow${bkSel.has(it.name) ? ' hasSel' : ''}" data-bk-row="${esc(it.name)}">
+        <span class="bkCk"><input type="checkbox" data-bk-ck="${esc(it.name)}"${bkSel.has(it.name) ? ' checked' : ''}></span>
+        <span class="bkTime">${esc(fmtBkTime(it.name))}</span>
+        <span class="bkSize">${esc(fmtBytes(it.size))}</span>
+        <span>${i === 0 ? '<span class="bkBadge">最新</span>' : ''}</span>
+        <span class="bkActs">
+          <button class="btn tiny" data-bk-diff="${esc(it.name)}">变化</button>
+          <button class="btn tiny" data-bk-restore="${esc(it.name)}">恢复</button>
+          <button class="btn tiny danger" data-bk-del="${esc(it.name)}">删除</button>
+        </span>
+      </div>`).join('') +
+      (r.items.length > 40 ? `<div class="bkEmpty" style="padding:10px;border-top:1px solid var(--border);">只显示最近 40 份，共 ${r.items.length} 份</div>` : '') +
+      '</div>';
+
+    /* 勾选联动 */
+    box.querySelectorAll('[data-bk-ck]').forEach(c => c.addEventListener('change', () => {
+      const nm = c.getAttribute('data-bk-ck');
+      if (c.checked) bkSel.add(nm); else bkSel.delete(nm);
+      const rw = c.closest('.bkRow'); if (rw) rw.classList.toggle('hasSel', c.checked);
+      const all = document.getElementById('bkAll');
+      if (all) {
+        const vis2 = vis.map(x => x.name);
+        all.checked = vis2.length > 0 && vis2.every(nm2 => bkSel.has(nm2));
+      }
+      syncDelSel();
+    }));
+    const allBox = document.getElementById('bkAll');
+    if (allBox) allBox.addEventListener('change', () => {
+      vis.forEach(it => { if (allBox.checked) bkSel.add(it.name); else bkSel.delete(it.name); });
+      loadBackupList();
+    });
+
+    /* 变化预览：面板就插在被点的那一行下面，不用翻到列表最底 */
+    const closeDiff = () => { const old = box.querySelector('.bkDiffRow'); if (old) old.remove(); };
+    box.querySelectorAll('[data-bk-diff]').forEach(b => b.addEventListener('click', async () => {
+      const name = b.getAttribute('data-bk-diff');
+      const row = box.querySelector('[data-bk-row="' + name + '"]');
+      if (!row) return;
+      closeDiff();                                  // 同一时间只展开一个
+      const panel = document.createElement('div');
+      panel.className = 'bkDiffRow';
+      panel.innerHTML = '<div class="bkSamples">正在对比…</div>';
+      row.insertAdjacentElement('afterend', panel);
+      panel.scrollIntoView({ block: 'nearest' });
+      const head = (title, cls) => `<div class="bkDiffTop"><b class="${cls || ''}">${esc(title)}</b><span class="spacer"></span><button class="btn tiny" data-bk-x>收起</button></div>`;
+      try {
+        const d = await api('/api/backup/diff?name=' + encodeURIComponent(name));
+        if (d.first) {
+          panel.innerHTML = head('这是最早的一份备份') + '<div class="bkSamples">没有可对比的上一版。</div>';
+        } else {
+          const rows = (d.items || []).map(it => `<div class="bkDiffItem">
+              <b>${esc(it.label)}</b>
+              ${it.added ? `<span class="bkNum add">+${it.added}</span>` : ''}
+              ${it.removed ? `<span class="bkNum del">−${it.removed}</span>` : ''}
+              ${it.changed ? `<span class="bkNum mod">~${it.changed} 处改动</span>` : ''}
+              <span class="bkSamples">${esc((it.samples || []).map(x => (x.type === 'add' ? '＋' : x.type === 'del' ? '－' : '·') + x.text).join('　'))}</span>
+            </div>`).join('');
+          panel.innerHTML = head(`相比上一份（${fmtBkTime(d.prev)}）的变化`) +
+            (rows || '<div class="bkSamples">两次备份内容一致，没有变化。</div>');
+        }
+      } catch (e) {
+        panel.innerHTML = head('对比失败') + `<div class="bkSamples">${esc(e.message)}</div>`;
+      }
+      const x = panel.querySelector('[data-bk-x]');
+      if (x) x.addEventListener('click', closeDiff);
+    }));
+    box.querySelectorAll('[data-bk-restore]').forEach(b => b.addEventListener('click', async () => {
+      const name = b.getAttribute('data-bk-restore');
+      if (!confirm(`确定用 ${fmtBkTime(name)} 这份备份覆盖当前数据吗？\n\n当前数据会先自动另存为一份备份，仍可恢复。\n恢复后需要重启应用。`)) return;
+      try {
+        await api('/api/backup/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+        toast('已恢复，请重启应用');
+        setTimeout(() => location.reload(), 1200);
+      } catch (e) { toast('恢复失败：' + e.message); }
+    }));
+    box.querySelectorAll('[data-bk-del]').forEach(b => b.addEventListener('click', async () => {
+      const name = b.getAttribute('data-bk-del');
+      if (!confirm(`删除备份 ${fmtBkTime(name)}？此操作不可撤销。`)) return;
+      try { await api('/api/backup/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }); bkSel.delete(name); await loadBackupList(); toast('已删除'); }
+      catch (e) { toast('删除失败：' + e.message); }
+    }));
+    /* 列表每次重绘都要把「删除选中」的计数/禁用态刷一遍，
+       否则全选后重新渲染，按钮还停在「删除选中」像是没选中。 */
+    syncDelSel();
+  }
+  const bkDelSel = document.getElementById('bkDelSel');
+  if (bkDelSel) bkDelSel.addEventListener('click', async () => {
+    const names = Array.from(bkSel);
+    if (!names.length) return;
+    if (!confirm(`删除选中的 ${names.length} 份备份？\n\n${names.slice(0,5).map(fmtBkTime).join('、')}${names.length > 5 ? ' 等' : ''}\n此操作不可撤销。`)) return;
+    let ok = 0, fail = 0;
+    for (const nm of names) {
+      try { await api('/api/backup/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: nm }) }); ok++; }
+      catch (e) { fail++; }
+    }
+    bkSel.clear();
+    await loadBackupList();
+    toast(fail ? `已删除 ${ok} 份，${fail} 份失败` : `已删除 ${ok} 份`);
+  });
+  syncDelSel();
+  const bkKeep = document.getElementById('backupKeep');
+  if (bkKeep) {
+    bkKeep.addEventListener('change', async () => {
+      bkKeep.dataset.touched = '1';
+      try {
+        const r = await api('/api/backup/keep', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keep: Number(bkKeep.value) }) });
+        toast(`改为保留最近 ${r.keep} 份，现有 ${r.count} 份`);
+        bkKeep.dataset.touched = '';
+        await loadBackupList();
+      } catch (e) { toast(e.message); }
+    });
+  }
+  loadBackupList();
   document.getElementById('importJson').addEventListener('change', async e => {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
@@ -8803,6 +8977,7 @@ function railItemsHTML() {
   const hasUpd = !!(state.update && state.update.supported && state.update.behind > 0 && state.update.latestShort !== updSkipHash());
   items.push({ icon: '⚙', label: '设置', hash: '#/settings', active: r.view === 'settings', dot: hasUpd });
   items.push({ icon: '📚', label: '资源库', hash: '#/library', active: r.view === 'library' });
+  items.push({ icon: '📦', label: '产出库', hash: '#/outlib', active: r.pluginId === 'outlib' });
   items.push({ icon: '🧩', label: '组件管理', hash: '#/components', active: r.view === 'components' });
   const head = items.slice(0, inGoal ? 2 : 1);
   const tail = items.slice(inGoal ? 2 : 1);

@@ -227,6 +227,9 @@ function wsCollect(abs, base) {
 }
 
 module.exports = {
+  /* 给产出库打包复用：零依赖 zip 生成器（STORE 模式，各平台自带解压都能打开） */
+  buildZip,
+
   id: 'workspace',
   name: '代码目录',
   icon: '📁',
