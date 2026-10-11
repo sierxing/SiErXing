@@ -1,14 +1,14 @@
 {
-  "version": "1.10.37",
-  "buildVer": "9e35e851ec09",
-  "payload": "release/payload-1.10.37.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.37.sxar?ref=main",
+  "version": "1.10.39",
+  "buildVer": "3c38c0a3918c",
+  "payload": "release/payload-1.10.39.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.39.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "647fda1b21d557bf84e513aefaf8695eb69475e65467f85b438101b72ca2b35e",
-  "size": 733488,
-  "unpackedSize": 2654134,
-  "publishedAt": "2026-10-11T12:26:41.939Z",
-  "notes": "合并指标：任务健壮性并入 AI 任务失败率（Q5 归为过程指标，长任务成败作为其一个维度）",
+  "sha256": "394f59ec55181dcd2b6906a9f407bad5f28cb42ccd6f8834a9db887da5a96060",
+  "size": 749608,
+  "unpackedSize": 2708860,
+  "publishedAt": "2026-10-11T15:45:28.240Z",
+  "notes": "新增 4 款主题：砚墨(暖黑)/炽焰(高饱和暗)/霜白(冷白高对比)/素墨(中性)；并修掉完成态颜色硬编码",
   "exeRequired": false
 }

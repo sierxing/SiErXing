@@ -22,6 +22,8 @@
   --accent-border:#e2cdb2;
 
   --ok:#4e7a58;
+  --ok-soft:rgba(78,122,88,.13);      /* 由本主题 --ok 派生：完成态底色 */
+  --ok-border:rgba(78,122,88,.34);
   --warn:#a97e2a;
   --danger:#b0523c;
 
