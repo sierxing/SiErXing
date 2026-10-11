@@ -74,6 +74,35 @@ applyTheme();
 function mdOneLine(text) {
   return mdInline(mdEscape(String(text == null ? '' : text)));
 }
+
+/* ===== 内联线性图标（UI 精细化层）=====
+   统一 16px、1.6 描边、round 端点，颜色继承 currentColor。
+   取代原来拿 emoji 当图标的做法（emoji 在不同平台字号/配色的观感不一致，
+   而且无法跟着文字颜色走）。用法：sxi('folder') 或 sxi('folder', 18)。 */
+const SXI_PATHS = {
+  folder:  '<path d="M2.5 5.5h4l1.6 2h8.4v9.5H2.5z"/>',
+  doc:     '<path d="M4 2.5h6.5L13 5v12.5H4z"/><path d="M10.2 2.6V5H13"/>',
+  layers:  '<path d="M8 2.5 13.5 6 8 9.5 2.5 6z"/><path d="M2.5 10 8 13.5 13.5 10"/>',
+  search:  '<circle cx="7.2" cy="7.2" r="4.3"/><path d="m10.4 10.4 3.1 3.1"/>',
+  spark:   '<path d="M8 2.5v3M8 10.5v3M2.5 8h3M10.5 8h3"/><path d="M4.8 4.8 6.6 6.6M9.4 9.4l1.8 1.8M11.2 4.8 9.4 6.6M6.6 9.4l-1.8 1.8"/>',
+  down:    '<path d="M8 3v9.5M4.6 8.8 8 12.2l3.4-3.4M3.5 15h9"/>',
+  up:      '<path d="M8 13V3.5M4.6 7.2 8 3.8l3.4 3.4M3.5 15h9"/>',
+  check:   '<path d="m3 8.4 3.2 3.2L13 4.8"/>',
+  book:    '<path d="M3 4.2h4.2A1.8 1.8 0 0 1 9 6v8a2 2 0 0 0-1.8-1.2H3z"/><path d="M13 4.2H8.8A1.8 1.8 0 0 0 7 6v8a2 2 0 0 1 1.8-1.2H13z"/>',
+  target:  '<circle cx="8" cy="8" r="5.2"/><circle cx="8" cy="8" r="1.9"/>',
+  pin:     '<path d="M8 13.5s4.6-4.4 4.6-7.4A4.6 4.6 0 0 0 3.4 6.1c0 3 4.6 7.4 4.6 7.4z"/><circle cx="8" cy="6" r="1.6"/>',
+  link:    '<path d="M6.6 9.4a2.6 2.6 0 0 0 3.9.3l2.1-2.1a2.6 2.6 0 1 0-3.7-3.7l-.7.7"/><path d="M9.4 6.6a2.6 2.6 0 0 0-3.9-.3L3.4 8.4a2.6 2.6 0 1 0 3.7 3.7l.7-.7"/>',
+  trash:   '<path d="M3.5 5h9M6.4 5V3.6h3.2V5M4.6 5l.5 9h5.8l.5-9"/>',
+  play:    '<path d="M6 4.2 12 8l-6 3.8z"/>',
+  clock:   '<circle cx="8" cy="8" r="5.2"/><path d="M8 5.2V8l2.2 1.4"/>',
+  plus:    '<path d="M8 3.5v9M3.5 8h9"/>',
+  grid:    '<path d="M3.2 3.2h3.8v3.8H3.2zM8.9 3.2h3.8v3.8H8.9zM3.2 8.9h3.8v3.8H3.2zM8.9 8.9h3.8v3.8H8.9z"/>'
+};
+function sxi(name, size) {
+  const d = SXI_PATHS[name] || SXI_PATHS.doc;
+  const cls = size === 14 ? 'sxi s14' : size === 18 ? 'sxi s18' : size === 22 ? 'sxi s22' : 'sxi';
+  return `<svg class="${cls}" viewBox="0 0 16 16" aria-hidden="true">${d}</svg>`;
+}
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -928,22 +957,22 @@ function showNodePanel(id, rerender) {
 
     <div class="npFold">
       <details class="npFD">
-        <summary>📎 依据信息源（${srcs.length}）<span class="npFDHint">${srcs.length ? '这条任务的硬指标是从这儿来的' : '未标注资料'}</span></summary>
+        <summary>${sxi('link',14)} 依据信息源<span class="npFDNum">${srcs.length}</span>${srcs.length ? '' : '<span class="npFDHint">未标注</span>'}</summary>
         <div class="npSrcList">${srcs.length ? srcs.map((x, i) => {
           const lib = findLibSource(x);
           const body = lib ? String(lib.content || lib.snippet || '') : '';
           const isStar = !!(lib && Number(lib.quality) === 1);
-          return `<div class="npSrc ${isStar ? 'isStar' : ''}"><div class="npSrcName">${isStar ? '★' : (x.source_id ? '🔗' : '📎')} ${esc(x.name || x.title || '')}${isStar ? '<span class="chip ok" style="margin-left:6px;">优质</span>' : ''}<button class="btn tiny danger npsrcDel" data-npsrc-del="${i}">移除</button></div>${x.note ? `<div class="npSrcNote">${esc(x.note)}</div>` : ''}${body ? `<details class="npSrcBody"><summary>查看资料库正文（${body.length} 字）</summary><div class="mdBody">${mdToHTML(body.slice(0, 4000))}</div></details>` : ''}</div>`;
+          return `<div class="npSrc ${isStar ? 'isStar' : ''}"><div class="npSrcName">${isStar ? sxi('check',14) : sxi('link',14)}${esc(x.name || x.title || '')}${isStar ? '<span class="chip ok" style="margin-left:6px;">优质</span>' : ''}<button class="btn tiny danger npsrcDel" data-npsrc-del="${i}">移除</button></div>${x.note ? `<div class="npSrcNote">${esc(x.note)}</div>` : ''}${body ? `<details class="npSrcBody"><summary>查看资料库正文（${body.length} 字）</summary><div class="mdBody">${mdToHTML(body.slice(0, 4000))}</div></details>` : ''}</div>`;
         }).join('') : '<div class="muted" style="font-size:12.5px;">未标注资料（本节点只依据提炼汇总与资料索引）</div>'}</div>
         <div class="npSrcAdd">
           <select id="npSrcPick">${(state.sources || []).map(x => `<option value="${x.id}">${esc('[' + x.kind + '] ' + String(x.title).slice(0, 40))}</option>`).join('')}</select>
-          <button class="btn tiny" id="npSrcAdd">＋ 关联资料库</button>
-          <button class="btn tiny" id="npSrcNew">＋ 手动写一条</button>
+          <button class="btn tiny" id="npSrcAdd">${sxi('plus',14)}关联资料库</button>
+          <button class="btn tiny" id="npSrcNew">${sxi('plus',14)}手动写一条</button>
         </div>
       </details>
 
       <details class="npFD">
-        <summary>🗂 关联文件夹<span class="npFDHint">挂在哪一级，哪一级和它的子节点可见</span></summary>
+        <summary>${sxi('folder',14)} 关联文件夹<span class="npFDHint">挂在哪一级，哪一级和它的子节点可见</span></summary>
         <div id="npFolders"><span class="muted" style="font-size:12.5px;">加载中…</span></div>
         <div class="npSrcAdd"><button class="btn tiny" id="npFolderAdd">＋ 关联文件夹</button></div>
       </details>
@@ -952,23 +981,23 @@ function showNodePanel(id, rerender) {
         const txt = (n.title || '') + ' ' + (n.detail || '');
         const rel = (state.digests || []).map(d => ({ d, score: kwScore(txt, (d.title || '') + ' ' + String(d.content || '').slice(0, 1500)) }))
           .filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 2);
-        return rel.length ? `<details class="npFD"><summary>📄 相关提炼汇总（${rel.length}）</summary>` + rel.map(({ d }) => `<details class="npSrcBody"><summary>${esc(d.title || d.topic)}</summary><div class="mdBody">${mdToHTML(d.content || '')}</div></details>`).join('') + '</details>' : '';
+        return rel.length ? `<details class="npFD"><summary>${sxi('doc',14)}相关提炼汇总<span class="npFDNum">${rel.length}</span></summary>` + rel.map(({ d }) => `<details class="npSrcBody"><summary>${esc(d.title || d.topic)}</summary><div class="mdBody">${mdToHTML(d.content || '')}</div></details>`).join('') + '</details>' : '';
       })()}
 
       <details class="npFD"${tuts.length ? '' : ' open'}>
-        <summary>📘 学习教程（${tuts.length}）<span class="npFDHint">${tuts.length ? '' : '还没有：可以生成一份覆盖这个任务知识点的完整教程'}</span></summary>
+        <summary>${sxi('book',14)} 学习教程<span class="npFDNum">${tuts.length}</span>${tuts.length ? '' : '<span class="npFDHint">还没有教程</span>'}</summary>
         <div class="npTut">
           ${tuts.length ? tuts.map(t => `<div class="npTutRow"><a class="npTutItem" href="#/t/${t.id}"><span class="npTutName">${esc(t.title)}</span><span class="chip gray">${t.format === 'html' ? 'HTML' : 'MD'}</span></a><button class="btn tiny danger" data-tut-del="${t.id}" title="删除这份教程">×</button></div>`).join('') : ''}
-          <button class="btn small primary" id="npTutBtn" style="margin-top:8px;">📘 生成完整教程（HTML / Markdown）</button>
+          <button class="btn small primary" id="npTutBtn" style="margin-top:8px;">${sxi('book')}生成完整教程</button>
           ${(goalCompOn(goalCtx(), 'tutbookmark') && window.TutBookmark) ? window.TutBookmark.nodeImportHTML() : ''}
         </div>
       </details>
 
       <details class="npFD">
-        <summary>💬 对当前划分有意见？让 AI 改</summary>
+        <summary>${sxi('spark',14)} 对当前划分有意见？让 AI 改</summary>
         <div class="npAdjust">
           <textarea id="npFeedback" placeholder="例如：划分太粗了，再拆细一点 / 跳过「X」（我已经会了）/ 顺序改成先 A 后 B / 删掉「Y」/ 增加关于 Z 的任务…"></textarea>
-          <button class="btn small primary" id="npAdjustBtn" style="margin-top:8px;">提交给 AI 调整</button>
+          <button class="btn small primary" id="npAdjustBtn" style="margin-top:8px;">${sxi('spark')}提交给 AI 调整</button>
         </div>
       </details>
     </div>
@@ -5300,14 +5329,14 @@ async function renderContinueCard(gid) {
   const at = total ? Math.min(Number(t.section_idx) + 1, total) : 0;
   const pct = total ? Math.min(100, Math.round(at / total * 100)) : 0;
   box.innerHTML = `<div class="continueCard">
-    <div class="ccIcon">📖</div>
+    <div class="ccIcon">${sxi('book', 18)}</div>
     <div class="ccMain">
-      <div class="ccLabel">继续学习${total ? ` · 看到第 ${at}/${total} 节（${pct}%）` : ''}</div>
+      <div class="ccLabel">继续学习${total ? `<span class="ccSep">·</span>第 <b>${at}</b>/${total} 节<b class="ccPct">${pct}%</b>` : ''}</div>
       <div class="ccTitle">${esc(t.title)}</div>
-      ${t.node_title ? `<div class="ccNode">对应任务：${esc(t.node_title)}</div>` : ''}
+      ${t.node_title ? `<div class="ccNode">${sxi('target', 14)}${esc(t.node_title)}</div>` : ''}
       ${total ? `<div class="bar"><div class="barFill" style="width:${pct}%"></div></div>` : ''}
     </div>
-    <a class="btn primary" href="#/t/${t.id}">继续阅读 →</a>
+    <a class="btn primary" href="#/t/${t.id}">${sxi('play', 14)}继续阅读</a>
   </div>`;
 }
 function renderGoal() {
@@ -6427,22 +6456,26 @@ async function renderLibraryPage() {
       <div class="libSrcBody">${x.url ? `<div class="libSrcMeta">来源：<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.site || x.url)}</a></div>` : `<div class="libSrcMeta">来源：${esc(x.site || '—')}</div>`}
       <div class="mdBody libFullText" style="margin-top:6px;">${mdToHTML(full)}</div></div></details>`;
   };
+  /* 页头：标题 + 统计（独立指标块，不再糊成一串字）+ 一组图标按钮 */
   let h = `<div class="page">
     <div class="pageHead">
-      <button class="back js-back" data-go="#/g/${g.id}">← 返回目标</button>
-      <h2 class="title">📚 资源库</h2>
-      <span class="muted" style="font-size:12.5px;">资料 ${sources.length} 条（自己提供 ${own.length} / 网络 ${net.length}）· 汇总 ${digests.length} 篇</span>
-      <span class="muted" id="libRagStatus" style="font-size:12px;"></span>
+      <h2 class="title">${sxi('layers', 18)} 资源库</h2>
+      <div class="libStats">
+        <span class="libStat own">${sxi('pin', 14)} 自己提供 <b>${own.length}</b></span>
+        <span class="libStat">${sxi('doc', 14)} 网络资料 <b>${net.length}</b></span>
+        <span class="libStat">${sxi('book', 14)} 提炼汇总 <b>${digests.length}</b></span>
+      </div>
       <div class="spacer"></div>
       <select id="libGoal" class="libGoalSel">${goalOptions}</select>
-      <button class="btn small" id="libRagBuild" title="把资料切片（配了向量模型则一并向量化）：规划/对话时按问题检索最相关片段">🧲 检索索引</button>
-      <button class="btn small" id="libDigest">🧠 ${digests.length ? '重新提炼' : '信息提炼'}</button>
-      <label class="btn small">⬆ 导入资料<input type="file" id="libImport" accept=".json,application/json" hidden></label>
-      <a class="btn small primary" href="/api/goals/${g.id}/library/export" download>⬇ 一键导出（Markdown）</a>
-    </div>`;
+      <button class="btn small" id="libRagBuild" title="把资料切片（配了向量模型则一并向量化）：规划/对话时按问题检索最相关片段">${sxi('spark')}检索索引</button>
+      <button class="btn small" id="libDigest">${sxi('spark')}${digests.length ? '重新提炼' : '信息提炼'}</button>
+      <label class="btn small">${sxi('up')}导入资料<input type="file" id="libImport" accept=".json,application/json" hidden></label>
+      <a class="btn small" href="/api/goals/${g.id}/library/export" download>${sxi('down')}导出 MD</a>
+    </div>
+    <div id="libRagStatus" class="muted" style="font-size:12px;margin:-10px 0 14px;"></div>`;
 
   // 一、按规划归类
-  h += `<div class="sec"><div class="secTitle">🗂 按规划归类</div>`;
+  h += `<div class="libSecHd">${sxi('grid')}<span class="libSecHdT">按规划归类</span><span class="libSecHdS">资料和汇总按阶段自动归堆</span></div>`;
   if (!stages.length) h += `<p class="hint">还没有规划骨架：生成规划后，这里的资料会自动按阶段归类。</p>`;
   for (const st of stages) {
     const nodeSrc = [];
@@ -6453,26 +6486,34 @@ async function renderLibraryPage() {
       .filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 3);
     const relSrc = sources.map(x => ({ x, score: kwScore(text, (x.title || '') + ' ' + String(x.content || '').slice(0, 1500)) }))
       .filter(y => y.score > 0).sort((a, b) => b.score - a.score).slice(0, 5);
-    h += `<details class="libStage"><summary>${esc(st.title)} <span class="muted" style="font-size:11.5px;">· 关联资料 ${nodeSrc.length} 条${relDigests.length ? ' · 相关汇总 ' + relDigests.length + ' 篇' : ''}${relSrc.length ? ' · 相关资料 ' + relSrc.length + ' 条' : ''}</span></summary>
+    const stageChips = [];
+    if (nodeSrc.length) stageChips.push(`<span class="chip">节点依据 ${nodeSrc.length}</span>`);
+    if (relDigests.length) stageChips.push(`<span class="chip gray">汇总 ${relDigests.length}</span>`);
+    if (relSrc.length) stageChips.push(`<span class="chip gray">相关资料 ${relSrc.length}</span>`);
+    if (!stageChips.length) stageChips.push('<span class="chip gray">暂无匹配</span>');
+    h += `<details class="libStage"><summary>${sxi('target', 14)}
+        <span class="libStageT">${esc(st.title)}</span>
+      </summary>
+      <div class="libStageM">${stageChips.join('')}</div>
       <div class="libStageBody">
-        ${nodeSrc.length ? `<div class="libSecT">本阶段节点自己标注的依据</div>${nodeSrc.map(x => `<div class="libRef">📎 ${esc(x.name || x.title || '')}${x.note ? `<div class="libSrcMeta">${esc(x.note)}</div>` : ''}</div>`).join('')}` : ''}
-        ${relDigests.length ? `<div class="libSecT">相关提炼汇总</div>${relDigests.map(({ d }) => `<details class="libSrc"><summary>📄 ${esc(d.title || d.topic)}</summary><div class="libSrcBody mdBody">${mdToHTML(d.content || '')}</div></details>`).join('')}` : ''}
-        ${relSrc.length ? `<div class="libSecT">相关资料</div>${relSrc.map(({ x }) => srcCard(x, true)).join('')}` : ''}
+        ${nodeSrc.length ? `<div class="libSecT" style="display:flex;align-items:center;gap:5px;">${sxi('pin',14)}节点自标依据</div>${nodeSrc.map(x => `<div class="libRef">${sxi('link',14)}<span>${esc(x.name || x.title || '')}${x.note ? `<div class="libSrcMeta">${esc(x.note)}</div>` : ''}</div>`).join('')}` : ''}
+        ${relDigests.length ? `<div class="libSecT" style="display:flex;align-items:center;gap:5px;">${sxi('doc',14)}相关汇总</div>${relDigests.map(({ d }) => `<details class="libSrc"><summary>📄 ${esc(d.title || d.topic)}</summary><div class="libSrcBody mdBody">${mdToHTML(d.content || '')}</div></details>`).join('')}` : ''}
+        ${relSrc.length ? `<div class="libSecT" style="display:flex;align-items:center;gap:5px;">${sxi('link',14)}相关资料</div>${relSrc.map(({ x }) => srcCard(x, true)).join('')}` : ''}
         ${(!nodeSrc.length && !relDigests.length && !relSrc.length) ? '<div class="muted" style="font-size:12.5px;">这个阶段暂时没有匹配到资料</div>' : ''}
       </div></details>`;
   }
   h += `</div>`;
 
   // 二、主题汇总（MD）
-  h += `<div class="sec"><div class="secTitle">📄 主题汇总（提炼出的 MD 文件，规划优先依据）</div>`;
+  h += `<div class="libSecHd">${sxi('doc')}<span class="libSecHdT">主题汇总</span><span class="libSecHdS">AI 通读全部资料后按主题整理的 MD，规划时的优先依据</span></div>`;
   h += digests.length
     ? `<div class="libDigestHead"><a class="btn tiny" href="/api/goals/${g.id}/digests/export" download>⬇ 下载全部 MD</a></div>` + digests.map(d => `<details class="libSrc"><summary>📄 ${esc(d.title || d.topic)} <span class="muted" style="font-size:11.5px;">· 依据 ${d.sources_count || 0} 条</span></summary><div class="libSrcBody mdBody">${mdToHTML(d.content || '')}</div><div class="spDigestOps"><span class="muted" style="font-size:11.5px;">${esc(fmtDate(d.created_at))}</span><div class="spacer"></div><button class="btn tiny danger" data-digest-del="${d.id}">删除</button></div></details>`).join('')
     : `<p class="hint">还没有提炼汇总：点右上「🧠 信息提炼」，AI 会通读全部资料并按主题整理成多篇 MD。</p>`;
   h += `</div>`;
 
   // 三、全部资料（按类型）
-  h += `<div class="sec"><div class="secTitle">📚 全部资料（${sources.length} 条）</div>`;
-  h += own.length ? `<div class="libSecT">你自己提供的（最高优先级）</div>${own.map(x => srcCard(x, true)).join('')}` : '';
+  h += `<div class="libSecHd">${sxi('layers')}<span class="libSecHdT">全部资料</span><span class="libSecHdS">共 ${sources.length} 条</span></div>`;
+  h += own.length ? `<div class="libSecT" style="display:flex;align-items:center;gap:5px;">${sxi('pin',14)}你自己提供的（最高优先级）</div>${own.map(x => srcCard(x, true)).join('')}` : '';
   for (const k of Object.keys(byKind)) {
     const list = byKind[k].filter(x => !own.includes(x));
     if (!list.length) continue;

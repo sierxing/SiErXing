@@ -1,14 +1,14 @@
 {
-  "version": "1.10.39",
-  "buildVer": "3c38c0a3918c",
-  "payload": "release/payload-1.10.39.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.39.sxar?ref=main",
+  "version": "1.10.40",
+  "buildVer": "053c906a97bb",
+  "payload": "release/payload-1.10.40.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.40.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "394f59ec55181dcd2b6906a9f407bad5f28cb42ccd6f8834a9db887da5a96060",
-  "size": 749608,
-  "unpackedSize": 2708860,
-  "publishedAt": "2026-10-11T15:45:28.240Z",
-  "notes": "新增 4 款主题：砚墨(暖黑)/炽焰(高饱和暗)/霜白(冷白高对比)/素墨(中性)；并修掉完成态颜色硬编码",
+  "sha256": "da963ceeef57838befb3556efb345ad6d209b85be09913c3f1f9494fb0bdc5f1",
+  "size": 753196,
+  "unpackedSize": 2721482,
+  "publishedAt": "2026-10-11T16:50:56.563Z",
+  "notes": "UI 精细化：内联图标系统、按钮触感与焦点环、资源库层级重排、节点折叠区计数徽标、空态说明与标题分离、浏览器表面（选中色/滚动条/caret）主题化",
   "exeRequired": false
 }

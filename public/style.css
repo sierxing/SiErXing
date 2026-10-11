@@ -2198,3 +2198,172 @@ body{padding-left:78px;}
 .bkNum.mod{color:var(--warn);}
 .bkSamples{color:var(--muted);min-width:0;flex:1;}
 .bkFoot{font-size:11.5px;color:var(--muted);margin-top:8px;}
+
+/* ============================================================
+   UI 精细化层（追加上去，不改动上面的既有规则）
+   动机：资源库/节点卡片/按钮这些地方原本是"emoji + 光秃秃的文字"，
+   既没有图标系统、也没有可点的触感。这里补四件事：
+     1) 一套 16px 线性图标（内联 SVG，统一 1.6 描边）——取代 emoji 当图标
+     2) 按钮的图标槽 + 按下触感 + 键盘焦点环
+     3) 浏览器表面的设计（选中色 / 焦点环 / 滚动条 / caret）
+     4) 资源库与"还没有…"提示的层级与分隔
+   ============================================================ */
+
+/* ---- 1) 内联线性图标：统一尺寸与描边，颜色继承 currentColor ---- */
+.sxi{
+  width:16px; height:16px; flex:0 0 auto; display:inline-block;
+  vertical-align:-3px; fill:none; stroke:currentColor; stroke-width:1.6;
+  stroke-linecap:round; stroke-linejoin:round;
+}
+.sxi.s14{width:14px; height:14px; vertical-align:-2px;}
+.sxi.s18{width:18px; height:18px; vertical-align:-4px;}
+.sxi.s22{width:22px; height:22px;}
+/* 图标作为按钮主视觉时，去掉左侧多余间距 */
+.btn > .sxi:first-child{margin-right:1px;}
+
+/* ---- 2) 按钮：图标槽对齐 + 按下触感 + 焦点环 ---- */
+.btn{display:inline-flex; align-items:center; gap:6px; line-height:1.5;}
+.btn:active{transform:translateY(1px);}
+.btn:focus-visible,
+.back:focus-visible,
+.libGoalSel:focus-visible,
+select:focus-visible,
+input:focus-visible,
+textarea:focus-visible{
+  outline:2px solid var(--accent); outline-offset:2px; border-radius:6px;
+}
+/* primary 的投影改用主题色，而不是写死的靛蓝 */
+.btn.primary{box-shadow:0 2px 10px color-mix(in srgb, var(--accent) 26%, transparent);}
+.btn.primary:hover{filter:brightness(1.06); color:#fff;}
+.btn.primary:active{transform:translateY(1px); filter:brightness(.98);}
+/* 图标按钮（正方形，只放图标） */
+.btn.ico{padding:5px 7px; gap:0;}
+
+/* ---- 3) 浏览器表面：选中色 / 滚动条 / 光标 ---- */
+::selection{background:color-mix(in srgb, var(--accent) 24%, transparent); color:var(--text);}
+*{scrollbar-color:var(--border) transparent; scrollbar-width:thin;}
+::-webkit-scrollbar{width:10px; height:10px;}
+::-webkit-scrollbar-thumb{background:var(--border); border-radius:99px; border:3px solid transparent; background-clip:content-box;}
+::-webkit-scrollbar-thumb:hover{background:var(--muted); border:3px solid transparent; background-clip:content-box;}
+::-webkit-scrollbar-track{background:transparent;}
+input,textarea{caret-color:var(--accent);}
+::selection{color:var(--text);}
+
+/* ---- 4) 资源库 ---- */
+/* 统计行：从"光秃秃一串字"变成独立可读的指标块 */
+.libStats{display:flex; flex-wrap:wrap; gap:6px; align-items:center;}
+.libStat{
+  display:inline-flex; align-items:baseline; gap:5px; font-size:12px;
+  padding:3px 10px; border-radius:8px; background:var(--soft); color:var(--muted);
+  border:1px solid transparent; white-space:nowrap;
+}
+.libStat b{font-size:13.5px; font-weight:800; color:var(--text); font-variant-numeric:tabular-nums;}
+.libStat.own{background:var(--ok-soft); color:var(--ok);}
+.libStat.own b{color:var(--ok);}
+
+/* 小节标题：图标 + 主标题 + 副标题分开，不再把说明塞进括号里 */
+.libSecHd{display:flex; align-items:baseline; gap:9px; flex-wrap:wrap; margin:22px 0 10px;}
+.libSecHd:first-child{margin-top:2px;}
+.libSecHd .sxi{color:var(--muted);}
+.libSecHdT{font-size:13.5px; font-weight:800; color:var(--text); letter-spacing:.1px;}
+.libSecHdS{font-size:11.5px; color:var(--muted);}
+.libSecHd::after{content:""; flex:1; height:1px; background:var(--border); min-width:20px; align-self:center;}
+
+/* 阶段条目：标题一行 + 元信息一行 + 关联 chips，不再"标题……一堆字"糊在一起 */
+/* ⚠️ .libStage 必须是块级：<details> 的子节点（summary / 计数行 / 正文）要纵向排。
+    曾误写成 display:flex，结果计数 chips 被横排到标题旁边、互相压住（几何实测抓到）。 */
+.libStage{padding:9px 12px 10px; border-radius:10px;
+  border:1px solid var(--border); background:var(--card); transition:.15s;}
+.libStage:hover{border-color:var(--accent-border); background:var(--accent-soft);}
+.libStage > summary{cursor:pointer; display:flex; align-items:flex-start; gap:10px; list-style:none;}
+.libStage > summary::-webkit-details-marker{display:none;}
+.libStageT{font-size:13.5px; font-weight:650; color:var(--text); line-height:1.5;}
+.libStageM{display:flex; flex-wrap:wrap; gap:5px; margin-top:6px;}
+.libStageM .chip{font-size:10.5px; padding:1px 7px;}
+.libStage[open] > summary{margin-bottom:2px;}
+.libStageBody{padding:2px 0 4px 26px;}
+/* 阶段里的细目 */
+.libRef{font-size:12.5px; color:var(--text); padding:5px 0; display:flex; gap:7px; align-items:flex-start;}
+.libRef .sxi{color:var(--muted); margin-top:2px;}
+.libRefNote{font-size:11.5px; color:var(--muted); line-height:1.6; margin-top:2px;}
+/* 资料条目 */
+.libSrc{border:1px solid var(--border); border-radius:10px; margin-top:6px; background:var(--card); overflow:hidden;}
+.libSrc > summary{cursor:pointer; display:flex; align-items:center; gap:7px; padding:8px 11px; list-style:none; font-size:12.5px;}
+.libSrc > summary::-webkit-details-marker{display:none;}
+.libSrc > summary:hover{background:var(--soft);}
+.libSrcTitle{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:550;}
+.libSrcMeta{font-size:11px; color:var(--muted); white-space:nowrap; font-variant-numeric:tabular-nums;}
+.libSrcBody{padding:2px 12px 11px; border-top:1px solid var(--border);}
+
+/* "还没有…"提示：和它是"附加说明"而不是标题的一部分 */
+.libHint{font-size:12.5px; color:var(--muted); line-height:1.7; margin:7px 0 0;
+  display:flex; gap:7px; align-items:flex-start;}
+.libHint::before{content:""; width:3px; align-self:stretch; min-height:15px; border-radius:2px;
+  background:var(--border); flex:0 0 auto; margin-top:2px;}
+.libHint b{color:var(--text); font-weight:650;}
+
+/* 节点折叠区里的"还没有：可以生成…"同款处理 */
+.npFDHint{font-weight:400; color:var(--muted); font-size:11.5px; display:inline-flex; align-items:center; gap:5px;}
+.npFDHint::before{content:"·"; opacity:.5;}
+
+/* ---- 节点折叠区：数字徽标 + 提示与标题分离 ---- */
+.npFD > summary{display:flex; align-items:center; gap:7px; font-size:13px; font-weight:700;
+  color:var(--text); cursor:pointer; padding:8px 2px; list-style:none;}
+.npFD > summary::-webkit-details-marker{display:none;}
+.npFD > summary:hover{color:var(--accent);}
+.npFD > summary .sxi{color:var(--muted);}
+.npFD > summary:hover .sxi{color:var(--accent);}
+/* 计数从"（3）"变成独立徽标，tabular 数字不会跳动 */
+.npFDNum{
+  font-size:10.5px; font-weight:800; font-variant-numeric:tabular-nums;
+  min-width:17px; text-align:center; padding:1px 5px; border-radius:6px;
+  background:var(--soft); color:var(--muted); line-height:1.5;
+}
+.npFD[open] > summary .npFDNum{background:var(--accent-soft); color:var(--accent);}
+/* 说明性文字不再是标题的一部分 */
+.npFDHint{font-weight:400; color:var(--muted); font-size:11.5px; display:inline-flex; align-items:center; gap:5px;}
+.npFDHint::before{content:"·"; opacity:.45;}
+
+/* ---- 「继续学习」卡片：从"图标+标题+副题"的通用模板改成有信息层级的 ---- */
+.continueCard{
+  display:flex; align-items:center; gap:13px; padding:13px 15px; margin:12px 0;
+  background:var(--card); border:1px solid var(--border); border-radius:13px;
+  position:relative; overflow:hidden; box-shadow:var(--shadow-sm);
+  transition:border-color .15s, background .15s;
+}
+.continueCard:hover{border-color:var(--accent-border);}
+/* 用主题色做一道极窄的高光线，而不是整卡染色 */
+.continueCard::before{
+  content:""; position:absolute; left:0; top:0; bottom:0; width:3px;
+  background:linear-gradient(180deg, var(--accent), var(--accent-2));
+}
+.ccIcon{
+  width:38px; height:38px; flex:none; border-radius:10px; display:grid; place-items:center;
+  background:var(--accent-soft); color:var(--accent); border:1px solid var(--accent-border);
+}
+.ccIcon .sxi{width:19px; height:19px;}
+.ccMain{flex:1; min-width:0;}
+.ccLabel{
+  font-size:11px; color:var(--muted); font-weight:700; letter-spacing:.06em;
+  text-transform:uppercase; display:flex; align-items:center; gap:6px;
+}
+.ccLabel b{color:var(--accent); font-variant-numeric:tabular-nums;}
+.ccTitle{font-size:14.5px; font-weight:700; margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.ccNode{font-size:11.5px; color:var(--muted); margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.continueCard .bar{height:5px; margin-top:8px;}
+.continueCard .btn{flex:none; gap:5px;}
+/* 节点空态说明：左侧一道而非整块底色 */
+.libHint, .npEmptyHint{
+  font-size:12.5px; color:var(--muted); line-height:1.75;
+  display:flex; gap:8px; align-items:flex-start;
+}
+.npEmptyHint::before{
+  content:""; width:3px; align-self:stretch; min-height:14px; border-radius:2px;
+  background:var(--border); flex:0 0 auto; margin-top:3px;
+}
+
+/* continueCard 内部细节 */
+.ccLabel .ccSep{opacity:.5; margin:0 2px;}
+.ccLabel .ccPct{color:var(--muted); font-weight:700; margin-left:2px;}
+.ccNode{display:flex; align-items:center; gap:5px;}
+.ccNode .sxi{color:var(--muted); opacity:.85;}
