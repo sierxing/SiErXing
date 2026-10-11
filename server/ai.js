@@ -888,7 +888,28 @@ async function opencodeText(c, opts) {
 
 /* ---------------- 对外接口 ---------------- */
 
+/* 把错误消息归类，供失败率指标按原因分布（auth/quota/timeout/network…） */
+function statsErrType(msg) {
+  const s = String(msg || '').toLowerCase();
+  if (!s) return 'unknown';
+  if (/abort|取消|cancel|已停止/.test(s)) return 'cancel';
+  if (/timeout|timed out|超时|etimedout/.test(s)) return 'timeout';
+  if (/429|quota|额度|余额|rate limit/.test(s)) return 'quota';
+  if (/401|403|auth|key|登录/.test(s)) return 'auth';
+  if (/enotfound|econnrefused|network|fetch failed|getaddrinfo|dns/.test(s)) return 'network';
+  if (/没有返回|截断|不完整|写了一半/.test(s)) return 'bad_output';
+  if (/解析|parse|json|格式/.test(s)) return 'parse';
+  return 'unknown';
+}
+
+/* AI 调用埋点（Q5）。**ai.text() 是所有 AI 调用的唯一出口**（ai.stream 也转调它），
+   所以在这里包一层就能覆盖全部 AI 功能：骨架生成 / 教程 / 追问 / 模拟面试 / JD 识别…
+   stats 由 server.js 注入（metrics 模块），未注入时完全不启用。 */
+let stats = null;
+
 const ai = {
+  setStats(fn) { stats = typeof fn === 'function' ? fn : null; return ai; },
+
   init(options) {
     ctx = {
       getSetting: (options && options.getSetting) || (() => ''),
@@ -940,8 +961,32 @@ const ai = {
     const o = (opts && typeof opts === 'object') ? { ...opts } : {};
     if (o.model) o.model = c.model;
     else if (c.model) o.model = c.model;
-    if (c.provider === 'opencode') return opencodeText(c, o);
-    return openaiText(c, o);
+    /* 埋点（Q5）：记录每次 AI 调用的成败与耗时。
+       scene 由调用方传（opts.scene），没传就记 'unknown'，事后可按场景看谁最不靠谱。
+       任何异常都在埋点里吞掉 —— 统计绝不影响真实调用。 */
+    if (!stats) {
+      if (c.provider === 'opencode') return opencodeText(c, o);
+      return openaiText(c, o);
+    }
+    const t0 = Date.now();
+    const scene = String(o.scene || 'unknown');
+    const model = String(o.model || c.model || '');
+    try {
+      const r = c.provider === 'opencode' ? await opencodeText(c, o) : await openaiText(c, o);
+      try { stats({ scene, model, status: 'ok', attempts: 1, costMs: Date.now() - t0 }); } catch (e) {}
+      return r;
+    } catch (e) {
+      /* 这里是"用户真正看到失败"的地方（抛到调用方）。
+         内部续写/抢救成功的路径不走这里，会被 rescue 钩子记成 rescued。 */
+      try {
+        stats({
+          scene, model, status: 'failed', attempts: 1,
+          errorType: statsErrType(e && e.message), error: (e && e.message) || String(e),
+          costMs: Date.now() - t0
+        });
+      } catch (e2) {}
+      throw e;
+    }
   },
   /** 带流式回调：onEvent({ text } | { thinking }) */
   async stream(opts) {

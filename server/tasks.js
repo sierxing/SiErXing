@@ -6,9 +6,14 @@
  *   · 每个任务有进度、状态、备注、结果；可取消
  *   · 前端轮询 /api/tasks 获取列表（任意页面都能显示进度）
  */
-module.exports = function createTasks({ log = () => {}, maxConcurrent = 3 } = {}) {
+module.exports = function createTasks({ log = () => {}, maxConcurrent = 3, metrics = null } = {}) {
   const tasks = new Map();
   let seq = 0;
+  /* 任务健壮性埋点（P3）。
+     为什么要落库：任务状态只在这个内存 Map 里，**进程一重启历史全丢**，
+     于是"上周成功率多少""重试救回来多少次"永远算不出来。
+     落库点就三处状态流转：提交 → 开跑 → 结束，写不进去也不影响任务本身。 */
+  const M = metrics;
 
   const pub = t => ({
     id: t.id, type: t.type, title: t.title, goalId: t.goalId, nodeId: t.nodeId,
@@ -64,6 +69,15 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3 } = {}
         } finally {
           next.endedAt = Date.now();
           next._abort = null;
+          if (M) {
+            try {
+              M.insTask({
+                goalId: next.goalId, nodeId: next.nodeId, type: next.type, title: next.title,
+                status: next.status, attempts: 1, error: next.error || '',
+                costMs: Math.max(0, next.endedAt - next.createdAt)
+              });
+            } catch (e) {}
+          }
           pump();
         }
       })();
@@ -79,6 +93,7 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3 } = {}
       progress: 0, createdAt: Date.now(), startedAt: 0, endedAt: 0, error: '', result: null,
       _run: run, _abort: null, _retry: typeof retry === 'function' ? retry : null
     });
+    if (M) { try { M.insTask({ goalId, nodeId, type, title, status: 'queued', attempts: 1 }); } catch (e) {} }
     pump();
     return id;
   }
@@ -149,16 +164,19 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3 } = {}
       _retry: typeof retry === 'function' ? retry : autoRetry()
     };
     tasks.set(id, t);
+    if (M) { try { M.insTask({ goalId, nodeId, type, title, status: 'running', attempts: 1 }); } catch (e) {} }
     log('[task] 开始 #' + id, type, t.title);
     return {
       id,
       signal: ac.signal,
       progress: (p, msg) => { if (p != null) t.progress = Math.max(0, Math.min(100, Math.round(p))); if (msg) t.message = String(msg).slice(0, 200); },
-      done: (result) => { t.status = 'done'; t.progress = 100; t.message = t.message || '完成'; t.result = result || null; t.endedAt = Date.now(); t._abort = null; log('[task] 完成 #' + id, type); },
+      done: (result) => { t.status = 'done'; t.progress = 100; t.message = t.message || '完成'; t.result = result || null; t.endedAt = Date.now(); t._abort = null; if (M) { try { M.insTask({ goalId, nodeId, type, title, status: 'done', costMs: t.endedAt - t.createdAt }); } catch (e) {} } log('[task] 完成 #' + id, type); },
       fail: (e) => {
         if (e && (e.cancelled || e.name === 'AbortError')) { t.status = 'cancelled'; t.message = '已停止'; }
         else { t.status = 'failed'; t.error = (e && e.message) || String(e); t.message = '失败：' + t.error.slice(0, 120); }
-        t.endedAt = Date.now(); t._abort = null; log('[task] 结束 #' + id, t.status, t.error || '');
+        t.endedAt = Date.now(); t._abort = null;
+        if (M) { try { M.insTask({ goalId, nodeId, type, title, status: t.status, error: t.error || '', costMs: t.endedAt - t.createdAt }); } catch (e) {} }
+        log('[task] 结束 #' + id, t.status, t.error || '');
       }
     };
   }

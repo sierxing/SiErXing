@@ -18,6 +18,7 @@ const createService = require('./service');
 const createSync = require('./sync');
 const createUpdate = require('./update');
 const createTasks = require('./tasks');
+const metrics = require('./metrics');
 const { readCodeFiles, buildCodeBlock, listCodeFiles } = require('./code-read');
 const nodeFolders = require('./node-folders');
 const codeStore = require('./code-store');
@@ -247,7 +248,11 @@ function currentVisionModel() {
 
 const service = createService({ appDir: APP_DIR, port: PORT, log: (...a) => console.log(...a) });
 const update = createUpdate({ appDir: APP_DIR, port: PORT, log: (...a) => console.log(...a) });
-const tasks = createTasks({ log: (...a) => console.log(...a) });
+metrics.init({ db, nowISO });
+const tasks = createTasks({ log: (...a) => console.log(...a), metrics });
+/* 把 AI 调用埋点接进 ai.text() 这个唯一出口（Q5：AI 任务失败率）。
+   scene 缺省记 'unknown'；各调用点传 opts.scene 就能按功能分场景统计。 */
+ai.setStats((r) => metrics.insCall(r));
 rag.init({ db, tasks, nowISO, getSetting, log: (...a) => console.log(...a) });
 let sync = null;   // 多端同步（在 backup 定义后初始化）
 
@@ -944,7 +949,7 @@ function buildCollectPlanPrompt(goal) {
   return L.join('\n');
 }
 async function recommendCollectPlan(goal, timeoutMs) {
-  const txt = await aiText(buildCollectPlanPrompt(goal), currentModel(), timeoutMs || 120000);
+  const txt = await aiText(buildCollectPlanPrompt(goal), currentModel(), timeoutMs || 120000, null, null, '资料收集');
   let arr = extractJSON(txt);
   if (!Array.isArray(arr)) {
     const m = String(txt || '').match(/\[[\s\S]*\]/);
@@ -988,7 +993,7 @@ function buildEbookRecommendPrompt(goal) {
   return L.join('\n');
 }
 async function recommendEbooks(goal, timeoutMs) {
-  const txt = await aiText(buildEbookRecommendPrompt(goal), currentModel(), timeoutMs || 120000);
+  const txt = await aiText(buildEbookRecommendPrompt(goal), currentModel(), timeoutMs || 120000, null, null, '电子书推荐');
   let arr = extractJSON(txt);
   if (!Array.isArray(arr)) {
     const m = String(txt || '').match(/\[[\s\S]*\]/);
@@ -1789,13 +1794,13 @@ function streamDrill(req, res, goal, questionId, answers, note) {
       }
       send({ status: 'AI 正在围绕「' + String(parent.title || '').slice(0, 18) + '」补充更细的问题…' });
       const prompt = buildDrillPrompt(goal, parent, answerText, data.questions, noteText);
-      let raw1 = await aiText(prompt, model, 300000);
+      let raw1 = await aiText(prompt, model, 300000, null, null, '骨架生成');
       let out = extractJSONRaw(raw1);
       if (!out || !Array.isArray(out.questions) || !out.questions.length) {
         console.log('[drill] 第一次解析失败（输出 ' + String(raw1 || '').length + ' 字），重试一次。原始输出前 400 字:', String(raw1 || '').slice(0, 400));
         send({ status: '正在重新整理问题…' });
         const retryPrompt = prompt + '\n\n【重要】你上一次的输出不是合法 JSON 或缺少 questions 字段。请严格只输出一个 JSON 对象：{"reason":"...","questions":[{...}]}，不要输出任何其他文字、不要用代码块包裹。';
-        raw1 = await aiText(retryPrompt, model, 300000);
+        raw1 = await aiText(retryPrompt, model, 300000, null, null, '骨架生成重试');
         out = extractJSONRaw(raw1);
         if (!out || !Array.isArray(out.questions) || !out.questions.length) {
           console.log('[drill] 重试仍失败，输出前 300 字:', String(raw1 || '').slice(0, 300));
@@ -2058,11 +2063,13 @@ async function buildTasksPrompt(goal, stage, stageIndex) {
   return lines.join('\n');
 }
 /* ===== AI 调用（由 server/ai.js 提供，支持任意 OpenAI 兼容接口或 opencode CLI） ===== */
-async function aiText(prompt, model, timeoutMs, onEvent, signal) {
-  return ai.text({ prompt, model: model || currentModel(), timeoutMs, onEvent, signal });
+/* scene 是 Q5 失败率的分组维度（"哪个功能最不靠谱"）。
+   放在参数最末尾 → 既有调用点一行不改也能跑，不传就记 'unknown'。 */
+async function aiText(prompt, model, timeoutMs, onEvent, signal, scene) {
+  return ai.text({ prompt, model: model || currentModel(), timeoutMs, onEvent, signal, scene: scene || 'unknown' });
 }
-async function aiTextFiles(prompt, model, files, timeoutMs, signal) {
-  return ai.text({ prompt, model: model || currentVisionModel(), images: files || [], timeoutMs, signal });
+async function aiTextFiles(prompt, model, files, timeoutMs, signal, scene) {
+  return ai.text({ prompt, model: model || currentVisionModel(), images: files || [], timeoutMs, signal, scene: scene || 'vision' });
 }
 function extractJSONObjects(text) {
   const objs = [];
@@ -2369,7 +2376,7 @@ async function finishVersion(goal, vid, reason, useAI = true) {
   if (useAI) {
     try {
       const model = currentModel();
-      const txt = await aiText(buildReportPrompt(goal, reason, diff), model, 120000);
+      const txt = await aiText(buildReportPrompt(goal, reason, diff), model, 120000, null, null, '变更报告');
       if (txt && txt.trim()) report = txt.trim().slice(0, 800);
     } catch (e) {}
   }
@@ -2526,7 +2533,7 @@ async function aiTextProgress(prompt, model, timeoutMs, send, label, signal) {
   const hb = setInterval(() => { send({ progress: snapshot({ heartbeat: true }) }); }, 2500);
   try {
     return await ai.stream({
-      prompt, model, timeoutMs, signal,
+      prompt, model, timeoutMs, signal, scene: '助手对话',
       onEvent: ev => {
         if (ev && ev.text) {
           full += ev.text;
@@ -3172,6 +3179,7 @@ function streamChat(req, res, goal, message, session) {
         model: model || currentModel(),
         timeoutMs: 420000,
         signal: sig,
+        scene: '助手对话',
         onEvent: ev => {
           if (ev.text) send({ text: ev.text });
           else if (ev.thinking) send({ thinking: summarizeThinking(ev.thinking) });
@@ -3256,7 +3264,17 @@ function stripTags(html) {
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ');
 }
-function topicDrifted(newHtml, oldHtml, titles) {
+/* ===== Q4 AI 产出通过率 · 质量闸门埋点 =====
+   思而行已有两道质量闸门：教程结构体检 tutIntegrity() 与跑题守卫 topicDrifted()。
+   它们的判定逻辑早就写好了，但**从不记录命中与否** → 通过率算不出来。
+   这里只做"记一行"，**一行判定逻辑都没改**。
+   attempts=1 表示首次判定；后续续写救回来的是被拒收后的事，不算"一次通过"。 */
+function recordQualityCheck(r) {
+  try { metrics.insCheck(r); } catch (e) { /* 埋点失败绝不影响正文 */ }
+}
+
+/* 原始判定（逻辑一行未改；埋点在下方同名包装层做） */
+function topicDriftedRaw(newHtml, oldHtml, titles) {
   const anchorEn = [], anchorZh = [], strong = [], weak = [];
   for (const t of (titles || [])) {
     const k = topicKeywords(t);
@@ -3315,6 +3333,20 @@ function topicDrifted(newHtml, oldHtml, titles) {
   if (oldOn && newOff) return { used, anchorEn, anchorZh, strong, weak, newBody: bodyNew.slice(0, 200) };
   return null;
 }
+/* 跑题守卫的埋点包装层。
+   判定有 3 个 return 点（正文太短判不了 / 标题太泛判不了 / 没跑题），
+   包一层最干净，也不用往判定里插代码。
+   drift=null 有两种含义——没跑题，或正文太短/标题太泛判不了；
+   后者不该算"跑题"，同样记 passed=1。 */
+function topicDrifted(newHtml, oldHtml, titles) {
+  const drift = topicDriftedRaw(newHtml, oldHtml, titles);
+  recordQualityCheck({
+    scene: (global.__tutScene || 'tutorial_edit'), check: 'anchor',
+    passed: drift ? 0 : 1, attempts: 1,
+    issue: drift ? ('疑似跑题，正文找不到：' + String(drift.used || '').slice(0, 100)) : ''
+  });
+  return drift;
+}
 /* ===== 教程完整性体检 =====
    线上真翻过车：AI 输出到一半被截断（目录列了 12 节，正文只写到第 3 节），
    而原来的校验只看「长度够不够」，25k 字远超阈值 → 半截内容照常入库。
@@ -3372,7 +3404,12 @@ function tutIntegrity(txt, format) {
     const fences = (s.match(/^\s*(?:```|~~~)/gm) || []).length;
     if (fences % 2) soft.push('末尾代码块 ``` 没有闭合（内容看起来仍完整）');
   }
-  return { ok: !issues.length, issues, soft, missingAnchors };
+  const ok = !issues.length;
+  recordQualityCheck({
+    scene: (global.__tutScene || 'tutorial_gen'), check: 'integrity',
+    passed: ok, attempts: 1, issue: issues.slice(0, 2).join('；')
+  });
+  return { ok, issues, soft, missingAnchors };
 }
 /* 续写提示词：给「已经写出的内容尾部」+ 具体缺什么，让模型接着往下写。
    只带尾部不带全文（省上下文），并明确禁止重复已输出内容与加前言。 */
@@ -3549,10 +3586,11 @@ function streamTutorial(req, res, node, format, note, codeFiles, withFolders, fo
       }
       send({ status: `正在撰写「${String(node.title).slice(0, 18)}」的${format === 'html' ? ' HTML ' : ' Markdown '}教程（讲原理、分步实践、练习与自测，约需 1-3 分钟）…` });
       const prompt = buildTutorialPrompt(goal, node, format, note, codeBlock);
-      let txt = cleanTutorialText(await aiText(prompt, model, 600000), format);
+      let txt = cleanTutorialText(await aiText(prompt, model, 600000, null, null, '教程生成'), format);
       if (!txt || txt.length < 200) throw new Error('教程生成失败：AI 只写了 ' + (txt ? txt.length : 0) + ' 字就停了。原教程没动，可以点任务上的「🔄 重试」，或换个输出更长的模型再试');
       /* 体检：结构不完整多半是被输出上限截断（长度够、结构缺）。
          自动续写补齐；补不齐就把问题说清楚 —— 不能把半截教程当成功写进库。 */
+      global.__tutScene = 'tutorial_gen';
       let chk = tutIntegrity(txt, format);
       if (!chk.ok) {
         send({ status: '检测到教程被截断（' + chk.issues[0] + '），正在让 AI 补全…' });
@@ -3594,6 +3632,12 @@ async function handleAPI(req, res, u) {
   const p = u.pathname, method = req.method;
 
   if (p === '/api/health' && method === 'GET') return sendJSON(res, 200, { ok: true, app: APP_NAME });
+  /* 指标接口：一次性返回 8 个可测量指标（AI 埋点数据 + 规划核心表计算）。
+     不依赖任何可选组件，组件全关也能算。 */
+  if (p === '/api/metrics' && method === 'GET') {
+    try { return sendJSON(res, 200, metrics.compute()); }
+    catch (e) { return sendJSON(res, 500, { error: e.message }); }
+  }
 
   /* ===== 组件能力开关：关闭的组件，其接口一律拒绝（按目标判定，目标之间不串） =====
      注意：/api/components/*（组件管理接口）永远放行，否则会把自己锁死。 */
@@ -3764,7 +3808,7 @@ async function handleAPI(req, res, u) {
             if (my >= info.batches.length) return;
             if (sig.aborted) { const e = new Error('已停止'); e.cancelled = true; throw e; }
             send({ status: `正在通读第 ${my + 1}/${info.batches.length} 批资料…`, progress: { done, total: info.batches.length } });
-            const txt = await aiText(digestBatchPrompt(info.batches[my], my + 1, info.batches.length), model, 300000, null, sig);
+            const txt = await aiText(digestBatchPrompt(info.batches[my], my + 1, info.batches.length), model, 300000, null, sig, '代码库摘要');
             let data = null;
             try { data = extractJSONRaw(txt) || {}; } catch (e) { data = {}; }
             parts.push({ idx: my + 1, data });
@@ -3775,7 +3819,7 @@ async function handleAPI(req, res, u) {
         await Promise.all(Array.from({ length: Math.min(3, info.batches.length) }, worker));
         parts.sort((a, b) => a.idx - b.idx);
         send({ status: '正在汇总成主题文档（按主题拆分成多篇）…', progress: { done, total: info.batches.length } });
-        const syn = await aiText(digestSynthesisPrompt(parts, info), model, 600000, null, sig);
+        const syn = await aiText(digestSynthesisPrompt(parts, info), model, 600000, null, sig, '代码库综合');
         const parsed = extractJSONRaw(syn) || {};
         const list = Array.isArray(parsed.digests) ? parsed.digests : (Array.isArray(parsed) ? parsed : []);
         if (!list.length) throw new Error('汇总结果解析失败，可重试');
@@ -4090,7 +4134,7 @@ function redactText(raw) {
           // 带用户意见调整现有子任务
           send({ status: '正在根据你的意见调整划分…' });
           const kids = db.prepare('SELECT title, detail, status FROM nodes WHERE parent_id = ? ORDER BY sort_order, id').all(n.id);
-          const txt = await aiText(await buildRefineNodePrompt(goal, n, kids, feedback, expandCode), model, 300000);
+          const txt = await aiText(await buildRefineNodePrompt(goal, n, kids, feedback, expandCode), model, 300000, null, null, '节点细化');
           const data = extractJSON(txt);
           if (data && Array.isArray(data.questions) && data.questions.length) {
             saveNodeQuestions(n.id, data, feedback);
@@ -4130,7 +4174,7 @@ function redactText(raw) {
           }
           send({ status: '开始制定拆分计划…' });
           var vid = beginVersion(goal.id, reason);
-          const txt = await aiText(await buildExpandPrompt(goal, n, null, expandCode), model, 300000);
+          const txt = await aiText(await buildExpandPrompt(goal, n, null, expandCode), model, 300000, null, null, '骨架展开');
           const data = extractJSON(txt);
           if (data && Array.isArray(data.questions) && data.questions.length) {
             saveNodeQuestions(n.id, data, feedback);
@@ -4343,7 +4387,7 @@ function redactText(raw) {
           }
         } catch (e) { console.log('[tutorial] 修改时源码载入失败:', e.message); }
         const editBase = buildTutorialEditPrompt(goal, node, tut, feedback, tut.format, editCodeBlock);
-        const runEdit = async (prompt) => cleanTutorialText(String(await ai.text({ prompt, model: currentModel(), timeoutMs: 600000, signal }) || ''), tut.format);
+        const runEdit = async (prompt) => cleanTutorialText(String(await ai.text({ prompt, model: currentModel(), timeoutMs: 600000, signal, scene: '教程修改' }) || ''), tut.format);
         let out = await runEdit(editBase);
         /* 模型偷懒有两类，都得再要一次全文，别让用户干等：
            ① 只回了句确认语（"好的，我来改…"）
@@ -4373,13 +4417,14 @@ function redactText(raw) {
         /* 结构体检：长度够不代表写完了（线上翻车：目录 12 节、正文只写到第 3 节，
            长度 25k 远超阈值，于是半截教程被当成功写进库，用户点后面几节全没反应）。
            这里改成先自动续写补齐，补不齐就拒收并说明缺什么。 */
+        global.__tutScene = 'tutorial_edit';
         let chk = tutIntegrity(out, tut.format);
         if (!chk.ok) {
           console.log('[tutorial] 修改结果疑似截断：' + chk.issues.join('；'));
           progress(70, '结果被截断，正在让 AI 补全缺失部分…');
           const fixed = await repairTruncatedText({
             raw: out, format: tut.format, title: tut.title, issues: chk.issues,
-            runText: (p) => ai.text({ prompt: p, model: currentModel(), timeoutMs: 600000, signal })
+            runText: (p) => ai.text({ prompt: p, model: currentModel(), timeoutMs: 600000, signal, scene: '教程续写' })
           });
           out = fixed.text;
           chk = tutIntegrity(out, tut.format);
