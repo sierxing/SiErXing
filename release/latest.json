@@ -1,14 +1,14 @@
 {
   "version": "1.10.35",
-  "buildVer": "baaabbff10fd",
+  "buildVer": "e9fe251f43d4",
   "payload": "release/payload-1.10.35.sxar",
   "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.35.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "6695ba9ef0ebbe01fec65fc2215ae3f2d8483c6ee2f1d4a8f08071dea9833658",
-  "size": 709053,
-  "unpackedSize": 2574252,
-  "publishedAt": "2026-10-10T10:49:19.314Z",
-  "notes": "新增组件「📌 划线笔记」：像 WPS 那样在教程里划重点——选中文字浮出颜色条，高亮/下划线/写批注卡片；右侧清单列出这篇教程的全部笔记，点一条跳过去；HTML 教程（iframe）同样可用",
+  "sha256": "e0344852a90c0c7e02e9974e69b26350073242cbf63a5ae3f3464d696e41eb43",
+  "size": 712458,
+  "unpackedSize": 2585129,
+  "publishedAt": "2026-10-11T09:12:08.903Z",
+  "notes": "AI 在规划/教程里写的「[2410]」这类引用，现在显示成可点的上标：点一下弹出它到底是什么（节点标题、所在阶段、说明全文；资料引用也能看正文片段），不再猜数字；弹窗尺寸与位置重做，任何位置点开都完整可见；行内代码里的引用同样可点",
   "exeRequired": false
 }
