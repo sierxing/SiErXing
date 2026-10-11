@@ -5,7 +5,7 @@
  * 目的：让"AI 到底靠不靠谱"变成可测量的数字，而不是靠感觉。
  *
  * 三张表：
- *   task_runs          后台 AI 任务的成功/失败/重试（P3 任务健壮性）
+ *   task_runs          后台 AI 任务的成功/失败/重试（Q5 的「长任务」维度，原独立指标 P3）
  *   ai_calls           每一次 AI 调用的成败与耗时（Q5 AI 任务失败率）
  *   ai_quality_checks  AI 产出的质量闸门判定（Q4 AI 产出通过率）
  *
@@ -24,7 +24,7 @@ let db = null;
 let nowISO = () => new Date().toISOString();
 
 const SCHEMA = `
-/* P3 任务健壮性：后台 AI 任务的每一次执行 */
+/* 后台 AI 任务的每一次执行（供 Q5 的「长任务」维度统计） */
 CREATE TABLE IF NOT EXISTS task_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   goal_id INTEGER NOT NULL DEFAULT 0,
@@ -201,29 +201,6 @@ function compute() {
     collectable: true
   });
 
-  /* ===== P3 任务健壮性 ===== */
-  if (has('task_runs')) {
-    const t = ONE(`SELECT COUNT(*) AS total,
-        COUNT(*) FILTER (WHERE status='done') AS done,
-        COUNT(*) FILTER (WHERE status='failed') AS failed,
-        COUNT(*) FILTER (WHERE status='cancelled') AS cancelled,
-        COUNT(*) FILTER (WHERE retried=1) AS retried
-      FROM task_runs`);
-    const fin = (t.done || 0) + (t.failed || 0);
-    m.push({
-      id: 'P3', name: '任务健壮性', type: '过程', unit: '%',
-      value: pct(t.done || 0, fin),
-      formula: "done ÷ (done + failed)",
-      source: 'task_runs',
-      detail: {
-        总任务: t.total || 0, 成功: t.done || 0, 失败: t.failed || 0,
-        已取消: t.cancelled || 0, 重试产生: t.retried || 0,
-        失败率: pct(t.failed || 0, fin)
-      },
-      collectable: true
-    });
-  }
-
   /* ===== P4 规划收敛迭代次数（相邻快照变动 ≥15% 记一次结构调整）===== */
   const TH = 0.15;
   const convByGoal = [];
@@ -347,8 +324,25 @@ function compute() {
       FROM ai_calls WHERE model <> '' GROUP BY model ORDER BY bad DESC, total DESC`)
       .map(r => ({ 模型: r.model, 调用数: r.total, 失败数: r.bad, 失败率: pct(r.bad, r.total) }));
 
+    /* ---- 分层④：长任务队列（原 P3 任务健壮性）----
+       合并进本指标的理由：长任务内部也是一次次 AI 调用，Q5 已经覆盖；
+       但"任务整体有没有办完"仍是独立视角（AI 失败可能被内部兜住，任务仍算 done），
+       所以作为 detail 的一个维度保留，而不是另立一个指标。 */
+    const tj = has('task_runs') ? ONE(`SELECT
+        COUNT(*) AS total,
+        COUNT(*) FILTER (WHERE status='done')      AS done,
+        COUNT(*) FILTER (WHERE status='failed')    AS failed,
+        COUNT(*) FILTER (WHERE status='cancelled') AS cancelled,
+        COUNT(*) FILTER (WHERE retried=1)          AS retried
+      FROM task_runs`) : {};
+    const tFin = (tj.done || 0) + (tj.failed || 0);
+    const byTaskType = ALL(`SELECT type, COUNT(*) AS total,
+        COUNT(*) FILTER (WHERE status='failed') AS failed
+      FROM task_runs GROUP BY type ORDER BY total DESC`)
+      .map(r => ({ 任务类型: r.type || '(未标注)', 次数: r.total, 失败: r.failed, 失败率: pct(r.failed, r.total) }));
+
     m.push({
-      id: 'Q5', name: 'AI 任务失败率', type: '质量', unit: '%',
+      id: 'Q5', name: 'AI 任务失败率', type: '过程', unit: '%',
       value: pct(a.bad || 0, fin),
       formula: '(failed + silent_fail) ÷ 调用总数',
       source: 'ai_calls',
@@ -356,7 +350,15 @@ function compute() {
         调用总数: a.total || 0, 一次成功: a.ok || 0, 抢救成功: a.rescued || 0,
         最终失败: a.failed || 0, 静默失败: a.silent || 0,
         首次失败率: pct((a.total || 0) - (a.ok || 0), a.total || 0),
-        按场景: byScene, 按错误类型: byErr, 按模型: byModel
+        按场景: byScene, 按错误类型: byErr, 按模型: byModel,
+        长任务: {
+          说明: '长任务队列的整体成败（AI 失败可能被内部兜住，任务仍算完成，所以这一维和上面不同视角）',
+          总任务: tj.total || 0, 成功: tj.done || 0, 失败: tj.failed || 0,
+          用户主动停止: tj.cancelled || 0,      /* 不算失败，单独列出 */
+          重试产生: tj.retried || 0,
+          成功率: pct(tj.done || 0, tFin), 失败率: pct(tj.failed || 0, tFin),
+          按任务类型: byTaskType
+        }
       },
       collectable: true
     });

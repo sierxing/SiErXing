@@ -1,14 +1,14 @@
 {
-  "version": "1.10.36",
-  "buildVer": "ae50f29497e8",
-  "payload": "release/payload-1.10.36.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.36.sxar?ref=main",
+  "version": "1.10.37",
+  "buildVer": "9e35e851ec09",
+  "payload": "release/payload-1.10.37.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.37.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "e74abc7eec12d53a7bd5ad86944b26d8d73a483830bb424384d20c051cce1d0f",
-  "size": 733172,
-  "unpackedSize": 2653335,
-  "publishedAt": "2026-10-11T12:03:41.864Z",
-  "notes": "新增 AI 产出埋点与指标接口：任务成功率、AI 调用失败率（分功能/错误类型/模型三层）、AI 产出通过率全部可采；新增 GET /api/metrics",
+  "sha256": "647fda1b21d557bf84e513aefaf8695eb69475e65467f85b438101b72ca2b35e",
+  "size": 733488,
+  "unpackedSize": 2654134,
+  "publishedAt": "2026-10-11T12:26:41.939Z",
+  "notes": "合并指标：任务健壮性并入 AI 任务失败率（Q5 归为过程指标，长任务成败作为其一个维度）",
   "exeRequired": false
 }
