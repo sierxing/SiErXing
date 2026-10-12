@@ -3078,6 +3078,40 @@ function roadmapOutline(goalId) {
 /* 从教程正文里挑出「用户这次点名的那一节」。
    教程动辄五六万字，整篇塞进提示词不现实；用户点标题（如"1.2 ReAct"）时就带上那一节，
    没点名就只给目录 —— 不硬塞，免得白白烧掉几万 token。 */
+/* 教程正文怎么塞进提示词。
+   ⚠️ 这里给的是**两种模式（ASK / Agent）完全相同的量** —— 模式只决定"能不能改"，
+   绝不决定"能看到什么"。上一版的错就在这儿：只给目录 + 用户点名的那一节，
+   于是 AI 回答"我读不到正文"，用户还以为是 ASK 模式的限制。
+   规则：正文不超预算 → 全给；超了 → 先给用户点名的节、再按顺序补满，
+   并把**没带上的节列出来**，让模型能如实说"这几节我没看到，你点一下给我看"，
+   而不是含糊地说"读不到"，更不是凭空猜。 */
+const TUT_BUDGET = 30000;
+function tutBodyBlock(content, message) {
+  const body = String(content || '');
+  if (!body.trim()) return '（这份教程还没有正文）';
+  if (body.length <= TUT_BUDGET) return '【它的正文（完整）】\n' + body;
+  const msg = String(message || '');
+  const hrs = [...body.matchAll(/^#{2,3}\s+(.+)$/gm)];
+  const secs = hrs.map((h, i) => ({
+    title: h[1].trim(),
+    text: body.slice(h.index, i + 1 < hrs.length ? hrs[i + 1].index : body.length)
+  }));
+  if (!secs.length) return '【它的正文（节选）】\n' + body.slice(0, TUT_BUDGET) + '\n…（后面还有 ' + (body.length - TUT_BUDGET) + ' 字没带上）';
+  const hit = x => { const k = x.title.replace(/^\d+(\.\d+)?[\.、\s]*/, '').slice(0, 12); return k.length >= 2 && msg.includes(k); };
+  const order = [...secs.filter(hit), ...secs.filter(x => !hit(x))];
+  const got = [], drop = [];
+  let used = 0;
+  for (const x of order) {
+    if (used + x.text.length <= TUT_BUDGET) { got.push(x); used += x.text.length; }
+    else drop.push(x.title);
+  }
+  got.sort((a, b) => body.indexOf(a.text) - body.indexOf(b.text));   // 按原文顺序放回去
+  const out = ['【它的正文（节选，' + used + ' / ' + body.length + ' 字）】'];
+  out.push(got.map(x => x.text).join('\n'));
+  if (drop.length) out.push('\n【这次**没有**带上来的节】' + drop.join(' / ')
+    + '\n（用户问的如果正是这几节，如实说"这几节我这边没看到"，请他在消息里点明节标题再看 —— 不要猜、也不要整篇否定。）');
+  return out.join('\n');
+}
 function pickTutorialSection(content, message) {
   const c = String(content || ''), msg = String(message || '');
   const hrs = [...c.matchAll(/^#{2,3}\s+(.+)$/gm)];
@@ -3094,6 +3128,43 @@ function pickTutorialSection(content, message) {
   const start = hrs[best.i].index;
   const end = hrs[best.i + 1] ? hrs[best.i + 1].index : c.length;
   return '《' + best.title + '》\n' + c.slice(start, end).slice(0, 4000);
+}
+/* 按字数取"最近 N 轮"对话：从最新往回装，装不下就停。
+   比"固定条数"适应性强得多 —— 短消息能带回几十轮，长回复也不会一条吃光预算。 */
+function pickChatWindow(rows, budget) {
+  const out = [];
+  let used = 0;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const c = rows[i];
+    const txt = (c.role === 'user' ? '用户：' : '你：') + String(c.content || '').replace(/\s+/g, ' ').slice(0, 4000);
+    if (out.length && used + txt.length > budget) break;
+    out.unshift(txt);
+    used += txt.length;
+  }
+  return { lines: out, dropped: rows.length - out.length, used };
+}
+/* 这个目标最近的 AI 任务（含正在跑的）。
+   用户问"改了没有 / 跑完没 / 为什么失败"时，模型必须答得上来 ——
+   上一版提示词里没有这块，AI 只能回"我查不了任务状态"。
+   ⚠️ 同样两种模式都给：看到的信息一致，差别只在能不能动手。 */
+function chatTasksBlock(goal) {
+  let live = [];
+  try { live = tasks.list(goal.id).filter(t => t.status === 'running' || t.status === 'queued'); } catch (e) {}
+  let rows = [];
+  try {
+    rows = db.prepare("SELECT type,title,status,error,cost_ms,created_at FROM task_runs"
+      + " WHERE goal_id = ? AND status IN ('done','failed','cancelled') ORDER BY id DESC LIMIT 8").all(goal.id);
+  } catch (e) {}
+  if (!live.length && !rows.length) return '';
+  const out = ['', '【这个目标最近的 AI 任务（判断"到底改了没有"就看这里）】'];
+  for (const t of live) out.push('- 🔄 进行中 ' + (t.progress || 0) + '%：' + String(t.title || t.type).slice(0, 50) + ' · ' + String(t.message || '').slice(0, 60));
+  for (const r of rows) {
+    out.push('- ' + String(r.created_at).replace('T', ' ').slice(0, 16) + ' [' + r.status + '] '
+      + String(r.title || r.type).slice(0, 50) + (r.cost_ms ? ' · ' + Math.round(r.cost_ms / 1000) + ' 秒' : '')
+      + (r.error ? ' · 原因：' + String(r.error).replace(/\s+/g, ' ').slice(0, 130) : ''));
+  }
+  out.push('⚠️ 注意口径：**失败 / 已停止 = 库里的内容可能一个字都没动**；"已提交任务"不等于"改成功了"。');
+  return out.join('\n');
 }
 async function buildChatPrompt(goal, message, sessionId, opts) {
   const o = opts || {};
@@ -3112,33 +3183,48 @@ async function buildChatPrompt(goal, message, sessionId, opts) {
   lines.push(constraintsBlock(goal));
   const dgBlock = digestsBlock(goal);
   if (dgBlock) lines.push(dgBlock);
-  const augBlock = await ragAugment(goal, message, 8);
-  if (augBlock) lines.push(augBlock);
+  /* 轻档：省掉向量检索与代码检索，并把历史从 12 条压到 4 条。
+     ⚠️ **资料清单无论如何都要留着** —— 它才是"资料库里有没有 XX"能答对的依据
+     （AGENTS.md 坑 #16：漏了它模型只会说"看不到"，哪怕资料就在库里）。
+     判断是纯启发式、不花 AI 调用；判断偏重了只是多一次检索，不会答错。 */
+  const ce = effort.chatEffort(message);
+  if (ce.heavy) {
+    const augBlock = await ragAugment(goal, message, 8);
+    if (augBlock) lines.push(augBlock);
+  }
   const srcBlock = chatSourcesBlock(goal);
   if (srcBlock) lines.push(srcBlock);
-  const codeBlock = codeContextBlock(goal, message);
-  if (codeBlock) lines.push(codeBlock);
+  if (ce.heavy) {
+    const codeBlock = codeContextBlock(goal, message);
+    if (codeBlock) lines.push(codeBlock);
+  }
+  /* 对话上下文：**按字数取窗口**，不再按"条数 + 轻重档"砍。
+     ⚠️ 原先 `ce.heavy ? 12 : 4` —— 轻档只带 4 条，用户直接反馈"上下文像是被隔开的、
+     只能看到刚发出去的那一条"。而**对话记忆跟"要不要做向量检索"不是一回事**：
+     它统共几千字，砍掉省不了多少，代价却是 AI 失忆。
+     现在从最近往回装，装到 26000 字预算为止（实测同一份 40 条会话：4 条 → 40 条）。 */
   const chats = sessionId
-    ? db.prepare('SELECT role, content FROM chats WHERE session_id = ? ORDER BY id DESC LIMIT 12').all(sessionId).reverse()
-    : db.prepare('SELECT role, content FROM chats WHERE goal_id = ? ORDER BY id DESC LIMIT 12').all(goal.id).reverse();
+    ? db.prepare('SELECT role, content FROM chats WHERE session_id = ? ORDER BY id DESC LIMIT 300').all(sessionId).reverse()
+    : db.prepare('SELECT role, content FROM chats WHERE goal_id = ? ORDER BY id DESC LIMIT 300').all(goal.id).reverse();
   if (chats.length) {
+    const w = pickChatWindow(chats, 26000);
     lines.push('');
-    lines.push('【最近的对话】');
-    for (const c of chats) lines.push((c.role === 'user' ? '用户：' : '你：') + String(c.content).replace(/\s+/g, ' ').slice(0, 1500));
+    lines.push('【最近的对话】' + (w.dropped ? '（更早的 ' + w.dropped + ' 条太长，这次没带上；需要时请用户复述）' : ''));
+    lines.push(w.lines.join('\n'));
   }
   lines.push('');
   lines.push('【当前路线图（方括号内是节点 id，修改时只能引用这些 id）】');
   lines.push(roadmapOutline(goal.id) || '（暂无节点）');
   if (tut) {
-    const heads = (String(tut.content || '').match(/^#{2,3}\s+(.+)$/gm) || []).map(x => x.replace(/^#+\s+/, '').trim());
+    const body = String(tut.content || '');
+    const heads = (body.match(/^#{2,3}\s+(.+)$/gm) || []).map(x => x.replace(/^#+\s+/, '').trim());
     lines.push('');
-    lines.push('【用户正在看的教程】#' + tut.id + ' 「' + String(tut.title || '') + '」');
+    lines.push('【用户正在看的教程】#' + tut.id + ' 「' + String(tut.title || '') + '」（正文 ' + body.length + ' 字）');
     if (heads.length) lines.push('它的目录：' + heads.join(' / '));
-    const sec = pickTutorialSection(String(tut.content || ''), message);
-    if (sec) lines.push('【你唯一能看到的一节正文（用户这次点到了它）】\n' + sec);
-    else lines.push('（教程正文很长，这里只给了目录。要回答某节的具体内容，请用户在消息里点明节标题，例如"1.2 ReAct：边想边做 这节讲的是什么"。）');
+    lines.push(tutBodyBlock(body, message));
   }
   lines.push('');
+  lines.push(chatTasksBlock(goal));
   lines.push('【用户的新消息】' + message);
   lines.push('');
   lines.push('【你的任务】');
