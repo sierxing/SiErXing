@@ -4922,7 +4922,24 @@ const tutEditMatch = p.match(/^\/api\/tutorials\/(\d+)\/edit$/);
       retry: startEditTask,
       run: async ({ progress, signal }) => {
         try {
-        progress(5, '正在按你的意见修改教程…');
+        /* 这条任务以前**不声明阶段**（只报一句百分比），左下角卡片就只有一个光秃秃的
+           百分比 + 一条不确定态的走马灯条 —— 用户看不出走到哪、也不知道 AI 在干什么。
+           照教程生成那条的做法，把**阶段表**和**实时思考**一并报上去。 */
+        const est = [
+          { key: 'load', label: '读原文' },
+          { key: 'write', label: 'AI 重写' },
+          { key: 'check', label: '结构自检' },
+          { key: 'fix', label: '续写补齐' },
+          { key: 'save', label: '保存版本' }
+        ].map(x => ({ key: x.key, label: x.label, state: 'pending' }));
+        let curStep = -1, thinkTail = '';
+        const stepAt = (k, pct, msg, think) => {
+          if (k != null && k > curStep) curStep = k;
+          est.forEach((x, i) => { x.state = i < curStep ? 'done' : (i === curStep ? 'active' : 'pending'); });
+          /* pct / msg 传 null = 「只更新阶段与思考」，别把百分比和当前文案覆盖掉 */
+          progress(pct == null ? null : pct, msg || null, { steps: est, thinking: think != null ? think : thinkTail });
+        };
+        stepAt(0, 5, '正在按你的意见修改教程…');
         let editCodeBlock = '';
         try {
           const stored = JSON.parse((tut && tut.code_files) || '[]');
@@ -4941,7 +4958,18 @@ const tutEditMatch = p.match(/^\/api\/tutorials\/(\d+)\/edit$/);
           }
         } catch (e) { console.log('[tutorial] 修改时源码载入失败:', e.message); }
         const editBase = buildTutorialEditPrompt(goal, node, tut, feedback, tut.format, editCodeBlock);
-        const runEdit = async (prompt) => cleanTutorialText(String(await ai.text({ prompt, model: currentModel(), timeoutMs: 600000, signal, scene: '教程修改' }) || ''), tut.format);
+        /* onEvent 把模型此刻在写什么带回来（推理片段 / 正文尾巴）——
+           卡片上那行 💭 才有内容，否则用户只知道"在跑"，不知道"在跑什么" */
+        const runEdit = async (prompt) => cleanTutorialText(String(await ai.text({
+          prompt, model: currentModel(), timeoutMs: 600000, signal, scene: '教程修改',
+          onEvent: ev => {
+            if (ev.thinking) thinkTail = ev.thinking;
+            else if (ev.text) thinkTail = ev.text;
+            else return;
+            stepAt(null, null, null);
+          }
+        }) || ''), tut.format);
+        stepAt(1, 15, '正在按你的意见重写正文…');
         let out = await runEdit(editBase);
         /* 模型偷懒有两类，都得再要一次全文，别让用户干等：
            ① 只回了句确认语（"好的，我来改…"）
@@ -4953,7 +4981,7 @@ const tutEditMatch = p.match(/^\/api\/tutorials\/(\d+)\/edit$/);
           if (out && out.length >= 80 && !looksLikeAskBack(out)) break;
           if (!out || !out.length) break;
           console.log('[tutorial] 修改初回只有 ' + out.length + ' 字（' + (looksLikeAskBack(out) ? '模型反过来要我们提供材料' : '疑似确认语') + '），追加指令重试。首字：' + out.slice(0, 60));
-          progress(55 + round * 5, 'AI 第一次没给出正文，正在让它直接输出全文…');
+          stepAt(1, 55 + round * 5, 'AI 第一次没给出正文，正在让它直接输出全文…');
           out = await runEdit(editBase + '\n\n【重要】不要只回复确认、解释或道歉，也不要向我索要任何材料 —— 你需要的原文已经完整包含在上面了。现在直接输出修改后的完整教程正文。');
         }
         if (!out || out.length < 80) {
@@ -4964,7 +4992,7 @@ const tutEditMatch = p.match(/^\/api\/tutorials\/(\d+)\/edit$/);
         }
         // 防截断兜底：原文很长、新文却只有一小截时，宁可报错也不覆盖好教程
         const origLen = String(tut.content || '').length;
-        progress(80, '正在保存新版本…');
+        stepAt(2, 70, '正在校验结果…');
         if (origLen > 3000 && out.length < Math.max(500, Math.floor(origLen * 0.2))) {
           throw new Error('AI 返回内容过短（仅原文 ' + Math.round(out.length / Math.max(1, origLen) * 100) + '%，疑似被截断），原教程没动：点任务上的「🔄 重试」即可原样重跑，或把修改意见拆小一点分多次提');
         }
@@ -4975,7 +5003,7 @@ const tutEditMatch = p.match(/^\/api\/tutorials\/(\d+)\/edit$/);
         let chk = tutIntegrity(out, tut.format);
         if (!chk.ok) {
           console.log('[tutorial] 修改结果疑似截断：' + chk.issues.join('；'));
-          progress(70, '结果被截断，正在让 AI 补全缺失部分…');
+          stepAt(3, 76, '结果被截断，正在让 AI 补全缺失部分…');
           const fixed = await repairTruncatedText({
             raw: out, format: tut.format, title: tut.title, issues: chk.issues,
             runText: (p) => ai.text({ prompt: p, model: currentModel(), timeoutMs: 600000, signal, scene: '教程续写' })
@@ -5073,6 +5101,7 @@ function structureLoss(before, after, feedback) {
             + '确实想整篇重写，请在意见里加上"允许重写结构"');
         }
         // 先存旧版（教程版本表），再覆盖正文 —— 改坏了能从历史版本恢复
+        stepAt(4, 90, '正在保存新版本…');
         try { saveTutorialVersion(tid, 'AI 修改：' + String(feedback || '').slice(0, 100)); } catch (e) {}
         // 保留历史版本（写入 goal_versions 便于回滚），再覆盖教程内容
         try {

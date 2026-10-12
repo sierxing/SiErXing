@@ -9922,14 +9922,18 @@ async function renderAiTasksPage() {
   app.innerHTML = '<p class="muted">正在读取 AI 任务…</p>';
   let data;
   try { data = await api('/api/ai-tasks' + aitQuery()); } catch (e) {
-    app.innerHTML = `<div class="page"><div class="pageHead"><h2 class="title">🤖 AI 任务</h2></div>
+    app.innerHTML = `<div class="page"><div class="pageHead"><button class="back" data-back="#/">← 返回</button>
+      <h2 class="title" style="margin-left:10px;">🤖 AI 任务</h2></div>
       <div class="emptyBox" style="margin-top:30px;"><div class="ebIcon">⚠️</div><div class="ebTitle">读取失败</div><div class="ebText">${esc(e.message)}</div></div></div>`;
     return;
   }
   state.aitData = data;
   const f = aitS().filter;
   app.innerHTML = `<div class="page">
-    <div class="pageHead"><h2 class="title">🤖 AI 任务</h2><span class="aitHeadHint" id="aitHint"></span></div>
+    <div class="pageHead">
+      <button class="back" data-back="#/">← 返回</button>
+      <h2 class="title" style="margin-left:10px;">🤖 AI 任务</h2><span class="aitHeadHint" id="aitHint"></span>
+    </div>
     <div id="aitRun"></div>
     <div class="aitSec">
       <div class="aitSecT">历史记录<span class="aitSecN">${(data.summary || {}).total || 0}</span></div>
