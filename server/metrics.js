@@ -77,22 +77,28 @@ function init(ctx) {
 
 /* ---------- 写入：全部吞异常，埋点绝不影响主流程 ---------- */
 
+/* 一次任务运行 = 一行。返回自增 id 供后续 updTask 用。
+   ⚠️ 原先「提交/开始/结束」各 insTask 一次 —— 一次任务在表里留下 2~3 行
+   （queued / running / done），指标里的任务数直接被放大一倍多。 */
 const insTask = (r) => {
   try {
-    db.prepare(`INSERT INTO task_runs
+    const info = db.prepare(`INSERT INTO task_runs
       (goal_id,node_id,type,title,status,attempts,retried,origin_id,error,cost_ms,created_at,ended_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(r.goalId|0, r.nodeId|0, String(r.type||''), String(r.title||'').slice(0,200),
            String(r.status||''), r.attempts||1, r.retried?1:0, r.originId|0,
-           String(r.error||'').slice(0,500), r.costMs|0, nowISO(), r.endedAt || nowISO());
-    return true;
+           String(r.error||'').slice(0,500), r.costMs|0, r.createdAt || nowISO(), r.endedAt || '');
+    return Number(info.lastInsertRowid) || true;
   } catch (e) { return false; }
 };
 
+/* 只更新同一行。ended_at 只有终态才写 —— 否则"开始运行"这一步就把它填上了，
+   看起来像任务已经结束。 */
 const updTask = (id, st) => {
   try {
+    const terminal = ['done', 'failed', 'cancelled'].includes(String(st.status || ''));
     db.prepare('UPDATE task_runs SET status=?, error=?, cost_ms=?, ended_at=? WHERE id=?')
-      .run(String(st.status||''), String(st.error||'').slice(0,500), st.costMs|0, nowISO(), id);
+      .run(String(st.status||''), String(st.error||'').slice(0,500), st.costMs|0, terminal ? nowISO() : '', id);
     return true;
   } catch (e) { return false; }
 };

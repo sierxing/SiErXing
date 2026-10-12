@@ -427,7 +427,9 @@ async function openaiText(c, opts) {
   if (!mdl) throw new Error('未配置模型名（在「设置」里填写，或设置环境变量 SIERXING_MODEL）');
   // 输出上限：默认 16000（覆盖完整教程/长回复），各调用方可通过 maxTokens 覆盖；
   // 不传时很多接口默认只给 4k 左右，长教程会被拦腰截断。
-  const maxTokens = Number(opts.maxTokens) || 16000;
+  /* let 而不是 const：推理模型可能把输出额度全花在 reasoning_content 上，
+   正文一个字没输出就撞上限 —— 这时要能就地加大额度重试（见下面 openaiText 里的判断）。 */
+  let maxTokens = Number(opts.maxTokens) || 16000;
   if (!useStream) return openaiLongText(c, { model: mdl, prompt, images, timeoutMs, signal, onEvent, maxTokens });
   /* ⚠️ 这里不要有「试发一次」的 fetch：曾经非流式分支提前 return 后，下面还留着
      一份旧的一次性请求代码，结果每次流式调用都向 AI 发两次相同请求、第一次的
@@ -473,10 +475,21 @@ async function openaiText(c, opts) {
     }
     return { text, finish };
   };
-  let text = '', rounds = 0;
+  let text = '', rounds = 0, grown = 0;
   let messages = [{ role: 'user', content: messageContent(prompt, images) }];
   for (;;) {
     const r = await readStream(await openaiRequest(c, { model: mdl, messages, stream: true, max_tokens: maxTokens }, timeoutMs, signal));
+    /* 同 openaiLongText：一字正文都没输出就撞上限 = 推理把预算吃干了，
+       这时续写只会拿到「请把尾部粘给我」这种废话。加预算重试，仍不行就报人话。 */
+    if (!r.text && r.finish === 'length') {
+      if (grown < 2 && maxTokens < 65536) {
+        maxTokens = Math.min(65536, maxTokens * 2); grown++;
+        messages = [{ role: 'user', content: messageContent(prompt, images) }];
+        continue;
+      }
+      throw new Error('模型把输出额度全用在内部推理上了，一个字正文都没输出就撞上上限（已自动加大额度重试 ' + grown + ' 次仍如此）。'
+        + '换 deepseek-chat 等非推理模型，或把这次要求拆小一点');
+    }
     text += r.text;
     if (r.finish !== 'length') break;
     rounds++;
@@ -510,7 +523,7 @@ function isTokenLimitError(e) {
   return /max_tokens|maximum context|context length|token[^a-z]*limit|tokens[^a-z]*limit|too long|too_large|content.*too/i.test(String((e && e.message) || ''));
 }
 async function openaiLongText(c, { model: mdl, prompt, images, timeoutMs, signal, onEvent, maxTokens }) {
-  let tokens = maxTokens, shrunk = 0;
+  let tokens = maxTokens, shrunk = 0, grown = 0;
   const firstMessages = [{ role: 'user', content: messageContent(prompt, images) }];
   let full = '', rounds = 0;
   let messages = firstMessages;
@@ -527,13 +540,38 @@ async function openaiLongText(c, { model: mdl, prompt, images, timeoutMs, signal
       }
       throw e;
     }
+    /* ⚠️ 一字正文都没输出就撞上输出上限（finish_reason=length 且内容为空）：
+       推理模型（deepseek-flash / reasoner 这类）会把预算先花在 reasoning_content 上，
+       正文一个字没轮到预算就耗光了。这时候**续写是续不出来的** ——
+       尾部是空的，模型只会回一句「请把已输出内容的尾部粘给我」（实测就收到过这句 27 字），
+       于是上层报「AI 只写了 27 字就停了」，看起来像提示词有问题，其实是被推理吃干了。
+       正确处理：先把预算加大重试一次；还不行就报人话，别让上层拿到一句废话。 */
+    if (!r.text && r.finish === 'length') {
+      if (grown < 2 && tokens < 65536) {
+        tokens = Math.min(65536, tokens * 2); grown++;
+        messages = firstMessages; full = ''; rounds = 0;
+        continue;
+      }
+      throw new Error('模型把输出额度全用在内部推理上了，一个字正文都没输出就撞上上限（已自动加大额度重试 ' + grown + ' 次仍如此）。'
+        + '换 deepseek-chat 等非推理模型，或把这次要求拆小一点');
+    }
     full += r.text;
     if (r.finish !== 'length') return full;
     rounds++;
     if (rounds >= 4) throw new Error('AI 输出过长（多次续写仍未写完）：请把这次要求拆小一点，分多次提');
     if (onEvent) { try { onEvent({ thinking: '输出较长，正在继续生成（第 ' + (rounds + 1) + ' 段）…' }); } catch (e2) {} }
-    // 续写只带尾部 3000 字做衔接，不带全文，省上下文
-    messages = [{ role: 'user', content: '你正在写一份教程，上次输出到下面这个位置就中断了' + CONTINUE_SUFFIX + '\n\n【已输出内容的尾部】\n' + full.slice(-3000) }];
+    /* ⚠️ 续写必须**带上原提示词**。原来这里只发尾部 3000 字，等于从第二轮起
+       模型手里只剩一段尾巴：不知道在写什么教程、不知道有哪些格式要求、更不知道
+       有 ```viz 可视化块这回事 —— 于是它开始自由发挥。实测后果：改一份 32K 的教程，
+       2 个 HTML 可视化块被整体丢掉、27 个章节少了 14 个、全文被换了个结构，
+       而长度校验只看总数（还剩 71%）一路放行。流式那条路本来就带全文，这里跟它对齐。 */
+    const TAIL = 9000;
+    const earlier = full.length - TAIL;
+    messages = [
+      { role: 'user', content: prompt },
+      { role: 'assistant', content: (earlier > 0 ? '……（以上你已输出约 ' + earlier + ' 字，其内容与本次任务开头一致，请原样保留，不要重写、不要重排）……\n' : '') + full.slice(-TAIL) },
+      { role: 'user', content: '（上一条被输出上限截断了）请**直接从最后一个字符接着往下写**，不要重复已输出的内容、不要重新开头、不要加任何说明或前后缀。' + CONTINUE_SUFFIX }
+    ];
   }
 }
 

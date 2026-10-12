@@ -71,11 +71,12 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3, metri
           next._abort = null;
           if (M) {
             try {
-              M.insTask({
-                goalId: next.goalId, nodeId: next.nodeId, type: next.type, title: next.title,
-                status: next.status, attempts: 1, error: next.error || '',
+              const st = {
+                status: next.status, error: next.error || '',
                 costMs: Math.max(0, next.endedAt - next.createdAt)
-              });
+              };
+              if (next._runRow) M.updTask(next._runRow, st);
+              else M.insTask({ goalId: next.goalId, nodeId: next.nodeId, type: next.type, title: next.title, attempts: 1, ...st });
             } catch (e) {}
           }
           pump();
@@ -93,7 +94,12 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3, metri
       progress: 0, createdAt: Date.now(), startedAt: 0, endedAt: 0, error: '', result: null,
       _run: run, _abort: null, _retry: typeof retry === 'function' ? retry : null
     });
-    if (M) { try { M.insTask({ goalId, nodeId, type, title, status: 'queued', attempts: 1 }); } catch (e) {} }
+    if (M) {
+      try {
+        const rid = M.insTask({ goalId, nodeId, type, title, status: 'queued', attempts: 1 });
+        const t = tasks.get(id); if (t) t._runRow = rid;   // 之后所有状态变化都更新这一行
+      } catch (e) {}
+    }
     pump();
     return id;
   }
@@ -164,18 +170,18 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3, metri
       _retry: typeof retry === 'function' ? retry : autoRetry()
     };
     tasks.set(id, t);
-    if (M) { try { M.insTask({ goalId, nodeId, type, title, status: 'running', attempts: 1 }); } catch (e) {} }
+    if (M) { try { if (t._runRow) M.updTask(t._runRow, { status: 'running' }); } catch (e) {} }
     log('[task] 开始 #' + id, type, t.title);
     return {
       id,
       signal: ac.signal,
       progress: (p, msg) => { if (p != null) t.progress = Math.max(0, Math.min(100, Math.round(p))); if (msg) t.message = String(msg).slice(0, 200); },
-      done: (result) => { t.status = 'done'; t.progress = 100; t.message = t.message || '完成'; t.result = result || null; t.endedAt = Date.now(); t._abort = null; if (M) { try { M.insTask({ goalId, nodeId, type, title, status: 'done', costMs: t.endedAt - t.createdAt }); } catch (e) {} } log('[task] 完成 #' + id, type); },
+      done: (result) => { t.status = 'done'; t.progress = 100; t.message = t.message || '完成'; t.result = result || null; t.endedAt = Date.now(); t._abort = null; if (M) { try { if (t._runRow) M.updTask(t._runRow, { status: 'done', costMs: t.endedAt - t.createdAt }); } catch (e) {} } log('[task] 完成 #' + id, type); },
       fail: (e) => {
         if (e && (e.cancelled || e.name === 'AbortError')) { t.status = 'cancelled'; t.message = '已停止'; }
         else { t.status = 'failed'; t.error = (e && e.message) || String(e); t.message = '失败：' + t.error.slice(0, 120); }
         t.endedAt = Date.now(); t._abort = null;
-        if (M) { try { M.insTask({ goalId, nodeId, type, title, status: t.status, error: t.error || '', costMs: t.endedAt - t.createdAt }); } catch (e) {} }
+        if (M) { try { if (t._runRow) M.updTask(t._runRow, { status: t.status, error: t.error || '', costMs: t.endedAt - t.createdAt }); } catch (e) {} }
         log('[task] 结束 #' + id, t.status, t.error || '');
       }
     };

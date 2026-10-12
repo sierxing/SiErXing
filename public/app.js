@@ -1511,6 +1511,9 @@ async function taskPoll() {
       if (['done', 'failed', 'cancelled'].includes(t.status)) known['done_' + t.id] = 1;
     }
     if (finishedNow.length && gid) {
+      /* 任务结果会写回对话（改完了 / 为什么失败），这里把新消息拉出来 ——
+         否则用户看到的永远停在"已把这条修改意见交给 AI"，不知道后来怎么样了。 */
+      if (document.getElementById('aiDrawer')) { try { await aiLoadMsgs(); } catch (e) {} }
       const rr = parseRoute();
       if (rr.view === 'tutorial' && rr.id) {
         // 教程页：只刷当前这份（别家任务不打扰阅读），其它完成任务照常提示
@@ -1857,7 +1860,14 @@ function tutTruncNotice(deadAnchors) {
     gb.disabled = true; gb.textContent = '提交中…';
     fetch('/api/nodes/' + nid + '/tutorial', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ format: (tutFmtOf(Number(rr.id)) || 'html'), note: '重写一份完整的：上次输出被截断了，务必写完所有章节并以 </html> 收尾' })
+      body: JSON.stringify({
+        format: (tutFmtOf(Number(rr.id)) || 'md'),
+        /* 截断提醒要按格式说话：对 HTML 教程是要收尾 </html>，
+           对 Markdown 教程说「以 </html> 收尾」等于给了条它永远做不到的指令。 */
+        note: (tutFmtOf(Number(rr.id)) === 'html')
+          ? '重写一份完整的：上次输出被截断了，务必写完所有章节并以 </html> 收尾'
+          : '重写一份完整的：上次输出被截断了，务必写完所有章节，所有 ``` 代码块（含 ```viz 可视化块）都要闭合收尾'
+      })
     }).then(() => { toast('已提交（进度见左下角任务中心）'); gb.textContent = '已提交'; gb.disabled = true; })
       .catch(err => { toast(err.message); gb.disabled = false; gb.textContent = '🔄 重新生成一份完整的'; });
   });
@@ -1865,7 +1875,7 @@ function tutTruncNotice(deadAnchors) {
 }
 function tutFmtOf(tid) {
   try { const t = ((state.goal && state.goal.tutorials) || []).find(x => Number(x.id) === Number(tid)); return t && t.format; } catch (e) {}
-  return state.tutFmt || 'html';
+  return state.tutFmt || 'md';
 }
 /* 正文滚了多少 / 能滚多远 —— Markdown 用主文档，HTML 用 iframe 内部 */
 function tutScrollRatio() {
@@ -2084,7 +2094,7 @@ document.addEventListener('click', async e => {
   aiToggle(true);
   setTimeout(() => {
     const ta = document.getElementById('adText');
-    if (ta) { ta.placeholder = '说出你想怎么改这份教程，例如：第三章再展开讲讲 / 多给一个完整代码示例 / 练习换成更简单的'; ta.focus(); }
+    if (ta) { aiRenderMode(); ta.focus(); }   // 提示语随 ASK / Agent 变，别再写死"说出你想怎么改" 
   }, 200);
 });
 /* ===== 教程：历史版本（查看/预览/恢复，全局委托） ===== */
@@ -2325,6 +2335,10 @@ function aiEnsureDOM() {
       <button class="adIco" id="adClose" title="隐藏侧边栏">×</button>
     </div>
     <div class="adBar">
+      <div class="adModes" id="adModes" title="ASK：只提问，AI 不会修改任何东西｜Agent：AI 先判断你的意图，需要改时才动手">
+        <button class="adMode" data-aimode="ask" aria-pressed="false">ASK</button>
+        <button class="adMode" data-aimode="agent" aria-pressed="false">Agent</button>
+      </div>
       <select id="adSession" class="adSelect" title="切换历史对话"></select>
       <select id="adModel" class="adSelect adModel" title="选择模型"></select>
     </div>
@@ -2340,6 +2354,10 @@ function aiEnsureDOM() {
   d.querySelector('#adNew').addEventListener('click', aiNewSession);
   d.querySelector('#adRename').addEventListener('click', aiRenameSession);
   d.querySelector('#adDel').addEventListener('click', aiDeleteSession);
+  d.querySelector('#adModes').addEventListener('click', e => {
+    const b = e.target.closest && e.target.closest('[data-aimode]');
+    if (b) aiModeSet(b.getAttribute('data-aimode'));
+  });
   d.querySelector('#adSession').addEventListener('change', e => aiSwitchSession(Number(e.target.value)));
   d.querySelector('#adModel').addEventListener('change', e => aiSetModel(e.target.value));
   aiBindResize();
@@ -2562,6 +2580,7 @@ function aiRenderMsgs() {
 }
 function aiRender() {
   aiEnsureDOM();
+  aiRenderMode();
   const sess = document.getElementById('adSession');
   const modelSel = document.getElementById('adModel');
   if (sess) {
@@ -2592,38 +2611,89 @@ function aiUpdateSendBtn() {
   if (state.aiBusy) { b.classList.add('stop'); b.textContent = '⏹'; b.title = '停止本轮对话（已生成的部分会保留）'; }
   else { b.classList.remove('stop'); b.textContent = '➤'; b.title = '发送（Enter）'; }
 }
+/* AI 助手的工作模式（工具栏上的 ASK / Agent）。
+   ask   = 只提问：**服务端**会禁掉一切 ops，AI 改不了任何东西（前端也再拦一道）
+   agent = 意图识别：AI 先判断你要干什么，需要改路线图 / 改教程时才动手
+   存本机 localStorage —— 这是「我这次想怎么用」，跟目标无关，不需要多端同步。
+   默认 ASK：出错的方向是"没帮上忙"，而不是"把你的教程改坏了"。 */
+function aiModeGet() {
+  try { return localStorage.getItem('sierxing-ai-mode') === 'agent' ? 'agent' : 'ask'; } catch (e) { return 'ask'; }
+}
+function aiModeSet(m) {
+  const v = m === 'agent' ? 'agent' : 'ask';
+  state.aiMode = v;
+  try { localStorage.setItem('sierxing-ai-mode', v); } catch (e) {}
+  aiRenderMode();
+  toast(v === 'agent'
+    ? '已切到 Agent：AI 会先判断你的意图，需要改路线图 / 改教程时才动手'
+    : '已切到 ASK：只回答、不改动，AI 不会修改任何东西');
+}
+/* 模式相关的界面：按钮选中态 + 输入框提示语（教程页与目标页的提示语不同） */
+function aiRenderMode() {
+  if (state.aiMode !== 'ask' && state.aiMode !== 'agent') state.aiMode = aiModeGet();
+  const m = state.aiMode === 'agent' ? 'agent' : 'ask';
+  state.aiMode = m;
+  const box = document.getElementById('adModes');
+  if (box) {
+    for (const b of box.querySelectorAll('[data-aimode]')) {
+      const on = b.getAttribute('data-aimode') === m;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    }
+  }
+  const ta = document.getElementById('adText');
+  if (!ta) return;
+  let onTut = false;
+  try { onTut = parseRoute().view === 'tutorial'; } catch (e) {}
+  ta.placeholder = m === 'ask'
+    ? (onTut ? 'ASK 模式 · 问这份教程的任何问题（不会修改它）。要改就切到 Agent。'
+             : 'ASK 模式 · 问规划 / 资料 / 进度，AI 只回答、不改动。要改就切到 Agent。')
+    : (onTut ? 'Agent 模式 · 说你想怎么改这份教程（也可以直接提问，它会先判断），例如：1.2 ReAct 那节再展开讲讲'
+             : 'Agent 模式 · 可以让它：改路线图 / 把这段资料存进资料库 / 提炼全部资料 / 再收集些资料 / 加一条约束 / 改目标现状与时间');
+}
+/* 把一条修改意见交给教程修改任务。两条来源共用：
+   ① Agent 模式下 AI 判断出「用户要改教程」→ ops 里的 tutorial_edit
+   ② 之后别的入口要重跑 */
+async function submitTutorialEdit(tid, feedback) {
+  const id = Number(tid || 0), fb = String(feedback || '').trim();
+  if (!id || !fb) { toast('修改意见为空，没有提交'); return; }
+  try {
+    await api('/api/tutorials/' + id + '/edit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      /* quiet：这句话与 AI 的回复已经记在对话里了，让服务端别再插一份
+         「【教程修改 · …】」和那条固定回执，否则对话变成一叠重复。 */
+      body: JSON.stringify({ feedback: fb, session_id: state.aiSessionId || 0, quiet: true })
+    });
+    await aiLoadMsgs();          // 把服务端刚落库的"已受理"回执读出来
+    toast('🤖 已提交教程修改任务（完成后会自动刷新，结果也会写回对话）');
+    taskPoll();
+  } catch (e) { toast('提交失败：' + e.message); }
+}
 async function aiSend() {
   if (state.aiBusy) return;
   // 教程页：消息作为修改意见，交给后台任务重写教程（记录记入当前会话，刷新也不丢；完成后自动刷新渲染）
+  /* ⚠️ 这里以前是「只要在教程页，任何消息都当修改意见发出去」—— 用户只是想问一句，
+     教程却被重写了。现在两种模式都走**同一个对话接口**，靠 mode 分流：
+       ASK   → 服务端丢掉一切 ops，纯回答
+       Agent → AI 先判断意图，真要改教程时才回 tutorial_edit，前端再开后台任务
+     教程页仍要把会话绑到教程所属目标，所以先做这一步。 */
   const rrTut = parseRoute();
-  if (rrTut.view === 'tutorial') {
-    const taT = document.getElementById('adText');
-    const msgT = (taT && taT.value || '').trim();
-    if (!msgT) return;
-    if (!(await ensureAIConfigured())) return;
-    const gid = state.tutGoalId || (state.goal && state.goal.id);
-    if (!gid) { toast('教程对应的目标不存在'); return; }
-    if (state.aiGoalId !== gid) { state.aiGoalId = gid; state.aiSessionId = 0; state.aiMsgs = []; await aiLoadModels(); await aiLoadSessions(gid); }
-    if (!state.aiSessionId) { toast('对话初始化失败，请刷新后重试'); return; }
-    taT.value = ''; state.aiDraft = '';
-    try {
-      const rt = await api('/api/tutorials/' + rrTut.id + '/edit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ feedback: msgT, session_id: state.aiSessionId }) });
-      if (rt.sessionId) state.aiSessionId = rt.sessionId;
-      await aiLoadMsgs();   // 把服务端刚落库的用户意见 + 回执读出来
-      toast('🤖 已提交教程修改任务（完成后自动刷新）');
-    } catch (e) {
-      state.aiMsgs = state.aiMsgs || [];
-      state.aiMsgs.push({ id: 0, role: 'assistant', content: '提交失败：' + e.message, ops: '[]', created_at: new Date().toISOString() });
-      aiRender();
-    }
-    return;
+  const onTut = rrTut.view === 'tutorial';
+  if (onTut) {
+    const gidT = state.tutGoalId || (state.goal && state.goal.id);
+    if (!gidT) { toast('教程对应的目标不存在'); return; }
+    if (state.aiGoalId !== gidT) { state.aiGoalId = gidT; state.aiSessionId = 0; state.aiMsgs = []; await aiLoadModels(); await aiLoadSessions(gidT); }
   }
   if (!(await ensureAIConfigured())) return;
   const ta = document.getElementById('adText');
-  const msg = (ta.value || '').trim();
+  const msg = (ta && ta.value || '').trim();
   if (!msg) return;
-  if (!state.goal) return toast('请先进入一个目标');
-  if (!state.aiSessionId) await aiNewSession();
+  const gid = state.aiGoalId || (state.goal && state.goal.id) || state.tutGoalId || 0;
+  if (!gid) return toast('请先进入一个目标');
+  if (!state.aiSessionId) {
+    if (onTut) { toast('对话初始化失败，请刷新后重试'); return; }
+    await aiNewSession();
+  }
   ta.value = '';
   state.aiDraft = '';
   ta.style.height = 'auto';
@@ -2637,7 +2707,7 @@ async function aiSend() {
   if (state.aiTick) clearInterval(state.aiTick);
   state.aiTick = setInterval(() => { if (state.aiStream) chatRenderStream(); }, 1000);
   try {
-    const resp = await fetch('/api/chat-sessions/' + state.aiSessionId + '/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: msg }), signal: state.aiAbort.signal });
+    const resp = await fetch('/api/chat-sessions/' + state.aiSessionId + '/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: msg, mode: state.aiMode === 'ask' ? 'ask' : 'agent', tutorial_id: onTut ? Number(rrTut.id) : 0 }), signal: state.aiAbort.signal });
     if (!resp.ok || !resp.body) throw new Error('无法连接对话服务');
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
@@ -2674,6 +2744,7 @@ async function aiSend() {
               setTimeout(() => {
                 if (st.action === 'digest') startDigest(state.goal.id);
                 else if (st.action === 'collect') startCollect(state.goal.id);
+                else if (st.action === 'tutorial_edit') submitTutorialEdit(st.tutorial_id, st.feedback);
               }, 300);
             }
           }
@@ -2829,8 +2900,8 @@ function showTutorialDialog(nodeId) {
   div.innerHTML = `
     <div class="tdHead"><span>📘</span><span>生成学习教程：${esc(String(n.title).slice(0, 26))}</span><button class="btn tiny" id="tdX">×</button></div>
     <div class="tdBody">
-      <p class="hint" style="margin:2px 0 10px;">教程以「真正掌握知识点」为目标：讲原理 → 分步实践（含自检与排错）→ 练习 → 掌握自测清单。生成约需 1-3 分钟。</p>
-      <div class="field"><textarea id="tdNote" placeholder="补充要求（可选）：例如 我完全零基础请讲慢一点 / 多给可复制的代码 / 侧重面试常问点…"></textarea></div>
+      <p class="hint" style="margin:2px 0 10px;">教程以「真正掌握知识点」为目标：讲原理 → 分步实践（含自检与排错）→ 练习 → 掌握自测清单。<b>文字讲解用 Markdown，纯文字讲不清的地方（数据结构、流程分步、协议时序、前后对比等）AI 会自己嵌一段能点能动的演示页面。</b>生成约需 1-3 分钟。</p>
+      <div class="field"><textarea id="tdNote" placeholder="补充要求（可选）：例如 我完全零基础请讲慢一点 / 多给可复制的代码 / 侧重面试常问点 / 流程部分要能一步步点着看…"></textarea></div>
       <div class="tdFolders muted" id="tdFolders">正在看本节点有没有挂文件夹（不勾则 AI 自动挑着读）…</div>
       <details class="tdCode" id="tdCodeBox">
         <summary>📂 结合项目源码讲解（可选，只读；data/.env/.git 等不会列出）</summary>
@@ -2844,8 +2915,8 @@ function showTutorialDialog(nodeId) {
       </details>
     </div>
     <div class="tdFoot">
-      <button class="btn primary" id="tdHtml">生成 HTML 图文教程</button>
-      <button class="btn" id="tdMd">生成 Markdown 教程</button>
+      <button class="btn primary" id="tdGo">生成图文教程</button>
+      <div class="muted tdFmtHint">正文用 Markdown 写，需要可视化演示的地方 AI 会自己嵌一段活的 HTML —— 按内容自行判断，不用你选。</div>
     </div>`;
   document.body.appendChild(div);
   const close = () => div.remove();
@@ -2919,8 +2990,11 @@ function showTutorialDialog(nodeId) {
   });
   const codeSearch = div.querySelector('#tdCodeSearch');
   if (codeSearch) codeSearch.addEventListener('input', () => { paintCodeList(state.tdCodeFiles || []); paintFolderFiles(state.tdFolderFiles || []); });
-  div.querySelector('#tdHtml').addEventListener('click', () => { const v = note(), cf = codeFiles(); close(); startTutorial(nodeId, 'html', v, cf, withFolders()); });
-  div.querySelector('#tdMd').addEventListener('click', () => { const v = note(), cf = codeFiles(); close(); startTutorial(nodeId, 'md', v, cf, withFolders()); });
+  /* 只剩一个入口：以前分开「生成 HTML」「生成 Markdown」两个按钮，
+     但 Markdown 教程现在能自己嵌可视化块（```viz → 沙箱里跑活的 HTML），
+     两种诉求（文字讲透 / 生动演示）一份文档就能同时满足，
+     格式选哪边交给 AI 按内容判断 —— 再让用户手选反而容易选错一边、牺牲另一边。 */
+  div.querySelector('#tdGo').addEventListener('click', () => { const v = note(), cf = codeFiles(); close(); startTutorial(nodeId, 'md', v, cf, withFolders()); });
   div.querySelector('#tdX').addEventListener('click', close);
   /* 本节点（含祖先继承）挂的文件夹：默认一起带上讲，对 RAGFlow 这种源码学习节点最有用 */
   const withFolders = () => {
@@ -2943,7 +3017,7 @@ async function startTutorial(nodeId, format, note, codeFiles, withFolders) {
   if (!goalCompOn(goalCtx(), 'tutorial')) { toast('「学习教程」组件在本目标已关闭：目标页 🧩 可单独开启'); return; }
   if (state.tutoring || state.planning || state.collecting || state.expanding) return;
   state.tutoring = true;
-  state.tutStatus = '正在撰写教程（' + (format === 'html' ? 'HTML' : 'Markdown') + '）…';
+  state.tutStatus = '正在撰写图文教程（文字用 Markdown，需要演示的地方 AI 会自己嵌活的 HTML）…';
   rerenderCurrent();
   try {
     const resp = await fetch('/api/nodes/' + nodeId + '/tutorial', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ format, note: note || '', codeFiles: codeFiles || [], withFolders: withFolders !== false }) });
@@ -3105,8 +3179,18 @@ function mdToHTML(text, opts) {
          拿到的是独立源，既能画图/动画，又碰不到应用本身。
          高度靠块内脚本 postMessage 上报，外层监听后设置（见 mdVizResize）。 */
       if (vizOn && /^(?:viz|demo|htmlviz)$/i.test(fence[2] || '')) {
+        const vcode = buf.join('\n');
+        /* ⚠️ 模型偶尔会在 ```viz 里塞**字符画流程图**而不是 HTML（线上教程 127 就是：
+           用 -> v ^ 画了三条执行轨迹）。塞进 iframe 会被当纯文本渲染，
+           连续空格被吞掉、换行塌掉 —— 用户看到的就是一团挤在一起的乱码（正是这次报的）。
+           所以先验一下：没有真 HTML 标签就退回 <pre>，至少等宽字体 + 保留缩进对齐，
+           字符画还能看；真要图示应该由模型按提示词改写成 HTML/SVG。 */
+        if (!/<[a-zA-Z][\w-]*[\s\S]*>/.test(vcode)) {
+          html += '<pre class="mdVizText" data-lang="viz"><code>' + mdEscape(vcode) + '</code></pre>';
+          continue;
+        }
         html += '<div class="mdViz"><iframe class="mdVizFrame" sandbox="allow-scripts" loading="lazy" srcdoc="'
-          + mdEscapeAttr(vizSrcdoc(buf.join('\n'))) + '"></iframe></div>';
+          + mdEscapeAttr(vizSrcdoc(vcode)) + '"></iframe></div>';
         continue;
       }
       html += '<pre' + (fence[2] ? ' data-lang="' + mdEscape(fence[2]) + '"' : '') + '><code>' + mdEscape(buf.join('\n')) + '</code></pre>';

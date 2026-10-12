@@ -1,14 +1,14 @@
 {
-  "version": "1.10.49",
-  "buildVer": "7832b81d808d",
-  "payload": "release/payload-1.10.49.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.49.sxar?ref=main",
+  "version": "1.10.52",
+  "buildVer": "9091c2de3352",
+  "payload": "release/payload-1.10.52.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.52.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "939c151ca82649b10c7d83097a1d5f48a324c3ceb97e75bff6fc544ebe23f274",
-  "size": 777768,
-  "unpackedSize": 2793202,
-  "publishedAt": "2026-10-12T05:57:51.587Z",
-  "notes": "依据说明改为 AI 分析（说清这份资料凭什么支撑这个节点）；「还有 N 条」改成弹窗用同一套卡片列全部依据",
+  "sha256": "f298e55c86788ae1dcb65ea22feee947fc13ba7012bf4fab6c0b0738882fbecb",
+  "size": 790208,
+  "unpackedSize": 2823072,
+  "publishedAt": "2026-10-12T10:23:13.583Z",
+  "notes": "AI 助手加 ASK / Agent 模式开关：ASK 只提问、不许改；Agent 才做意图识别调工具。教程页不再把任何消息都当成「改教程」。改完/失败/停止都会写回对话。修可视化守卫误报与 task_runs 重复计数",
   "exeRequired": false
 }

@@ -1954,10 +1954,13 @@ body{padding-left:78px;}
 .tutDialog{max-height:calc(100vh - 80px); display:flex; flex-direction:column; top:40px; transform:translateX(-50%);}
 .tdBody{flex:1 1 auto; min-height:0; overflow-y:auto;}
 .tdFoot{
-  flex:none; display:flex; gap:10px; padding:12px 16px;
+  flex:none; display:flex; gap:10px; padding:12px 16px; flex-wrap:wrap;
   border-top:1px solid var(--border); background:var(--bg);
   border-radius:0 0 var(--r-lg) var(--r-lg);
 }
+/* 教程生成只剩一个按钮了，下面这行说明"格式由 AI 按内容自己判断"，
+   免得用户以为点下去只能得到纯文字教程。 */
+.tdFmtHint{flex-basis:100%; font-size:12px; line-height:1.6; margin:-2px 0 0;}
 /* 挂载文件夹的文件分组（排在本程序源码清单前面） */
 .tdFolderGrp{margin-bottom:10px;}
 .tdFolderGrp:last-child{margin-bottom:0;}
@@ -2494,5 +2497,29 @@ input,textarea{caret-color:var(--accent);}
 /* 沙箱 iframe 不继承外层样式，所以这里只给外壳：白底、描边、圆角。
    块内排版由 AI 自己写的 <style> 负责（提示词里已要求自包含）。 */
 .mdViz{margin:16px 0;}
+/* ```viz 里写的其实是字符画（模型偶尔犯）时的兜底：等宽 + 保留缩进，
+   至少对齐不塌，比塞进 iframe 变成一堆挤在一起的字强。 */
+.mdVizText{overflow-x:auto;}
 .mdVizFrame{display:block;width:100%;height:340px;border:1px solid var(--border);border-radius:var(--r);background:#fff;box-shadow:var(--shadow-sm);}
 :root[data-theme="dark"] .mdVizFrame{background:#fff;}
+
+/* ---- AI 助手工具栏：模式开关（ASK / Agent）----
+   放在工具栏第一行、独占整行：会话与模型两个下拉框已经占满 440px 宽的抽屉，
+   再挤一个控件进去，会话标题就只剩几十像素了。 */
+.adBar{flex-wrap:wrap;}
+.adModes{
+  flex:1 0 100%; display:flex; border:1px solid var(--border); border-radius:9px;
+  overflow:hidden; background:var(--card);
+}
+.adMode{
+  flex:1; border:0; background:transparent; color:var(--muted); cursor:pointer;
+  font-family:inherit; font-size:12px; font-weight:600; letter-spacing:.02em;
+  padding:6px 8px; transition:background .15s, color .15s;
+}
+.adMode + .adMode{border-left:1px solid var(--border);}
+.adMode:hover{background:var(--accent-soft); color:var(--accent);}
+.adMode.on{
+  background:linear-gradient(135deg, var(--accent), var(--accent-2));
+  color:#fff; box-shadow:0 2px 8px color-mix(in srgb, var(--accent) 26%, transparent);
+}
+.adMode:focus-visible{outline:2px solid var(--accent); outline-offset:-2px;}

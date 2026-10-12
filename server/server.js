@@ -2301,6 +2301,54 @@ async function buildExpandPrompt(goal, node, sources, folderCode) {
   return lines.join('\n');
 }
 /* 按用户意见修改已有教程 */
+/* ===== Markdown 教程的「可视化块」规范 =====
+   生成（buildTutorialPrompt）与修改（buildTutorialEditPrompt）共用同一份。
+   两处各写一遍必然走样：曾经修改提示词只说「别弄坏已有的 viz」，既没说「可以新增」
+   也没给画图规范，于是 AI 改教程时只会删不会加。 */
+function vizSpecLines() {
+  const lines = [];
+  lines.push('');
+  lines.push('【可视化块：图文结合（重要）】纯靠文字讲不清的地方，用可视化块嵌一个**能跑起来的小页面**；');
+  lines.push('其余讲解仍然全部用 Markdown —— 文字讲透、该动图的地方动图，两者别互相替代。');
+  lines.push('写法（三个反引号 + viz，单独一行，里面放完整的 HTML）：');
+  lines.push('```viz');
+  lines.push('<!DOCTYPE html><html><head><meta charset="utf-8"><style>…</style></head>');
+  lines.push('<body>…<script>…<\/script></body></html>');
+  lines.push('```');
+  lines.push('什么时候该用：数据结构与内存布局、算法/流程的分步执行、协议交互时序、前后对比、');
+  lines.push('参数变化带来的影响、坐标系/几何关系、有状态迁移的过程 —— 看图比看字快的地方。');
+  lines.push('');
+  lines.push('【凡是需要"看/点/动"的地方，都要做成 HTML 可视化，而不是用文字描述】');
+  lines.push('判断口径：**这件事如果只能读，不能点、不能换参数、不能一步步看下去，就算讲得再细也不合格。**');
+  lines.push('以下情形必须做成可视化块，不许只写一段话概括：');
+  lines.push('· 流程 / 调用链 / 状态机 / 决策分支（如"什么条件走哪条路"）→ 画成节点和箭头，');
+  lines.push('  分支条件标在箭头上；关键路径可高亮，点节点看它做什么；');
+  lines.push('· 时序与交互（谁调谁、先先后后、传什么）→ 画成泳道时序或步骤时间轴；');
+  lines.push('· 算法执行过程 → 给「下一步 / 上一步 / 重置 / 换一组数据」按钮，让人自己跑一遍看每步状态；');
+  lines.push('· 数据结构 / 内存布局 / 索引结构 → 画出真实结构和指针/下标关系，节点可点开看字段含义；');
+  lines.push('· 并发、异步、事件循环、连接池这类"时间上怎么交错"的 → 画时间轴或甘特式条带，能暂停/单步；');
+  lines.push('· 同一对象的多个状态 / 多方案对比 → 给切换按钮或滑块，让参数变化的后果看得见；');
+  lines.push('· 配置项、命令行参数、环境变量的作用范围 → 做成能填能点的对照面板。');
+  lines.push('');
+  lines.push('【禁止用字符画代替图示】绝对不要用 -> v ^ | ─ │ ┌ ┐ └ ┘ ▼ 这类符号在 ```viz 里画流程图，');
+  lines.push('也不要画 ASCII 表格当布局。这类字符画在网页里会被字体和缩进弄乱、箭头对不齐，');
+  lines.push('用户根本读不出流程 —— 这是不合格输出。图示一律用 HTML 元素 + CSS 画：');
+  lines.push('· 流程图：div 盒子（圆角、边框、背景色做区分）+ CSS 箭头或 SVG <line>/<path> + <marker> 画箭头；');
+  lines.push('· 真实连线优先用内联 <svg>（viewBox + preserveAspectRatio），缩放不糊、箭头方向可控；');
+  lines.push('· 布局用 flex/grid 定位，别靠空格和换行对齐。');
+  lines.push('');
+  lines.push('要求：');
+  lines.push('· 每个块必须**自包含**：样式和脚本全写在块里，禁止引用任何外部 CSS/JS/图片/字体');
+  lines.push('· **块里第一行必须是 <!DOCTYPE html>**；如果你打算在 ```viz 里写的东西不是 HTML，那就写错了 ——');
+  lines.push('  改成真正的 HTML 页面，或者退回普通 Markdown 文字，不要写字符画');
+  lines.push('· 要能交互就加按钮（如「下一步」「重置」「切换参数」「播放」），让用户自己动手看变化');
+  lines.push('· 块的高度会按内容自动适配，不用自己算高度；宽度按容器宽（可用 width:100%）');
+  lines.push('· 沙箱限制（同 HTML 教程的约法三章）：只许操作本块 DOM；禁止 fetch/XHR、localStorage、');
+  lines.push('  Cookie、跳转、弹窗、外部请求。违反即不合格');
+  lines.push('· 节制使用：只在确实"一图胜千言"处放；不要为了炫技堆可视化，也不要给纯概念硬造动画');
+  lines.push('· 视觉上做干净：留白、对齐、配色克制，别用满屏艳色；深浅色都要能看清');
+  return lines;
+}
 function buildTutorialEditPrompt(goal, node, tut, feedback, format, codeBlock) {
   const lines = [];
   lines.push('你是耐心、严谨的技术导师。用户对**已生成的教程**提出了修改意见，请按要求改好它。');
@@ -2315,14 +2363,47 @@ function buildTutorialEditPrompt(goal, node, tut, feedback, format, codeBlock) {
   lines.push('');
   lines.push('【修改要求】');
   lines.push('1. 在**保留原有优质内容**的基础上，按用户意见修改（增删改均可）；不要无故删掉原有章节；');
+  lines.push('   ⚠️ 用户往往只针对某一段提意见（"这节太抽象"），**绝不能因此把整本教程重写**：');
+  lines.push('   原有的每一个章节（分步实践、验收标准、面试追问、速查卡、延伸阅读、小结…）都要留着，');
+  lines.push('   标题可以微调，但不许整节整节地消失。要改哪就只改哪。');
   lines.push('2. 保持原有格式与结构风格，篇幅可增可减，但要保证「能照着学会」；');
   lines.push('3. 直接输出修改后的完整教程正文（' + (format === 'md' ? 'Markdown' : 'HTML') + '），不要任何解释或前后缀。');
   lines.push('4. 范围顺手清理：如果正文里混入了与【教程主题】无关的其它章节的成段内容，且用户意见没有要求保留，可顺手删减；不要新增超出主题的新章节。');
+  if (format === 'md') {
+    lines.push('5. **可视化块要原样留住**：正文里的 ```viz … ``` 块是能跑起来的演示页面，除用户明确要求外不要删除、');
+    lines.push('不要改成普通代码块、不要只留片段、更不要把里面的 HTML 换成一段文字描述；');
+    lines.push('更不能改成 -> v ^ | ─ │ ┌ ┐ └ ┘ 这类字符画（网页里会因字体和缩进错位、箭头对不齐而读不出来）。');
+    lines.push('6. **主动判断哪里该补可视化（不是只听用户提）**：用户往往只会说"这里没讲清"或"太抽象了"，');
+    lines.push('不会说"你要插个 HTML"。所以你要**自己通读全文，逐段判断**：');
+    lines.push('· 凡是涉及流程、调用链、状态流转、分支判断、时序先后、数据结构、并发交错的地方，');
+    lines.push('  如果现在只有文字描述（哪怕写得很长），就在对应位置**插入一个新的 ```viz 可视化块**；');
+    lines.push('· 插入位置要对：放在它所解释的那段文字**紧后面**，不要堆到章节末尾或全挤在一起；');
+    lines.push('· 原来某个 ```viz 块覆盖得不全（比如只画了主流程没画异常分支），可以在它后面补一个，');
+    lines.push('  也可以在同一个块内补全 —— 但**已有的块优先在原位改好，而不是删了重写**；');
+    lines.push('· 已经在块里讲清楚了的，不要重复再造一个讲同样的事。');
+    lines.push('');
+    lines.push('（以下是可视化块的完整写法与规范，新增的块必须照着做）');
+    for (const L of vizSpecLines()) lines.push(L);
+  }
   lines.push('');
   lines.push('【原教程正文】');
-  lines.push(String(tut.content || '').slice(0, 30000));
+  lines.push(fullTutorialForEdit(tut.content));
   if (codeBlock) { lines.push(''); lines.push(codeBlock); }
   return lines.join('\n');
+}
+/* 改教程时把原文喂给 AI 的预算。
+   ⚠️ 原来是硬 slice(0, 30000)，而模型必须输出**改好的全文** —— 于是超 30K 的教程
+   （线上最长 71K，5 份超限）AI 只看得到开头，尾部连同里面的可视化块会被静默删掉，
+   而长度校验只比总长、看不出少了一整节。
+   这里改成：额度内**整篇照给**；额度外宁可**直接报错**，也不偷偷截断 ——
+   悄悄删内容比明确失败恶劣得多。90K 字符约 6~9 万 token，覆盖现有全部教程。 */
+const TUT_EDIT_MAX = 90000;
+function fullTutorialForEdit(content) {
+  const s = String(content || '');
+  if (s.length <= TUT_EDIT_MAX) return s;
+  throw new Error('这份教程有 ' + s.length + ' 字，超出一次交给 AI 修改的上限（' + TUT_EDIT_MAX + ' 字），已**没有改动**。'
+    + '请把修改意见拆小、分多次提，或先删掉教程里用不上的章节再改 —— '
+    + '绝不能只把前半截发给 AI 让它"改好"，那会把后半截整段删掉。');
 }
 function buildTutorialPrompt(goal, node, format, note, codeBlock) {
   const levelName = { 0: '阶段', 1: '小目标', 2: '任务', 3: '子任务', 4: '步骤', 5: '步骤' }[node.level] || '任务';
@@ -2372,6 +2453,7 @@ function buildTutorialPrompt(goal, node, format, note, codeBlock) {
     lines.push('【页内脚本约法三章】只许操作本页 DOM（翻页、折叠、动画、高亮）；禁止 fetch/XHR、localStorage、Cookie、top 跳转、新窗口弹窗。违反即不合格。');
   } else {
     lines.push('【输出格式】只输出 Markdown 正文（# 一级标题开始）。不要用 ``` 包裹整篇内容，不要输出任何额外说明文字。代码块、表格、清单、引用都要用标准 Markdown 语法。');
+    for (const L of vizSpecLines()) lines.push(L);
   }
   return lines.join('\n');
 }
@@ -2990,7 +3072,34 @@ function roadmapOutline(goalId) {
   if (lines.length > 600) lines.push('…（节点过多，仅显示前 600 个）');
   return lines.join('\n');
 }
-async function buildChatPrompt(goal, message, sessionId) {
+/* 从教程正文里挑出「用户这次点名的那一节」。
+   教程动辄五六万字，整篇塞进提示词不现实；用户点标题（如"1.2 ReAct"）时就带上那一节，
+   没点名就只给目录 —— 不硬塞，免得白白烧掉几万 token。 */
+function pickTutorialSection(content, message) {
+  const c = String(content || ''), msg = String(message || '');
+  const hrs = [...c.matchAll(/^#{2,3}\s+(.+)$/gm)];
+  if (!hrs.length) return '';
+  let best = null;
+  for (let i = 0; i < hrs.length; i++) {
+    const title = hrs[i][1].trim();
+    const key = title.replace(/^\d+(\.\d+)?[\.、\s]*/, '').slice(0, 12);
+    if (key && key.length >= 2 && msg.includes(key)) {
+      if (!best || title.length > best.title.length) best = { i, title };
+    }
+  }
+  if (!best) return '';
+  const start = hrs[best.i].index;
+  const end = hrs[best.i + 1] ? hrs[best.i + 1].index : c.length;
+  return '《' + best.title + '》\n' + c.slice(start, end).slice(0, 4000);
+}
+async function buildChatPrompt(goal, message, sessionId, opts) {
+  const o = opts || {};
+  /* ASK 模式：只回答、不许改。这里是**服务端**的硬边界 —— 前端也会拦一道，
+     但真正决定"能不能改"的是这里，因为 ops 是在这个函数里被允许或禁止的。 */
+  const askOnly = o.mode === 'ask';
+  const tutId = Number((o.tutorial && o.tutorial.id) || 0);
+  const tutRow = tutId ? db.prepare('SELECT id,title,node_id,content,goal_id FROM tutorials WHERE id = ?').get(tutId) : null;
+  const tut = (tutRow && Number(tutRow.goal_id) === Number(goal.id)) ? tutRow : null;
   const lines = [];
     lines.push('你是用户的「目标助理」：不只可以改路线图，还能操作这个目标下的所有可操作信息——管理信息源（添加/删除）、触发信息提炼与信息源收集、修改目标信息（现状/时间/期限/参考资料）、添加规划约束。');
   lines.push('用户让你做这些事时，直接通过下面的 ops 执行，不要只说"你可以去某某页面点一下"。');
@@ -3017,10 +3126,27 @@ async function buildChatPrompt(goal, message, sessionId) {
   lines.push('');
   lines.push('【当前路线图（方括号内是节点 id，修改时只能引用这些 id）】');
   lines.push(roadmapOutline(goal.id) || '（暂无节点）');
+  if (tut) {
+    const heads = (String(tut.content || '').match(/^#{2,3}\s+(.+)$/gm) || []).map(x => x.replace(/^#+\s+/, '').trim());
+    lines.push('');
+    lines.push('【用户正在看的教程】#' + tut.id + ' 「' + String(tut.title || '') + '」');
+    if (heads.length) lines.push('它的目录：' + heads.join(' / '));
+    const sec = pickTutorialSection(String(tut.content || ''), message);
+    if (sec) lines.push('【你唯一能看到的一节正文（用户这次点到了它）】\n' + sec);
+    else lines.push('（教程正文很长，这里只给了目录。要回答某节的具体内容，请用户在消息里点明节标题，例如"1.2 ReAct：边想边做 这节讲的是什么"。）');
+  }
   lines.push('');
   lines.push('【用户的新消息】' + message);
   lines.push('');
   lines.push('【你的任务】');
+  if (askOnly) {
+    lines.push('0. **当前是「ASK 提问模式」**：你只能回答、解释、给建议。不要使用任何工具。');
+    lines.push('1. **绝对不要修改任何东西**：不要输出 ops 代码块、不要输出任何 JSON 操作数组、也不要写"我已经帮你改好了"。这个模式下你没有修改权限，也绝对不要把用户的要求转成操作。');
+    lines.push('2. 如果用户其实是要改东西（改路线图 / 改教程 / 存资料 / 加约束 / 改目标信息），就直说：把 AI 助手顶部的模式切成「Agent」，再说一次我就去做。不要假装已经做了。');
+    lines.push('3. 回答要具体、可执行；引用资料时写明来源标题。默认 400 字以内，除非用户要求详细说明。');
+    lines.push('4. 不要编造事实。看不到的信息就说看不到，并告诉用户怎么让你看到。');
+    return lines.join('\n');
+  }
   lines.push('0. 不要使用任何工具（不要读取文件、不要执行命令、不要联网）；规划、资料库与代码库的全部信息都在本提示里，直接基于它作答。');
   lines.push('   用户问「资料库里有没有 / 能不能看到 XX（如某个代码库）」时，依据上面【资料库清单】【资料提炼汇总】【已导入的代码库】如实回答，不要说资料库是空的：每个代码库都存了完整文件快照（脱敏），并已按本次问题附上最相关文件的内容。要看别的文件时，请用户在消息里直接写文件路径或关键词（如「看 server/ai.js」），下一轮就会带上；你不能写文件、不能执行命令。');
     lines.push('1. 判断用户意图：只是咨询/提问 → 直接回答，不要修改；要求修改路线图 / 管理资料 / 改目标信息 → 执行对应 ops。');
@@ -3045,6 +3171,9 @@ async function buildChatPrompt(goal, message, sessionId) {
   lines.push('   - {"op":"update_goal","fields":{"title":"","profile":"现状","weekly_hours":"每周可投入","deadline":"期望期限","materials":"参考资料"}}（只填要改的字段）');
   lines.push('   - {"op":"digest"}（用户要求「提炼资料 / 汇总资料 / 通读全部资料」时使用：会启动信息提炼，把全部资料整理成多篇主题汇总，规划时优先依据）');
   lines.push('   - {"op":"collect"}（用户要求「再收集一些资料 / 找找岗位信息」时使用：会启动信息源检索）');
+  if (tut) {
+    lines.push('   - {"op":"tutorial_edit","feedback":"修改意见"}（**只有**用户要求改上面那份「他正在看的教程」时才用。feedback 写清改哪里、改成什么样，可以把用户原话整理得更明确。它会开一个后台任务重写整篇教程、耗时几分钟，所以用户只是在问问题时**不要**用它。想在正文里说明你已提交，就写"已把这条修改交给教程任务"。）');
+  }
   lines.push('4. 修改要精准：用户说改哪个就改哪个，不要顺手大改；单次最多 20 个操作。');
   lines.push('5. 删除要谨慎：只有用户明确要求才删除；阶段（最外层节点）不要删除，除非用户明确要求。');
   lines.push('6. 新增任务必须带 detail（怎么做，60-120 字）与 hours；依据已确认的问答与用户现状。');
@@ -3069,7 +3198,8 @@ function placeSibling(goalId, parentId, nodeId, op) {
   sibs.forEach((x, i) => stmt.run(i, x.id));
   return idx;
 }
-function applyChatOps(goalId, ops) {
+function applyChatOps(goalId, ops, opts) {
+  const chatOpts = opts || {};
   const applied = [], errors = [];
   const nodeOf = id => db.prepare('SELECT * FROM nodes WHERE id = ? AND goal_id = ?').get(Number(id), goalId);
   for (const op of (Array.isArray(ops) ? ops : []).slice(0, 25)) {
@@ -3164,6 +3294,15 @@ function applyChatOps(goalId, ops) {
           applied.push({ op: 'start', action: 'digest', title: '开始信息提炼（通读全部资料 → 多篇主题汇总）' });
       } else if (kind === 'collect' || kind === 'collect_sources') {
           applied.push({ op: 'start', action: 'collect', title: '开始收集信息源' });
+      } else if (kind === 'tutorial_edit') {
+          /* 教程 id 只认**请求里带的那个**（用户当前正在看的那份），不信模型自己报的 id ——
+             模型编一个 id 出来就会改错教程。 */
+          const tid = Number((chatOpts.tutorial && chatOpts.tutorial.id) || 0);
+          const fb = String(op.feedback || op.text || '').trim().slice(0, 1500);
+          const tr = tid ? db.prepare('SELECT id,title,goal_id FROM tutorials WHERE id = ?').get(tid) : null;
+          if (!tr || Number(tr.goal_id) !== Number(goalId)) { errors.push('要改的教程不在当前目标里（请打开那份教程再说一次）'); continue; }
+          if (!fb) { errors.push('没说清要改什么'); continue; }
+          applied.push({ op: 'start', action: 'tutorial_edit', tutorial_id: tr.id, feedback: fb, title: '修改教程：' + String(tr.title).slice(0, 30) });
         } else if (kind === 'status') {
         const n = nodeOf(op.id);
         if (!n) { errors.push('节点不存在：' + op.id); continue; }
@@ -3244,7 +3383,7 @@ function extractReplyField(s) {
 function parseChatOutput(text) {
   let s = String(text || '').trim();
   let ops = [];
-  const valid = o => o && typeof o === 'object' && ['add', 'update', 'delete', 'move', 'status', 'constraint', 'add_source', 'delete_source', 'update_goal', 'goal', 'source', 'digest', 'digest_sources', 'extract', 'collect', 'collect_sources'].includes(String(o.op || o.type || '').toLowerCase());
+  const valid = o => o && typeof o === 'object' && ['add', 'update', 'delete', 'move', 'status', 'constraint', 'add_source', 'delete_source', 'update_goal', 'goal', 'source', 'digest', 'digest_sources', 'extract', 'collect', 'collect_sources', 'tutorial_edit'].includes(String(o.op || o.type || '').toLowerCase());
   const takeOps = arr => (Array.isArray(arr) ? arr.filter(valid).slice(0, 25) : []);
   // 1) ```ops 代码块（推荐格式）
   const m = s.match(/```ops[ \t]*\r?\n?([\s\S]*?)```/i);
@@ -3278,7 +3417,9 @@ function parseChatOutput(text) {
   if (!s) s = ops.length ? '已按你的要求更新路线图。' : '（AI 没有输出内容，请重试）';
   return { reply: s, ops };
 }
-function streamChat(req, res, goal, message, session) {
+function streamChat(req, res, goal, message, session, opts) {
+  const o = opts || {};
+  const askOnly = o.mode === 'ask';
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   const sig = clientSignal(req);   // 用户在对话里点「停止」时，终止上游 AI 请求
   const model = (session && session.model) ? session.model : currentModel();
@@ -3297,7 +3438,7 @@ function streamChat(req, res, goal, message, session) {
       }
       send({ status: '正在理解你的要求…' });
       fullText = await ai.text({
-        prompt: await buildChatPrompt(goal, message, sessionId),
+        prompt: await buildChatPrompt(goal, message, sessionId, o),
         model: model || currentModel(),
         timeoutMs: 420000,
         signal: sig,
@@ -3310,13 +3451,15 @@ function streamChat(req, res, goal, message, session) {
       const parsed = parseChatOutput(fullText);
       const reply = parsed.reply.slice(0, 20000);
       if (!reply) throw new Error('AI 回复为空，请重试');
-      const ops = parsed.ops;
+      /* ASK 模式下服务端直接丢弃任何 ops —— 不给模型"忘了规矩"的机会。
+         前端也会拦一道，但边界必须在这里。 */
+      const ops = askOnly ? [] : parsed.ops;
       send({ reply });
       let applied = [], errors = [], vid = 0;
       if (ops.length) {
         send({ status: `正在应用 ${ops.length} 处修改…` });
         vid = beginVersion(goal.id, '对话修改');
-        const r = applyChatOps(goal.id, ops);
+        const r = applyChatOps(goal.id, ops, o);
         applied = r.applied; errors = r.errors;
         db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), goal.id);
         const report = await finishVersion(goal, vid, '对话修改', false);
@@ -3525,6 +3668,10 @@ function tutIntegrity(txt, format) {
        Markdown 真被截断由"长度比原文短太多"那条兜住，不靠围栏判断。 */
     const fences = (s.match(/^\s*(?:```|~~~)/gm) || []).length;
     if (fences % 2) soft.push('末尾代码块 ``` 没有闭合（内容看起来仍完整）');
+    /* 可视化块另有要求：它是一段真会渲染的 HTML，缺了收尾围栏 = 演示被截半，
+       比少个代码块显眼得多，所以按真问题（issues）处理。 */
+    const vizFences = (s.match(/^\s*```\s*(?:viz|demo|htmlviz)\s*$/gim) || []).length;
+    if (vizFences % 2) issues.push('可视化块（```viz）没有闭合，演示内容不完整');
   }
   const ok = !issues.length;
   recordQualityCheck({
@@ -3595,7 +3742,10 @@ async function repairTruncatedText({ raw, format, title, issues, runText, progre
 }
 function cleanTutorialText(txt, format) {
   let s = String(txt || '').trim();
-  const m = s.match(/^```[a-zA-Z]*\n([\s\S]*?)\n```$/);
+  /* 只在「开头围栏是无语言 / md / markdown / text」时才拆包 —— 那才是模型把整篇
+     包了一层。若开头是 ```viz，它和结尾的 ``` 只是"第一个可视化块的开 + 最后一个
+     块的闭"，按老写法会把中间整段正文剥掉（正文直接少一大截）。 */
+  const m = s.match(/^```(?:md|markdown|text|plain)?\n([\s\S]*?)\n```$/i);
   if (m) s = m[1].trim();
   if (format === 'html') {
     /* 不要求全文被围栏包裹：模型经常在前面加一句前言（"这是根据您的意见重写的…"），
@@ -3708,6 +3858,7 @@ function streamTutorial(req, res, node, format, note, codeFiles, withFolders, fo
       }
       send({ status: `正在撰写「${String(node.title).slice(0, 18)}」的${format === 'html' ? ' HTML ' : ' Markdown '}教程（讲原理、分步实践、练习与自测，约需 1-3 分钟）…` });
       const prompt = buildTutorialPrompt(goal, node, format, note, codeBlock);
+      let __raw = await aiText(prompt, model, 600000, null, null, '教程生成');
       let txt = cleanTutorialText(await aiText(prompt, model, 600000, null, null, '教程生成'), format);
       if (!txt || txt.length < 200) throw new Error('教程生成失败：AI 只写了 ' + (txt ? txt.length : 0) + ' 字就停了。原教程没动，可以点任务上的「🔄 重试」，或换个输出更长的模型再试');
       /* 体检：结构不完整多半是被输出上限截断（长度够、结构缺）。
@@ -4422,7 +4573,11 @@ function redactText(raw) {
     const body = await readBody(req);
     const message = String(body.message || '').trim().slice(0, 30000);
     if (!message) return sendJSON(res, 400, { error: '请先输入内容' });
-    return streamChat(req, res, g, message, s);
+    /* mode: 'ask' = 只提问（服务端禁掉一切 ops）；其余一律当 agent（可意图识别 + 调工具）。
+       tutorial_id: 用户当前在看哪份教程 —— 有它才允许 AI 提议改教程。 */
+    const mode = String(body.mode || '').toLowerCase() === 'ask' ? 'ask' : 'agent';
+    const tutorial = Number(body.tutorial_id || 0) ? { id: Number(body.tutorial_id) } : null;
+    return streamChat(req, res, g, message, s, { mode, tutorial });
   }
   const chatsMatch = p.match(/^\/api\/goals\/(\d+)\/chats$/);
   if (chatsMatch && method === 'DELETE') {
@@ -4467,13 +4622,42 @@ function redactText(raw) {
     } catch (e) {}
     return streamTutorial(req, res, n, format, note, codeFiles, withFolders, folderFiles);
   }
-  const tutEditMatch = p.match(/^\/api\/tutorials\/(\d+)\/edit$/);
+/* 教程修改任务的进展写回对话。
+   以前任务跑完只改数据库，对话里永远停在"已把这条修改意见交给 AI" ——
+   用户不知道后来成了没有、为什么没成。 */
+function tutEditSay(sess, tut, kind, payload) {
+  const sid = sess && sess.id ? Number(sess.id) : 0;
+  const gid = tut && tut.goal_id ? Number(tut.goal_id) : 0;
+  if (!gid) return;
+  const title = String((tut && tut.title) || '').slice(0, 30);
+  let text;
+  if (kind === 'stopped') {
+    text = '⏹ 已停止：教程没动。\n\n' + title + ' 还是原样。想重跑就点左下角任务上的「🔄 重试」，或者把要改什么再说一遍。';
+  } else if (kind === 'ok') {
+    text = '✅ 教程已改完：' + title + '（正文 ' + (payload ? String(payload).length : 0) + ' 字）\n\n'
+      + '页面已自动刷新，可以直接往下读。改得不满意，点教程右上角的「📜 版本对比」就能回到上一版。';
+  } else {
+    text = '✗ 教程没改成：' + title + '\n\n原因：' + String(payload || '未知').slice(0, 600) + '\n\n'
+      + '原教程一个字没动。点左下角任务上的「🔄 重试」可以原样重跑，或把修改意见拆小一点分多次提。';
+  }
+  try {
+    db.prepare('INSERT INTO chats (goal_id, session_id, role, content, created_at) VALUES (?,?,?,?,?)')
+      .run(gid, sid, 'assistant', text.slice(0, 3000), nowISO());
+    if (sid) db.prepare('UPDATE chat_sessions SET updated_at = ? WHERE id = ?').run(nowISO(), sid);
+    backup();
+  } catch (e) { console.log('[tutorial] 回执写库失败:', e.message); }
+}
+const tutEditMatch = p.match(/^\/api\/tutorials\/(\d+)\/edit$/);
   if (tutEditMatch && method === 'POST') {
     const tid = Number(tutEditMatch[1]);
     const tut = db.prepare('SELECT * FROM tutorials WHERE id = ?').get(tid);
     if (!tut) return sendJSON(res, 404, { error: '教程不存在' });
     const body = await readBody(req).catch(() => ({}));
     const feedback = String((body && body.feedback) || '').trim().slice(0, 1500);
+    /* quiet = 这次修改是从对话里发起的（Agent 模式识别出意图）。
+       用户那句话与 AI 的回复都已经记在对话里了，再插一份"【教程修改 · …】"和固定回执
+       只会让对话变成一叠重复。 */
+    const quiet = !!(body && body.quiet);
     if (!feedback) return sendJSON(res, 400, { error: '请填写修改意见' });
     const goal = db.prepare('SELECT * FROM goals WHERE id = ?').get(tut.goal_id);
     const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(tut.node_id);
@@ -4490,6 +4674,7 @@ function redactText(raw) {
       type: 'tutorial', title: '修改教程：' + String(tut.title || '').slice(0, 30), goalId: tut.goal_id, nodeId: tut.node_id, note: feedback,
       retry: startEditTask,
       run: async ({ progress, signal }) => {
+        try {
         progress(5, '正在按你的意见修改教程…');
         let editCodeBlock = '';
         try {
@@ -4560,13 +4745,85 @@ function redactText(raw) {
               + '。原教程没动，点「🔄 重试」可原样重跑');
           }
         }
-        // 防跑题兜底：标题留着、正文被换成毫不相干的内容时，长度检查拦不住
+        /* 数一份教程里的 ```viz 块，并给每个块算个"长相指纹"（长度 + 开头特征），
+   用来判断"这个块还在不在、还是不是原来那个"。改教程时 AI 把可视化整段删掉、
+   或者悄悄换成一段文字，只看总长度是发现不了的 —— 那正是用户肉眼会发现的损失。 */
+function vizBlocks(txt) {
+  const out = [];
+  const re = /```(?:viz|demo|htmlviz)\n([\s\S]*?)\n```/g;
+  let m;
+  while ((m = re.exec(String(txt || '')))) {
+    const b = m[1];
+    out.push({ len: b.length, head: b.replace(/\s+/g, ' ').slice(0, 40), isHtml: /<[a-zA-Z][\w-]*[\s\S]*>/.test(b) });
+  }
+  return out;
+}
+/* 原教程里的可视化块，改完还在不在、还是不是原来那个。
+   ⚠️ 之前这版在 `a.length <= b.length` 时直接返回 null —— 于是"删掉一个旧的、
+   另写一个新的"这种最典型的丢失（实测：把我那张 HTML 流程图换成了一张字符画，
+   块数不变，守卫全绿）根本不会被发现。数不变不代表没丢，要逐块对指纹。 */
+function vizLoss(before, after) {
+  const a = vizBlocks(before), b = vizBlocks(after);
+  if (!a.length) return null;
+  const match = x => b.some(y => y.isHtml === x.isHtml && Math.abs(y.len - x.len) < Math.max(300, x.len * 0.25));
+  const gone = a.filter(x => !match(x));
+  if (!gone.length) return null;
+  const hadHtml = a.filter(x => x.isHtml).length, nowHtml = b.filter(x => x.isHtml).length;
+  /* ⚠️ 只要「总块数」和「HTML 演示数」都没减少，就不算丢失 —— 那只是**重写**。
+     实测误报（2026-10-12）：用户要求"把 ReAct 那段做成 HTML 可视化"，AI 从 6 块做到 8 块
+     （净增 2 块），同时重写了原有的一块 → 指纹对不上 → 判成"丢失"，把用户正想要的结果拒了。
+     真正要拦的是这两种，它们都会让计数**下降**：
+       · 整块被删掉
+       · HTML 演示被降级成一段文字或字符画（块数可能不变，但 HTML 数会掉） */
+  if (b.length >= a.length && nowHtml >= hadHtml) {
+    console.log('[tutorial] 可视化块被重写（块 ' + a.length + '→' + b.length + '，其中 HTML ' + hadHtml + '→' + nowHtml + '），不算丢失：'
+      + gone.map(x => x.head).join(' / '));
+    return null;
+  }
+  return { had: a.length, now: b.length, gone: gone.slice(0, 2).map(x => (x.isHtml ? 'HTML 演示「' : '非 HTML 内容「') + x.head + '」') };
+}
+/* 章节流失：用户只说"这一段讲得不清楚"，AI 却把大半本教程重写了 ——
+   实测一次编辑消失了 22 个章节里的 14 个（分步实践、验收标准、面试追问、速查卡全没了），
+   而长度校验只看总长（22882 / 32134 = 71%，远高于 20% 阈值），一路放行。
+   现在按 ## / ### 标题逐个对：掉得太多就拒收，并告诉用户真想重写怎么说。 */
+function structureLoss(before, after, feedback) {
+  if (/允许重写|全部重写|重写整篇|推倒重来|重新组织|重构结构|不用保留原结构/.test(String(feedback || ''))) return null;
+  const grab = t => {
+    const m = String(t || '').match(/^#{2,3}\s+(.+)$/gm) || [];
+    return m.map(s => s.replace(/^#+\s+/, '').trim()).filter(Boolean);
+  };
+  const a = grab(before), b = grab(after);
+  if (a.length < 5) return null;                       // 章节本来就不多，不做判断
+  const set = new Set(b);
+  const lost = a.filter(x => !set.has(x));
+  if (lost.length < 4 || lost.length / a.length < 0.3) return null;
+  return { had: a.length, lost: lost.slice(0, 4) };
+}
+// 防跑题兜底：标题留着、正文被换成毫不相干的内容时，长度检查拦不住
         // （线上翻车：RAGFlow 教程被改成离线同步引擎）。命中即拒收，原教程不动。
         const drift = topicDrifted(out, tut.content, [tut.title, node && node.title]);
         if (drift) {
           const missed = (drift.anchorEn.length ? drift.anchorEn : drift.anchorZh.length ? drift.anchorZh : drift.strong).slice(0, 4);
           console.log('[tutorial] 修改疑似跑题，拒收。判定依据：' + drift.used + '；新文正文开头：' + drift.newBody);
           throw new Error('AI 新写的内容疑似跑题（正文里找不到“' + missed.join('”“') + '”等主题词），已保留原教程：请换个说法再提意见，或先问它复述一遍要改什么，确认对了再让它写');
+        }
+        /* 可视化块丢失兜底：用户要"改一下"，结果回来发现演示没了 ——
+           这是最刺眼的一种内容丢失，而且长度校验完全看不出来。宁可拒收也不能悄悄交。 */
+        const lost = vizLoss(tut.content, out);
+        if (lost) {
+          console.log('[tutorial] 修改后可视化块从 ' + lost.had + ' 降到 ' + lost.now + '，拒收。丢失块开头：' + lost.gone.join(' / '));
+          throw new Error('AI 改完后教程里的可视化演示变少了（原有 ' + lost.had + ' 个，改后只剩 ' + lost.now + ' 个；丢失：'
+            + lost.gone.join(' 、 ') + '），已保留原教程：'
+            + '请在修改意见里明确写一句"保留所有可视化块"，或点「🔄 重试」原样重跑');
+        }
+        /* 章节流失兜底：一次"讲清楚一点"的要求，被改成了重写大半本教程。
+           静默丢掉"分步实践 / 验收标准 / 面试追问"这类章节，用户过几天才发现。 */
+        const lostSec = structureLoss(tut.content, out, feedback);
+        if (lostSec) {
+          console.log('[tutorial] 修改疑似把教程重写了：原有 ' + lostSec.had + ' 个章节，消失了至少 ' + lostSec.lost.length + ' 个 → ' + lostSec.lost.join(' / '));
+          throw new Error('这次改动把教程的章节结构改掉了（原有 ' + lostSec.had + ' 个章节，至少消失了「' + lostSec.lost.join('」「') + '」等），已保留原教程：'
+            + '只想改某一段的话，请把意见写得更具体（例如"只改 2. 可视化那一节，其余章节一个字别动"）；'
+            + '确实想整篇重写，请在意见里加上"允许重写结构"');
         }
         // 先存旧版（教程版本表），再覆盖正文 —— 改坏了能从历史版本恢复
         try { saveTutorialVersion(tid, 'AI 修改：' + String(feedback || '').slice(0, 100)); } catch (e) {}
@@ -4580,7 +4837,14 @@ function redactText(raw) {
         }
         progress(100, '修改完成');
         backup();
+        tutEditSay(sess, tut, 'ok', out);
         return { tutorialId: tid, length: out.length };
+        } catch (e) {
+          /* 用户自己点了停止 ≠ 失败。混在一起报"没改成…原因：已停止"会让人以为出错了。 */
+          const stopped = !!(e && (e.cancelled || e.name === 'AbortError'));
+          tutEditSay(sess, tut, stopped ? 'stopped' : 'fail', e && e.message);
+          throw e;
+        }
       }
     });
     const taskId = startEditTask();
@@ -4588,10 +4852,12 @@ function redactText(raw) {
     if (sess) {
       const t = nowISO();
       try {
-        db.prepare('INSERT INTO chats (goal_id, session_id, role, content, created_at) VALUES (?,?,?,?,?)')
-          .run(tut.goal_id, sess.id, 'user', ('【教程修改 · ' + String(tut.title || '').slice(0, 40) + '】' + feedback).slice(0, 3000), t);
-        db.prepare('INSERT INTO chats (goal_id, session_id, role, content, created_at) VALUES (?,?,?,?,?)')
-          .run(tut.goal_id, sess.id, 'assistant', ('收到！已把这条修改意见交给 AI（任务 #' + taskId + '），它会保留原有内容、只改需要改的地方。\n\n进度可以在左下角任务中心看到（切页面也不影响）；完成后教程会自动刷新，也可以点「📜 版本对比」回滚。').slice(0, 3000), t);
+        if (!quiet) {
+          db.prepare('INSERT INTO chats (goal_id, session_id, role, content, created_at) VALUES (?,?,?,?,?)')
+            .run(tut.goal_id, sess.id, 'user', ('【教程修改 · ' + String(tut.title || '').slice(0, 40) + '】' + feedback).slice(0, 3000), t);
+          db.prepare('INSERT INTO chats (goal_id, session_id, role, content, created_at) VALUES (?,?,?,?,?)')
+            .run(tut.goal_id, sess.id, 'assistant', ('收到！已把这条修改意见交给 AI（任务 #' + taskId + '），它会保留原有内容、只改需要改的地方。\n\n进度可以在左下角任务中心看到（切页面也不影响）；完成后教程会自动刷新，也可以点「📜 版本对比」回滚。').slice(0, 3000), t);
+        }
         if (!sess.title || sess.title === '新对话') {
           const autoTitle = String(feedback).replace(/\s+/g, ' ').trim().slice(0, 24);
           if (autoTitle) db.prepare('UPDATE chat_sessions SET title = ? WHERE id = ?').run(autoTitle, sess.id);
