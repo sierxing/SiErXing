@@ -1,14 +1,14 @@
 {
-  "version": "1.10.40",
-  "buildVer": "053c906a97bb",
-  "payload": "release/payload-1.10.40.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.40.sxar?ref=main",
+  "version": "1.10.41",
+  "buildVer": "98b123921c14",
+  "payload": "release/payload-1.10.41.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.41.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "da963ceeef57838befb3556efb345ad6d209b85be09913c3f1f9494fb0bdc5f1",
-  "size": 753196,
-  "unpackedSize": 2721482,
-  "publishedAt": "2026-10-11T16:50:56.563Z",
-  "notes": "UI 精细化：内联图标系统、按钮触感与焦点环、资源库层级重排、节点折叠区计数徽标、空态说明与标题分离、浏览器表面（选中色/滚动条/caret）主题化",
+  "sha256": "7383a97b010c53eb4d93c74e2f1d2a15a256a53d3b56cba8576880e27f48aba7",
+  "size": 754493,
+  "unpackedSize": 2725129,
+  "publishedAt": "2026-10-12T04:02:37.967Z",
+  "notes": "修对话响应慢：代码库上下文不再无条件注入（无关问话的提示词从 7.1 万字降到 3.1 万字）",
   "exeRequired": false
 }

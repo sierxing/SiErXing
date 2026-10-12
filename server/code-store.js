@@ -54,6 +54,27 @@ function tokensOf(message) {
 }
 const escRe = s => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+/* 挑"够具体"的词去正文里搜。
+   ⚠️ tokensOf 对中文切的是**二字滑窗**（"下一步做什么" → 下一/一步/步做/做什/什么），
+   这种词在本项目的中文注释里到处都是 —— 拿它搜正文，任何一句中文都会"命中"
+   好几个文件，于是无关的问话也被判定为"要带源码"，白塞几万字进提示词。
+   现在正文匹配只认：含 ASCII 的（标识符/路径/函数名）或 **三字以上**的中文词。
+   路径匹配仍用全部词（路径是英文，二字词无害）。 */
+function specificTokens(tokens, message) {
+  const out = new Set();
+  for (const t of tokens) if (/[a-z0-9]/i.test(t)) out.add(t);          // 标识符/路径：一定具体
+  // 中文：不要二字滑窗（到处都匹配），改用「整段短语」+「三字以上滑窗」
+  for (const run of String(message || '').toLowerCase().match(/[\u4e00-\u9fa5]{2,}/g) || []) {
+    if (run.length <= 6) out.add(run);                                  // 短短语整体保留（本身就是词）
+    for (let n = 3; n <= Math.min(6, run.length); n++) {
+      for (let i = 0; i + n <= run.length; i++) { out.add(run.slice(i, i + n)); if (out.size > 60) break; }
+      if (out.size > 60) break;
+    }
+    if (out.size > 60) break;
+  }
+  return Array.from(out).slice(0, 60);
+}
+
 /* 「门面文件」加成：只在**没有任何命中**（泛问"这个项目是干什么的"）时才起作用，
    不能和命中分相加 —— 否则 README 里随便提一句文件名，就会把真正含关键词的源码挤下去。 */
 function facadeScore(p) {
@@ -74,7 +95,27 @@ function pickCodeContext(rows, message, opts) {
   const perFile = o.perFile || 10000;
   const lowerMsg = String(message || '').toLowerCase();
   const tokens = tokensOf(message);
-  const re = tokens.length ? new RegExp(tokens.map(escRe).join('|'), 'gi') : null;
+  /* 正文是否值得注入，只看一件事：**这句话里有没有"像文件名/路径"的词**。
+     理由：中文注释里几乎任何三字词组都能搜到命中，靠词面匹配判断
+     "这个问题与代码有关吗"是做不到的（试过二字滑窗、三字滑窗、去重计分，
+     都会把"下一步做什么"判成"要看源码"）。而用户被要求（提示词里写明了）
+     "要看别的文件时直接写文件路径或关键词"，所以"点名文件"这个信号最准。
+     没点名时只给【文件清单】，AI 知道有哪些文件、可以反过来让用户指名。 */
+  const pathLike = tokens.filter(t => /[a-z0-9]/i.test(t) && /[./_-]|[a-z]{3,}/i.test(t));
+  let re = null;
+  if (pathLike.length) {
+    const ctoks = specificTokens(tokens, message);
+    re = ctoks.length ? new RegExp(ctoks.map(escRe).join('|'), 'gi') : null;
+  }
+  /* ⚠️ 无信号就不注入正文（线上翻车修）：
+     原来的规则是"零命中文件也在凑门面时补几个"（下方 out.length>=6 那句），
+     于是**任何一句与代码无关的话**（如"下一步做什么"）也会被塞进
+     6 × 10000 = 40000 字的无关源码。用户目标里一旦导入过代码库，
+     每次对话的提示词就凭空多 4 万字 ≈ 27k tokens，模型要先把这些读完才开始回答
+     —— 表现就是"发消息响应特别慢"。
+     现在：完全没命中（score 全为 0）时**只给文件清单，不给正文**，
+     让 AI 知道有哪些文件、需要时让用户点名；
+     requireHits=true 时即便有命中也不再补零命中文件充数。 */
   const scored = [];
   for (const f of rows) {
     const p = String(f.path || '');
@@ -84,16 +125,25 @@ function pickCodeContext(rows, message, opts) {
     else { for (const t of tokens) { if (pl.includes(t)) { hit += 100; break; } } }
     if (re && f.content) {
       const m = String(f.content).match(re);
-      if (m) hit += Math.min(m.length * 10, 300);                      // 内容命中（封顶，防高频词淹没）
+      /* 内容命中：按**去重后的词数**给分（不是命中次数）。
+         同一句注释里同一个词重复 40 次，不代表这个文件相关。 */
+      if (m) {
+        const uniq = new Set(m.map(x => String(x).toLowerCase()));
+        hit += Math.min(uniq.size * 40, 240);
+      }
     }
     scored.push({ path: p, root: f.root || '', content: String(f.content || ''), truncated: !!f.truncated, score: hit, facade: facadeScore(pl) });
   }
   scored.sort((a, b) => (b.score - a.score) || (b.facade - a.facade) || a.path.localeCompare(b.path));
   const out = [];
   let used = 0;
+  if (o.requireHits && !pathLike.length) return [];                    // 没点名文件 → 一个字正文都不给
   for (const f of scored) {
     if (out.length >= maxFiles || used >= maxChars) break;
-    if (f.score <= 0 && out.length >= 6) break;                        // 零命中文件只在凑门面时补几个
+    if (f.score <= 0) {
+      if (o.requireHits) break;                                        // 只要真命中，不拿零命中文件充数
+      if (out.length >= 6) break;                                      // 兼容旧行为：最多补几个门面文件
+    }
     const room = Math.min(perFile, maxChars - used);
     const full = String(f.content);
     let t = full, mid = false, cut = f.truncated;

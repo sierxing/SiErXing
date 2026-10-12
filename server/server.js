@@ -1673,10 +1673,13 @@ function codeContextBlock(goal, message) {
     for (const f of files.slice(0, 400)) lines.push('- ' + f.path);
     if (files.length > 400) lines.push('…（其余 ' + (files.length - 400) + ' 个文件未列出）');
   }
-  const picked = codeStore.pickCodeContext(rows, message);
+  /* requireHits：没有真实命中时不要注入源码正文。
+     否则"下一步做什么"这类与代码无关的话也会拖进 4 万字无关源码，
+     每次对话凭空多 27k tokens（线上表现为"发消息特别慢"）。 */
+  const picked = codeStore.pickCodeContext(rows, message, { requireHits: true });
   if (picked.length) {
     lines.push('');
-    lines.push('【与本次问题最相关的源码（按关键词自动挑选，已脱敏；超长文件给的是命中处附近的片段）】');
+    lines.push('【与本次问题最相关的源码（按你这句话里的关键词挑选，已脱敏；超长文件给的是命中处附近的片段）】');
     for (const f of picked) {
       lines.push('');
       lines.push('--- ' + f.path + (f.mid ? '（截断 · 中间片段）' : f.truncated ? '（截断）' : '') + ' ---');
