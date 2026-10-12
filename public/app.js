@@ -14,6 +14,18 @@ const AI_PRESETS = [
   { name: 'OpenAI', base: 'https://api.openai.com/v1', model: 'gpt-5.4-mini', vision: 'gpt-4o' },
   { name: '本地 Ollama', base: 'http://localhost:11434/v1', model: 'qwen3:8b', vision: '', key: 'ollama' }
 ];
+/* ⚠️ 必须放在**文件顶部**：initAI() 在启动时就会调用 aiEnsureDOM()，
+   把 const 放到文件后半会让它处于 TDZ，页面报
+   "Cannot access AI_MODES before initialization"，整个 AI 助手打不开。 */
+/* 执行模式表。**加新模式只往这里加一条** —— 按钮文案、菜单项、说明都由它生成，
+   不用再改 HTML（顶栏那种两格开关放不下第三个模式）。 */
+const AI_MODES = [
+  { id: 'ask', icon: '💬', label: 'ASK', short: '只提问',
+    desc: '只回答，不改动。AI 不会修改路线图 / 教程 / 资料库里的任何东西。' },
+  { id: 'agent', icon: '⚙️', label: 'Agent', short: '能动手',
+    desc: '先判断你的意图：只是提问就直接回答，需要改路线图 / 改教程时才动手。' }
+];
+
 
 const state = { goals: [], goal: null, sources: [], planning: false, collecting: false, collectStatus: '', expanded: {}, filter: '', models: [], model: '', showNew: false, showEdit: false, mapScale: 1, mapTx: 40, mapTy: 40, _drag: null, _suppressClick: false };
 
@@ -2335,15 +2347,26 @@ function aiEnsureDOM() {
       <button class="adIco" id="adClose" title="隐藏侧边栏">×</button>
     </div>
     <div class="adBar">
-      <div class="adModes" id="adModes" title="ASK：只提问，AI 不会修改任何东西｜Agent：AI 先判断你的意图，需要改时才动手">
-        <button class="adMode" data-aimode="ask" aria-pressed="false">ASK</button>
-        <button class="adMode" data-aimode="agent" aria-pressed="false">Agent</button>
-      </div>
       <select id="adSession" class="adSelect" title="切换历史对话"></select>
       <select id="adModel" class="adSelect adModel" title="选择模型"></select>
     </div>
     <div class="adMsgs" id="adMsgs"></div>
     <div class="adResizeY" id="adResizeY" title="上下拖动调整输入框高度（双击复位）"></div>
+    <div class="adTools" id="adTools">
+      <button class="adToolBtn" id="adModeBtn" aria-haspopup="true" aria-expanded="false" title="选择执行模式">
+        <span class="adModeIco" id="adModeIco">💬</span><span id="adModeLabel">ASK</span><span class="adCare">▾</span>
+      </button>
+      <div class="adModePop" id="adModePop" hidden role="menu">
+        <div class="adModePopT">执行模式</div>
+        ${AI_MODES.map(m => `<button class="adModeItem" role="menuitemradio" data-aimode="${m.id}" aria-checked="false">
+          <span class="adModeItemIco">${m.icon}</span>
+          <span class="adModeItemTxt"><b>${esc(m.label)}</b><span class="adModeItemSub">${esc(m.short)}</span>
+            <span class="adModeItemDesc">${esc(m.desc)}</span></span>
+        </button>`).join('')}
+        <div class="adModePopN">ASK 里 AI 改不了任何东西；要让它动手就切 Agent。</div>
+      </div>
+      <!-- 📝 提示词 等插件工具按钮会追加到这里（见 plugins/aiprompts.js） -->
+    </div>
     <div class="adInput">
       <textarea id="adText" rows="1" placeholder="可以让它：改路线图 / 把这段资料存进资料库 / 提炼全部资料 / 再收集些资料 / 加一条约束 / 改目标现状与时间（Enter 发送）"></textarea>
       <button class="adSendBtn" id="adSend" title="发送（Enter）">➤</button>
@@ -2354,10 +2377,25 @@ function aiEnsureDOM() {
   d.querySelector('#adNew').addEventListener('click', aiNewSession);
   d.querySelector('#adRename').addEventListener('click', aiRenameSession);
   d.querySelector('#adDel').addEventListener('click', aiDeleteSession);
-  d.querySelector('#adModes').addEventListener('click', e => {
-    const b = e.target.closest && e.target.closest('[data-aimode]');
-    if (b) aiModeSet(b.getAttribute('data-aimode'));
+  d.querySelector('#adModeBtn').addEventListener('click', ev => {
+    ev.stopPropagation();
+    const pop = document.getElementById('adModePop');
+    aiModePopOpen(!!(pop && pop.hidden));
   });
+  d.querySelector('#adModePop').addEventListener('click', ev => {
+    const it = ev.target.closest && ev.target.closest('[data-aimode]');
+    if (!it) return;
+    aiModeSet(it.getAttribute('data-aimode'));
+    aiModePopOpen(false);
+  });
+  /* 点别处 / Esc 关闭。用捕获阶段 —— 面板里有不少按钮会 stopPropagation。 */
+  document.addEventListener('click', ev => {
+    if (!document.getElementById('adModePop')) return;
+    const t = ev.target;
+    if (t && t.closest && (t.closest('#adModePop') || t.closest('#adModeBtn'))) return;
+    aiModePopOpen(false);
+  }, true);
+  document.addEventListener('keydown', ev => { if (ev.key === 'Escape') aiModePopOpen(false); });
   d.querySelector('#adSession').addEventListener('change', e => aiSwitchSession(Number(e.target.value)));
   d.querySelector('#adModel').addEventListener('change', e => aiSetModel(e.target.value));
   aiBindResize();
@@ -2621,24 +2659,42 @@ function aiModeGet() {
 }
 function aiModeSet(m) {
   const v = m === 'agent' ? 'agent' : 'ask';
+  const changed = state.aiMode !== v;
   state.aiMode = v;
   try { localStorage.setItem('sierxing-ai-mode', v); } catch (e) {}
   aiRenderMode();
+  if (!changed) return;   // 选的是当前模式：不弹提示、不啰嗦
   toast(v === 'agent'
     ? '已切到 Agent：AI 会先判断你的意图，需要改路线图 / 改教程时才动手'
     : '已切到 ASK：只回答、不改动，AI 不会修改任何东西');
 }
 /* 模式相关的界面：按钮选中态 + 输入框提示语（教程页与目标页的提示语不同） */
+/* 菜单开合（按钮、菜单项、说明都由 AI_MODES 生成） */
+function aiModePopOpen(on) {
+  const pop = document.getElementById('adModePop');
+  const btn = document.getElementById('adModeBtn');
+  if (!pop || !btn) return;
+  pop.hidden = !on;
+  btn.classList.toggle('open', !!on);
+  btn.setAttribute('aria-expanded', on ? 'true' : 'false');
+}
 function aiRenderMode() {
   if (state.aiMode !== 'ask' && state.aiMode !== 'agent') state.aiMode = aiModeGet();
   const m = state.aiMode === 'agent' ? 'agent' : 'ask';
   state.aiMode = m;
-  const box = document.getElementById('adModes');
-  if (box) {
-    for (const b of box.querySelectorAll('[data-aimode]')) {
-      const on = b.getAttribute('data-aimode') === m;
-      b.classList.toggle('on', on);
-      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  const cur = AI_MODES.find(x => x.id === m) || AI_MODES[0];
+  const ico = document.getElementById('adModeIco');
+  if (ico) ico.textContent = cur.icon;
+  const lab = document.getElementById('adModeLabel');
+  if (lab) lab.textContent = cur.label;
+  const btn = document.getElementById('adModeBtn');
+  if (btn) btn.title = '执行模式：' + cur.label + ' —— ' + cur.desc + '（点击切换）';
+  const pop = document.getElementById('adModePop');
+  if (pop) {
+    for (const it of pop.querySelectorAll('[data-aimode]')) {
+      const on = it.getAttribute('data-aimode') === m;
+      it.classList.toggle('on', on);
+      it.setAttribute('aria-checked', on ? 'true' : 'false');
     }
   }
   const ta = document.getElementById('adText');

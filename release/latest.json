@@ -1,14 +1,14 @@
 {
-  "version": "1.10.52",
-  "buildVer": "9091c2de3352",
-  "payload": "release/payload-1.10.52.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.52.sxar?ref=main",
+  "version": "1.10.53",
+  "buildVer": "269c552a798b",
+  "payload": "release/payload-1.10.53.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.53.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "f298e55c86788ae1dcb65ea22feee947fc13ba7012bf4fab6c0b0738882fbecb",
-  "size": 790208,
-  "unpackedSize": 2823072,
-  "publishedAt": "2026-10-12T10:23:13.583Z",
-  "notes": "AI 助手加 ASK / Agent 模式开关：ASK 只提问、不许改；Agent 才做意图识别调工具。教程页不再把任何消息都当成「改教程」。改完/失败/停止都会写回对话。修可视化守卫误报与 task_runs 重复计数",
+  "sha256": "1d16bdad175b37e11c0eec5f81bf74437d3d9a6f5cbeafab37f2606018127159",
+  "size": 791979,
+  "unpackedSize": 2827834,
+  "publishedAt": "2026-10-12T10:29:24.020Z",
+  "notes": "执行模式开关从顶栏挪到输入框上方的工具栏（📝 提示词 左边），改成点击弹出菜单，加模式只改一张表",
   "exeRequired": false
 }

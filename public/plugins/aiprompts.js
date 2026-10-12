@@ -42,8 +42,12 @@
         bar = document.createElement('div');
         bar.id = 'apBar';
         bar.innerHTML = `<button id="apBarBtn" title="打开提示词库，快捷插入常用提示词">📝 <span>提示词</span><span class="apCount" id="apCount"></span></button>`;
+        /* 并进 #adTools 那条工具栏（模式按钮在它左边），整行看起来才像一个工具栏；
+           没有 #adTools（老版本前端）时退回原来的位置。 */
+        const tools = d.querySelector('#adTools');
         const inputBox = d.querySelector('.adInput');
-        if (inputBox) inputBox.parentNode.insertBefore(bar, inputBox);
+        if (tools) tools.appendChild(bar);
+        else if (inputBox) inputBox.parentNode.insertBefore(bar, inputBox);
         else d.appendChild(bar);
         bar.querySelector('#apBarBtn').addEventListener('click', ev => { ev.stopPropagation(); togglePicker(); });
       }
