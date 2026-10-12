@@ -3215,6 +3215,14 @@ async function buildChatPrompt(goal, message, sessionId, opts) {
   lines.push('');
   lines.push('【当前路线图（方括号内是节点 id，修改时只能引用这些 id）】');
   lines.push(roadmapOutline(goal.id) || '（暂无节点）');
+  /* 该目标的教程清单：让模型能**点名**要改哪一份（tutorial_edit 可带 tutorial_id） */
+  try {
+    const tlist = db.prepare('SELECT id,title FROM tutorials WHERE goal_id = ? ORDER BY updated_at DESC, id DESC LIMIT 8').all(goal.id);
+    if (tlist.length) {
+      lines.push('');
+      lines.push('【这个目标的教程（要改哪份就说它的编号）】' + tlist.map(t => '#' + t.id + ' ' + String(t.title || '').slice(0, 40)).join(' ｜ '));
+    }
+  } catch (e) {}
   if (tut) {
     const body = String(tut.content || '');
     const heads = (body.match(/^#{2,3}\s+(.+)$/gm) || []).map(x => x.replace(/^#+\s+/, '').trim());
@@ -3261,7 +3269,7 @@ async function buildChatPrompt(goal, message, sessionId, opts) {
   lines.push('   - {"op":"digest"}（用户要求「提炼资料 / 汇总资料 / 通读全部资料」时使用：会启动信息提炼，把全部资料整理成多篇主题汇总，规划时优先依据）');
   lines.push('   - {"op":"collect"}（用户要求「再收集一些资料 / 找找岗位信息」时使用：会启动信息源检索）');
   if (tut) {
-    lines.push('   - {"op":"tutorial_edit","feedback":"修改意见"}（**只有**用户要求改上面那份「他正在看的教程」时才用。feedback 写清改哪里、改成什么样，可以把用户原话整理得更明确。它会开一个后台任务重写整篇教程、耗时几分钟，所以用户只是在问问题时**不要**用它。想在正文里说明你已提交，就写"已把这条修改交给教程任务"。）');
+    lines.push('   - {"op":"tutorial_edit","tutorial_id":<编号>,"feedback":"修改意见"}（用户要求改教程时用；tutorial_id 从上面【这个目标的教程】里挑，不填则用他当前打开的那份。feedback 写清改哪里、改成什么样，可以把用户原话整理得更明确。它会开一个后台任务重写整篇教程、耗时几分钟，所以用户只是在问问题时**不要**用它。想在正文里说明你已提交，就写"已把这条修改交给教程任务"。）');
   }
   lines.push('4. 修改要精准：用户说改哪个就改哪个，不要顺手大改；单次最多 20 个操作。');
   lines.push('5. 删除要谨慎：只有用户明确要求才删除；阶段（最外层节点）不要删除，除非用户明确要求。');
