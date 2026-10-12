@@ -2901,10 +2901,14 @@ select.sxiSelNative{display:none !important;}
 .tutPage .tutBody,
 .tutPage .tutFrame{
   /* 用 width 而不是 max-width —— max-width 只能**收窄**，拖出去放宽没反应。
-     同时夹一个窗口上限：否则拖太宽会顶出横向滚动条。 */
+     同时夹一个窗口上限：否则拖太宽会顶出横向滚动条。
+     ⚠️ 左边距必须用 calc 算（而不是 auto）：当正文比容器还宽时，auto 会把
+     外边距压成 0，于是只有右边在动、左边纹丝不动（用户报的就是这个）。
+     (100% - 宽)/2 在超宽时是**负值**，左右各溢出一半 —— 看起来才是对称拉伸。 */
   width:min(var(--tut-w, 100%), calc(100vw - 110px));
   max-width:none;
-  margin-left:auto; margin-right:auto;
+  margin-left:calc((100% - min(var(--tut-w, 100%), calc(100vw - 110px))) / 2);
+  margin-right:0;
 }
 /* Markdown 教程：只放字号（卡片宽度由 --tut-w 管），行高跟着字号走 */
 .tutPage .tutBody.mdBody{font-size:calc(15px * var(--tut-zoom, 1));}
@@ -2913,3 +2917,15 @@ select.sxiSelNative{display:none !important;}
 /* 拖宽度时的全局反馈：文字不可选、光标保持 col-resize */
 body.tutResizing{cursor:col-resize !important; user-select:none;}
 body.tutResizing *{cursor:col-resize !important;}
+
+/* ---- 顶栏（按钮行 + 收藏栏）跟随教程宽度 ----
+   否则拖宽教程后，正文比顶栏宽出一截，边缘对不齐很难看。
+   .tutSticky 本身仍保持整宽（它的背景要盖住从下面滚上来的内容），
+   只把**里面那两行**按与正文完全相同的公式收窄/居中。 */
+.tutPage .tutHead,
+.tutPage #tutFavBar{
+  width:min(var(--tut-w, 100%), calc(100vw - 110px));
+  max-width:none;
+  margin-left:calc((100% - min(var(--tut-w, 100%), calc(100vw - 110px))) / 2);
+  margin-right:0;
+}

@@ -4515,7 +4515,16 @@ function tutWheelBind(win) {
   if (!win || win.__tutWheel) return;
   win.__tutWheel = ev => {
     if (!ev.ctrlKey) return;                 // 没按 Ctrl → 放行给浏览器（整页缩放）
-    ev.preventDefault();                     // 按了 Ctrl → 只改正文字号
+    /* 主文档里要判"鼠标是否落在教程框内" —— 否则整页任何位置 Ctrl+滚轮都会改字号，
+       浏览器自己的整页缩放反而没了（用户报的第二个问题）。
+       iframe 里不用判：整个 iframe 就是教程。 */
+    if (win === window) {
+      const c = (document.getElementById('app') || document).querySelector('.tutFrame, .tutBody');
+      if (!c) return;
+      const r = c.getBoundingClientRect();
+      if (ev.clientX < r.left || ev.clientX > r.right || ev.clientY < r.top || ev.clientY > r.bottom) return;
+    }
+    ev.preventDefault();                     // 框内 + 按了 Ctrl → 只改正文字号
     tutZoomBy(ev.deltaY < 0 ? 0.1 : -0.1);
   };
   win.addEventListener('wheel', win.__tutWheel, { passive: false });
