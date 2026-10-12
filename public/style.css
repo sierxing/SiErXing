@@ -2929,3 +2929,13 @@ body.tutResizing *{cursor:col-resize !important;}
   margin-left:calc((100% - min(var(--tut-w, 100%), calc(100vw - 110px))) / 2);
   margin-right:0;
 }
+
+/* ---- 教程正文「点哪儿改哪儿」的悬停反馈（Markdown 教程）----
+   鼠标滑到某一段，四周浮出一道淡描边 + 文本光标 —— 不改布局、不插说明文字，
+   配色沿用目录条目的 accent 系，提示"这里点一下就能直接改"。 */
+.tutPage .tutBody :is(p,li,h1,h2,h3,h4,h5,h6,blockquote,pre,dt,dd,figcaption):hover{
+  outline:1.5px solid var(--accent-border);
+  outline-offset:3px;
+  border-radius:7px;
+  cursor:text;
+}

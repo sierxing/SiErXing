@@ -39,6 +39,17 @@
     const el = document.getElementById('nnCount');
     if (el) el.textContent = current ? ('共 ' + current.length + ' 字') : '';
   }
+  /* 把"人看到的一段话"变成几个"最可能在 Markdown 源码里逐字出现"的候选片段：
+     整段 + 前缀 + 按标点/换行切出来的短句（列表项被折成一行时光靠整段找不到）。 */
+  function anchorCands(txt) {
+    const norm = String(txt || '').replace(/[ \t\r\n]+/g, ' ').trim();
+    if (!norm) return [];
+    const out = [norm.slice(0, 40), norm.slice(0, 16)];
+    const pieces = norm.split(/[\n，。；、,.;!?！？:：]/).map(s => s.trim()).filter(s => s.length >= 4);
+    pieces.sort((a, b) => b.length - a.length);
+    for (const p of pieces.slice(0, 4)) out.push(p);
+    return out.filter(s => s && s.length >= 4);
+  }
 
   /* ---- 视图态：直接看渲染效果 ---- */
   function showView() {
@@ -59,14 +70,47 @@
   }
 
   /* ---- 编辑态：单个框里写 ---- */
-  function showEdit() {
+  /* 从光标处开始改：双击（或点「编辑」）那一下落在哪，编辑框光标就停在源码对应位置；
+     定位不到就按视图态的滚动比例折算，总之不许每次都跳回开头。 */
+  function showEdit(e) {
     editing = true;
     const body = document.getElementById('nnBody');
     if (!body) return;
+    /* ⚠️ 下面要整体替换 DOM，选中区/滚动位置会没，所以先把"想改哪"记下来 */
+    let anchor = '', word = '', ratio = 0;
+    try {
+      const view = document.getElementById('nnView');
+      const target = e && e.target ? e.target : null;
+      if (target && view) {
+        let d = target;
+        while (d && d !== view && d.parentNode) {
+          const tag = String(d.tagName || '').toLowerCase();
+          if (/^(p|li|h[1-6]|pre|blockquote|td|th|dt|dd)$/.test(tag)) break;
+          d = d.parentNode;
+        }
+        if (d && d !== view) anchor = String(d.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+      }
+      const sel = window.getSelection ? window.getSelection() : null;
+      if (sel && !sel.isCollapsed) word = String(sel.toString() || '').replace(/\s+/g, ' ').trim();
+      if (view) { const span = view.scrollHeight - view.clientHeight; ratio = span > 0 ? view.scrollTop / span : 0; }
+    } catch (err) {}
     body.innerHTML = `<textarea id="nnEditor" spellcheck="false" placeholder="Markdown 笔记，Ctrl+S 保存"></textarea>`;
     const ta = document.getElementById('nnEditor');
     ta.value = current;
+    let p = -1;
+    for (const c of anchorCands(anchor)) { const i = current.indexOf(c); if (i >= 0) { p = i; break; } }
+    if (p >= 0 && word) { const w = current.indexOf(word, p); if (w >= 0 && w < p + 400) p = w; }
+    if (p < 0 && word) { const i = current.indexOf(word); if (i >= 0) p = i; }
+    if (p < 0) p = Math.round(ratio * current.length);
+    p = Math.max(0, Math.min(current.length, p));
     ta.focus();
+    try { ta.setSelectionRange(p, p); } catch (err) {}
+    /* 把光标那一行滚进可视区（居中偏上），不然长笔记一进去还是开头 */
+    try {
+      const line = (current.slice(0, p).match(/\n/g) || []).length + 1;
+      const lh = parseFloat(window.getComputedStyle(ta).lineHeight) || 20;
+      ta.scrollTop = Math.max(0, (line - 1) * lh - ta.clientHeight * 0.3);
+    } catch (err) {}
     ta.addEventListener('keydown', e => {
       if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); doSave(); }
       if (e.key === 'Escape') { doCancel(); }

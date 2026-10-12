@@ -1758,8 +1758,12 @@ selBoxInit();   // 文档级监听：导图页 Ctrl+拖拽框选
 /* ===== 教程：手动编辑与保存 ===== */
 const TUTMANUAL_BOUND = true;
 let tutEditing = false;
-/* 进入手动编辑时算出源码偏移：Markdown 优先按目录追踪到的当前章节标题找对应 # 行，否则按滚动比例映射 */
-function tutEditPos(src, fmt, ratioFb) {
+/* 进入手动编辑时算出源码偏移。优先级：
+   ① 用户点中的那段文字（anchorOff，最准，"点哪儿改哪儿"）
+   ② Markdown 且目录追踪到当前章节标题 → 找对应 # 行
+   ③ 兜底按滚动比例映射（HTML 教程走这里） */
+function tutEditPos(src, fmt, ratioFb, anchorOff) {
+  if (typeof anchorOff === 'number' && anchorOff >= 0) return { off: anchorOff, sec: 0 };
   try {
     if (fmt === 'md' && window.__tutCur && window.__tutCur.title) {
       const norm = s => String(s || '').replace(/^[#\s>]+/, '').replace(/[*`_~\[\]()#-]/g, '').replace(/\s+/g, '').slice(0, 60);
@@ -1784,6 +1788,127 @@ function tutEditPos(src, fmt, ratioFb) {
     return { off: Math.floor(String(src).length * ratio), sec: 0 };
   } catch (e) { return { off: 0, sec: 0 }; }
 }
+/* ---- 「点哪儿改哪儿」：在教程正文里点一段 → 直接进入手动编辑，光标落到对应源码 ----
+   只对 Markdown 教程生效（它的正文就在主文档的 .tutBody 里）。
+   HTML 教程的正文在 iframe 里、源码是 HTML：零依赖没有可靠的 HTML→MD 转换，
+   而保存接口又不改 format（改不了），转成 MD 后会被当成 HTML 渲染 = 显示源码，
+   所以 HTML 教程维持原样（仍可用工具条「✎ 手动编辑」按阅读位置进入）。 */
+function tutClickRoot() {
+  try { return document.querySelector('#app .tutBody') || null; } catch (e) { return null; }
+}
+/* 从点中的那段文字里挑几段"最可能在源码里逐字出现"的内容，去源码里找偏移。
+   ⚠️ 渲染时有几处会往正文里塞东西：引用角标 [123456] → <sup class="cite">⧉</sup>，
+   所以先去掉 ⧉ 再匹配（否则整段都找不着、只能退回滚动比例）。 */
+function tutTextAnchor(src, txt) {
+  const s = String(src || '');
+  const norm = String(txt || '').replace(/⧉/g, '\n').replace(/\s+/g, ' ').trim();
+  if (!s || !norm) return -1;
+  const cands = [norm.slice(0, 40), norm.slice(0, 18)];
+  const runs = (norm.match(/[^\s`*_#>\[\]()~|]+/g) || []).filter(r => r.length >= 6).sort((a, b) => b.length - a.length);
+  for (const r of runs.slice(0, 3)) cands.push(r);
+  /* 列表项被折成一行 / 中间夹了角标时，整段找不到，按标点切成短句再试 */
+  const pieces = norm.split(/[\n，。；、,.;!?！？:：]/).map(x => x.trim()).filter(x => x.length >= 4).sort((a, b) => b.length - a.length);
+  for (const p of pieces.slice(0, 4)) cands.push(p);
+  for (const c of cands) { if (c && c.length >= 4) { const i = s.indexOf(c); if (i >= 0) return i; } }
+  return -1;
+}
+function tutAnchorOff(el, root, src) {
+  try {
+    let d = el;
+    while (d && d !== root && d.parentNode) {
+      const tag = String(d.tagName || '').toLowerCase();
+      if (/^(p|li|h[1-6]|pre|blockquote|td|th|dt|dd|figcaption)$/.test(tag)) break;
+      d = d.parentNode;
+    }
+    if (!d || d === root) return -1;
+    return tutTextAnchor(src, d.textContent);
+  } catch (e) { return -1; }
+}
+/* 打开手动编辑：anchorEl 为空 = 点工具条进来的（按阅读位置定位） */
+async function tutManualEnter(anchorEl) {
+  if (tutEditing) return;
+  const rr = parseRoute();
+  if (rr.view !== 'tutorial') return;
+  const tut = ((state.goal && state.goal.tutorials) || []).find(x => Number(x.id) === Number(rr.id));
+  const contentEl = document.getElementById('tutFrame') || tutRoot();
+  tutEditing = true;
+  // 先记下阅读位置（DOM 替换前量滚动比例，编辑框里直接跳过去）
+  let editRatio = 0;
+  try { editRatio = tutScrollRatio(); } catch (e) {}
+  // 取最新内容：按教程 id 单独取（直接打开/刷新教程页时 state.goal 里没有它，也能编辑）
+  let src = '', fmt = (tut && tut.format) || 'md';
+  try {
+    const r = await api('/api/tutorials/' + rr.id);
+    const fresh = r.tutorial || r;
+    if (fresh && fresh.content) src = fresh.content;
+    if (fresh && fresh.format) fmt = fresh.format;
+  } catch (e) {}
+  if (!src) src = (tut && tut.content) || '';
+  if (!src) { tutEditing = false; toast('教程内容加载失败，请刷新后重试'); return; }
+  const anchorOff = anchorEl ? tutAnchorOff(anchorEl, tutClickRoot(), src) : -1;
+  const wrap = document.createElement('div');
+  wrap.id = 'tutEditorWrap';
+  wrap.className = 'tutEditorWrap';
+  wrap.innerHTML = '<div class="tutEditorBar">正在编辑（' + (fmt === 'md' ? 'Markdown' : 'HTML') + '）· 改完点「💾 保存」，或点「取消」放弃</div><textarea id="tutEditor" spellcheck="false"></textarea>';
+  if (contentEl && contentEl.parentNode) {
+    contentEl.style.display = 'none';
+    contentEl.parentNode.insertBefore(wrap, contentEl);
+  } else {
+    const app = document.getElementById('app');
+    if (app) app.appendChild(wrap);
+  }
+  const ta = document.getElementById('tutEditor');
+  ta.value = src;
+  // 跳到"要改的那一段"，而不是从头开始找
+  let editJumpSec = 0;
+  try {
+    const ep = tutEditPos(src, fmt, editRatio, anchorOff);
+    editJumpSec = ep.sec || 0;
+    ta.focus();
+    if (ep.off > 0) {
+      ta.setSelectionRange(ep.off, ep.off);
+      /* 两种估算取较大值：按行号×行高（源码换行准）、按字符比例×总高（长段落折行时更贴），
+         总之把光标那一行滚进框内偏上，肉眼不会跳回开头。 */
+      requestAnimationFrame(() => {
+        try {
+          const lh = parseFloat(window.getComputedStyle(ta).lineHeight) || 20;
+          const line = (src.slice(0, ep.off).match(/\n/g) || []).length;
+          const byLine = (line - 1) * lh - ta.clientHeight * 0.3;
+          const byRatio = (ep.off / Math.max(1, src.length)) * ta.scrollHeight - ta.clientHeight * 0.35;
+          ta.scrollTop = Math.max(0, Math.max(byLine, byRatio));
+        } catch (e2) {}
+      });
+    }
+  } catch (e2) { try { ta.focus(); } catch (e3) {} }
+  const sv = document.getElementById('tutSaveBtn'); if (sv) sv.hidden = false;
+  const mb = document.getElementById('tutManualBtn'); if (mb) mb.textContent = '✎ 编辑中…';
+  const cb = document.getElementById('tutCancelBtn');
+  if (cb) cb.hidden = false;
+  toast(anchorOff >= 0 ? '已进入编辑并定位到你点的那一段（Ctrl+S 保存不了这里，点「💾 保存」）'
+    : '已进入编辑模式' + (editJumpSec ? '（已定位到第 ' + editJumpSec + ' 节附近）' : '（共 ' + src.length + ' 字）'));
+}
+/* 正文里单击一段 → 进编辑。链接/按钮/引用角标/划线段/图上都不抢；
+   刚拖选过文字（要划线或复制）也不抢。 */
+function tutBindClickEdit() {
+  if (document.__tutClickEdit) return;
+  document.__tutClickEdit = true;
+  document.addEventListener('click', e => {
+    if (tutEditing) return;
+    const t = e.target;
+    if (!t || !t.closest) return;
+    if (t.closest('a,button,input,textarea,select,svg,img,sup.cite,mark.tnm,[data-toc]')) return;
+    try {
+      const sel = window.getSelection ? window.getSelection() : null;
+      if (sel && !sel.isCollapsed && String(sel.toString()).trim()) return;
+    } catch (err) {}
+    const root = tutClickRoot();
+    if (!root || !root.contains(t)) return;
+    const rr = parseRoute();
+    if (rr.view !== 'tutorial') return;
+    tutManualEnter(t);
+  });
+}
+tutBindClickEdit();
 document.addEventListener('click', async e => {
   const eb = e.target.closest && e.target.closest('#tutManualBtn');
   const sb = e.target.closest && e.target.closest('#tutSaveBtn');
@@ -1792,57 +1917,7 @@ document.addEventListener('click', async e => {
   const rr = parseRoute();
   if (rr.view !== 'tutorial') return;
   const tut = ((state.goal && state.goal.tutorials) || []).find(x => Number(x.id) === Number(rr.id));
-  // 找到教程正文容器（iframe / md 渲染区），只替换它，不动整个页面
-  const contentEl = document.getElementById('tutFrame') || tutRoot();
-  if (eb) {
-    if (tutEditing) return;
-    tutEditing = true;
-    // 先记下阅读位置（DOM 替换前量滚动比例，编辑框里直接跳过去）
-    let editRatio = 0;
-    try { editRatio = tutScrollRatio(); } catch (e) {}
-    // 取最新内容：按教程 id 单独取（直接打开/刷新教程页时 state.goal 里没有它，也能编辑）
-    let src = '', fmt = (tut && tut.format) || 'md';
-    try {
-      const r = await api('/api/tutorials/' + rr.id);
-      const fresh = r.tutorial || r;
-      if (fresh && fresh.content) src = fresh.content;
-      if (fresh && fresh.format) fmt = fresh.format;
-    } catch (e) {}
-    if (!src) src = (tut && tut.content) || '';
-    if (!src) { tutEditing = false; toast('教程内容加载失败，请刷新后重试'); return; }
-    const wrap = document.createElement('div');
-    wrap.id = 'tutEditorWrap';
-    wrap.className = 'tutEditorWrap';
-    wrap.innerHTML = '<div class="tutEditorBar">正在编辑（' + (fmt === 'md' ? 'Markdown' : 'HTML') + '）· 改完点「💾 保存」，或点「取消」放弃</div><textarea id="tutEditor" spellcheck="false"></textarea>';
-    if (contentEl && contentEl.parentNode) {
-      contentEl.style.display = 'none';
-      contentEl.parentNode.insertBefore(wrap, contentEl);
-    } else {
-      const app = document.getElementById('app');
-      if (app) app.appendChild(wrap);
-    }
-    const ta = document.getElementById('tutEditor');
-    ta.value = src;
-    // 跳到当前阅读位置，而不是从头开始找
-    let editJumpSec = 0;
-    try {
-      const ep = tutEditPos(src, fmt, editRatio);
-      editJumpSec = ep.sec || 0;
-      if (ep.off > 0) {
-        ta.setSelectionRange(ep.off, ep.off);
-        ta.focus();
-        requestAnimationFrame(() => {
-          try { ta.scrollTop = Math.max(0, (ep.off / Math.max(1, src.length)) * ta.scrollHeight - ta.clientHeight / 2); } catch (e2) {}
-        });
-      } else ta.focus();
-    } catch (e2) { try { ta.focus(); } catch (e3) {} }
-    const sv = document.getElementById('tutSaveBtn'); if (sv) sv.hidden = false;
-    const mb = document.getElementById('tutManualBtn'); if (mb) mb.textContent = '✎ 编辑中…';
-    const cb = document.getElementById('tutCancelBtn');
-    if (cb) cb.hidden = false;
-    toast('已进入编辑模式（正文已填入，共 ' + src.length + ' 字' + (editJumpSec ? '，已定位到第 ' + editJumpSec + ' 节附近' : '') + '）');
-    return;
-  }
+  if (eb) { await tutManualEnter(null); return; }
   const cbtn = e.target.closest && e.target.closest('#tutCancelBtn');
   if (cbtn) {
     tutEditing = false;
@@ -4607,7 +4682,7 @@ async function renderTutorialPage(tid) {
       ${goalCompOn(goal, 'quiz') ? `<button class="btn small" data-tbtn id="tutQuizBtn" title="按这篇教程逐点考察掌握情况（一次一题，答错可追问）">📝 测验</button>` : ''}
       ${(goalCompOn(goal, 'workspace') && window.Workspace) ? `<button class="btn small primary" data-tbtn id="tutCodeBtn" title="为当前节点建好代码目录并用 VSCode 打开，边看教程边写代码（子目录嵌在父目录下，无需手动管理）">💻 写代码</button>` : ''}
       ${(goalCompOn(goal, 'workspace') && window.Workspace) ? `<button class="btn small" data-tbtn id="tutPackBtn" title="把整个目标的代码目录一键打包成 zip 下载">📦 打包</button>` : ''}
-      <button class="btn small" data-tbtn id="tutManualBtn" title="直接手动编辑并保存（Markdown / HTML 都可以）">✎ 手动编辑</button>
+      <button class="btn small" data-tbtn id="tutManualBtn" title="直接手动编辑并保存。也可以直接在正文里点某一段：会进编辑并定位到那一句（Markdown 教程）">✎ 手动编辑</button>
       <button class="btn small primary" id="tutSaveBtn" hidden>💾 保存</button>
       <button class="btn small" id="tutCancelBtn" hidden>取消</button>
       <span class="mapTitle">📘 ${esc(t.title)}</span>
