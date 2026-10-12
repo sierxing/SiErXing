@@ -1,14 +1,14 @@
 {
-  "version": "1.10.43",
-  "buildVer": "e4cc152a2906",
-  "payload": "release/payload-1.10.43.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.43.sxar?ref=main",
+  "version": "1.10.44",
+  "buildVer": "17dc01aa043d",
+  "payload": "release/payload-1.10.44.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.44.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "6a8ced6e99efc127e8c54a472cdf001f33759456b35410caaf979b27c7094eb5",
-  "size": 758063,
-  "unpackedSize": 2733588,
-  "publishedAt": "2026-10-12T04:22:28.216Z",
-  "notes": "节点依据不再只挂 1 条：资料索引全量下发（16→266 条）、规划要求每节点 3-5 条依据且写清是哪条要求导致它存在；节点面板「为什么有这一步」改为依据优先",
+  "sha256": "b91b4b4c6fa0c580cbd168165d286c676d389b14905dac5479a0079c71f9ab73",
+  "size": 759709,
+  "unpackedSize": 2738268,
+  "publishedAt": "2026-10-12T04:37:02.810Z",
+  "notes": "补齐其余 5 处「依据 1-2 条」的提示词（任务级才是这次没生效的原因）；依据列表改为前 3 条带批注 + 其余 chips 折叠，40 条也不撑爆面板；「这一支要达成的是」可展开不再硬截断",
   "exeRequired": false
 }

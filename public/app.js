@@ -921,6 +921,14 @@ function showNodePanel(id, rerender) {
   if (pos && sibs.length > 1) whyLines.push('在第 ' + pos + '/' + sibs.length + ' 步' + (P ? '（' + P.title + '）' : ''));
   else if (P) whyLines.push('属于「' + P.title + '」');
   const steps = splitSteps(n.detail);
+  /* 「这一支要达成的是」以前硬截 140 字 + "…"，用户看不到后半段（线上反馈）。
+     现在整段放进 DOM，靠 CSS 折 2 行；确实超出才显示「展开」。 */
+  requestAnimationFrame(() => {
+    div.querySelectorAll('[data-clamp]').forEach(el => {
+      const tg = el.parentNode.querySelector('[data-clamp-tg]');
+      if (tg && el.scrollHeight > el.clientHeight + 2) tg.hidden = false;
+    });
+  });
   div.innerHTML = `
     <div class="npHead">
       <span class="chip">${LEVEL_NAME[n.level] || ''}</span>
@@ -950,7 +958,7 @@ function showNodePanel(id, rerender) {
         <ul class="npWhyList">${evid.slice(0, 6).map((t, i) => `<li>${evidName[i] ? `<b>${esc(evidName[i])}</b>` : ''}${esc(t)}</li>`).join('')}</ul>
         ${evid.length > 6 ? `<div class="npWhyMore">…还有 ${evid.length - 6} 条依据</div>` : ''}
       </div>` : `<div class="npWhyLine npWhyMiss">这一步还没有标注依据 —— 点下面的「让 AI 改」补上，或自己关联资料库。</div>`}
-      ${scopeD ? `<div class="npWhyLine"><span class="npWhyK">这一支要达成的是</span>${rewriteCites(esc(scopeD.length > 140 ? scopeD.slice(0, 140) + '…' : scopeD))}</div>` : ''}
+      ${scopeD ? `<div class="npWhyLine"><span class="npWhyK">这一支要达成的是</span><span class="npWhyClamp" data-clamp="1">${rewriteCites(esc(scopeD))}</span><button class="npWhyTg" data-clamp-tg="1" hidden>展开</button></div>` : ''}
       ${whyLines.map(x => '<div class="npWhyLine">' + esc(x) + '</div>').join('')}
     </div>` : ''}
 
@@ -964,12 +972,34 @@ function showNodePanel(id, rerender) {
     <div class="npFold">
       <details class="npFD">
         <summary>${sxi('link',14)} 依据信息源<span class="npFDNum">${srcs.length}</span>${srcs.length ? '' : '<span class="npFDHint">未标注</span>'}</summary>
-        <div class="npSrcList">${srcs.length ? srcs.map((x, i) => {
-          const lib = findLibSource(x);
-          const body = lib ? String(lib.content || lib.snippet || '') : '';
-          const isStar = !!(lib && Number(lib.quality) === 1);
-          return `<div class="npSrc ${isStar ? 'isStar' : ''}"><div class="npSrcName">${isStar ? sxi('check',14) : sxi('link',14)}${esc(x.name || x.title || '')}${isStar ? '<span class="chip ok" style="margin-left:6px;">优质</span>' : ''}<button class="btn tiny danger npsrcDel" data-npsrc-del="${i}">移除</button></div>${x.note ? `<div class="npSrcNote">${esc(x.note)}</div>` : ''}${body ? `<details class="npSrcBody"><summary>查看资料库正文（${body.length} 字）</summary><div class="mdBody">${mdToHTML(body.slice(0, 4000))}</div></details>` : ''}</div>`;
-        }).join('') : '<div class="muted" style="font-size:12.5px;">未标注资料（本节点只依据提炼汇总与资料索引）</div>'}</div>
+        ${(() => {
+          /* 依据列表要能装下很多条还不把面板撑爆。
+             原来是**一条一行**平铺（100 条就是 100 行）。
+             分两层：前 3 条完整卡（批注才是"为什么"，必须看得见），
+             其余收成紧凑 chips（一行放好几个，可展开、可点开看批注）。
+             点 chip 把它的批注显示在下面一行 —— 不弹窗、不跳页，就地看。 */
+          if (!srcs.length) return '<div class="npSrcList"><div class="muted" style="font-size:12.5px;">未标注资料（本节点只依据提炼汇总与资料索引）</div></div>';
+          const items = srcs.map((x, i) => {
+            const lib = findLibSource(x);
+            const body = lib ? String(lib.content || lib.snippet || '') : '';
+            const isStar = !!(lib && Number(lib.quality) === 1);
+            return { x, i, body, isStar, name: String(x.name || x.title || '').trim() || '（未命名来源）', note: String(x.note || '').trim() };
+          });
+          const HEAD = 3;
+          const head = items.slice(0, HEAD).map(o => `<div class="npSrc ${o.isStar ? 'isStar' : ''}">
+              <div class="npSrcName">${o.isStar ? sxi('check', 14) : sxi('link', 14)}${esc(o.name)}${o.isStar ? '<span class="chip ok" style="margin-left:6px;">优质</span>' : ''}<button class="btn tiny danger npsrcDel" data-npsrc-del="${o.i}">移除</button></div>
+              ${o.note ? `<div class="npSrcNote">${esc(o.note)}</div>` : ''}
+              ${o.body ? `<details class="npSrcBody"><summary>查看资料库正文（${o.body.length} 字）</summary><div class="mdBody">${mdToHTML(o.body.slice(0, 4000))}</div></details>` : ''}
+            </div>`).join('');
+          const rest = items.slice(HEAD);
+          const chip = o => `<button class="npSrcChip${o.isStar ? ' isStar' : ''}" data-npsrc-note="${esc(o.note || o.name)}">${o.isStar ? '★ ' : ''}${esc(o.name.length > 20 ? o.name.slice(0, 20) + '…' : o.name)}</button>`;
+          const more = rest.length ? `<div class="npSrcChipsWrap">
+              <div class="npSrcChips" id="npSrcChips" hidden>${rest.map(chip).join('')}</div>
+              <button class="btn tiny" id="npSrcChipsTg">＋ 还有 ${rest.length} 条依据</button>
+              <div class="npSrcChipNote" id="npSrcChipNote" hidden></div>
+            </div>` : '';
+          return `<div class="npSrcList">${head}${more}</div>`;
+        })()}
         <div class="npSrcAdd">
           <select id="npSrcPick">${(state.sources || []).map(x => `<option value="${x.id}">${esc('[' + x.kind + '] ' + String(x.title).slice(0, 40))}</option>`).join('')}</select>
           <button class="btn tiny" id="npSrcAdd">${sxi('plus',14)}关联资料库</button>
@@ -3133,6 +3163,35 @@ function citePopOpen(id, x, y) {
   })();
 }
 document.addEventListener('click', e => {
+  /* 依据 chips：展开 / 收起；点某条把它的批注显示在下面一行 */
+  const tg = e.target.closest && e.target.closest('#npSrcChipsTg');
+  if (tg) {
+    const box = document.getElementById('npSrcChips');
+    if (box) {
+      const willShow = box.hidden;
+      box.hidden = !willShow;
+      tg.textContent = willShow ? '收起多余依据' : '＋ 还有 ' + box.children.length + ' 条依据';
+    }
+    return;
+  }
+  const clampTg = e.target.closest && e.target.closest('[data-clamp-tg]');
+  if (clampTg) {
+    const box = clampTg.parentNode.querySelector('[data-clamp]');
+    if (box) {
+      const open = box.classList.toggle('isOpen');
+      clampTg.textContent = open ? '收起' : '展开';
+    }
+    return;
+  }
+  const chipEl = e.target.closest && e.target.closest('[data-npsrc-note]');
+  if (chipEl) {
+    const noteBox = document.getElementById('npSrcChipNote');
+    const txt = chipEl.getAttribute('data-npsrc-note') || '';
+    const already = !noteBox.hidden && noteBox.textContent === txt;
+    noteBox.textContent = txt;
+    noteBox.hidden = already;
+    return;
+  }
   const nodeBtn = e.target.closest && e.target.closest('[data-cite-node]');
   if (nodeBtn) {
     const id = Number(nodeBtn.getAttribute('data-cite-node'));

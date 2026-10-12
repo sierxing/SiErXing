@@ -1782,7 +1782,7 @@ async function libraryBlock(goal, query, legacy) {
   if ((getSetting('rag_enabled', '1') || '1') !== '0') {
     try {
       const b = await rag.block(goal, query, { k: 10 });
-      if (b) return b + sourcesIndexBlock(goal, 24, '【资料库其余条目（仅索引，未展开；需要时从检索结果里找）】');
+      if (b) return b + sourcesIndexBlock(goal, 400, '【资料库索引（仅标题，未展开正文；需要时从检索结果里找）】', 12000);
     } catch (e) { console.log('[rag] 检索失败，回退整段资料：', e.message); }
   }
   return sourcesBlock(goal, (legacy && legacy.items) || 30, (legacy && legacy.len) || 180);
@@ -2061,7 +2061,7 @@ async function buildStageGoalsPrompt(goal, stage) {
   lines.push('你是资深职业路径规划师。下面这个「阶段」的小目标太少，没有覆盖它要掌握的知识点。');
   lines.push('请把它的小目标补足：**阶段说明里提到的每个知识点 / 技术点 / 能力项都要有独立的小目标**（一个知识点一个，不要合并）。');
   lines.push('要求：① 保留原有小目标（措辞可微调）；② 补齐缺失的；③ 小目标要能独立验收、能力或成果导向；');
-  lines.push('④ 一般 5-10 个，知识点多可到 16 个；⑤ 每个小目标给 1-3 条 sources 依据（name 写来源，note 写依据）。');
+  lines.push('④ 一般 5-10 个，知识点多可到 16 个；⑤ 每个小目标给 **3-5 条** sources 依据（name 写来源，note 写「哪条要求导致这个节点必须存在」）。');
   lines.push('');
   lines.push(goalHeader(goal));
   lines.push(digestsBlock(goal));
@@ -2178,7 +2178,7 @@ async function buildTasksPrompt(goal, stage, stageIndex) {
   lines.push('   - artifact：产出物（具体的文件/仓库/笔记/作品，必须看得见摸得着）');
   lines.push('   - acceptance：验收标准（可自检，如「功能可用 + 代码已提交 + 有 README 说明」）');
   lines.push('   - hours：预计投入小时数（如「6-8h」）');
-  lines.push('   - sources：1-2 条依据（name 写实际来源，note 写依据要点）');
+  lines.push('   - sources：**3-5 条依据**（name 写实际来源，note 写清「这条资料里的哪条要求/结论导致这个任务必须做」——依据是任务存在的理由，只给 1 条说明不了问题）');
   lines.push('3. 只输出一个 JSON 对象（不要其他文字或代码块标记）：');
   lines.push('{"goals":[{"index":0,"tasks":[{"title":"","detail":"","artifact":"","acceptance":"","hours":"","sources":[{"name":"","note":""}]}]}]}');
   lines.push('4. 若按「关键机制」需要先提问，则只输出 {"questions":[...]}，不要输出 goals。');
@@ -2292,7 +2292,7 @@ async function buildExpandPrompt(goal, node, sources, folderCode) {
   lines.push('   - artifact：产出物（具体文件/仓库/笔记/作品）');
   lines.push('   - acceptance：验收标准（可自检）');
   lines.push('   - hours：预计投入小时数（如「3h」）');
-  lines.push('   - sources：1-2 条依据（name 写实际来源（站点+标题要点），note 写依据内容）');
+  lines.push('   - sources：**3-5 条依据**（name 写实际来源（站点+标题要点），note 写清这条资料支撑了什么要求/结论）');
   lines.push('3. 优先依据上面检索到的真实资料；如果资料不足，依据公开公认做法并标注「待核实」。');
   lines.push('4. 只输出一个 JSON 对象（不要其他文字或代码块标记）：');
   lines.push('{"tasks":[{"title":"","detail":"","artifact":"","acceptance":"","hours":"","sources":[{"name":"","note":""}]}]}');
@@ -2407,7 +2407,7 @@ async function buildRefineNodePrompt(goal, node, kids, feedback, folderCode) {
   lines.push('【要求】');
   lines.push('1. 严格按用户反馈调整：该删的删、该加的加、该改顺序的改顺序、该拆细的拆细、该跳过的跳过。');
   lines.push('2. 输出调整后的完整子任务列表（最多 10 个），每个字段齐全。');
-  lines.push('3. 每个子任务给出：title / detail（60-120字做法）/ artifact（产出物）/ acceptance（验收标准）/ hours（预计小时）/ sources（1-2 条依据）。');
+  lines.push('3. 每个子任务给出：title / detail（60-120字做法 + 为什么现在做它）/ artifact（产出物）/ acceptance（验收标准）/ hours（预计小时）/ sources（**3-5 条依据**，note 写清依据了什么要求）。');
   lines.push('4. 只输出一个 JSON 对象：{"tasks":[{"title":"","detail":"","artifact":"","acceptance":"","hours":"","sources":[{"name":"","note":""}]}]}');
   lines.push('5. 若按「关键机制」需要先提问，则只输出 {"questions":[...]}，不要输出 tasks。');
   return lines.join('\n');
@@ -2705,7 +2705,7 @@ function buildSkeletonRepairPrompt(goal, rawText) {
   lines.push('');
   lines.push('【任务】把上面的构思整理成标准 JSON，只输出 JSON 对象，不要任何解释、前后缀或代码块标记：');
   lines.push('{"stages":[{"title":"阶段名","detail":"60-120字说明","sources":[{"name":"来源","note":"依据要点"}],"goals":[{"title":"小目标名","detail":"60-120字","sources":[{"name":"","note":""}]}]}]}');
-  lines.push('要求：阶段 3-12 个；每个阶段的小目标按知识点数量决定（一般 5-10 个，多的可到 16 个，一个知识点至少一个）；阶段 3-5 条依据、小目标 1-3 条；detail 可精简到 40-80 字。');
+  lines.push('要求：阶段 3-12 个；每个阶段的小目标按知识点数量决定（一般 5-10 个，多的可到 16 个，一个知识点至少一个）；**阶段 5-8 条依据、小目标 3-5 条**（依据是节点存在的理由，不要只给 1 条）；detail 可精简到 40-80 字。');
   return lines.join('\n');
 }
 function streamPlan(req, res, goal, answers) {
