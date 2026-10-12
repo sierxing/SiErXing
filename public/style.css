@@ -2702,3 +2702,196 @@ select.sxiSelNative{display:none !important;}
 .sxiSelBtn .sxiSelCaret{font-size:9px; opacity:.55; font-style:normal;}
 .sxiSelBtn.sm{height:28px; padding:0 9px; font-size:12px;}
 .sxiSelBtn.block{display:flex; width:100%; max-width:none; justify-content:space-between;}
+
+/* ---- AI 任务历史：每页条数 ---- */
+.aitPerPage{display:inline-flex; align-items:center; gap:5px; font-size:11.5px; color:var(--muted);}
+.aitPerPage .sxi-sel{min-width:64px;}
+/* datetime-local 比较宽，弹层要给够地方，两个输入框别挤成一条 */
+
+/* ---- 自定义时间范围（AI 任务历史） ----
+   原来是「日期框 — 日期框 [应用]」横着挤在窄弹层里，加上原生 datetime-local
+   的空值占位（yyyy/mm/日 --:--）被渲染成一大团灰色等宽字，看着像坏了。
+   改成竖排：每行一个「从/到」标签 + 整宽输入框，下面一排快捷填值 + 主按钮。 */
+.sxiDT{display:flex; flex-direction:column; gap:7px; padding:2px 9px 8px;}
+.sxiDTRow{display:flex; align-items:center; gap:8px;}
+.sxiDTLb{
+  flex:0 0 auto; width:22px; text-align:center; font-size:11.5px; color:var(--muted);
+  background:var(--soft); border-radius:6px; padding:3px 0;
+}
+.sxiDT input[type="datetime-local"]{
+  flex:1 1 auto; min-width:0; padding:6px 9px; font-size:12.5px; font-family:inherit;
+  line-height:1.35; color:var(--text); background:var(--bg);
+  border:1px solid var(--border); border-radius:8px;
+}
+.sxiDT input[type="datetime-local"]:focus{outline:none; border-color:var(--accent);}
+/* 原生日历小图标在深色主题下几乎看不见，给个滤镜让它跟主题走 */
+.sxiDT input[type="datetime-local"]::-webkit-calendar-picker-indicator{
+  cursor:pointer; opacity:.62; filter:none;
+}
+.sxiDT input[type="datetime-local"]::-webkit-calendar-picker-indicator:hover{opacity:1;}
+:root[data-theme="dark"] .sxiDT input[type="datetime-local"]::-webkit-calendar-picker-indicator{filter:invert(1);}
+.sxiDTQuick{display:flex; gap:5px; flex-wrap:wrap;}
+.sxiDTq{
+  border:1px solid var(--border); background:var(--card); color:var(--muted); cursor:pointer;
+  font-family:inherit; font-size:11px; padding:3px 9px; border-radius:999px; white-space:nowrap;
+}
+.sxiDTq:hover{border-color:var(--accent); color:var(--accent);}
+.sxiDTGo{width:100%; margin-top:1px;}
+
+/* ==================== 语法高亮的 token 配色 ==================== */
+.mdBody code .tk-cm{color:var(--tk-cm); font-style:italic;}
+.mdBody code .tk-st{color:var(--tk-st);}
+.mdBody code .tk-nu{color:var(--tk-nu);}
+.mdBody code .tk-kw{color:var(--tk-kw); font-weight:600;}
+.mdBody code .tk-bi{color:var(--tk-bi);}
+.mdBody code .tk-va{color:var(--tk-va);}
+.mdBody code .tk-pp{color:var(--tk-pp);}
+.mdBody code .tk-at{color:var(--tk-at);}
+
+/* 代码块整体：换一层自己的底色，跟正文区分开；左侧一道细色条表示"这是代码" */
+.mdBody pre{
+  background:var(--code-bg); border:1px solid var(--code-border);
+  border-left:3px solid var(--accent-border);
+  border-radius:10px; padding:11px 13px; overflow-x:auto; margin:11px 0; position:relative;
+  line-height:1.62;
+}
+.mdBody pre[data-lang]:before{
+  content:attr(data-lang); position:absolute; top:6px; right:10px;
+  font-size:10px; color:var(--muted); letter-spacing:.5px; text-transform:uppercase;
+  background:var(--card); border:1px solid var(--border); border-radius:5px; padding:0 5px; opacity:.9;
+}
+
+/* ==================== 教程正文：视觉层级 ====================
+   .mdBody 那套是给聊天/汇总用的紧凑排版（13.9px、行距 1.75、标题只差 2px）。
+   教程动辄几万字，沿用那套就会变成"一大坨同质的文字"（用户原话：抓不到重点、
+   平铺直叙）。所以教程页单独加一层：字号更大、章节间距更开、标题带色带和序号、
+   标签变成彩色卡片。只作用于教程页，聊天/汇总不受影响。 */
+.tutBody.mdBody{font-size:15px; line-height:1.85; color:var(--text);}
+.tutBody.mdBody p{margin:10px 0;}
+
+/* 章节标题：左边一道渐变色带 + 序号圆牌，扫一眼就知道到第几节了 */
+.tutBody{counter-reset:tutsec;}
+.tutBody h1{
+  font-size:25px; line-height:1.35; font-weight:800; letter-spacing:-.01em;
+  margin:4px 0 20px; padding-bottom:14px; border-bottom:2px solid var(--border);
+  background:linear-gradient(92deg, var(--accent), var(--accent-2, var(--accent)) 78%);
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+}
+.tutBody h2{
+  counter-increment:tutsec; position:relative;
+  font-size:19.5px; font-weight:800; margin:34px 0 12px; padding:2px 0 2px 46px;
+  line-height:1.4; border-top:1px solid var(--border); padding-top:20px;
+}
+.tutBody h2:first-of-type{border-top:none; padding-top:2px; margin-top:8px;}
+.tutBody h2:before{
+  content:counter(tutsec); position:absolute; left:0; top:19px;
+  width:32px; height:32px; border-radius:10px; display:flex; align-items:center; justify-content:center;
+  font-size:15px; font-weight:800; color:#fff; letter-spacing:0;
+  background:linear-gradient(135deg, var(--accent), var(--accent-2, var(--accent)));
+  box-shadow:0 3px 10px color-mix(in srgb, var(--accent) 32%, transparent);
+}
+.tutBody h2:first-of-type:before{top:0;}
+.tutBody h3{
+  font-size:16.5px; font-weight:750; margin:24px 0 9px; padding-left:13px;
+  position:relative; color:var(--text);
+}
+.tutBody h3:before{
+  content:''; position:absolute; left:0; top:.32em; bottom:.32em; width:4px; border-radius:3px;
+  background:var(--accent);
+}
+.tutBody h4{font-size:15px; font-weight:700; margin:18px 0 7px; color:var(--accent);}
+
+/* 正文里的加粗当"重点词"用：给一点色，方便竖扫。不能用高饱和，
+   几万字的文章里满屏彩色反而更累。 */
+.tutBody strong{color:color-mix(in srgb, var(--accent) 78%, var(--text)); font-weight:700;}
+
+/* 表格：斑马纹 + 表头着色 + 圆角外壳，长对比表才好读 */
+.tutBody table{
+  border-collapse:separate; border-spacing:0; width:100%; margin:16px 0; font-size:13.8px;
+  border:1px solid var(--border); border-radius:10px; overflow:hidden;
+}
+.tutBody th,.tutBody td{border:0; border-bottom:1px solid var(--border); padding:9px 12px; text-align:left; vertical-align:top;}
+.tutBody th{background:var(--accent-soft); color:var(--accent); font-weight:700; white-space:nowrap;}
+.tutBody tbody tr:nth-child(even) td{background:var(--soft);}
+.tutBody tr:last-child td{border-bottom:0;}
+
+/* 自测清单：勾选项做成一行一张的小卡片 */
+.tutBody li:has(> input[type=checkbox]){
+  list-style:none; margin:6px 0; padding:8px 12px; border-radius:10px;
+  background:var(--soft); border:1px solid var(--border); display:flex; gap:9px; align-items:flex-start;
+}
+.tutBody ul:has(> li > input[type=checkbox]){margin-left:0;}
+.tutBody li > input[type=checkbox]{flex:none; margin-top:.32em; width:15px; height:15px;}
+
+/* ---------- 标签卡片 ----------
+   一行一个标签：左边是固定的标签列（窄、带色、带图标），右边是内容。
+   连着的标签行合成一张卡，读起来像一张对照表。 */
+.mdCall{
+  margin:16px 0; border-radius:12px; overflow:hidden;
+  border:1px solid var(--border); background:var(--card);
+}
+.mdCallRow{
+  display:grid; grid-template-columns:minmax(96px,132px) minmax(0,1fr);
+  border-left:4px solid var(--muted); border-bottom:1px solid var(--border);
+}
+.mdCallRow:last-child{border-bottom:0;}
+.mdCallK{
+  display:flex; align-items:flex-start; gap:6px; padding:11px 12px;
+  font-size:13px; font-weight:750; background:var(--soft); line-height:1.5;
+}
+.mdCallIcon{font-size:13px; line-height:1.5; flex:none;}
+.mdCallV{padding:11px 14px; min-width:0; font-size:14.2px; line-height:1.72;}
+.mdCallV > :first-child{margin-top:0;}
+.mdCallV > :last-child{margin-bottom:0;}
+.mdCallV p{margin:6px 0;}
+.mdCallV ul,.mdCallV ol{margin:6px 0 6px 20px;}
+.mdCallV pre{margin:8px 0; font-size:12.6px;}
+.mdCallRow.mdc-step{border-left-color:#3b82f6;}
+.mdCallRow.mdc-step .mdCallK{background:rgba(59,130,246,.1); color:#1d4ed8;}
+.mdCallRow.mdc-why{border-left-color:var(--accent-2, var(--accent));}
+.mdCallRow.mdc-why .mdCallK{background:color-mix(in srgb, var(--accent-2, var(--accent)) 12%, transparent); color:var(--accent-2, var(--accent));}
+.mdCallRow.mdc-check{border-left-color:var(--ok);}
+.mdCallRow.mdc-check .mdCallK{background:var(--ok-soft, rgba(14,159,110,.13)); color:var(--ok);}
+.mdCallRow.mdc-warn{border-left-color:var(--warn);}
+.mdCallRow.mdc-warn .mdCallK{background:rgba(217,119,6,.12); color:#b45309;}
+.mdCallRow.mdc-key{border-left-color:#d97706;}
+.mdCallRow.mdc-key .mdCallK{background:rgba(217,119,6,.1); color:#b45309;}
+.mdCallRow.mdc-tip{border-left-color:#0ea5e9;}
+.mdCallRow.mdc-tip .mdCallK{background:rgba(14,165,233,.1); color:#0369a1;}
+.mdCallRow.mdc-iv{border-left-color:#db2777;}
+.mdCallRow.mdc-iv .mdCallK{background:rgba(219,39,119,.1); color:#be185d;}
+.mdCallRow.mdc-goal{border-left-color:#7c3aed;}
+.mdCallRow.mdc-goal .mdCallK{background:rgba(124,58,237,.1); color:#6d28d9;}
+:root[data-theme="dark"] .mdCallRow.mdc-step .mdCallK{color:#7fb4ff;}
+:root[data-theme="dark"] .mdCallRow.mdc-warn .mdCallK,
+:root[data-theme="dark"] .mdCallRow.mdc-key .mdCallK{color:#fbbf24;}
+:root[data-theme="dark"] .mdCallRow.mdc-tip .mdCallK{color:#5cc8f5;}
+:root[data-theme="dark"] .mdCallRow.mdc-iv .mdCallK{color:#f472b6;}
+:root[data-theme="dark"] .mdCallRow.mdc-goal .mdCallK{color:#a78bfa;}
+/* 信息密度小的屏（窄窗口/手机）改成上下排，标签列不占宽度 */
+@media (max-width:720px){
+  .mdCallRow{grid-template-columns:1fr;}
+  .mdCallK{border-bottom:1px solid var(--border);}
+}
+
+/* ---- 教程版本对比（🎍 历史版本 → 🔍 对比）：像 git diff 一样看改了哪几行 ---- */
+.tutDiffHead{display:flex; align-items:center; gap:9px; padding:2px 2px 10px; flex-wrap:wrap;}
+.tutDiffWhich{font-size:12px; color:var(--muted);}
+.tutDiffSum{font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums;}
+.tutDiffSum b.add{color:var(--ok, #0e9f6e);}
+.tutDiffSum b.del{color:var(--danger);}
+.tutDiffBody{
+  border:1px solid var(--border); border-radius:10px; overflow:auto; max-height:60vh;
+  background:var(--bg); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+.tutDiffLine{display:flex; gap:8px; padding:1px 10px; font-size:12.3px; line-height:1.65; white-space:pre-wrap; word-break:break-word;}
+.tutDiffSign{flex:0 0 10px; color:var(--muted); user-select:none;}
+.tutDiffTxt{flex:1; min-width:0;}
+.tutDiffLine.add{background:color-mix(in srgb, var(--ok, #0e9f6e) 12%, transparent);}
+.tutDiffLine.add .tutDiffSign{color:var(--ok, #0e9f6e); font-weight:700;}
+.tutDiffLine.del{background:color-mix(in srgb, var(--danger) 11%, transparent);}
+.tutDiffLine.del .tutDiffSign{color:var(--danger); font-weight:700;}
+.tutDiffSkip{
+  padding:3px 10px; font-size:11.5px; color:var(--muted); text-align:center;
+  background:var(--soft); border-top:1px solid var(--border); border-bottom:1px solid var(--border);
+}

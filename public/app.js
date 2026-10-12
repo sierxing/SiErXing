@@ -2184,6 +2184,68 @@ document.addEventListener('click', async e => {
   if (rr.view !== 'tutorial') return;
   openTutVersions(Number(rr.id));
 });
+/* 教程版本对比：逐行差异（LCS）。
+   为什么自己写：项目零依赖；而 node 侧没这需求，只在浏览器里用。
+   性能注意：教程动辄几千行，直接 O(n*m) 的 DP 会吃掉几十 MB ——
+   所以先裁掉**首尾完全相同的行**，只对中间那段跑 DP，超过 120 万格就退化成
+   "整段列出"（诚实标出删/增，不假装逐行对齐）。 */
+function lineDiff(a, b) {
+  const A = String(a || '').split('\n'), B = String(b || '').split('\n');
+  const out = [];
+  let s = 0;
+  while (s < A.length && s < B.length && A[s] === B[s]) s++;
+  let ea = A.length, eb = B.length;
+  while (ea > s && eb > s && A[ea - 1] === B[eb - 1]) { ea--; eb--; }
+  for (let i = 0; i < s; i++) out.push({ t: 'same', x: A[i] });
+  const M = A.slice(s, ea), N = B.slice(s, eb);
+  if (M.length * N.length > 1200000) {
+    for (const x of M) out.push({ t: 'del', x });
+    for (const x of N) out.push({ t: 'add', x });
+  } else {
+    const dp = [];
+    for (let i = 0; i <= M.length; i++) dp.push(new Uint32Array(N.length + 1));
+    for (let i = M.length - 1; i >= 0; i--) {
+      for (let j = N.length - 1; j >= 0; j--) {
+        dp[i][j] = M[i] === N[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+    let i = 0, j = 0;
+    while (i < M.length && j < N.length) {
+      if (M[i] === N[j]) { out.push({ t: 'same', x: M[i] }); i++; j++; }
+      else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ t: 'del', x: M[i] }); i++; }
+      else { out.push({ t: 'add', x: N[j] }); j++; }
+    }
+    while (i < M.length) out.push({ t: 'del', x: M[i++] });
+    while (j < N.length) out.push({ t: 'add', x: N[j++] });
+  }
+  for (let k = ea; k < A.length; k++) out.push({ t: 'same', x: A[k] });
+  return out;
+}
+/* 差异视图：连续未改动的行折起来，只留首尾两行 —— 一篇 7 万字的教程改三处，
+   全列出来用户还是找不到重点。 */
+function diffHTML(rows) {
+  const line = r => '<div class="tutDiffLine ' + r.t + '"><span class="tutDiffSign">'
+    + (r.t === 'add' ? '+' : r.t === 'del' ? '−' : ' ') + '</span><span class="tutDiffTxt">'
+    + (esc(r.x) || '&nbsp;') + '</span></div>';
+  const out = [];
+  let i = 0;
+  while (i < rows.length) {
+    if (rows[i].t !== 'same') { out.push(line(rows[i])); i++; continue; }
+    let j = i;
+    while (j < rows.length && rows[j].t === 'same') j++;
+    const n = j - i;
+    if (n <= 8) { for (let k = i; k < j; k++) out.push(line(rows[k])); }
+    else {
+      out.push(line(rows[i]));
+      out.push(line(rows[i + 1]));
+      out.push('<div class="tutDiffSkip">⋯ 未改动 ' + (n - 4) + ' 行 ⋯</div>');
+      out.push(line(rows[j - 2]));
+      out.push(line(rows[j - 1]));
+    }
+    i = j;
+  }
+  return out.join('');
+}
 function openTutVersions(tid) {
   const old = document.getElementById('tutVersDlg');
   if (old) old.remove();
@@ -2211,9 +2273,33 @@ function openTutVersions(tid) {
       <div class="tutVerInfo"><div class="tutVerT">${i === 0 ? '<span class="chip ok">最新</span> ' : ''}${esc(v.reason || '（无说明）')}</div>
       <div class="tutVerM">${esc(fmtDate(v.created_at))} · ${Number(v.chars) >= 1000 ? (Number(v.chars) / 1000).toFixed(1) + 'k 字' : v.chars + ' 字'}</div></div>
       <div class="spacer" style="flex:1"></div>
+      <button class="btn tiny" data-vdiff="${v.id}" title="和当前版本逐行对比，看这次改了哪里">🔍 对比</button>
       <button class="btn tiny" data-vprev="${v.id}">预览</button>
       <button class="btn tiny primary" data-vrestore="${v.id}">恢复到这版</button>
     </div>`).join('');
+    /* 对比：这版 → 当前版。改了什么、在哪一行，一眼能看见（用户要的就是这个） */
+    body.querySelectorAll('[data-vdiff]').forEach(b => b.addEventListener('click', async () => {
+      try {
+        const r = await api('/api/tutorials/versions/' + b.getAttribute('data-vdiff'));
+        const v = r.version || {};
+        /* 当前正文：优先用页面里的；教程页不加载整个 goal，取不到就现问接口 */
+        let cur = String((t && t.content) || '');
+        if (!cur && tid) { try { cur = String((await api('/api/tutorials/' + tid + '/content')).content || ''); } catch (e) {} }
+        if (!cur) { toast('拿不到当前正文，稍后再试'); return; }
+        const rows = lineDiff(v.content || '', cur);
+        const add = rows.filter(x => x.t === 'add').length;
+        const del = rows.filter(x => x.t === 'del').length;
+        body.innerHTML = `<div class="tutDiffHead">
+            <button class="btn tiny" data-vback2>← 返回列表</button>
+            <span class="tutDiffWhich">${esc(v.reason || '（无说明）')} · ${esc(fmtDate(v.created_at))} → <b>当前版</b></span>
+            <span class="spacer" style="flex:1"></span>
+            <span class="tutDiffSum"><b class="add">+${add}</b> <b class="del">−${del}</b> 行</span>
+          </div>
+          ${(add || del) ? `<div class="tutDiffBody">${diffHTML(rows)}</div>`
+            : '<div class="muted" style="padding:14px;">这版和当前正文完全一样（可能中间又被改回或没实际改动）。</div>'}`;
+        body.querySelector('[data-vback2]').addEventListener('click', paint);
+      } catch (err) { toast(err.message); }
+    }));
     body.querySelectorAll('[data-vprev]').forEach(b => b.addEventListener('click', async () => {
       try {
         const r = await api('/api/tutorials/versions/' + b.getAttribute('data-vprev'));

@@ -4916,6 +4916,14 @@ function redactText(raw) {
       return sendJSON(res, 200, { ok: true });
     }
   }
+  /* 取教程**当前正文**：版本对比要用它当"新"的一侧。
+     不能指望 state.goal.tutorials —— 教程页根本不加载整个 goal（实测取不到）。 */
+  const tutContentMatch = p.match(/^\/api\/tutorials\/(\d+)\/content$/);
+  if (tutContentMatch && method === 'GET') {
+    const t = db.prepare('SELECT id,title,format,content FROM tutorials WHERE id = ?').get(Number(tutContentMatch[1]));
+    if (!t) return sendJSON(res, 404, { error: '教程不存在' });
+    return sendJSON(res, 200, { id: t.id, title: t.title, format: t.format, content: t.content || '' });
+  }
   const sessMsgsMatch = p.match(/^\/api\/chat-sessions\/(\d+)\/messages$/);
   if (sessMsgsMatch && method === 'GET') {
     const sid = Number(sessMsgsMatch[1]);
