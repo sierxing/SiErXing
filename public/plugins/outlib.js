@@ -68,7 +68,7 @@
       <span class="mapTitle">📦 产出库</span>
       <span class="chip gray">目录化管理 · 每个目标独立</span>
       <div class="spacer"></div>
-      ${goals.length ? `<select class="btn small" id="olGoalSel">${opts}</select>` : ''}
+      ${goals.length ? `<select class="sxi-sel sxi-sel-sm" id="olGoalSel">${opts}</select>` : ''}
       <button class="btn small" id="olMkdir">＋ 新建文件夹</button>
       <button class="btn small primary" id="olAddFiles">＋ 添加产出</button>
     </div>`;
@@ -164,6 +164,8 @@
       tree = (r && r.nodes) || [];
     } catch (e) { tree = []; }
   }
+  /* 每次重画后把 select.sxi-sel 换成自画下拉（插件自己替换 innerHTML，得自己再叫一次） */
+  function polish() { try { if (window.sxiSelify) window.sxiSelify(document); } catch (e) {} }
   async function render(match) {
     const box = app();
     if (!box) return;
@@ -176,6 +178,7 @@
     curDir = 0; picked = 0; editing = 0; preview = null; dragId = 0;
     await loadTree();
     box.innerHTML = pageHTML();
+    polish();
     bind();
   }
 
@@ -186,6 +189,7 @@
     await loadTree();
     curDir = d && byId(d) ? d : 0;
     app().innerHTML = pageHTML();
+    polish();
     bind();
   }
   async function mkdir() {
@@ -417,9 +421,10 @@
     if (!n) return;
     preview = { id, name: n.name };
     app().innerHTML = pageHTML();
+    polish();
     bind();
     const close = document.getElementById('olPvClose');
-    if (close) close.addEventListener('click', () => { preview = null; app().innerHTML = pageHTML(); bind(); });
+    if (close) close.addEventListener('click', () => { preview = null; app().innerHTML = pageHTML(); polish(); bind(); });
   }
   function dl(id) { location.href = '/api/outlib/dl/' + id; }
   function zip(id) { location.href = '/api/outlib/zip/' + id; }

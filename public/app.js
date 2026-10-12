@@ -394,6 +394,7 @@ async function route() {
 
     else if (r.view === 'plugin') { setHeader(r); await r.route.render(r.match, window.SiErXing); }
     else { await loadGoal(r.id); setHeader(r); if (!state.components) await loadComponents(); renderGoal(); }
+    try { sxiSelify(document); } catch (e) {}   // 页面里所有 select.sxi-sel 统一换成自画下拉
     renderRail();
     if (r.view === 'goal' || r.view === 'map') {
       await aiBindGoal(r.id);
@@ -6956,7 +6957,7 @@ async function renderLibraryPage() {
         <span class="libStat">${sxi('book', 14)} 提炼汇总 <b>${digests.length}</b></span>
       </div>
       <div class="spacer"></div>
-      <select id="libGoal" class="libGoalSel">${goalOptions}</select>
+      <select id="libGoal" class="libGoalSel sxi-sel">${goalOptions}</select>
       <button class="btn small" id="libRagBuild" title="把资料切片（配了向量模型则一并向量化）：规划/对话时按问题检索最相关片段">${sxi('spark')}检索索引</button>
       <button class="btn small" id="libDigest">${sxi('spark')}${digests.length ? '重新提炼' : '信息提炼'}</button>
       <label class="btn small">${sxi('up')}导入资料<input type="file" id="libImport" accept=".json,application/json" hidden></label>
@@ -8038,10 +8039,10 @@ function themeSettingsHTML() {
   return `<p class="hint" style="margin:-4px 0 12px;">只是换颜色（字体、布局不动）：白天挑一个柔和的浅色主题，晚上挑一个不那么黑的深色主题。选择立即生效，只影响这台设备。</p>
   <div class="ccRow">
     <label class="ccWide">☀️ 亮色模式用
-      <span class="inWrap"><select id="themeLight">${optsFor('light')}</select></span>
+      <span class="inWrap"><select id="themeLight" class="sxi-sel">${optsFor('light')}</select></span>
     </label>
     <label class="ccWide">🌙 暗色模式用
-      <span class="inWrap"><select id="themeDark">${optsFor('dark')}</select></span>
+      <span class="inWrap"><select id="themeDark" class="sxi-sel">${optsFor('dark')}</select></span>
     </label>
   </div>
   <div class="hint" id="themeMsg" style="margin-top:8px;">${themeMsgText()}</div>`;
@@ -8089,7 +8090,7 @@ function ragSettingsHTML(s) {
   <div class="field" style="margin-top:14px;">
     <label>索引状态与检索预览</label>
     <div class="toolbarRow" style="margin-top:6px;">
-      <select id="ragGoalSel" class="libGoalSel">${gopts}</select>
+      <select id="ragGoalSel" class="libGoalSel sxi-sel">${gopts}</select>
       <button class="btn small" id="ragBuildBtn">🧲 建立本目标索引</button>
       <button class="btn small" id="ragRefresh">刷新状态</button>
     </div>
@@ -8236,7 +8237,7 @@ async function renderSettings() {
         <span class="spacer"></span>
         <div class="bkGroup">
           <span class="bkLbl">保留最近</span>
-          <select class="btn" id="backupKeep">
+          <select class="sxi-sel" id="backupKeep">
             ${[5, 10, 20, 30, 50, 100].map(n => `<option value="${n}"${n === 30 ? ' selected' : ''}>${n} 份</option>`).join('')}
           </select>
         </div>
@@ -9568,6 +9569,82 @@ function aitQuery(extra) {
   for (const k of Object.keys(extra || {})) p.push(k + '=' + encodeURIComponent(extra[k]));
   return p.length ? '?' + p.join('&') : '';
 }
+/* ============ 统一的下拉选择器（给 <select> 加 class="sxi-sel" 即可） ============
+   原生 <select> 展开后是**操作系统的系统菜单**，跟 App 观感完全不搭；而且各页面
+   各写各的样式（.libGoalSel / class="btn" / 内联 style）—— 用户要求"统一一下"。
+   做法：**原生 select 保留为真值源**，只是视觉上藏起来（.sxiSelNative）。
+   点选项时把值写回它并派发 change —— 于是原先读 `el.value`、监听 `change` 的代码
+   **一行都不用改**，迁移只是给它加个 class + 调一次 sxiSelify()。
+   规格：sxi-sel 普通；sxi-sel-sm 小号；sxi-sel-block 撑满一行。 */
+function sxiSelText(sel) {
+  const o = sel.options[sel.selectedIndex];
+  return o ? String(o.textContent).trim() : '';
+}
+function sxiSelPaint(sel) {
+  const btn = sel.nextElementSibling;
+  if (!btn || !btn.classList || !btn.classList.contains('sxiSelBtn')) return;
+  const lab = btn.querySelector('.sxiSelLabel');
+  const txt = sxiSelText(sel) || sel.getAttribute('data-ph') || '请选择';
+  if (lab) lab.textContent = txt;
+  btn.title = sel.title || txt;
+  btn.disabled = !!sel.disabled;
+}
+function sxiSelify(root) {
+  const scope = root || document;
+  if (!scope.querySelectorAll) return;
+  for (const sel of scope.querySelectorAll('select.sxi-sel:not([data-sxisel])')) {
+    sel.setAttribute('data-sxisel', '1');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'sxiSelBtn'
+      + (sel.classList.contains('sxi-sel-sm') ? ' sm' : '')
+      + (sel.classList.contains('sxi-sel-block') ? ' block' : '');
+    btn.innerHTML = '<span class="sxiSelLabel"></span><i class="sxiSelCaret">▾</i>';
+    sel.parentNode.insertBefore(btn, sel.nextSibling);
+    sel.classList.add('sxiSelNative');
+    sxiSelPaint(sel);
+    /* 值被代码改动（不是用户点的）时，按钮文案也要跟上 */
+    sel.addEventListener('change', () => sxiSelPaint(sel));
+    btn.addEventListener('click', ev => {
+      ev.stopPropagation();
+      const same = sxiPopEl && sxiPopEl.__for === sel;
+      sxiPopClose();
+      if (same) return;
+      const d = document.createElement('div');
+      d.className = 'sxiPop';
+      d.__for = sel;
+      d.innerHTML = [...sel.options].map((o, i) =>
+        `<button class="sxiOpt ${i === sel.selectedIndex ? 'on' : ''}" data-sxi-sel-idx="${i}"${o.disabled ? ' disabled' : ''}>${esc(String(o.textContent).trim())}</button>`).join('');
+      document.body.appendChild(d);
+      const r = btn.getBoundingClientRect();
+      d.style.minWidth = Math.max(150, r.width) + 'px';
+      d.style.top = (r.bottom + 6) + 'px';
+      d.style.left = Math.max(8, Math.min(r.left, window.innerWidth - d.offsetWidth - 8)) + 'px';
+      sxiPopEl = d;
+      d.addEventListener('click', e2 => {
+        const b2 = e2.target.closest('[data-sxi-sel-idx]');
+        if (!b2) return;
+        sel.selectedIndex = Number(b2.getAttribute('data-sxi-sel-idx'));
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        sxiSelPaint(sel);
+        sxiPopClose();
+      });
+    });
+  }
+}
+window.sxiSelify = sxiSelify;   // 插件重画之后用得上
+/* 点别处 / Esc / 滚动 关弹层：全 App 只绑一次，共用一个弹层 */
+if (!window.__sxiPopBound) {
+  window.__sxiPopBound = true;
+  document.addEventListener('click', e => {
+    if (!sxiPopEl) return;
+    const t = e.target;
+    if (t && t.closest && (t.closest('.sxiPop') || t.closest('.sxiSelBtn') || t.closest('[data-ait-open]'))) return;
+    sxiPopClose();
+  }, true);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') sxiPopClose(); });
+  window.addEventListener('scroll', () => sxiPopClose(), true);
+}
 /* ---- 筛选条：三个**自画**的下拉 + 时间区间 ----
    为什么不用原生 <select>：它展开后是操作系统的系统菜单，跟 App 风格完全不搭
    （用户原话"太丑陋了"），而且没法做"自定义起止日期"。
@@ -9638,47 +9715,47 @@ function aitPaintFilterBtns() {
   set('status', aitStatusLabel(), !!aitS().filter.status);
   set('time', aitTimeLabel(), aitTimeOn());
 }
-let aitPopEl = null;
-function aitPopClose() { if (aitPopEl) { aitPopEl.remove(); aitPopEl = null; } }
-function aitPopShow(btn, kind) {
-  const already = aitPopEl && aitPopEl.getAttribute('data-kind') === kind;
-  aitPopClose();
+let sxiPopEl = null;
+function sxiPopClose() { if (sxiPopEl) { sxiPopEl.remove(); sxiPopEl = null; } }
+function sxiPopShow(btn, kind) {
+  const already = sxiPopEl && sxiPopEl.getAttribute('data-kind') === kind;
+  sxiPopClose();
   if (already) return;
   const data = state.aitData || {}, f = aitS().filter;
   const d = document.createElement('div');
-  d.className = 'aitPop';
+  d.className = 'sxiPop';
   d.setAttribute('data-kind', kind);
   const opt = (pick, label, on, title) =>
-    `<button class="aitOpt ${on ? 'on' : ''}" data-ait-pick="${pick}"${title ? ' title="' + esc(title) + '"' : ''}>${esc(label)}</button>`;
+    `<button class="sxiOpt ${on ? 'on' : ''}" data-ait-pick="${pick}"${title ? ' title="' + esc(title) + '"' : ''}>${esc(label)}</button>`;
   if (kind === 'goal') {
-    d.innerHTML = '<div class="aitPopT">按目标筛选</div>'
+    d.innerHTML = '<div class="sxiPopT">按目标筛选</div>'
       + opt('goal:0', '全部目标', !f.goal)
       + ((data.goals || []).map(g => opt('goal:' + g.id, g.title, Number(f.goal) === Number(g.id), g.title)).join(''));
   } else if (kind === 'status') {
-    d.innerHTML = '<div class="aitPopT">按状态筛选</div>'
+    d.innerHTML = '<div class="sxiPopT">按状态筛选</div>'
       + opt('status:', '全部状态', !f.status)
       + opt('status:done', '✓ 完成', f.status === 'done')
       + opt('status:failed', '✗ 失败', f.status === 'failed')
       + opt('status:cancelled', '已停止', f.status === 'cancelled');
   } else {
-    d.innerHTML = '<div class="aitPopT">时间范围</div>'
-      + `<button class="aitOpt ${!aitTimeOn() ? 'on' : ''}" data-ait-time="all">全部时间</button>`
-      + `<button class="aitOpt ${f.preset === 'today' ? 'on' : ''}" data-ait-time="today">今天</button>`
-      + `<button class="aitOpt ${f.preset === '7' ? 'on' : ''}" data-ait-time="7">最近 7 天</button>`
-      + `<button class="aitOpt ${f.preset === '30' ? 'on' : ''}" data-ait-time="30">最近 30 天</button>`
-      + '<div class="aitPopSep"></div><div class="aitPopT">自定义（精确到某几天）</div>'
-      + `<div class="aitRange">
+    d.innerHTML = '<div class="sxiPopT">时间范围</div>'
+      + `<button class="sxiOpt ${!aitTimeOn() ? 'on' : ''}" data-ait-time="all">全部时间</button>`
+      + `<button class="sxiOpt ${f.preset === 'today' ? 'on' : ''}" data-ait-time="today">今天</button>`
+      + `<button class="sxiOpt ${f.preset === '7' ? 'on' : ''}" data-ait-time="7">最近 7 天</button>`
+      + `<button class="sxiOpt ${f.preset === '30' ? 'on' : ''}" data-ait-time="30">最近 30 天</button>`
+      + '<div class="sxiPopSep"></div><div class="sxiPopT">自定义（精确到某几天）</div>'
+      + `<div class="sxiRange">
            <input type="date" id="aitFrom" value="${esc(f.fromDate || '')}" aria-label="开始日期">
-           <span class="aitRangeSep">—</span>
+           <span class="sxiRangeSep">—</span>
            <input type="date" id="aitTo" value="${esc(f.toDate || '')}" aria-label="结束日期">
-           <button class="btn small primary" id="aitRangeGo">应用</button>
+           <button class="btn small primary" id="sxiRangeGo">应用</button>
          </div>`;
   }
   document.body.appendChild(d);
   const r = btn.getBoundingClientRect();
   d.style.top = (r.bottom + 6) + 'px';
   d.style.left = Math.max(8, Math.min(r.left, window.innerWidth - d.offsetWidth - 8)) + 'px';
-  aitPopEl = d;
+  sxiPopEl = d;
 }
 /* 改完筛选统一走的收尾：清掉展开状态（换筛选后旧的那一组就不作数了） */
 async function aitAfterFilterChange() {
@@ -9903,30 +9980,23 @@ function bindAiTasks() {
   const bar = document.getElementById('aitFilters');
   if (bar) bar.addEventListener('click', e => {
     const b = e.target.closest('[data-ait-open]');
-    if (b) { e.stopPropagation(); aitPopShow(b, b.getAttribute('data-ait-open')); return; }
+    if (b) { e.stopPropagation(); sxiPopShow(b, b.getAttribute('data-ait-open')); return; }
   });
-  if (!window.__aitPopBound) {
-    window.__aitPopBound = true;
-    document.addEventListener('click', e => {
-      if (!aitPopEl) return;
-      if (e.target.closest && (e.target.closest('.aitPop') || e.target.closest('[data-ait-open]'))) return;
-      aitPopClose();
-    }, true);
-    document.addEventListener('keydown', e => { if (e.key === 'Escape') aitPopClose(); });
-    window.addEventListener('scroll', () => aitPopClose(), true);
+  if (!window.__sxiSelBound) {
+    window.__sxiSelBound = true;
     document.addEventListener('click', async e => {
       const pick = e.target.closest && e.target.closest('[data-ait-pick]');
       if (pick) {
         const v = pick.getAttribute('data-ait-pick');
         if (v.indexOf('goal:') === 0) aitS().filter.goal = Number(v.slice(5)) || 0;
         else aitS().filter.status = v.slice(7);
-        aitPopClose(); await aitAfterFilterChange();
+        sxiPopClose(); await aitAfterFilterChange();
         return;
       }
       const tm = e.target.closest && e.target.closest('[data-ait-time]');
-      if (tm) { aitApplyPreset(tm.getAttribute('data-ait-time')); aitPopClose(); await aitAfterFilterChange(); return; }
-      if (e.target.closest && e.target.closest('#aitRangeGo')) {
-        if (aitApplyCustom()) { aitPopClose(); await aitAfterFilterChange(); }
+      if (tm) { aitApplyPreset(tm.getAttribute('data-ait-time')); sxiPopClose(); await aitAfterFilterChange(); return; }
+      if (e.target.closest && e.target.closest('#sxiRangeGo')) {
+        if (aitApplyCustom()) { sxiPopClose(); await aitAfterFilterChange(); }
       }
     }, true);
   }
