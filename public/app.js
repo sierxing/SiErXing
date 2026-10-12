@@ -9562,19 +9562,15 @@ function aitQuery(extra) {
   for (const k of Object.keys(extra || {})) p.push(k + '=' + encodeURIComponent(extra[k]));
   return p.length ? '?' + p.join('&') : '';
 }
-/* 「正在执行」的紧凑卡片：一条任务一屏内看全 —— 标题 / 目标 / 进度 / 阶段 / 用时 / 停 */
+/* 「正在执行」的卡片。
+   进度 / **所有阶段点** / 实时思考直接用任务中心那套 `taskProgressHTML` ——
+   用户明确要求"能显示当前所处的阶段（所有阶段都能显示）"：那一套就是把每个阶段
+   摆出来、已完成的打勾、当前那个转圈。之前这里只写"第 2/5 步 · 规划大纲"一行，
+   信息比任务中心还少，属于白丢。两处长得一样也省得口径不一致。 */
 function aitRunningCard(t) {
   const m = aitTypeMeta(t.type);
   const st = AITASK_ST[t.status] || AITASK_ST.running;
   const queued = t.status === 'queued';
-  const pct = Math.max(0, Math.min(100, Number(t.progress) || 0));
-  const steps = Array.isArray(t.steps) ? t.steps : null;
-  let stage = '';
-  if (steps && steps.length) {
-    const i = steps.findIndex(s => s.state === 'active');
-    stage = i >= 0 ? `第 ${i + 1}/${steps.length} 步 · ${steps[i].label}` : `${steps.length} 步已完成`;
-  }
-  const think = String(t.thinking || '').replace(/\s+/g, ' ').trim();
   return `<div class="aitRun ${st.cls}">
     <div class="aitRunHd">
       <span class="aitRunIco">${m.icon}</span>
@@ -9582,16 +9578,8 @@ function aitRunningCard(t) {
       <span class="aitSt ${st.cls}">${st.text}</span>
     </div>
     <div class="aitRunSub">${esc(t.goalTitle || '（无目标）')}${t.nodeId ? ' · 节点 #' + t.nodeId : ''}</div>
-    ${queued ? '' : `<div class="aitRunBar"><i style="width:${pct}%"></i></div>`}
-    <div class="aitRunFoot">
-      ${queued
-        ? '<span class="aitRunStage">排在队列里，等前面两个任务腾出并发位</span>'
-        : `<span class="aitRunPct">${pct}%</span>`
-          + (stage ? `<span class="aitRunStage" title="${esc(stage)}">${esc(stage)}</span>` : '')
-          + (t.startedAt ? `<span class="taskElapsed aitRunTime" data-since="${t.startedAt}"></span>` : '')}
-      <button class="btn tiny" data-ait-cancel="${t.id}">停止</button>
-    </div>
-    ${think ? `<div class="aitRunThink" title="${esc(think)}">💭 ${esc(think)}</div>` : ''}
+    ${queued ? '<div class="aitRunSub muted">排在队列里，等前面两个任务腾出并发位</div>' : taskProgressHTML(t)}
+    <div class="aitRunFoot"><button class="btn tiny" data-ait-cancel="${t.id}">停止</button></div>
   </div>`;
 }
 function aitRunHTML(data) {

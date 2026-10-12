@@ -2606,19 +2606,7 @@ input,textarea{caret-color:var(--accent);}
 .aitRunIco{font-size:14px;}
 .aitRunTitle{flex:1; min-width:0; font-size:13px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
 .aitRunSub{font-size:11.5px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
-.aitRunBar{height:5px; border-radius:99px; background:var(--soft); overflow:hidden;}
-.aitRunBar i{display:block; height:100%; border-radius:99px; background:linear-gradient(90deg, var(--accent), var(--accent-2)); transition:width .4s ease;}
-/* 条本身带流动高光：百分比不动的那几十秒里，肉眼也能确认"它还活着" */
-.aitRun.running .aitRunBar i{
-  background-image:linear-gradient(90deg, var(--accent), var(--accent-2), var(--accent));
-  background-size:200% 100%; animation:aitFlow 1.8s linear infinite;
-}
-@keyframes aitFlow{from{background-position:0 0;} to{background-position:-200% 0;}}
-.aitRunFoot{display:flex; align-items:center; gap:8px; font-size:11.5px; color:var(--muted); font-variant-numeric:tabular-nums;}
-.aitRunPct{font-size:12px; font-weight:700; color:var(--accent);}
-.aitRunStage{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
-.aitRunTime{white-space:nowrap;}
-.aitRunThink{font-size:11.5px; color:var(--muted); opacity:.85; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.aitRunFoot{display:flex; justify-content:flex-end;}   /* 只剩「停止」一个按钮：进度/阶段/思考都交给 taskProgressHTML */
 
 /* —— 历史：筛选条 + 目标汇总行 —— */
 .aitFilters{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:11px;}
