@@ -886,6 +886,59 @@ function splitSteps(text) {
   if (parts.length === 1) parts = t.split(/[。；;]/).map(x => x.trim()).filter(x => x.length >= 4);
   return parts.map(x => x.replace(/^[0-9]+[.、)]\s*/, '').trim()).filter(Boolean).slice(0, 8);
 }
+/* 模型写 detail 时，习惯把"为什么"用【】标记写在最前面：
+     【为什么需要】server.js 是思而行唯一入口……
+     【对找实习的作用】面试讲「0-1 做一个 Agent 应用」时这段就是架构开场……
+     【是否必要】必要——加 rag 插件必须先懂启动与注册流程……
+     【怎么做】读 server/server.js 与 server/data-dir.js，顺 7 步走……
+   但面板只按"换行就当一个步骤"切，于是**这些理由全被当成"怎么做"的步骤显示**，
+   "为什么有这一步"反而是空的 —— 用户的原话是"说不清楚为什么要存在，
+   执行的时候心里很不安"。事实是模型写了，只是被摆错了位置。
+   这里按【】里的关键词把它们摘出来分类：理由归"为什么"，做法归"怎么做"。
+   ⚠️ 这是纯展示层归类，**不动数据库、不改存量数据**，所以对已有节点立刻生效。 */
+const WHY_MARK = /^\s*【\s*(为什么[^】]*|理由|原因|背景|价值|作用|目的|必要性|是否必要|对[^】]{0,14}的作用|对[^】]{0,14}的价值|依据[^】]*)\s*】/;
+const HOW_MARK = /^\s*【\s*(怎么做|做法|步骤|如何做|执行|操作|怎么学)\s*】/;
+/* ⚠️ 模型常把多个标记写在**同一行**里：
+     【为什么】……。【对找实习的作用】……。【是否必要】……
+   只在行首找标记（第一版就是这么写的）会漏掉后面那几个 ——
+   实测漏掉后它们仍留在"怎么做"的步骤里，用户看到的还是"说不清为什么"。
+   所以按【…】的位置**切开**再逐段归类，而不是一行一段。 */
+function splitDetailRationale(text) {
+  const t = String(text || '').replace(/\r/g, '').trim();
+  if (!t) return { why: [], how: [] };
+  const why = [], how = [];
+  // 按 "【标记】正文" 的边界切段；段内正文一直延伸到下一个标记或字符串末尾
+  const re = /【([^】]{1,20})】/g;
+  const marks = [];
+  let m;
+  while ((m = re.exec(t)) !== null) marks.push({ mark: m[0], start: m.index, end: m.index + m[0].length });
+  if (!marks.length) return { why: [], how: splitPlain(t) };
+
+  if (marks[0].start > 0) {                       // 标记之前的前言
+    const pre = t.slice(0, marks[0].start).trim();
+    if (pre) how.push(...splitPlain(pre));
+  }
+  for (let i = 0; i < marks.length; i++) {
+    const body = t.slice(marks[i].end, i + 1 < marks.length ? marks[i + 1].start : t.length).trim();
+    if (!body) continue;
+    if (WHY_MARK.test(marks[i].mark)) why.push(...splitPlain(body));
+    else if (HOW_MARK.test(marks[i].mark)) how.push(...splitPlain(body));
+    else why.push(...splitPlain(body));           // 【其它标记】默认算理由（模型多用于解释用途）
+  }
+  return { why: why.slice(0, 6), how: how.slice(0, 8) };
+}
+/* 段内再按句号/分号切，避免一整段挤成一条 */
+function splitPlain(txt) {
+  const t = String(txt || '').trim();
+  if (!t) return [];
+  let parts = t.split(/\n+/).map(x => x.trim()).filter(Boolean);
+  const out = [];
+  for (const p of parts) {
+    if (p.length <= 90) { out.push(p); continue; }
+    out.push(...p.split(/[；;]/).map(x => x.trim()).filter(x => x.length >= 4));
+  }
+  return out;
+}
 function showNodePanel(id, rerender) {
   const rerenderFn = rerender || renderGoal;
   const n = state.goal.nodes.find(x => x.id === id);
@@ -920,7 +973,10 @@ function showNodePanel(id, rerender) {
   const scopeD = scope && scope.detail ? String(scope.detail).replace(/\s+/g, ' ').trim() : '';
   if (pos && sibs.length > 1) whyLines.push('在第 ' + pos + '/' + sibs.length + ' 步' + (P ? '（' + P.title + '）' : ''));
   else if (P) whyLines.push('属于「' + P.title + '」');
-  const steps = splitSteps(n.detail);
+  /* 把 detail 拆成"理由"和"做法"两半（见 splitDetailRationale 的说明） */
+  const rd = splitDetailRationale(n.detail);
+  const whyFromDetail = rd.why;
+  const steps = splitSteps(rd.how.length ? rd.how.join('\n') : n.detail);
   /* 「这一支要达成的是」以前硬截 140 字 + "…"，用户看不到后半段（线上反馈）。
      现在整段放进 DOM，靠 CSS 折 2 行；确实超出才显示「展开」。 */
   requestAnimationFrame(() => {
@@ -953,11 +1009,16 @@ function showNodePanel(id, rerender) {
 
     ${(evid.length || whyLines.length || scopeD) ? `<div class="npWhy">
       <div class="npWhyHd">💡 为什么有这一步</div>
+      ${whyFromDetail.length ? `<div class="npWhySelf">
+        ${whyFromDetail.map(x => `<div class="npWhySelfLine">${rewriteCites(esc(x))}</div>`).join('')}
+      </div>` : ''}
       ${evid.length ? `<div class="npWhyEvid">
         <div class="npWhyEvidHd">这一步的依据 <span class="npWhyCnt">${evid.length} 条</span></div>
         <ul class="npWhyList">${evid.slice(0, 6).map((t, i) => `<li>${evidName[i] ? `<b>${esc(evidName[i])}</b>` : ''}${esc(t)}</li>`).join('')}</ul>
         ${evid.length > 6 ? `<div class="npWhyMore">…还有 ${evid.length - 6} 条依据</div>` : ''}
-      </div>` : `<div class="npWhyLine npWhyMiss">这一步还没有标注依据 —— 点下面的「让 AI 改」补上，或自己关联资料库。</div>`}
+      </div>` : (whyFromDetail.length
+          ? `<div class="npWhyLine npWhyMissSoft">这个节点的依据只写在说明里，还没有跟资料库里的具体条目挂钩 —— 想让它可追溯，点下面的「让 AI 改」补上依据。</div>`
+          : `<div class="npWhyLine npWhyMiss">这一步还没有标注依据 —— 点下面的「让 AI 改」补上，或自己关联资料库。</div>`)}
       ${scopeD ? `<div class="npWhyLine"><span class="npWhyK">这一支要达成的是</span><span class="npWhyClamp" data-clamp="1">${rewriteCites(esc(scopeD))}</span><button class="npWhyTg" data-clamp-tg="1" hidden>展开</button></div>` : ''}
       ${whyLines.map(x => '<div class="npWhyLine">' + esc(x) + '</div>').join('')}
     </div>` : ''}

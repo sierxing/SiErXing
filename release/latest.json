@@ -1,14 +1,14 @@
 {
-  "version": "1.10.44",
-  "buildVer": "17dc01aa043d",
-  "payload": "release/payload-1.10.44.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.44.sxar?ref=main",
+  "version": "1.10.46",
+  "buildVer": "33a318f131e8",
+  "payload": "release/payload-1.10.46.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.46.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "b91b4b4c6fa0c580cbd168165d286c676d389b14905dac5479a0079c71f9ab73",
-  "size": 759709,
-  "unpackedSize": 2738268,
-  "publishedAt": "2026-10-12T04:37:02.810Z",
-  "notes": "补齐其余 5 处「依据 1-2 条」的提示词（任务级才是这次没生效的原因）；依据列表改为前 3 条带批注 + 其余 chips 折叠，40 条也不撑爆面板；「这一支要达成的是」可展开不再硬截断",
+  "sha256": "71d9adfd9526eefe2299ff2308602a9d8e0d08af6cb5e7d18fd00118d109656c",
+  "size": 762165,
+  "unpackedSize": 2743119,
+  "publishedAt": "2026-10-12T04:44:06.713Z",
+  "notes": "节点「为什么有这一步」：把 detail 里【为什么/对找实习的作用/是否必要】等标记摘出来归位（支持一行多个标记），存量节点立刻生效",
   "exeRequired": false
 }

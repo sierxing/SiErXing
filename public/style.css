@@ -2403,3 +2403,11 @@ input,textarea{caret-color:var(--accent);}
 .npWhyTg{font:inherit; font-size:11px; cursor:pointer; padding:0 6px; margin-left:4px;
   background:none; border:0; color:var(--accent); border-radius:5px;}
 .npWhyTg:hover{background:var(--accent-soft);}
+
+/* ---- 「为什么有这一步」里，节点自己的理由（来自 detail 的【…】标记）---- */
+.npWhySelf{display:flex; flex-direction:column; gap:6px; margin:2px 0 8px;}
+.npWhySelfLine{
+  font-size:12.5px; line-height:1.75; color:var(--text);
+  padding-left:9px; border-left:2px solid var(--accent-border);
+}
+.npWhyMissSoft{color:var(--muted); font-size:12px;}
