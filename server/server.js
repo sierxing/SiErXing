@@ -5480,30 +5480,68 @@ function extractEbookPrefFromAnswers(answers) {
     const gid = Number(u.searchParams.get('goalId') || 0);
     return sendJSON(res, 200, { tasks: tasks.list(gid || 0), status: tasks.status() });
   }
-  /* ---- AI 任务总览（左栏「AI 任务」页）：所有目标正在跑的 + 跑过的 ----
-     正在跑：内存队列（进程内，含 progress / steps / thinking，够画进度与阶段）
-     跑过的：task_runs 表（跨重启，含耗时与失败原因）
-     ⚠️ 历史只取**终态**行。status 还是 queued/running 的行，要么是此刻正在跑的
-     （已经在 running 里了，再列一遍是重复），要么是旧埋点一次任务写 2~3 行留下的
-     幽灵行（已修，但历史数据还在）—— 列出来只会让人以为任务卡住了。 */
+  /* ---- AI 任务总览（左栏「AI 任务」页）----
+     必须扛得住「10 个目标 × 每个 100 条任务」：一次任务一行，历史可能上千条，
+     所以**只给汇总 + 分组计数**，具体记录另走分页接口（/api/ai-tasks/history）。
+     正在跑的取自内存队列（带 progress / steps / thinking，够画进度与阶段）。
+
+     ⚠️ 历史只认**终态**行。status 还是 queued/running 的行，要么是此刻正在跑的
+     （已经在 running 里，再列一遍是重复），要么是旧埋点一次任务写 2~3 行留下的
+     幽灵行（那个 bug 已修，但历史数据还在）—— 列出来只会让人以为任务卡住了。 */
+  const AIT_TERMINAL = "status IN ('done','failed','cancelled')";
   if (p === '/api/ai-tasks' && method === 'GET') {
     const live = tasks.list(0).filter(t => t.status === 'running' || t.status === 'queued');
     const goals = db.prepare('SELECT id,title FROM goals ORDER BY id').all();
     const gtitle = {};
     for (const g of goals) gtitle[g.id] = g.title;
-    const rows = db.prepare(`SELECT id,goal_id,node_id,type,title,status,error,cost_ms,created_at,ended_at
-      FROM task_runs WHERE status IN ('done','failed','cancelled') ORDER BY id DESC LIMIT 300`).all();
+    const sum = db.prepare('SELECT COUNT(*) n, SUM(status=\'done\') d, SUM(status=\'failed\') f, SUM(status=\'cancelled\') c FROM task_runs WHERE ' + AIT_TERMINAL).get();
+    /* 按目标聚合：每个目标一行汇总（总数 / 成败 / 最近一次时间），默认折叠就靠它 */
+    const grp = db.prepare('SELECT goal_id, COUNT(*) n, SUM(status=\'done\') d, SUM(status=\'failed\') f,'
+      + ' SUM(status=\'cancelled\') c, MAX(REPLACE(created_at,\' \',\'T\')) last_at, MAX(id) last_id'
+      + ' FROM task_runs WHERE ' + AIT_TERMINAL + ' GROUP BY goal_id ORDER BY last_id DESC').all();
     return sendJSON(res, 200, {
       running: live.map(t => Object.assign({}, t, { goalTitle: gtitle[t.goalId] || '' })),
-      history: rows.map(r => ({
-        runId: r.id, goalId: r.goal_id, goalTitle: gtitle[r.goal_id] || '（目标已删除）',
-        nodeId: r.node_id, type: r.type, title: r.title, status: r.status,
-        error: r.error || '', costMs: r.cost_ms || 0, createdAt: r.created_at, endedAt: r.ended_at
+      summary: { total: sum.n || 0, done: sum.d || 0, failed: sum.f || 0, cancelled: sum.c || 0 },
+      groups: grp.map(g => ({
+        goalId: g.goal_id, goalTitle: gtitle[g.goal_id] || '（目标已删除）',
+        total: g.n, done: g.d || 0, failed: g.f || 0, cancelled: g.c || 0, lastAt: g.last_at || ''
       })),
       goals: goals.map(g => ({ id: g.id, title: g.title })),
       status: tasks.status()
     });
   }
+  /* 某个筛选条件下的一页历史。筛选全在 SQL 里做 —— 前端过滤等于迟早把上千条
+     全塞进浏览器。offset/limit 分页，前端一组一次先拉 20 条。 */
+  if (p === '/api/ai-tasks/history' && method === 'GET') {
+    const goal = Number(u.searchParams.get('goal') || 0);
+    const status = String(u.searchParams.get('status') || '');
+    const days = Number(u.searchParams.get('days') || 0);
+    const q = String(u.searchParams.get('q') || '').trim().slice(0, 60);
+    const limit = Math.min(100, Math.max(1, Number(u.searchParams.get('limit') || 20)));
+    const offset = Math.max(0, Number(u.searchParams.get('offset') || 0));
+    const where = [AIT_TERMINAL], args = [];
+    if (goal) { where.push('goal_id = ?'); args.push(goal); }
+    if (['done', 'failed', 'cancelled'].includes(status)) { where.push('status = ?'); args.push(status); }
+    /* created_at 老行是 'YYYY-MM-DD HH:MM:SS'、新行是 ISO（带 T），归一化后再比 */
+    if (days > 0) { where.push("REPLACE(created_at,' ','T') >= ?"); args.push(new Date(Date.now() - days * 864e5).toISOString()); }
+    if (q) { where.push('title LIKE ?'); args.push('%' + q + '%'); }
+    const w = where.join(' AND ');
+    const total = db.prepare('SELECT COUNT(*) n FROM task_runs WHERE ' + w).get(...args).n;
+    const rows = db.prepare('SELECT id,goal_id,node_id,type,title,status,error,cost_ms,created_at'
+      + ' FROM task_runs WHERE ' + w + ' ORDER BY id DESC LIMIT ? OFFSET ?').all(...args, limit, offset);
+    const goals = db.prepare('SELECT id,title FROM goals').all();
+    const gtitle = {};
+    for (const g of goals) gtitle[g.id] = g.title;
+    return sendJSON(res, 200, {
+      total, offset, limit, hasMore: offset + rows.length < total,
+      rows: rows.map(r => ({
+        runId: r.id, goalId: r.goal_id, goalTitle: gtitle[r.goal_id] || '（目标已删除）',
+        type: r.type, title: r.title, status: r.status, error: r.error || '',
+        costMs: r.cost_ms || 0, createdAt: r.created_at
+      }))
+    });
+  }
+
   /* ---- 检索增强（RAG）：状态 / 重建索引 / 检索预览 ---- */
   if (p === '/api/rag/status' && method === 'GET') {
     const gid = Number(u.searchParams.get('goalId') || 0);

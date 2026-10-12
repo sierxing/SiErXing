@@ -9512,9 +9512,16 @@ function bindPluginPicker() {
   applyFilter();
 }
 /* ============ AI 任务页（左栏入口） ============
-   两个来源：正在跑的在内存队列里（带 progress / steps / thinking，够画进度条与阶段），
-   跑过的在 task_runs 表里（跨重启，带耗时与失败原因）。
-   用户要的就是这两句：「当前在执行的」和「执行过的」，外加推进到哪一步。 */
+   ⚠️ 这一页必须扛得住「10 个目标 × 每个 100 条任务」（把 1000 条平铺出来是没法用的）：
+     · 正在执行 → 至多几条（队列并发上限 3），用紧凑卡片铺成自适应网格，
+                  一眼看完进度 / 阶段 / 用时 —— 这才是你此刻要看的
+     · 历史记录 → 上千条。**默认按目标折叠成一行汇总**（每个目标一行：成败计数 +
+                  最近一次时间）；点开才拉那一组头 20 条，要更多点「再看 20 条」。
+                  一次只渲染几十个 DOM 节点，1000 条和 10 条打开速度一样。
+     · 目标 / 状态 / 时间 / 标题搜索四个筛选**全部走服务端** —— 前端过滤等于
+                  迟早要把上千条全塞进浏览器。
+   另外：只有「正在执行」那块每 3 秒重绘；历史那块只在用户操作时重绘 ——
+   否则你展开的那一组每 3 秒就被折叠回去一次。 */
 const AITASK_ST = {
   queued: { text: '排队中', cls: 'queued' },
   running: { text: '进行中', cls: 'running' },
@@ -9522,6 +9529,7 @@ const AITASK_ST = {
   failed: { text: '✗ 失败', cls: 'failed' },
   cancelled: { text: '已停止', cls: 'cancelled' }
 };
+const AIT_PAGE = 20;                 // 一组一次拉多少条
 let aiTasksTimer = null;
 function aiTasksStopPoll() { if (aiTasksTimer) { clearInterval(aiTasksTimer); aiTasksTimer = null; } }
 function aitTypeMeta(type) { return TASK_META[type] || { icon: '🤖', label: String(type || '任务') }; }
@@ -9540,61 +9548,181 @@ function aitWhen(v) {
   if (new Date().toDateString() === d.toDateString()) return '今天 ' + hm;
   return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + hm;
 }
-/* 正在跑的：直接复用左下角任务中心那套进度 / 阶段渲染（taskProgressHTML），
-   两处看到的是同一件事，长得不一样反而让人怀疑口径不一致。 */
-function aitRunningHTML(t) {
+/* 本页的全部可变状态：筛选条件、哪些目标展开了、每组已加载的记录 */
+function aitS() {
+  if (!state.ait) state.ait = { filter: { goal: 0, status: '', days: 0, q: '' }, open: {}, rows: {} };
+  return state.ait;
+}
+function aitQuery(extra) {
+  const f = aitS().filter, p = [];
+  if (f.goal) p.push('goal=' + f.goal);
+  if (f.status) p.push('status=' + encodeURIComponent(f.status));
+  if (f.days) p.push('days=' + f.days);
+  if (f.q) p.push('q=' + encodeURIComponent(f.q));
+  for (const k of Object.keys(extra || {})) p.push(k + '=' + encodeURIComponent(extra[k]));
+  return p.length ? '?' + p.join('&') : '';
+}
+/* 「正在执行」的紧凑卡片：一条任务一屏内看全 —— 标题 / 目标 / 进度 / 阶段 / 用时 / 停 */
+function aitRunningCard(t) {
   const m = aitTypeMeta(t.type);
   const st = AITASK_ST[t.status] || AITASK_ST.running;
-  return `<div class="taskItem ${t.status} aitCard">
-    <span class="taskIcon">${m.icon}</span>
-    <div class="taskMain">
-      <div class="taskTitle">${esc(t.title || m.label)}<span class="aitGoalTag" title="所属目标">${esc(t.goalTitle || '（无目标）')}</span></div>
-      <div class="taskMsg">${esc(t.message || '')}${t.nodeId ? ' · 节点 #' + t.nodeId : ''}</div>
-      ${t.status === 'running' ? taskProgressHTML(t) : ''}
-    </div>
-    <div class="aitOps">
+  const queued = t.status === 'queued';
+  const pct = Math.max(0, Math.min(100, Number(t.progress) || 0));
+  const steps = Array.isArray(t.steps) ? t.steps : null;
+  let stage = '';
+  if (steps && steps.length) {
+    const i = steps.findIndex(s => s.state === 'active');
+    stage = i >= 0 ? `第 ${i + 1}/${steps.length} 步 · ${steps[i].label}` : `${steps.length} 步已完成`;
+  }
+  const think = String(t.thinking || '').replace(/\s+/g, ' ').trim();
+  return `<div class="aitRun ${st.cls}">
+    <div class="aitRunHd">
+      <span class="aitRunIco">${m.icon}</span>
+      <span class="aitRunTitle" title="${esc(t.title || m.label)}">${esc(t.title || m.label)}</span>
       <span class="aitSt ${st.cls}">${st.text}</span>
+    </div>
+    <div class="aitRunSub">${esc(t.goalTitle || '（无目标）')}${t.nodeId ? ' · 节点 #' + t.nodeId : ''}</div>
+    ${queued ? '' : `<div class="aitRunBar"><i style="width:${pct}%"></i></div>`}
+    <div class="aitRunFoot">
+      ${queued
+        ? '<span class="aitRunStage">排在队列里，等前面两个任务腾出并发位</span>'
+        : `<span class="aitRunPct">${pct}%</span>`
+          + (stage ? `<span class="aitRunStage" title="${esc(stage)}">${esc(stage)}</span>` : '')
+          + (t.startedAt ? `<span class="taskElapsed aitRunTime" data-since="${t.startedAt}"></span>` : '')}
       <button class="btn tiny" data-ait-cancel="${t.id}">停止</button>
     </div>
+    ${think ? `<div class="aitRunThink" title="${esc(think)}">💭 ${esc(think)}</div>` : ''}
   </div>`;
 }
-function aitHistoryRow(h) {
-  const m = aitTypeMeta(h.type);
-  const st = AITASK_ST[h.status] || { text: h.status, cls: 'done' };
+function aitRunHTML(data) {
+  const f = aitS().filter;
+  let run = data.running || [];
+  if (f.goal) run = run.filter(t => Number(t.goalId) === Number(f.goal));
+  if (!run.length) return '';
+  const running = run.filter(t => t.status === 'running').length;
+  const queued = run.length - running;
+  return `<div class="aitSec">
+    <div class="aitSecT">正在执行<span class="aitSecN">${run.length}</span>
+      <span class="aitSecSub">${running ? running + ' 个在跑' : ''}${running && queued ? ' · ' : ''}${queued ? queued + ' 个排队' : ''}</span></div>
+    <div class="aitRunGrid">${run.map(aitRunningCard).join('')}</div>
+  </div>`;
+}
+/* 一个目标的汇总行：折叠时只有这一行 —— 1000 条记录压成 10 行，靠的就是它 */
+function aitGrpHTML(g) {
+  const open = !!aitS().open[g.goalId];
+  return `<div class="aitGrp ${open ? 'open' : ''}" data-ait-grpbox="${g.goalId}">
+    <button class="aitGrpHd" data-ait-grp="${g.goalId}" aria-expanded="${open ? 'true' : 'false'}">
+      <span class="aitGrpCaret">${open ? '▾' : '▸'}</span>
+      <span class="aitGrpName" title="${esc(g.goalTitle)}">${esc(g.goalTitle)}</span>
+      <span class="aitGrpNums">
+        <span class="aitSt done">✓ ${g.done}</span>
+        ${g.failed ? `<span class="aitSt failed">✗ ${g.failed}</span>` : ''}
+        ${g.cancelled ? `<span class="aitSt cancelled">⏹ ${g.cancelled}</span>` : ''}
+        <span class="aitGrpTotal">共 ${g.total}</span>
+      </span>
+      <span class="aitGrpLast">${g.lastAt ? '最近 ' + aitWhen(g.lastAt) : ''}</span>
+    </button>
+    <div class="aitGrpBody" ${open ? '' : 'hidden'}>${open ? aitRowsHTML(g.goalId) : ''}</div>
+  </div>`;
+}
+function aitHistRowHTML(r) {
+  const m = aitTypeMeta(r.type);
+  const st = AITASK_ST[r.status] || { text: r.status, cls: 'done' };
   return `<div class="aitRowWrap">
-    <div class="aitRow" data-ait-go="${h.goalId || 0}" title="点一下去这个目标">
+    <div class="aitRow" data-ait-go="${r.goalId || 0}" title="点一下去这个目标">
       <span class="aitRowIcon">${m.icon}</span>
-      <span class="aitRowTitle">${esc(h.title || m.label)}</span>
+      <span class="aitRowTitle">${esc(r.title || m.label)}</span>
       <span class="aitSt ${st.cls}">${st.text}</span>
-      <span class="aitRowMeta">${aitWhen(h.createdAt)}${h.costMs ? ' · ' + aitDur(h.costMs) : ''}</span>
-      ${h.error ? '<button class="btn tiny" data-ait-err="1">看原因</button>' : ''}
+      <span class="aitRowMeta">${aitWhen(r.createdAt)}${r.costMs ? ' · ' + aitDur(r.costMs) : ''}</span>
+      ${r.error ? '<button class="btn tiny" data-ait-err="1">看原因</button>' : ''}
     </div>
-    ${h.error ? `<div class="aitErrBox" hidden>${esc(h.error)}</div>` : ''}
+    ${r.error ? `<div class="aitErrBox" hidden>${esc(r.error)}</div>` : ''}
   </div>`;
 }
-function aitBodyHTML(data) {
-  const running = data.running || [], history = data.history || [];
-  const sec = (title, n, body) => `<div class="aitSec"><div class="aitSecT">${title}<span class="aitSecN">${n}</span></div>${body}</div>`;
-  const runPart = running.length
-    ? running.map(aitRunningHTML).join('')
-    : '<div class="aitNone">当前没有正在执行的 AI 任务。</div>';
-  /* 历史按目标分组；组内按时间倒序（服务端已按 id 倒序给） */
-  const groups = new Map();
-  for (const h of history) {
-    const k = h.goalId || 0;
-    if (!groups.has(k)) groups.set(k, { id: h.goalId || 0, title: h.goalTitle || '（无目标）', list: [] });
-    groups.get(k).list.push(h);
+/* 某一组已经加载出来的记录 + 「再看 N 条」 */
+function aitRowsHTML(goalId) {
+  const box = aitS().rows[goalId];
+  if (!box) return '<div class="aitNone">正在读取…</div>';
+  if (!box.rows.length) return '<div class="aitNone">这个目标下没有符合条件的记录。</div>';
+  const rest = box.total - box.rows.length;
+  return box.rows.map(aitHistRowHTML).join('')
+    + (rest > 0 || box.hasMore
+      ? `<div class="aitMore"><button class="btn tiny" data-ait-more="${goalId}">${box.loading ? '读取中…' : '再看 ' + Math.min(AIT_PAGE, Math.max(0, rest)) + ' 条'}${rest > 0 ? '（还有 ' + rest + ' 条）' : ''}</button></div>`
+      : '');
+}
+function aitPaintRun(data) {
+  const host = document.getElementById('aitRun');
+  if (!host) return;
+  const html = aitRunHTML(data);
+  if (host.__html !== html) { host.__html = html; host.innerHTML = html; }
+  const n = (data.running || []).length;
+  const hint = document.getElementById('aitHint');
+  if (hint) {
+    const sm = data.summary || {};
+    hint.textContent = (n ? n + ' 个正在执行 · ' : '')
+      + `历史 ${sm.total || 0} 条（✓ ${sm.done || 0} · ✗ ${sm.failed || 0} · ⏹ ${sm.cancelled || 0}）`;
   }
-  const histPart = groups.size
-    ? [...groups.values()].map(g => `<div class="aitGroup">
-        <div class="aitGroupH" data-ait-go="${g.id}">${esc(g.title)}<span class="aitSecN">${g.list.length}</span></div>
-        ${g.list.map(aitHistoryRow).join('')}
-      </div>`).join('')
-    : '<div class="aitNone">还没有跑完的 AI 任务记录。</div>';
-  return sec('进行中', running.length, runPart) + sec('历史记录', history.length, histPart);
+}
+function aitPaintHist() {
+  const host = document.getElementById('aitHist');
+  if (!host) return;
+  const data = state.aitData || {};
+  const f = aitS().filter;
+  let groups = data.groups || [];
+  if (f.goal) groups = groups.filter(g => Number(g.goalId) === Number(f.goal));
+  const body = groups.length
+    ? groups.map(aitGrpHTML).join('')
+    : `<div class="aitNone">${(data.summary || {}).total ? '没有符合筛选条件的记录。' : '还没有跑完的 AI 任务记录。'}</div>`;
+  host.innerHTML = body;
+  const allBtn = document.getElementById('aitToggleAll');
+  if (allBtn) {
+    const anyClosed = groups.some(g => !aitS().open[g.goalId]);
+    allBtn.textContent = anyClosed ? '展开全部' : '收起全部';
+    allBtn.disabled = !groups.length;
+  }
+}
+async function aitLoadRows(goalId, more) {
+  const st = aitS();
+  const cur = st.rows[goalId] || { rows: [], total: 0, hasMore: false, loading: false };
+  if (cur.loading) return;
+  cur.loading = true; st.rows[goalId] = cur;
+  if (more) { const box = document.querySelector('[data-ait-grpbox="' + goalId + '"] .aitGrpBody'); if (box) box.innerHTML = aitRowsHTML(goalId); }
+  try {
+    const r = await api('/api/ai-tasks/history' + aitQuery({ goal: goalId, limit: AIT_PAGE, offset: more ? cur.rows.length : 0 }));
+    cur.rows = more ? cur.rows.concat(r.rows || []) : (r.rows || []);
+    cur.total = r.total || 0;
+    cur.hasMore = !!r.hasMore;
+  } catch (e) {
+    cur.error = e.message;
+  }
+  cur.loading = false;
+  const box = document.querySelector('[data-ait-grpbox="' + goalId + '"] .aitGrpBody');
+  if (box) box.innerHTML = aitRowsHTML(goalId);
+}
+async function aitToggle(goalId, force) {
+  const st = aitS();
+  const open = force != null ? force : !st.open[goalId];
+  st.open[goalId] = open;
+  const box = document.querySelector('[data-ait-grpbox="' + goalId + '"]');
+  if (!box) return;
+  box.classList.toggle('open', open);
+  const hd = box.querySelector('.aitGrpHd');
+  if (hd) hd.setAttribute('aria-expanded', open ? 'true' : 'false');
+  const caret = box.querySelector('.aitGrpCaret');
+  if (caret) caret.textContent = open ? '▾' : '▸';
+  const body = box.querySelector('.aitGrpBody');
+  if (body) body.hidden = !open;
+  if (open && !st.rows[goalId]) { if (body) body.innerHTML = '<div class="aitNone">正在读取…</div>'; await aitLoadRows(goalId, false); }
+  else if (open && body) body.innerHTML = aitRowsHTML(goalId);
+  const allBtn = document.getElementById('aitToggleAll');
+  if (allBtn) {
+    const gs = (state.aitData && state.aitData.groups) || [];
+    allBtn.textContent = gs.some(g => !aitS().open[g.goalId]) ? '展开全部' : '收起全部';
+  }
 }
 async function renderAiTasksPage() {
   aiTasksStopPoll();
+  aitS();
   app.innerHTML = '<p class="muted">正在读取 AI 任务…</p>';
   let data;
   try { data = await api('/api/ai-tasks'); } catch (e) {
@@ -9602,51 +9730,105 @@ async function renderAiTasksPage() {
       <div class="emptyBox" style="margin-top:30px;"><div class="ebIcon">⚠️</div><div class="ebTitle">读取失败</div><div class="ebText">${esc(e.message)}</div></div></div>`;
     return;
   }
+  state.aitData = data;
+  const f = aitS().filter;
+  const opts = (list, cur) => list.map(o => `<option value="${esc(String(o[0]))}" ${String(o[0]) === String(cur) ? 'selected' : ''}>${esc(o[1])}</option>`).join('');
   app.innerHTML = `<div class="page">
     <div class="pageHead"><h2 class="title">🤖 AI 任务</h2><span class="aitHeadHint" id="aitHint"></span></div>
-    <div id="aitBody"></div>
+    <div id="aitRun"></div>
+    <div class="aitSec">
+      <div class="aitSecT">历史记录<span class="aitSecN">${(data.summary || {}).total || 0}</span></div>
+      <div class="aitFilters">
+        <input id="aitQ" class="aitQ" placeholder="搜任务标题…" value="${esc(f.q)}">
+        <select id="aitFGoal" class="aitSel">${opts([[0, '全部目标']].concat((data.goals || []).map(g => [g.id, g.title])), f.goal)}</select>
+        <select id="aitFStatus" class="aitSel">${opts([[ '', '全部状态'], ['done', '✓ 完成'], ['failed', '✗ 失败'], ['cancelled', '已停止']], f.status)}</select>
+        <select id="aitFDays" class="aitSel">${opts([[0, '全部时间'], [1, '今天'], [7, '最近 7 天'], [30, '最近 30 天']], f.days)}</select>
+        <span class="spacer"></span>
+        <button class="btn tiny" id="aitToggleAll">展开全部</button>
+      </div>
+    </div>
+    <div id="aitHist"></div>
   </div>`;
-  const paint = d => {
-    const body = document.getElementById('aitBody');
-    if (!body) return false;
-    const html = aitBodyHTML(d);
-    /* 内容没变就别重写 DOM：否则每 2.5 秒闪一下、滚动位置也会跳 */
-    if (body.__html !== html) { body.__html = html; body.innerHTML = html; }
-    const hint = document.getElementById('aitHint');
-    const rn = (d.running || []).length;
-    if (hint) hint.textContent = rn ? `${rn} 个正在执行 · 共 ${(d.history || []).length} 条历史` : `共 ${(d.history || []).length} 条历史`;
-    return true;
-  };
-  paint(data);
+  /* 选了某个目标 → 直接把它展开，省一次点击 */
+  if (f.goal) aitS().open[f.goal] = true;
+  aitPaintRun(data);
+  aitPaintHist();
   bindAiTasks();
-  /* 有任务在跑才轮询；跑完自动停，别让一个静态页一直发请求 */
-  if ((data.running || []).length) {
-    aiTasksTimer = setInterval(async () => {
-      if (parseRoute().view !== 'aitasks') { aiTasksStopPoll(); return; }
-      try { const d = await api('/api/ai-tasks'); if (!paint(d)) aiTasksStopPoll(); } catch (e) {}
-    }, 2500);
-  }
+  if (f.goal) await aitLoadRows(f.goal, false).then(aitPaintHist);
+  /* 常驻轻轮询：这一页就是看任务的，随时可能新起一个。历史那块只在总数变了才重画 */
+  aiTasksTimer = setInterval(async () => {
+    if (parseRoute().view !== 'aitasks') { aiTasksStopPoll(); return; }
+    try {
+      const d = await api('/api/ai-tasks');
+      const before = ((state.aitData || {}).summary || {}).total || 0;
+      state.aitData = d;
+      aitPaintRun(d);
+      if (((d.summary || {}).total || 0) !== before) aitPaintHist();
+    } catch (e) {}
+  }, 3000);
 }
 function bindAiTasks() {
-  const body = document.getElementById('aitBody');
-  if (!body || body.__bound) return;
-  body.__bound = true;
-  body.addEventListener('click', async e => {
-    const c = e.target.closest('[data-ait-cancel]');
-    if (c) {
-      try { await api('/api/tasks/' + c.getAttribute('data-ait-cancel') + '/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); toast('已请求停止'); await taskPoll(); }
-      catch (err) { toast(err.message); }
-      return;
+  const q = document.getElementById('aitQ');
+  if (q) {
+    let t = null;
+    const run = () => {
+      aitS().filter.q = q.value.trim();
+      aitS().open = {}; aitS().rows = {};
+      aitPaintHist();
+      const g = aitS().filter.goal || ((state.aitData && state.aitData.groups || [])[0] || {}).goalId;
+      if (aitS().filter.goal) { aitS().open[g] = true; aitLoadRows(g, false).then(aitPaintHist); }
+    };
+    q.addEventListener('input', () => { clearTimeout(t); t = setTimeout(run, 350); });
+  }
+  const bindSel = (id, key, num) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', async () => {
+      const st = aitS();
+      st.filter[key] = num ? Number(el.value) : el.value;
+      st.open = {}; st.rows = {};          // 筛选一换，之前展开的那些就不作数了
+      if (st.filter.goal) st.open[st.filter.goal] = true;
+      aitPaintRun(state.aitData || {}); aitPaintHist();
+      if (st.filter.goal) { await aitLoadRows(st.filter.goal, false); aitPaintHist(); }
+    });
+  };
+  bindSel('aitFGoal', 'goal', true);
+  bindSel('aitFStatus', 'status', false);
+  bindSel('aitFDays', 'days', true);
+  const all = document.getElementById('aitToggleAll');
+  if (all) all.addEventListener('click', async () => {
+    const data = state.aitData || {};
+    const f = aitS().filter;
+    let gs = data.groups || [];
+    if (f.goal) gs = gs.filter(g => Number(g.goalId) === Number(f.goal));
+    const anyClosed = gs.some(g => !aitS().open[g.goalId]);
+    for (const g of gs) {
+      aitS().open[g.goalId] = anyClosed;
+      if (anyClosed && !aitS().rows[g.goalId]) await aitLoadRows(g.goalId, false);
     }
-    /* 「看原因」要排在跳转前面 —— 它就在可跳转的那一行里，否则一点就跳走了 */
+    aitPaintHist();
+  });
+  const body = document.getElementById('aitHist');
+  if (body) body.addEventListener('click', async e => {
+    const hd = e.target.closest('[data-ait-grp]');
+    if (hd) { await aitToggle(Number(hd.getAttribute('data-ait-grp'))); return; }
+    const more = e.target.closest('[data-ait-more]');
+    if (more) { await aitLoadRows(Number(more.getAttribute('data-ait-more')), true); return; }
     const eb = e.target.closest('[data-ait-err]');
-    if (eb) {
+    if (eb) {                       /* 要排在跳转前面：它就在可跳转的那一行里 */
       const box = eb.closest('.aitRowWrap') && eb.closest('.aitRowWrap').querySelector('.aitErrBox');
       if (box) box.hidden = !box.hidden;
       return;
     }
-    const g = e.target.closest('[data-ait-go]');
-    if (g) { const id = Number(g.getAttribute('data-ait-go')); if (id) go('#/g/' + id); }
+    const goEl = e.target.closest('[data-ait-go]');
+    if (goEl) { const id = Number(goEl.getAttribute('data-ait-go')); if (id) go('#/g/' + id); }
+  });
+  const runBox = document.getElementById('aitRun');
+  if (runBox) runBox.addEventListener('click', async e => {
+    const c = e.target.closest('[data-ait-cancel]');
+    if (!c) return;
+    try { await api('/api/tasks/' + c.getAttribute('data-ait-cancel') + '/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); toast('已请求停止'); await taskPoll(); }
+    catch (err) { toast(err.message); }
   });
 }
 

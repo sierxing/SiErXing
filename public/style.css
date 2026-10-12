@@ -2582,45 +2582,84 @@ input,textarea{caret-color:var(--accent);}
   padding:7px 9px 3px; border-top:1px solid var(--border); margin-top:4px;
 }
 
-/* ---- AI 任务页（左栏入口）：进行中 + 历史 ---- */
-.aitHeadHint{font-size:12.5px; color:var(--muted); margin-left:10px;}
-.aitSec{margin:18px 0 0;}
-.aitSecT{display:flex; align-items:center; gap:7px; font-size:13px; font-weight:700; margin-bottom:9px;}
-.aitSecN{
-  font-size:11px; font-weight:600; padding:1px 7px; border-radius:6px;
-  background:var(--soft); color:var(--muted); font-variant-numeric:tabular-nums;
-}
+/* ---- AI 任务页（左栏入口）----
+   两段形状完全不同，所以样式也分开：
+     · 正在执行 = 几张紧凑卡，自适应网格（窄屏一列、宽屏两三列）
+     · 历史记录 = 「每个目标一行」的折叠汇总 —— 1000 条压成 10 行靠的就是折叠，
+                  所以这里压根没有给长列表准备的样式 */
+.aitHeadHint{font-size:12.5px; color:var(--muted); margin-left:10px; font-variant-numeric:tabular-nums;}
+.aitSec{margin:16px 0 0;}
+.aitSecT{display:flex; align-items:center; gap:7px; font-size:13px; font-weight:700; margin-bottom:10px;}
+.aitSecN{font-size:11px; font-weight:600; padding:1px 7px; border-radius:6px; background:var(--soft); color:var(--muted); font-variant-numeric:tabular-nums;}
+.aitSecSub{font-size:11.5px; font-weight:500; color:var(--muted);}
 .aitNone{font-size:12.5px; color:var(--muted); padding:11px 13px; border:1px dashed var(--border); border-radius:10px;}
-/* 进行中的卡片：复用任务中心的 .taskItem，只补两处 */
-.aitCard{align-items:flex-start;}
-.aitGoalTag{
-  font-size:11px; font-weight:600; margin-left:8px; padding:1px 7px; border-radius:6px;
-  background:var(--accent-soft); color:var(--accent); vertical-align:1px;
+.aitMore{padding:9px 0 5px;}
+
+/* —— 正在执行：紧凑卡 —— */
+.aitRunGrid{display:grid; gap:10px; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr));}
+.aitRun{
+  display:flex; flex-direction:column; gap:7px;
+  padding:11px 12px; border:1px solid var(--border); border-radius:12px; background:var(--card);
 }
-.aitOps{display:flex; flex-direction:column; align-items:flex-end; gap:7px;}
+.aitRun.running{border-color:var(--accent-border); background:linear-gradient(180deg, var(--accent-soft), var(--card) 62%);}
+.aitRunHd{display:flex; align-items:center; gap:7px; min-width:0;}
+.aitRunIco{font-size:14px;}
+.aitRunTitle{flex:1; min-width:0; font-size:13px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.aitRunSub{font-size:11.5px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.aitRunBar{height:5px; border-radius:99px; background:var(--soft); overflow:hidden;}
+.aitRunBar i{display:block; height:100%; border-radius:99px; background:linear-gradient(90deg, var(--accent), var(--accent-2)); transition:width .4s ease;}
+/* 条本身带流动高光：百分比不动的那几十秒里，肉眼也能确认"它还活着" */
+.aitRun.running .aitRunBar i{
+  background-image:linear-gradient(90deg, var(--accent), var(--accent-2), var(--accent));
+  background-size:200% 100%; animation:aitFlow 1.8s linear infinite;
+}
+@keyframes aitFlow{from{background-position:0 0;} to{background-position:-200% 0;}}
+.aitRunFoot{display:flex; align-items:center; gap:8px; font-size:11.5px; color:var(--muted); font-variant-numeric:tabular-nums;}
+.aitRunPct{font-size:12px; font-weight:700; color:var(--accent);}
+.aitRunStage{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.aitRunTime{white-space:nowrap;}
+.aitRunThink{font-size:11.5px; color:var(--muted); opacity:.85; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+
+/* —— 历史：筛选条 + 目标汇总行 —— */
+.aitFilters{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:11px;}
+.aitQ{
+  flex:1 1 190px; min-width:150px; border:1px solid var(--border); background:var(--card); color:var(--text);
+  border-radius:9px; padding:6px 10px; font-family:inherit; font-size:12.5px;
+}
+.aitQ:focus{outline:none; border-color:var(--accent);}
+.aitSel{
+  flex:0 0 auto; max-width:190px; border:1px solid var(--border); background:var(--card); color:var(--text);
+  border-radius:9px; padding:6px 8px; font-family:inherit; font-size:12.5px; cursor:pointer;
+}
+.aitSel:focus{outline:none; border-color:var(--accent);}
+.aitGrp{border:1px solid var(--border); border-radius:12px; overflow:hidden; margin-bottom:9px; background:var(--card);}
+.aitGrp.open{border-color:var(--accent-border);}
+.aitGrpHd{
+  display:flex; align-items:center; gap:9px; width:100%; padding:10px 12px;
+  border:0; background:transparent; color:var(--text); font-family:inherit; font-size:13px; cursor:pointer; text-align:left;
+}
+.aitGrpHd:hover{background:var(--soft);}
+.aitGrpCaret{width:12px; font-size:12px; color:var(--text); opacity:.55;}
+.aitGrpName{flex:1; min-width:0; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.aitGrpNums{display:flex; align-items:center; gap:9px; font-variant-numeric:tabular-nums;}
+.aitGrpTotal{font-size:11.5px; color:var(--muted);}
+.aitGrpLast{min-width:110px; text-align:right; font-size:11.5px; color:var(--muted); white-space:nowrap;}
+.aitGrpBody{padding:2px 12px 7px; border-top:1px solid var(--border);}
+.aitRowWrap{border-bottom:1px solid var(--border);}
+.aitRowWrap:last-child{border-bottom:0;}
+.aitRow{display:flex; align-items:center; gap:10px; padding:8px 2px; border-radius:8px; cursor:pointer;}
+.aitRow:hover{background:var(--soft);}
+.aitRowIcon{font-size:13.5px;}
+.aitRowTitle{flex:1; min-width:0; font-size:12.8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.aitRowMeta{font-size:11.5px; color:var(--muted); white-space:nowrap; font-variant-numeric:tabular-nums;}
+.aitErrBox{
+  font-size:12px; line-height:1.6; color:var(--danger); margin:0 0 9px; padding:8px 11px;
+  border-radius:9px; background:color-mix(in srgb, var(--danger) 7%, transparent);
+}
+/* 状态色：同一套用在卡片和汇总行上 */
 .aitSt{font-size:11.5px; font-weight:600; white-space:nowrap;}
 .aitSt.running{color:var(--accent);}
 .aitSt.queued{color:var(--muted);}
 .aitSt.done{color:var(--ok, #0e9f6e);}
 .aitSt.failed{color:var(--danger);}
 .aitSt.cancelled{color:var(--muted);}
-/* 历史：按目标分组，一行一条 */
-.aitGroup{margin:0 0 14px;}
-.aitGroupH{
-  display:flex; align-items:center; gap:7px; padding:6px 2px; cursor:pointer;
-  font-size:12.5px; font-weight:600; color:var(--muted);
-}
-.aitGroupH:hover{color:var(--accent);}
-.aitRowWrap{border-bottom:1px solid var(--border);}
-.aitRowWrap:last-child{border-bottom:0;}
-.aitRow{display:flex; align-items:center; gap:10px; padding:8px 2px; cursor:pointer; border-radius:8px;}
-.aitRow:hover{background:var(--soft);}
-.aitRowIcon{font-size:14px;}
-.aitRowTitle{flex:1; min-width:0; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
-.aitRowMeta{font-size:11.5px; color:var(--muted); white-space:nowrap; font-variant-numeric:tabular-nums;}
-.aitErrBox{
-  font-size:12px; line-height:1.6; color:var(--danger); margin:0 0 9px; padding:8px 11px;
-  border-radius:9px; background:color-mix(in srgb, var(--danger) 7%, transparent);
-}
-/* 预计剩余时间：用户最想知道的就是"还要多久" */
-.taskEta{color:var(--muted); font-weight:400;}
