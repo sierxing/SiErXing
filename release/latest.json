@@ -1,14 +1,14 @@
 {
-  "version": "1.10.47",
-  "buildVer": "7522958092cc",
-  "payload": "release/payload-1.10.47.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.47.sxar?ref=main",
+  "version": "1.10.49",
+  "buildVer": "7832b81d808d",
+  "payload": "release/payload-1.10.49.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.49.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "b3b0ac5360beea25f6330692092eac4488d25fefb823be19c76d228fe32b322e",
-  "size": 773674,
-  "unpackedSize": 2782453,
-  "publishedAt": "2026-10-12T04:55:23.159Z",
-  "notes": "「为什么有这一步」只讲原因不再罗列依据（依据清单归「依据信息源」）；依据卡片排版重做（类型标签/内联操作/正文就地展开）",
+  "sha256": "939c151ca82649b10c7d83097a1d5f48a324c3ceb97e75bff6fc544ebe23f274",
+  "size": 777768,
+  "unpackedSize": 2793202,
+  "publishedAt": "2026-10-12T05:57:51.587Z",
+  "notes": "依据说明改为 AI 分析（说清这份资料凭什么支撑这个节点）；「还有 N 条」改成弹窗用同一套卡片列全部依据",
   "exeRequired": false
 }

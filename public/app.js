@@ -945,6 +945,7 @@ function showNodePanel(id, rerender) {
   if (!n) return;
   const srcs = safeParse(n.sources, []);
   state.__npSrcs = srcs;   // 依据卡片的「正文」按钮按 index 回取（面板每次重绘）
+  state.__npNodeId = id;   // 「查看全部依据」弹窗按节点 id 取完整清单
   const tuts = tutorialsOfNode(id);   // 修复：原来漏了这行，节点面板一打开就报 tuts is not defined
   const old = document.getElementById('nodePanel');
   if (old) old.remove();
@@ -1050,22 +1051,11 @@ function showNodePanel(id, rerender) {
           const HEAD = 3;
           /* 每张卡：一行头（类型标签 + 名字 + 优质 + 操作），批注在下面。
              类型标签从来源名/站点里认出来，让用户一眼分类。 */
-          const kindOf = o => {
-            const t = o.name + ' ' + String(o.x.site || '') + ' ' + String(o.x.kind || '');
-            if (/代码库/.test(t)) return '代码库';
-            if (/JD|招聘|岗位/.test(t)) return 'JD';
-            if (/面经|面试|一面|二面/.test(t)) return '面经';
-            if (/提炼汇总|汇总/.test(t)) return '汇总';
-            if (/用户提供/.test(t)) return '自己提供';
-            if (/电子书|书单/.test(t)) return '书';
-            if (/路线|路径/.test(t)) return '路线';
-            return String(o.x.kind || '资料').slice(0, 6);
-          };
           const head = items.slice(0, HEAD).map(o => `<div class="npSrc ${o.isStar ? 'isStar' : ''}">
               <div class="npSrcHd">
                 ${o.isStar ? sxi('check', 14) : sxi('link', 14)}
                 <span class="npSrcName" title="${esc(o.name)}">${esc(o.name)}</span>
-                <span class="npSrcKind">${esc(kindOf(o))}</span>
+                <span class="npSrcKind">${esc(srcKind(o))}</span>
                 ${o.isStar ? '<span class="npSrcStar">优质</span>' : ''}
                 <div class="npSrcOps">
                   ${o.body ? `<button class="btn tiny" data-npsrc-body="${o.i}" title="展开 / 收起资料正文">正文 ${o.body.length}</button>` : ''}
@@ -1075,13 +1065,12 @@ function showNodePanel(id, rerender) {
               ${o.note ? `<div class="npSrcNote">${esc(o.note)}</div>` : ''}
               <div class="npSrcBodyBox" hidden></div>
             </div>`).join('');
-          const rest = items.slice(HEAD);
-          const chip = o => `<button class="npSrcChip${o.isStar ? ' isStar' : ''}" data-npsrc-note="${esc(o.note || o.name)}">${o.isStar ? '★ ' : ''}${esc(o.name.length > 20 ? o.name.slice(0, 20) + '…' : o.name)}</button>`;
-          const more = rest.length ? `<div class="npSrcChipsWrap">
-              <div class="npSrcChips" id="npSrcChips" hidden>${rest.map(chip).join('')}</div>
-              <button class="btn tiny" id="npSrcChipsTg">＋ 还有 ${rest.length} 条依据</button>
-              <div class="npSrcChipNote" id="npSrcChipNote" hidden></div>
-            </div>` : '';
+          /* 其余依据不再"就地展开成 chips"（chips 和上面的卡片长得完全不一样，
+             用户说"展开后看不到类似的依据卡片"）。
+             改成：一个按钮 → **弹窗里用同一套卡片列全部依据**，视觉一致、也不挤压面板。 */
+          const more = items.length > HEAD
+            ? `<button class="btn small" id="npSrcAll">查看全部 ${items.length} 条依据</button>`
+            : '';
           return `<div class="npSrcList">${head}${more}</div>`;
         })()}
         <div class="npSrcAdd">
@@ -2145,7 +2134,7 @@ function openTutVersions(tid) {
           <div class="tutVerPrevMeta">${esc(v.reason || '')} · ${esc(fmtDate(v.created_at))}</div>`
           + (isHtml
             ? `<iframe class="tutFrame tutVerFrame" sandbox="allow-scripts allow-same-origin allow-popups" srcdoc=""></iframe>`
-            : `<div class="tutBody mdBody">${mdToHTML(v.content || '')}</div>`);
+            : `<div class="tutBody mdBody">${mdToHTML(v.content || '', { viz: true })}</div>`);
         if (isHtml) {
           const fr = body.querySelector('.tutVerFrame');
           if (fr) fr.srcdoc = withCiteHook(tutThemedHTML(rewriteCites(cleanHtmlForFrame(v.content || ''))));
@@ -3014,6 +3003,45 @@ function bindTutorialCard() {
 function mdEscape(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
+/* 放进 HTML 属性里的转义（srcdoc 要整段 HTML 塞进双引号属性） */
+function mdEscapeAttr(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+/* 可视化块：给 AI 写的 HTML 补一段「上报自己多高」的脚本。
+   沙箱 iframe 拿不到父页面，只能用 postMessage 把高度传出来；
+   外层 mdVizResize 按 event.source 对上号再设高度 —— 于是图表/动画多高就显示多高，
+   不会出现固定高度里被裁一刀。 */
+function vizSrcdoc(code) {
+  /* ⚠️ 不能拿 documentElement.offsetHeight / scrollHeight 当高度：它们至少等于 iframe
+     视口高度，而视口高度又由外层设的那个值决定 —— 会锁死在一个值上（实测永远 338）。
+     改成逐个量 body 直接子元素的底边，取最大值再加下内边距，才是内容真实高度。 */
+  const report = '<script>(function(){function h(){try{var b=document.body;if(!b)return;var m=0;'
+    + 'var cs=getComputedStyle(b);var pb=parseFloat(cs.paddingBottom)||0;var pt=parseFloat(cs.paddingTop)||0;'
+    + 'var kids=b.children;for(var i=0;i<kids.length;i++){var r=kids[i].getBoundingClientRect();'
+    + 'if(r.height||r.width){var bt=r.bottom+(window.scrollY||0);if(bt>m)m=bt;}}'
+    + 'var y=Math.ceil(m+pb);if(!(y>0))y=Math.ceil(b.scrollHeight||0);'
+    + 'if(y>0)parent.postMessage({__mdviz:1,h:y},"*");}catch(e){}}'
+    + 'window.addEventListener("load",h);document.addEventListener("DOMContentLoaded",h);'
+    + 'setTimeout(h,60);setTimeout(h,400);setInterval(h,900);'
+    + 'window.addEventListener("resize",h);'
+    + 'if(window.ResizeObserver){try{new ResizeObserver(h).observe(document.body);}catch(e){}}'
+    + '})();<\/script>';
+  const s0 = String(code == null ? '' : code);
+  if (/<\/body>/i.test(s0)) return s0.replace(/<\/body>/i, report + '</body>');
+  return s0 + report;
+}
+/* 可视化 iframe 自适应高度：只认自家可视化块发来的消息 */
+window.addEventListener('message', e => {
+  const d = e && e.data;
+  if (!d || d.__mdviz !== 1) return;
+  const frames = document.querySelectorAll('iframe.mdVizFrame');
+  for (const f of frames) {
+    if (f.contentWindow !== e.source) continue;
+    const h = Math.max(140, Math.min(1600, Math.round(Number(d.h) || 0) || 320));
+    if (Math.abs((parseInt(f.style.height, 10) || 0) - h) > 4) f.style.height = h + 'px';
+    break;
+  }
+});
 function mdInline(s) {
   s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
   s = s.replace(/~~([^~]+?)~~/g, '<del>$1</del>');
@@ -3034,7 +3062,10 @@ function normalizeFences(raw) {
   t = t.replace(/([^\n`])(```+)/g, '$1\n$2');                        // 围栏紧跟在文字后面
   return t;
 }
-function mdToHTML(text) {
+function mdToHTML(text, opts) {
+  /* opts.viz：把 ```viz 围栏渲染成沙箱 iframe 里的活页面（教程专用，见下方说明）。
+     默认关闭 —— 聊天/汇总里的 ```viz 仍按普通代码块显示，避免模型偶发写出时用户看到空白框。 */
+  const vizOn = !!(opts && opts.viz);
   const lines = normalizeFences(text).split('\n');
   let html = '', i = 0;
   const mdRow = c => {
@@ -3068,6 +3099,16 @@ function mdToHTML(text) {
       // ⚠️ 这里只能 i = start + 1，不能退回 start：那会让同一行被反复重新判定，死循环。
       if (!closed) { i = start + 1; html += '<p>' + mdInline(mdEscape(line)) + '</p>'; continue; }
       i++;
+      /* 可视化块：```viz ... ``` 里的 HTML 会被塞进一个沙箱 iframe 真跑起来。
+         为什么要 iframe：教程正文里直接插 HTML 会和外层样式互相污染、脚本还可能
+         摸到主页面 DOM。沙箱（只给 allow-scripts，不给 allow-same-origin）让它
+         拿到的是独立源，既能画图/动画，又碰不到应用本身。
+         高度靠块内脚本 postMessage 上报，外层监听后设置（见 mdVizResize）。 */
+      if (vizOn && /^(?:viz|demo|htmlviz)$/i.test(fence[2] || '')) {
+        html += '<div class="mdViz"><iframe class="mdVizFrame" sandbox="allow-scripts" loading="lazy" srcdoc="'
+          + mdEscapeAttr(vizSrcdoc(buf.join('\n'))) + '"></iframe></div>';
+        continue;
+      }
       html += '<pre' + (fence[2] ? ' data-lang="' + mdEscape(fence[2]) + '"' : '') + '><code>' + mdEscape(buf.join('\n')) + '</code></pre>';
       continue;
     }
@@ -3209,6 +3250,60 @@ function citeResolve(id) {
   }
   return '';
 }
+/* 「查看全部依据」弹窗：用与面板内**完全相同的卡片**列出该节点的全部依据。
+   起因：其余依据原来是展开成 chips（窄条、只有名字），与上面的卡片长得不一样，
+   用户说"展开后看不到类似的依据卡片"。现在统一成一套卡片 + 一个弹窗。 */
+/* 从来源名/站点/类型里认出它属于哪一类，给卡片一个标签（面板与弹窗共用） */
+function srcKind(o) {
+  const t = String((o && o.name) || '') + ' ' + String((o && o.x && o.x.site) || '') + ' ' + String((o && o.x && o.x.kind) || '');
+  if (/代码库/.test(t)) return '代码库';
+  if (/JD|招聘|岗位/.test(t)) return 'JD';
+  if (/面经|面试|一面|二面/.test(t)) return '面经';
+  if (/提炼汇总|汇总/.test(t)) return '汇总';
+  if (/用户提供/.test(t)) return '自己提供';
+  if (/电子书|书单/.test(t)) return '书';
+  if (/路线|路径/.test(t)) return '路线';
+  return String((o && o.x && o.x.kind) || '资料').slice(0, 6);
+}
+function srcCardHTML(o) {
+  return `<div class="npSrc ${o.isStar ? 'isStar' : ''}">
+    <div class="npSrcHd">
+      ${o.isStar ? sxi('check', 14) : sxi('link', 14)}
+      <span class="npSrcName" title="${esc(o.name)}">${esc(o.name)}</span>
+      <span class="npSrcKind">${esc(srcKind(o))}</span>
+      ${o.isStar ? '<span class="npSrcStar">优质</span>' : ''}
+    </div>
+    ${o.note ? `<div class="npSrcNote">${esc(o.note)}</div>` : ''}
+    ${o.body ? `<details class="npSrcBody"><summary>查看资料库正文（${o.body.length} 字）</summary><div class="mdBody">${mdToHTML(o.body.slice(0, 4000))}</div></details>` : ''}
+  </div>`;
+}
+function openAllSrcPop() {
+  const node = state.goal && state.goal.nodes
+    ? state.goal.nodes.find(x => Number(x.id) === Number(state.__npNodeId)) : null;
+  const srcs = safeParse(node && node.sources, []);
+  if (!srcs.length) return;
+  const old = document.getElementById('srcAllPop');
+  if (old) old.remove();
+  const items = srcs.map(x => {
+    const lib = findLibSource(x);
+    const body = lib ? String(lib.content || lib.snippet || '') : '';
+    return { x, body, isStar: !!(lib && Number(lib.quality) === 1), name: String(x.name || x.title || '').trim() || '（未命名来源）', note: String(x.note || '').trim() };
+  });
+  const d = document.createElement('div');
+  d.id = 'srcAllPop';
+  d.className = 'srcAllPop';
+  d.innerHTML = `<div class="srcAllHd">
+      <b>依据信息源</b><span class="srcAllCnt">${items.length} 条</span>
+      <span class="spacer"></span>
+      <button class="btn tiny" id="srcAllClose">关闭</button>
+    </div>
+    <div class="srcAllBody">${items.map(o => srcCardHTML(o)).join('')}</div>`;
+  document.body.appendChild(d);
+  d.querySelector('#srcAllClose').addEventListener('click', () => d.remove());
+  d.addEventListener('click', ev => { if (ev.target === d) d.remove(); });
+  return d;
+}
+window.__openAllSrc = openAllSrcPop;
 function citePopClose() { const el = document.getElementById('citePop'); if (el) el.remove(); }
 function citePopOpen(id, x, y) {
   citePopClose();
@@ -3247,17 +3342,8 @@ function citePopOpen(id, x, y) {
   })();
 }
 document.addEventListener('click', e => {
-  /* 依据 chips：展开 / 收起；点某条把它的批注显示在下面一行 */
-  const tg = e.target.closest && e.target.closest('#npSrcChipsTg');
-  if (tg) {
-    const box = document.getElementById('npSrcChips');
-    if (box) {
-      const willShow = box.hidden;
-      box.hidden = !willShow;
-      tg.textContent = willShow ? '收起多余依据' : '＋ 还有 ' + box.children.length + ' 条依据';
-    }
-    return;
-  }
+  /* 「查看全部 N 条依据」→ 弹窗里用同一套卡片列全（视觉与面板内一致） */
+  if (e.target.closest && e.target.closest('#npSrcAll')) { openAllSrcPop(); return; }
   const clampTg = e.target.closest && e.target.closest('[data-clamp-tg]');
   if (clampTg) {
     const box = clampTg.parentNode.querySelector('[data-clamp]');
@@ -3286,15 +3372,6 @@ document.addEventListener('click', e => {
       box.hidden = false;
       bodyBtn.classList.add('primary');
     }
-    return;
-  }
-  const chipEl = e.target.closest && e.target.closest('[data-npsrc-note]');
-  if (chipEl) {
-    const noteBox = document.getElementById('npSrcChipNote');
-    const txt = chipEl.getAttribute('data-npsrc-note') || '';
-    const already = !noteBox.hidden && noteBox.textContent === txt;
-    noteBox.textContent = txt;
-    noteBox.hidden = already;
     return;
   }
   const nodeBtn = e.target.closest && e.target.closest('[data-cite-node]');
@@ -4112,7 +4189,7 @@ async function renderTutorialPage(tid) {
     <div class="tutMeta">${node ? '对应任务：' + esc(node.title) : ''}${goal ? '　·　所属目标：' + esc(goal.title) : ''}　·　生成于 ${esc(fmtDate(t.created_at))}${(goalCompOn(goal, 'workspace') && window.Workspace) ? '　·　<span class="wsHint" id="wsHint"></span>' : ''}</div>
     ${isHtml
       ? `<iframe class="tutFrame" id="tutFrame" sandbox="allow-scripts allow-same-origin allow-popups"></iframe>`
-      : `<div class="tutBody mdBody">${mdToHTML(t.content)}</div>`}
+      : `<div class="tutBody mdBody">${mdToHTML(t.content, { viz: true })}</div>`}
     <!-- 书签为浮动面板（顶栏按钮呼出），此处不占位 -->
   </div>`;
   if (isHtml) {

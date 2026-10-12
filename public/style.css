@@ -2471,3 +2471,28 @@ input,textarea{caret-color:var(--accent);}
 /* 「为什么有这一步」：只讲原因；一句轻提示把"依据清单"指向下面的折叠区 */
 .npWhyCite{font-size:11.5px; color:var(--muted); margin-top:6px;}
 .npWhySelfLine{font-size:13px; line-height:1.85;}
+
+/* 「查看全部依据」弹窗：与面板内同一套卡片，视觉一致 */
+.srcAllPop{
+  position:fixed; z-index:300; left:50%; top:50%; transform:translate(-50%,-50%);
+  width:min(720px,94vw); max-height:min(84vh,760px); display:flex; flex-direction:column;
+  background:var(--card); border:1px solid var(--border); border-radius:14px;
+  box-shadow:var(--shadow-lg); overflow:hidden;
+  animation:srcAllIn .16s cubic-bezier(.16,1,.3,1);
+}
+@keyframes srcAllIn{from{opacity:0; transform:translate(-50%,-48%) scale(.985);} to{opacity:1; transform:translate(-50%,-50%) scale(1);}}
+.srcAllHd{display:flex; align-items:center; gap:8px; padding:12px 15px; border-bottom:1px solid var(--border); font-size:13.5px;}
+.srcAllCnt{font-size:11.5px; padding:1px 7px; border-radius:6px; background:var(--soft); color:var(--muted); font-variant-numeric:tabular-nums;}
+.srcAllBody{padding:12px 15px 15px; overflow:auto; display:flex; flex-direction:column; gap:8px;}
+/* 窄屏铺满，避免"浮在中间的小卡片" */
+@media (max-width:720px){
+  .srcAllPop{left:12px; right:12px; top:12px; bottom:12px; width:auto; max-height:none; transform:none;}
+  @keyframes srcAllIn{from{opacity:0;} to{opacity:1;}}
+}
+
+/* ============ 教程内的可视化块（```viz）============ */
+/* 沙箱 iframe 不继承外层样式，所以这里只给外壳：白底、描边、圆角。
+   块内排版由 AI 自己写的 <style> 负责（提示词里已要求自包含）。 */
+.mdViz{margin:16px 0;}
+.mdVizFrame{display:block;width:100%;height:340px;border:1px solid var(--border);border-radius:var(--r);background:#fff;box-shadow:var(--shadow-sm);}
+:root[data-theme="dark"] .mdVizFrame{background:#fff;}
