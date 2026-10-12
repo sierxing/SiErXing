@@ -233,39 +233,81 @@ module.exports = function createSync(ctx) {
   /* 产出库文件 → 同步目录。
      用「本地没有才拷」而不是每次全量覆盖：省 IO，也避免正在用的文件被改动。 */
   function syncOutlibFiles() {
-    if (!fs.existsSync(OUTLIB_DIR)) return;
+    const st = { copied: 0, tooBig: 0, overTotal: 0, noSource: 0, failed: 0, names: [] };
+    if (!fs.existsSync(OUTLIB_DIR)) return st;
     fs.mkdirSync(OUTLIB_SYNC_DIR, { recursive: true });
-    let total = 0, skipped = 0;
+    let total = 0;
     for (const f of fs.readdirSync(OUTLIB_DIR)) {
       const src = path.join(OUTLIB_DIR, f), dst = path.join(OUTLIB_SYNC_DIR, f);
       try {
-        const st = fs.statSync(src);
-        if (!st.isFile()) continue;
-        if (st.size > OUTLIB_MAX_FILE) { skipped++; continue; }
-        if (total + st.size > OUTLIB_MAX_TOTAL) { skipped++; continue; }
+        const s = fs.statSync(src);
+        if (!s.isFile()) continue;
+        if (s.size > OUTLIB_MAX_FILE) { st.tooBig++; st.names.push(f); continue; }
+        if (total + s.size > OUTLIB_MAX_TOTAL) { st.overTotal++; continue; }
         if (fs.existsSync(dst)) {
           const ds = fs.statSync(dst);
-          if (ds.size === st.size) continue;          // 大小一致认为已是最新
+          if (ds.size === s.size) continue;          // 大小一致认为已是最新
         }
         fs.copyFileSync(src, dst);
-        total += st.size;
-      } catch (e) { skipped++; }
+        total += s.size;
+        st.copied++;
+      } catch (e) { st.failed++; }
     }
-    if (skipped) log('[sync] 产出库：有 ' + skipped + ' 个文件超过大小上限未上传（目录结构仍会同步）');
+    /* 库里记着、本机却没有的文件本体：这类条目会同步到别的设备去，
+       那边点开就是 404 —— 必须说出来，不能让用户对着"同步成功"干瞪眼。
+       （真实翻车：远端快照有 3 条产出记录，仓库里只有 1 个文件。） */
+    st.dangling = danglingOutlib();
+    if (st.dangling.length) {
+      log('[sync] 产出库：有 ' + st.dangling.length + ' 个条目在本机找不到文件本体（文件名仍在数据库里）');
+    }
+    if (st.tooBig || st.overTotal) {
+      log('[sync] 产出库：' + st.tooBig + ' 个超过单文件 ' + Math.round(OUTLIB_MAX_FILE / 1048576) + 'MB 上限、'
+        + st.overTotal + ' 个超过本次 ' + Math.round(OUTLIB_MAX_TOTAL / 1048576) + 'MB 总上限，未上传（目录结构仍会同步）');
+    }
+    return st;
+  }
+
+  /* outlib_nodes 里 kind=file 但 blob 不在磁盘上的条目 */
+  function danglingOutlib() {
+    const out = [];
+    try {
+      const rows = db.prepare("SELECT id, name, file FROM outlib_nodes WHERE kind = 'file'").all();
+      for (const r of rows) {
+        if (!r.file) { out.push({ id: r.id, name: r.name, why: 'no-pointer' }); continue; }
+        try { if (!fs.statSync(path.join(OUTLIB_DIR, r.file)).isFile()) out.push({ id: r.id, name: r.name, why: 'no-file' }); }
+        catch (e) { out.push({ id: r.id, name: r.name, why: 'no-file' }); }
+      }
+    } catch (e) {}
+    return out;
   }
 
   /* 同步目录 → 本机：别的设备拉下来的产出文件落回 blob 目录 */
   function importOutlibFiles() {
-    if (!fs.existsSync(OUTLIB_SYNC_DIR)) return;
+    const st = { copied: 0, existed: 0 };
+    if (!fs.existsSync(OUTLIB_SYNC_DIR)) return st;
     fs.mkdirSync(OUTLIB_DIR, { recursive: true });
     for (const f of fs.readdirSync(OUTLIB_SYNC_DIR)) {
       const src = path.join(OUTLIB_SYNC_DIR, f), dst = path.join(OUTLIB_DIR, f);
       try {
         if (!fs.statSync(src).isFile()) continue;
-        if (fs.existsSync(dst)) continue;             // 本机已有同名 blob，不覆盖
+        if (fs.existsSync(dst)) { st.existed++; continue; }   // 本机已有同名 blob，不覆盖
         fs.copyFileSync(src, dst);
+        st.copied++;
       } catch (e) {}
     }
+    return st;
+  }
+
+  /* 产出库体检 → 给用户看的一句话。别只写进日志：日志在设置页看不到，
+     用户只看到"上传成功"，于是理所当然地以为另一台设备也能打开那些文件。 */
+  function outlibWarn(st) {
+    if (!st) return '';
+    const bits = [];
+    if (st.dangling && st.dangling.length) bits.push(st.dangling.length + ' 个条目在本机找不到文件本体（可能是在别的设备删过、或超出大小上限没上传），它们会作为目录结构同步过去，但在哪台设备都打不开');
+    if (st.tooBig) bits.push(st.tooBig + ' 个文件超过单文件 ' + Math.round(OUTLIB_MAX_FILE / 1048576) + 'MB，只同步了目录结构');
+    if (st.overTotal) bits.push(st.overTotal + ' 个文件因超过本次 ' + Math.round(OUTLIB_MAX_TOTAL / 1048576) + 'MB 总上限未上传');
+    if (st.failed) bits.push(st.failed + ' 个文件复制失败（可能被其它程序占用）');
+    return bits.join('；');
   }
 
   function importRemote(snap, opts) {
@@ -406,7 +448,7 @@ module.exports = function createSync(ctx) {
      否则"新生成的节点"会被判定为比远端旧而被覆盖（曾导致节点消失） */
   function localChangeAt() {
     let latest = '';
-    for (const t of ['goals', 'nodes', 'sources', 'source_digests', 'tutorials', 'tutorial_bookmarks', 'tutorial_progress', 'node_notes', 'node_workspaces', 'goal_versions', 'study_records', 'study_days', 'study_segments', 'ai_prompts', 'jd_images', 'practice_records', 'daily_plans']) {
+    for (const t of ['goals', 'nodes', 'sources', 'source_digests', 'tutorials', 'tutorial_bookmarks', 'tutorial_progress', 'node_notes', 'node_workspaces', 'goal_versions', 'study_records', 'study_days', 'study_segments', 'ai_prompts', 'jd_images', 'practice_records', 'daily_plans', 'outlib_nodes']) {
       for (const col of ['updated_at', 'created_at']) {
         try {
           const row = db.prepare(`SELECT MAX(${col}) AS t FROM ${t}`).get();
@@ -477,7 +519,7 @@ module.exports = function createSync(ctx) {
           try { fs.copyFileSync(path.join(UPLOAD_DIR, f), path.join(dest, f)); } catch (e) {}
         }
       }
-      syncOutlibFiles();
+      const olStat = syncOutlibFiles();
       await git(['add', '-A'], 60000);
       const commit = await git(['commit', '-m', `sync: ${reason || 'update'} @ ${new Date().toLocaleString('zh-CN')}`], 60000);
       if (!commit.ok && !/nothing to commit|no changes added/i.test(commit.out + commit.err)) {
@@ -488,7 +530,9 @@ module.exports = function createSync(ctx) {
       setBase(await localHead(), localChangeAt());
       writeConflict(null);
       setSetting('sync_last_at', new Date().toISOString());
-      setSetting('sync_last_status', '上传成功 · ' + (snap.counts.goals || 0) + ' 个目标');
+      setSetting('sync_outlib_warn', outlibWarn(olStat));
+      setSetting('sync_last_status', '上传成功 · ' + (snap.counts.goals || 0) + ' 个目标'
+        + (olStat && olStat.dangling ? ' · ⚠ 产出库有 ' + olStat.dangling.length + ' 个文件本体缺失' : ''));
       log('[sync] push ok:', snap.counts.goals, 'goals');
       return { ok: true, at: new Date().toISOString(), counts: snap.counts };
     } catch (e) {
@@ -529,10 +573,15 @@ module.exports = function createSync(ctx) {
     /* 这是用户在冲突对话框里**亲口选的**「用云端覆盖本地」→ 强制导入。
        安全阀只拦"自动导入"，不拦用户自己的决定（导入前已经 backup，可回滚）。 */
     importRemote(remote, { force: true });
+    /* 拉完立刻体检：远端快照里记着文件、本机却没拿到 blob 的条目，
+       就是"同步完了但点不开"的那些。以前一声不吭，用户只能自己发现。 */
+    const olWarn = outlibWarn({ dangling: danglingOutlib() });
+    setSetting('sync_outlib_warn', olWarn);
     setBase(await localHead(), localChangeAt());
     writeConflict(null);
     setSetting('sync_last_at', new Date().toISOString());
-    setSetting('sync_last_status', '拉取成功 · 来自 ' + (remote.device || '其它设备') + ' · ' + (remote.counts && remote.counts.goals || 0) + ' 个目标');
+    setSetting('sync_last_status', '拉取成功 · 来自 ' + (remote.device || '其它设备') + ' · ' + (remote.counts && remote.counts.goals || 0) + ' 个目标'
+      + (olWarn ? ' · ⚠ ' + olWarn : ''));
     log('[sync] pulled from', remote.device, remote.counts);
     return { ok: true, imported: true, savedAt: remote.savedAt, device: remote.device, counts: remote.counts };
   }
@@ -630,6 +679,16 @@ module.exports = function createSync(ctx) {
       conflict: readConflict(),
       workDir: WORK_DIR, cloned, commit: remoteHead, workState: ahead,
       lastAt: getSetting('sync_last_at', ''), lastStatus: getSetting('sync_last_status', ''),
+      /* 产出库体检：设置页直接显示，别只躺在日志里。
+         「同步成功」不等于「文件都过去了」—— 超过 20MB 的、在别的设备被删的，
+         都只有目录结构没有文件本体。不说出来，用户只会看到一堆点不开的条目。 */
+      outlibWarn: (function () {
+        const saved = getSetting('sync_outlib_warn', '');
+        const d = danglingOutlib();
+        if (d.length) return (saved ? saved + '；' : '') + '当前本机有 ' + d.length + ' 个产出条目找不到文件本体';
+        return saved || '';
+      })(),
+      outlibDangling: danglingOutlib().slice(0, 8).map(x => ({ id: x.id, name: x.name })),
       snapshot: snap ? { savedAt: snap.savedAt, device: snap.device, counts: snap.counts } : null,
       localChangeAt: localChangeAt()
     };

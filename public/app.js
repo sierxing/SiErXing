@@ -156,6 +156,7 @@ function parseRoute() {
   if (h.startsWith('#/settings')) return { view: 'settings' };
   if (h.startsWith('#/components')) return { view: 'components' };
   if (h.startsWith('#/library')) return { view: 'library' };
+  if (h.startsWith('#/aitasks')) return { view: 'aitasks' };
   const vm = h.match(/^#\/g\/(\d+)\/versions$/);
   if (vm) return { view: 'versions', id: Number(vm[1]) };
   // 插件页面路由（由前端插件声明）
@@ -345,6 +346,7 @@ function setHeader(r) {
 }
 
 async function route() {
+  try { aiTasksStopPoll(); } catch (e) {}    // 离开 AI 任务页就停轮询
   document.querySelectorAll('.ctxMenu').forEach(m => m.remove());
   // 教程目录大纲只属于教程页：切到别的页面时移除（含滚动监听，避免残留）
   const oldToc = document.getElementById('tutToc');
@@ -384,6 +386,7 @@ async function route() {
     else if (r.view === 'components') { setHeader(r); await renderComponentsPage(); }
     else if (r.view === 'versions') { await loadGoal(r.id); setHeader(r); await renderVersionsPage(r.id); }
     else if (r.view === 'library') { setHeader(r); await renderLibraryPage(); }
+    else if (r.view === 'aitasks') { setHeader(r); await renderAiTasksPage(); }
     else if (r.view === 'map') { await loadGoal(r.id); setHeader(r); renderMapPage(); }
     else if (r.view === 'diff') { await loadGoal(r.id); setHeader(r); await renderDiffPage(r.vid); }
     else if (r.view === 'tutorial') { setHeader(r); await renderTutorialPage(r.id); await aiBindGoal(state.tutGoalId); }
@@ -1393,6 +1396,46 @@ function taskBarEnsure() {
   }
   return el;
 }
+/* 进行中任务的进度条：百分比 + 阶段点 + 实时思考。
+   为什么要"动效"而不是一根静态的条：AI 任务一次要跑好几分钟，中间有很长
+   时间是"在写、但没换阶段"，静态条看着像卡死。所以：
+     · 条本身带流动高光，即使百分比不动也在动；
+     · 底部再垫一条不确定态的走马灯条，只在没有真实百分比时显示；
+     · 阶段点标出走到哪一步，已完成的打勾、当前的转圈；
+     · 模型此刻在写什么/想什么，实时打在下面一行。
+   进度只在 taskPoll 拉回来时更新（默认 1.5s 一次），动画交给 CSS，不占主线程。 */
+function taskProgressHTML(t) {
+  const pct = Math.max(0, Math.min(100, Number(t.progress) || 0));
+  const steps = Array.isArray(t.steps) ? t.steps : null;
+  const hasPct = pct > 0;
+  /* 阶段点：超过 6 个就折叠成「3/9」这种计数，否则一行放不下 */
+  let stepsHTML = '';
+  if (steps && steps.length) {
+    if (steps.length <= 6) {
+      stepsHTML = `<div class="taskSteps">${steps.map(s =>
+        `<span class="taskStep ${esc(s.state || 'pending')}" title="${esc(s.label)}${s.detail ? ' · ' + esc(s.detail) : ''}">`
+        + `<i>${s.state === 'done' ? '✓' : s.state === 'active' ? '' : ''}</i>${esc(s.label)}</span>`).join('')}</div>`;
+    } else {
+      const done = steps.filter(s => s.state === 'done').length;
+      const cur = steps.find(s => s.state === 'active');
+      const i = steps.indexOf(cur);
+      stepsHTML = `<div class="taskSteps count"><span class="taskStep done"><i>✓</i>${done} 步已完成</span>`
+        + (cur ? `<span class="taskStep active"><i></i>${esc(cur.label)}（第 ${i + 1}/${steps.length} 步）</span>` : '')
+        + `</div>`;
+    }
+  }
+  const think = String(t.thinking || '').trim();
+  const eta = String(t.eta || '').trim();
+  return `<div class="taskProgWrap">
+    <div class="taskProgNum">
+      <span>${hasPct ? pct + '%' : '进行中'}${eta ? ` · <span class="taskEta">${esc(eta)}</span>` : ''}</span>
+      ${t.startedAt ? `<span class="taskElapsed" data-since="${t.startedAt}"></span>` : ''}
+    </div>
+    <div class="taskProg${hasPct ? '' : ' indet'}"><i style="width:${hasPct ? pct : 100}%"></i></div>
+    ${stepsHTML}
+    ${think ? `<div class="taskThink" title="${esc(think)}">💭 ${esc(think)}</div>` : ''}
+  </div>`;
+}
 function taskBarRender() {
   const all = state.tasks || [];
   const active = all.filter(taskActive);
@@ -1414,7 +1457,7 @@ function taskBarRender() {
             <div class="taskTitle">${esc(t.title || m.label)}</div>
             <div class="taskMsg">${esc(t.message || '')}${t.nodeId ? ' · 节点 #' + t.nodeId : ''}${t.note ? ' · 备注：' + esc(String(t.note).slice(0, 40)) : ''}</div>
             ${t.status === 'failed' && t.error && t.error.length > 46 ? `<div class="taskErr" data-task-err="${t.id}" title="点开看完整原因">${esc(String(t.error).slice(0, 46))}… <span class="taskErrMore">看原因</span></div>` : ''}
-            ${t.status === 'running' ? `<div class="taskProg"><i style="width:${t.progress || 0}%"></i></div>` : ''}
+            ${t.status === 'running' ? taskProgressHTML(t) : ''}
           </div>
           ${taskActive(t)
             ? `<button class="btn tiny" data-task-cancel="${t.id}">停止</button>`
@@ -1513,6 +1556,9 @@ async function taskPoll() {
     const gid = (state.goal ? state.goal.id : 0) || (rr0.view === 'tutorial' ? (state.tutGoalId || 0) : 0);
     const r = await api('/api/tasks' + (gid ? '?goalId=' + gid : ''));
     const list = r.tasks || [];
+    /* 左栏「AI 任务」的小红点靠这个数；变了才重画左栏，别每 2 秒重画一次 */
+    const actN = list.filter(taskActive).length;
+    if (state.taskRunning !== actN) { state.taskRunning = actN; try { renderRail(); } catch (e) {} }
     // 新任务出现时给个小提示（动画 toast），替代原来的灰色遮罩
     const known = state.taskKnownIds || (state.taskKnownIds = {});
     const fresh = list.filter(t => !known[t.id] && (t.status === 'queued' || t.status === 'running'));
@@ -1551,6 +1597,26 @@ async function taskPoll() {
   } catch (e) { return; }
   taskBarRender();
   taskMarkNodes();
+  taskElapsedTick();
+}
+/* 「已用时」每秒跳一格：进度本身 2 秒才拉一次，但秒数自己会走，
+   肉眼就能确认"它还活着"。只改文本节点，不重绘整个任务列表。 */
+let taskElapsedTimer = null;
+function taskElapsedTick() {
+  const paint = () => {
+    document.querySelectorAll('.taskElapsed[data-since]').forEach(el => {
+      const since = Number(el.getAttribute('data-since')) || 0;
+      if (!since) return;
+      const s = Math.max(0, Math.round((Date.now() - since) / 1000));
+      el.textContent = s < 60 ? s + ' 秒' : Math.floor(s / 60) + ' 分 ' + String(s % 60).padStart(2, '0') + ' 秒';
+    });
+  };
+  paint();
+  if (taskElapsedTimer) return;
+  taskElapsedTimer = setInterval(() => {
+    if (!document.querySelector('.taskElapsed[data-since]')) { clearInterval(taskElapsedTimer); taskElapsedTimer = null; return; }
+    paint();
+  }, 1000);
 }
 function taskStart() {
   if (taskTimer) return;
@@ -7565,6 +7631,9 @@ async function syncSectionHTML() {
         ${snap ? `仓库里最新快照：${esc(fmtDate(snap.savedAt))} · 来自 ${esc(snap.device || '')} · ${snap.counts && snap.counts.goals || 0} 个目标<br>` : ''}
         ${st.lastAt ? `上次同步：${esc(fmtDate(st.lastAt))} · ${esc(st.lastStatus || '')}` : '还没有同步记录'}
         ${st.cloned ? `<br>本地副本：${esc(st.commit || '')} · ${esc(st.workState || '')}` : ''}
+        ${st.outlibWarn ? `<br><span style="color:var(--danger,#ef4444); font-weight:600;">⚠ 产出库：${esc(st.outlibWarn)}</span>`
+          + (st.outlibDangling && st.outlibDangling.length ? `<br><span style="opacity:.85;">缺文件的有：${st.outlibDangling.map(x => esc(x.name)).join('、')}${st.outlibDangling.length >= 8 ? ' 等' : ''}</span>` : '')
+          + `<br><span style="opacity:.85;">这些条目只有名字、没有文件本体，到哪台设备上都点不开。要恢复只能重新上传一次。</span>` : ''}
       </div>
     </div>`;
 }
@@ -9442,6 +9511,145 @@ function bindPluginPicker() {
   paint();
   applyFilter();
 }
+/* ============ AI 任务页（左栏入口） ============
+   两个来源：正在跑的在内存队列里（带 progress / steps / thinking，够画进度条与阶段），
+   跑过的在 task_runs 表里（跨重启，带耗时与失败原因）。
+   用户要的就是这两句：「当前在执行的」和「执行过的」，外加推进到哪一步。 */
+const AITASK_ST = {
+  queued: { text: '排队中', cls: 'queued' },
+  running: { text: '进行中', cls: 'running' },
+  done: { text: '✓ 完成', cls: 'done' },
+  failed: { text: '✗ 失败', cls: 'failed' },
+  cancelled: { text: '已停止', cls: 'cancelled' }
+};
+let aiTasksTimer = null;
+function aiTasksStopPoll() { if (aiTasksTimer) { clearInterval(aiTasksTimer); aiTasksTimer = null; } }
+function aitTypeMeta(type) { return TASK_META[type] || { icon: '🤖', label: String(type || '任务') }; }
+/* 给人话，不给裸毫秒和 ISO 串 */
+function aitDur(ms) {
+  const t = Math.max(0, Math.round(Number(ms || 0) / 1000));
+  if (t < 60) return t + ' 秒';
+  const m = Math.floor(t / 60);
+  return m + ' 分' + (t % 60 ? ' ' + (t % 60) + ' 秒' : '');
+}
+function aitWhen(v) {
+  const t = Date.parse(String(v || '').replace(' ', 'T'));
+  if (!t) return '';
+  const d = new Date(t);
+  const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  if (new Date().toDateString() === d.toDateString()) return '今天 ' + hm;
+  return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + hm;
+}
+/* 正在跑的：直接复用左下角任务中心那套进度 / 阶段渲染（taskProgressHTML），
+   两处看到的是同一件事，长得不一样反而让人怀疑口径不一致。 */
+function aitRunningHTML(t) {
+  const m = aitTypeMeta(t.type);
+  const st = AITASK_ST[t.status] || AITASK_ST.running;
+  return `<div class="taskItem ${t.status} aitCard">
+    <span class="taskIcon">${m.icon}</span>
+    <div class="taskMain">
+      <div class="taskTitle">${esc(t.title || m.label)}<span class="aitGoalTag" title="所属目标">${esc(t.goalTitle || '（无目标）')}</span></div>
+      <div class="taskMsg">${esc(t.message || '')}${t.nodeId ? ' · 节点 #' + t.nodeId : ''}</div>
+      ${t.status === 'running' ? taskProgressHTML(t) : ''}
+    </div>
+    <div class="aitOps">
+      <span class="aitSt ${st.cls}">${st.text}</span>
+      <button class="btn tiny" data-ait-cancel="${t.id}">停止</button>
+    </div>
+  </div>`;
+}
+function aitHistoryRow(h) {
+  const m = aitTypeMeta(h.type);
+  const st = AITASK_ST[h.status] || { text: h.status, cls: 'done' };
+  return `<div class="aitRowWrap">
+    <div class="aitRow" data-ait-go="${h.goalId || 0}" title="点一下去这个目标">
+      <span class="aitRowIcon">${m.icon}</span>
+      <span class="aitRowTitle">${esc(h.title || m.label)}</span>
+      <span class="aitSt ${st.cls}">${st.text}</span>
+      <span class="aitRowMeta">${aitWhen(h.createdAt)}${h.costMs ? ' · ' + aitDur(h.costMs) : ''}</span>
+      ${h.error ? '<button class="btn tiny" data-ait-err="1">看原因</button>' : ''}
+    </div>
+    ${h.error ? `<div class="aitErrBox" hidden>${esc(h.error)}</div>` : ''}
+  </div>`;
+}
+function aitBodyHTML(data) {
+  const running = data.running || [], history = data.history || [];
+  const sec = (title, n, body) => `<div class="aitSec"><div class="aitSecT">${title}<span class="aitSecN">${n}</span></div>${body}</div>`;
+  const runPart = running.length
+    ? running.map(aitRunningHTML).join('')
+    : '<div class="aitNone">当前没有正在执行的 AI 任务。</div>';
+  /* 历史按目标分组；组内按时间倒序（服务端已按 id 倒序给） */
+  const groups = new Map();
+  for (const h of history) {
+    const k = h.goalId || 0;
+    if (!groups.has(k)) groups.set(k, { id: h.goalId || 0, title: h.goalTitle || '（无目标）', list: [] });
+    groups.get(k).list.push(h);
+  }
+  const histPart = groups.size
+    ? [...groups.values()].map(g => `<div class="aitGroup">
+        <div class="aitGroupH" data-ait-go="${g.id}">${esc(g.title)}<span class="aitSecN">${g.list.length}</span></div>
+        ${g.list.map(aitHistoryRow).join('')}
+      </div>`).join('')
+    : '<div class="aitNone">还没有跑完的 AI 任务记录。</div>';
+  return sec('进行中', running.length, runPart) + sec('历史记录', history.length, histPart);
+}
+async function renderAiTasksPage() {
+  aiTasksStopPoll();
+  app.innerHTML = '<p class="muted">正在读取 AI 任务…</p>';
+  let data;
+  try { data = await api('/api/ai-tasks'); } catch (e) {
+    app.innerHTML = `<div class="page"><div class="pageHead"><h2 class="title">🤖 AI 任务</h2></div>
+      <div class="emptyBox" style="margin-top:30px;"><div class="ebIcon">⚠️</div><div class="ebTitle">读取失败</div><div class="ebText">${esc(e.message)}</div></div></div>`;
+    return;
+  }
+  app.innerHTML = `<div class="page">
+    <div class="pageHead"><h2 class="title">🤖 AI 任务</h2><span class="aitHeadHint" id="aitHint"></span></div>
+    <div id="aitBody"></div>
+  </div>`;
+  const paint = d => {
+    const body = document.getElementById('aitBody');
+    if (!body) return false;
+    const html = aitBodyHTML(d);
+    /* 内容没变就别重写 DOM：否则每 2.5 秒闪一下、滚动位置也会跳 */
+    if (body.__html !== html) { body.__html = html; body.innerHTML = html; }
+    const hint = document.getElementById('aitHint');
+    const rn = (d.running || []).length;
+    if (hint) hint.textContent = rn ? `${rn} 个正在执行 · 共 ${(d.history || []).length} 条历史` : `共 ${(d.history || []).length} 条历史`;
+    return true;
+  };
+  paint(data);
+  bindAiTasks();
+  /* 有任务在跑才轮询；跑完自动停，别让一个静态页一直发请求 */
+  if ((data.running || []).length) {
+    aiTasksTimer = setInterval(async () => {
+      if (parseRoute().view !== 'aitasks') { aiTasksStopPoll(); return; }
+      try { const d = await api('/api/ai-tasks'); if (!paint(d)) aiTasksStopPoll(); } catch (e) {}
+    }, 2500);
+  }
+}
+function bindAiTasks() {
+  const body = document.getElementById('aitBody');
+  if (!body || body.__bound) return;
+  body.__bound = true;
+  body.addEventListener('click', async e => {
+    const c = e.target.closest('[data-ait-cancel]');
+    if (c) {
+      try { await api('/api/tasks/' + c.getAttribute('data-ait-cancel') + '/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); toast('已请求停止'); await taskPoll(); }
+      catch (err) { toast(err.message); }
+      return;
+    }
+    /* 「看原因」要排在跳转前面 —— 它就在可跳转的那一行里，否则一点就跳走了 */
+    const eb = e.target.closest('[data-ait-err]');
+    if (eb) {
+      const box = eb.closest('.aitRowWrap') && eb.closest('.aitRowWrap').querySelector('.aitErrBox');
+      if (box) box.hidden = !box.hidden;
+      return;
+    }
+    const g = e.target.closest('[data-ait-go]');
+    if (g) { const id = Number(g.getAttribute('data-ait-go')); if (id) go('#/g/' + id); }
+  });
+}
+
 /* ============ 左栏：可展开的组件模块（分组 + 常用置顶 + 拖拽/右键） ============ */
 const RAIL_LOGO_SVG = `<svg viewBox="0 0 64 64" width="46" height="46" aria-hidden="true">
   <defs>
@@ -9465,6 +9673,8 @@ function railItemsHTML() {
   const g = state.goal;
   const themeIcon = currentThemeEff() === 'dark' ? '☀️' : '🌙';
   const inGoal = !!(g && (r.view === 'goal' || r.view === 'map' || r.view === 'plugin'));
+  /* 左栏「AI 任务」上的小红点 = 有任务正在跑（数字由 taskPoll 维护） */
+  const runningN = Number(state.taskRunning || 0);
   const items = [{ icon: '🏠', label: '目标', hash: '#/', active: r.view === 'home' }];
   if (inGoal) items.push({ icon: '🗺', label: '路线图', hash: '#/g/' + g.id, active: r.view === 'goal' });
   const hasUpd = !!(state.update && state.update.supported && state.update.behind > 0 && state.update.latestShort !== updSkipHash());
@@ -9472,9 +9682,11 @@ function railItemsHTML() {
   items.push({ icon: '📚', label: '资源库', hash: '#/library', active: r.view === 'library' });
   items.push({ icon: '📦', label: '产出库', hash: '#/outlib', active: r.pluginId === 'outlib' });
   items.push({ icon: '🧩', label: '组件管理', hash: '#/components', active: r.view === 'components' });
+  items.push({ icon: '🤖', label: 'AI 任务', hash: '#/aitasks', active: r.view === 'aitasks',
+    dot: runningN > 0, dotTitle: runningN + ' 个任务正在执行' });
   const head = items.slice(0, inGoal ? 2 : 1);
   const tail = items.slice(inGoal ? 2 : 1);
-  const row = i => `<a class="railItem ${i.active ? 'active' : ''}" href="${i.hash}" title="${esc(i.label)}${i.dot ? ' · 有新版本' : ''}">
+  const row = i => `<a class="railItem ${i.active ? 'active' : ''}" href="${i.hash}" title="${esc(i.label)}${i.dot ? ' · ' + esc(i.dotTitle || '有新版本') : ''}">
         <span class="railIcon">${i.icon}${i.dot ? '<i class="railDot"></i>' : ''}</span><span class="railLabel">${esc(i.label)}</span></a>`;
   return `<a class="railLogo" href="#/" title="思而行 · 返回目标列表">${RAIL_LOGO_SVG}</a>
     <div class="railNav">

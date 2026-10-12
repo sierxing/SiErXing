@@ -23,6 +23,9 @@ const { readCodeFiles, buildCodeBlock, listCodeFiles } = require('./code-read');
 const nodeFolders = require('./node-folders');
 const codeStore = require('./code-store');
 const rag = require('./rag');
+/* 教程分节生成（规划 / 逐节 / 自检）。提示词块在下面才定义，
+   所以这里先占位，等函数都声明完再初始化（见文件末尾 tutPlanInit）。 */
+let tutPlan = null;
 
 const APP_DIR = path.resolve(__dirname, '..');
 /* 前端资源版本戳：启动时对 public 下的 js/css 求哈希，发版后浏览器必取新文件。
@@ -3630,6 +3633,25 @@ function countTag(s, tag) {
    div 的闭合情况实测很脏（用户库里那份正常教程就少一个 </div>，多半是 </div></div> 手滑），
    少 1 个不作为截断证据 —— 缺一整段时下面的锚点检查会抓到。 */
 const STRUCT_TAGS = ['html', 'head', 'body', 'section', 'style', 'script', 'table', 'ul', 'ol', 'pre', 'svg'];
+/* 逐个围栏配对，找出**最后一个没被闭合**的围栏是什么类型。
+   （数 ```viz 出现的个数是判断不出来的：两个开围栏配一个收围栏，
+     开围栏个数是偶数、照样通过 —— MCP 那篇就是这么被放过去的。） */
+function unclosedFences(txt) {
+  const lines = String(txt || '').split('\n');
+  let open = null;                       // { mark, lang }
+  for (const line of lines) {
+    const m = line.match(/^\s*(`{3,}|~{3,})\s*([\w-]*)\s*$/);
+    if (!m) continue;
+    if (!open) { open = { mark: m[1][0], len: m[1].length, lang: String(m[2] || '') }; continue; }
+    // 收尾围栏至少要跟开围栏一样长、且同种符号，否则 ``` 会把 ```` 开的块提前关掉
+    if (m[1][0] === open.mark && m[1].length >= open.len && !m[2]) open = null;
+  }
+  if (!open) return { kind: '' };
+  const L = String(open.lang || '').toLowerCase();
+  if (L === 'viz' || L === 'demo' || L === 'htmlviz') return { kind: '可视化块（```' + L + '）' };
+  if (L) return { kind: '代码块（```' + L + '）' };
+  return { kind: '代码块（```）' };
+}
 function tutIntegrity(txt, format) {
   const s = String(txt || '');
   /* issues = 截断证据（命中即没写完 → 续写 / 拒收）
@@ -3668,10 +3690,13 @@ function tutIntegrity(txt, format) {
        Markdown 真被截断由"长度比原文短太多"那条兜住，不靠围栏判断。 */
     const fences = (s.match(/^\s*(?:```|~~~)/gm) || []).length;
     if (fences % 2) soft.push('末尾代码块 ``` 没有闭合（内容看起来仍完整）');
-    /* 可视化块另有要求：它是一段真会渲染的 HTML，缺了收尾围栏 = 演示被截半，
-       比少个代码块显眼得多，所以按真问题（issues）处理。 */
-    const vizFences = (s.match(/^\s*```\s*(?:viz|demo|htmlviz)\s*$/gim) || []).length;
-    if (vizFences % 2) issues.push('可视化块（```viz）没有闭合，演示内容不完整');
+    /* 真正被这个漏洞放过去过：MCP 那篇停在 viz 块中间一句
+       `arguments: {role:"AI产品经理", count:`，只写出 2 个章节、8294 字，
+       却当成成功写进了库。上面那条只判 soft，下面这条必须能兜住。
+       ⚠️ 判断"viz 块有没有闭合"不能只数 ```viz 开头的个数 —— 两个开围栏
+       配一个收围栏，开头的个数是偶数、照样通过。要按"逐个围栏配对"来数。 */
+    const unclosed = unclosedFences(s);
+    if (unclosed.kind) issues.push(unclosed.kind + ' 没有闭合（正文停在了半句话或半个文件上），教程不完整');
   }
   const ok = !issues.length;
   recordQualityCheck({
@@ -3797,13 +3822,215 @@ function tutGenRetry(node, format, note, codeFiles, withFolders, folderFiles) {
     return 0;   // 新任务 id 由前端从任务列表里看（提交即刻可见）
   };
 }
+/* ===== 分节式教程生成：外层规划 → 内层逐节 → Reflection 定向补写 =====
+   任何一步出问题（规划解析不出、大面积截断、Reflection 一直不合格）都返回空串，
+   由调用方退回单次生成 —— 最坏情况和改造前一样，不会更差。 */
+async function generateTutorialByPlan({ goal, node, note, codeBlock, model, send, aiText }) {
+  const TP = tutPlan;
+  const title = String(node.title || '').trim().slice(0, 120);
+
+  /* ---------- 进度上报 ----------
+     进度条要"让人感觉在推进"，就得有真实百分比而不是一个转圈的图标。
+     下面把整件事切成 5 个阶段，权重按实际耗时给（逐节占大头）。
+     STEPS 是阶段清单，前端把它渲染成一排步骤点，当前那个转圈、做过的打勾。 */
+  const STEPS = [
+    { key: 'load', label: '载入资料' },
+    { key: 'plan', label: '规划大纲' },
+    { key: 'write', label: '逐节撰写' },
+    { key: 'review', label: '自检补全' },
+    { key: 'save', label: '保存入库' }
+  ];
+  let curKey = '';
+  let thinkTail = '';
+  let thinkTimer = 0;
+  const stepsNow = () => STEPS.map(s => ({
+    key: s.key, label: s.label,
+    state: s.key === curKey ? 'active' : (STEPS.findIndex(x => x.key === s.key) < STEPS.findIndex(x => x.key === curKey) ? 'done' : 'pending'),
+    detail: s.detail || ''
+  }));
+  const emit = (pct, msg, detail, eta) => {
+    if (detail != null) {
+      const s = STEPS.find(x => x.key === curKey);
+      if (s) s.detail = String(detail).slice(0, 80);
+    }
+    try { send({ status: msg, pct, steps: stepsNow(), thinking: thinkTail, eta: eta || '' }); } catch (e) {}
+  };
+  const phase = (key, pct, msg) => { curKey = key; emit(pct, msg); };
+  /* 模型流式输出的尾巴：直接显示给人看"它现在在写什么/想什么"。
+     节流到 1.2 秒一次 —— 每来一个 token 就推一次会把 SSE 和设备都打满。 */
+  const onStream = ev => {
+    if (!ev) return;
+    const piece = ev.thinking || ev.text || '';
+    if (!piece) return;
+    thinkTail = String(piece).replace(/\s+/g, ' ').slice(-150);
+    const now = Date.now();
+    if (now - thinkTimer < 1200) return;
+    thinkTimer = now;
+    try { send({ status: null, steps: stepsNow(), thinking: thinkTail }); } catch (e) {}
+  };
+  const say = (s, d) => { try { if (d != null) { const st = STEPS.find(x => x.key === curKey); if (st) st.detail = String(d).slice(0, 80); } send({ status: s, steps: stepsNow(), thinking: thinkTail }); } catch (e) {} };
+
+  const P = { plan: 6, write: 82, review: 93 };   // 三个阶段各自的完成百分比上限
+  const pctOf = (from, to, i, n) => Math.round(from + (to - from) * (n ? i / n : 1));
+
+  /* ---------- 1) 外层：规划 ---------- */
+  let plan = null;
+  try {
+    phase('plan', P.plan - 4, '正在规划教程大纲（先定要讲哪几节）…');
+    plan = TP.parsePlan(await aiText(TP.buildPlanPrompt(goal, node, note, codeBlock), onStream));
+  } catch (e) {
+    console.log('[tutorial] 规划失败，退回单次生成：', e.message);
+    return '';
+  }
+  if (!plan) { console.log('[tutorial] 大纲解析不出，退回单次生成'); return ''; }
+  console.log('[tutorial] 规划出 ' + plan.length + ' 节：' + plan.map(s => s.title + (s.viz ? '(viz)' : '')).join(' / '));
+  emit(P.plan, '大纲已定：共 ' + plan.length + ' 节', plan.map(s => s.title).join(' / ').slice(0, 78));
+
+  /* ---------- 2) 内层：逐节生成（并行） ----------
+     一开始是一节一节串着跑的，实测 9 节 × 每节 50~70 秒 = 十几分钟，
+     用户看着进度条挪一格要等一分钟，体感就是卡死。而每一节其实**互不依赖**：
+     提示词里已经有全文大纲、本节目标、上一节/下一节的标题，够写出一节连贯的内容了。
+     所以改成并发 3 路（跟任务队列的上限一致，不额外抢额度）。
+     代价是拿不到"上一节的结尾"做衔接，所以改成把相邻两节的标题显式给它。 */
+  const CONC = 3;
+  const parts = new Array(plan.length).fill(null);
+  const badSet = new Set();
+  const t0 = Date.now();
+  let doneN = 0, secMs = [];
+  const etaText = () => {
+    if (!secMs.length) return '';
+    const avg = secMs.reduce((a, b) => a + b, 0) / secMs.length;
+    const left = Math.ceil((plan.length - doneN) / CONC) * avg;   // 并发下按批算
+    if (left < 15000) return '';
+    return '预计还需约 ' + (left < 60000 ? Math.round(left / 1000) + ' 秒' : Math.ceil(left / 60000) + ' 分钟');
+  };
+
+  async function genSection(i) {
+    const sec = plan[i];
+    const secT0 = Date.now();
+    /* 相邻节标题当衔接锚点。上一节若已写完，顺手把它结尾带上（并行下拿不到就算了，
+       大纲本身已经限定了每节的范围，不会因此跑题）。 */
+    const prevSec = i > 0 ? plan[i - 1] : null;
+    const nextSec = i + 1 < plan.length ? plan[i + 1] : null;
+    const prevTail = (i > 0 && parts[i - 1]) ? parts[i - 1].slice(-500) : '';
+    let body = '', why = '';
+    for (let round = 1; round <= 2; round++) {
+      let p = TP.buildSectionPrompt(sec, i + 1, plan.length, plan, prevTail, title, codeBlock, { prevSec, nextSec });
+      if (round > 1 && why) p += TP.retryHint(why);
+      try {
+        body = cleanTutorialText(await aiText(p, onStream), 'md');
+      } catch (e) {
+        console.log('[tutorial] 第 ' + (i + 1) + ' 节生成抛错：', e.message);
+        body = ''; why = e.message;
+      }
+      why = TP.sectionTruncated(body);
+      if (!why) break;
+      console.log('[tutorial] 第 ' + (i + 1) + ' 节疑似截断：' + why);
+      if (round < 2) emit(null, '第 ' + (i + 1) + ' 节没写完，正在重写…', '重写第 ' + (i + 1) + ' 节');
+    }
+    if (why) {
+      /* 两轮都没过：仍然收下，但把没收尾的围栏补上（文档结构必须合法），
+         同时记一笔交给 Reflection 阶段定向补写 —— 直接丢掉整节会造成
+         "目录有、正文没有"，比内容略糙更刺眼。 */
+      console.log('[tutorial] 第 ' + (i + 1) + ' 节两轮未通过体检（' + why + '），补齐围栏后保留并交给 Reflection');
+      body = TP.closeFences(body);
+      badSet.add(i);
+    }
+    parts[i] = body || ('## ' + sec.title + '\n\n（本节内容缺失）');
+    secMs.push(Date.now() - secT0);
+    doneN++;
+    const pct = pctOf(P.plan, P.write, doneN, plan.length);
+    const stepsNowDone = Math.min(plan.length, doneN + (CONC - 1 - Math.min(CONC - 1, plan.length - doneN)));
+    emit(pct, '已完成 ' + doneN + '/' + plan.length + ' 节（并行 ' + Math.min(CONC, plan.length) + ' 路）'
+      + (etaText() ? ' · ' + etaText() : ''),
+      '已完成 ' + doneN + '/' + plan.length + ' 节', etaText());
+    console.log('[tutorial] 第 ' + (i + 1) + '/' + plan.length + ' 节完成（' + Math.round((Date.now() - secT0) / 1000) + 's，累计 ' + doneN + ' 节）');
+  }
+
+  curKey = 'write';
+  emit(P.plan, '正在并行撰写 ' + plan.length + ' 节内容（' + Math.min(CONC, plan.length) + ' 路同时写，预计 2~4 分钟）…',
+    '共 ' + plan.length + ' 节');
+  /* 并发执行：用递增游标让先完成的 worker 接着领下一节，避免固定分片导致长尾 */
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(CONC, plan.length) }, () => (async () => {
+    for (;;) {
+      const i = cursor++;
+      if (i >= plan.length) return;
+      await genSection(i);
+    }
+  })()));
+  const bad = badSet.size;
+  if (!parts.filter(Boolean).join('\n\n').length) return '';
+  console.log('[tutorial] 逐节生成结束，总耗时 ' + Math.round((Date.now() - t0) / 1000) + 's / ' + plan.length + ' 节');
+
+  let txt = '# ' + title + '\n\n' + parts.filter(Boolean).join('\n\n');
+
+  /* ---------- 3) Reflection：对着大纲核对，定向补写 ---------- */
+  curKey = 'review';
+  for (let pass = 1; pass <= 2; pass++) {
+    const gaps = plan.filter(s => !TP.sectionPresent(txt, s.title));
+    let review = null;
+    emit(P.write + (pass - 1) * 5, '正在自检教程完整性（Reflection 第 ' + pass + ' 轮）…', '第 ' + pass + ' 轮自检');
+    try {
+      review = TP.parseReview(await aiText(TP.buildReviewPrompt(title, plan, txt), onStream));
+    } catch (e) {
+      console.log('[tutorial] 自检抛错：', e.message);
+    }
+    const miss = []
+      .concat(gaps.map(s => s.title))
+      .concat(review ? review.missing.concat(review.unfinished) : [])
+      .filter((v, i, a) => a.indexOf(v) === i);
+    const vizBad = review ? review.vizMissing.concat(review.vizNotHtml) : [];
+    const fenceBad = review && review.fenceOpen;
+    if (!miss.length && !vizBad.length && !fenceBad && !bad) {
+      console.log('[tutorial] 自检通过（第 ' + pass + ' 轮）');
+      break;
+    }
+    const whyList = []
+      .concat(miss.length ? ['缺/未完成：' + miss.slice(0, 4).join('、')] : [])
+      .concat(vizBad.length ? ['可视化有问题：' + vizBad.slice(0, 3).join('、')] : [])
+      .concat(fenceBad ? ['有围栏没闭合'] : []);
+    console.log('[tutorial] 自检发现问题：' + whyList.join('；'));
+    if (pass >= 2) { console.log('[tutorial] 补写 2 轮后仍有缺口，保留现状交由后续人工判断'); break; }
+    const want = (miss.length ? miss : vizBad).slice(0, 4);
+    let add = '';
+    try {
+      emit(P.write + 4, '正在补写缺失的章节：' + want.slice(0, 3).join('、') + '…', '补写 ' + want.length + ' 节');
+      add = cleanTutorialText(await aiText(TP.buildFillPrompt(plan, want, title, txt), onStream), 'md');
+    } catch (e) { console.log('[tutorial] 补写抛错：', e.message); }
+    if (!add || add.length < 150) { console.log('[tutorial] 补写没产出可用内容，停止'); break; }
+    txt = txt + '\n\n' + add;
+    bad = 0;
+  }
+  emit(P.review, '自检完成，共 ' + plan.length + ' 节', plan.length + ' 节全部到位');
+
+  /* 最后一道机械闸：分节拼接理论上不会出现奇数围栏，真出现就别交付半成品。 */
+  const fin = tutIntegrity(txt, 'md');
+  if (!fin.ok) {
+    console.log('[tutorial] 分节生成结果仍有问题：' + fin.issues.join('；') + ' —— 退回单次生成');
+    return '';
+  }
+  curKey = 'save';
+  console.log('[tutorial] 分节生成完成：' + plan.length + ' 节 / ' + txt.length + ' 字');
+  return { text: txt, steps: stepsNow(), count: plan.length };
+}
+
 function streamTutorial(req, res, node, format, note, codeFiles, withFolders, folderFiles) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   const model = currentModel();
   const tk = tasks.begin({ type: 'tutorial', title: '生成教程：' + (node ? node.title : ''), goalId: node ? node.goal_id : 0, nodeId: node ? node.id : 0, note: note || '', retry: tutGenRetry(node, format, note, codeFiles, withFolders, folderFiles) });
   /* SSE 响应是"一次性输出"：重试发回来的这份没人读，所以显式说明一下，
      免得后来看日志的人以为前端断流了。 */
-    const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} if (obj && obj.status) tk.progress(undefined, obj.status); };
+    /* obj 里的 pct / steps / thinking 一并转给任务中心 —— 前端据此画动效进度条。
+       以前只转 status，于是分节生成跑到第 5/9 节时进度条还停在 0%。 */
+    const send = obj => {
+      try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {}
+      /* 只报了"我在想什么"（status 为空）也要转给任务中心 ——
+         不过滤的话实时思考文本根本刷不上去。 */
+      if (obj && (obj.status || obj.thinking != null || obj.steps)) {
+        tk.progress(obj.pct, obj.status, { steps: obj.steps, thinking: obj.thinking, eta: obj.eta });
+      }
+    };
   (async () => {
     try {
       const goal = db.prepare('SELECT * FROM goals WHERE id = ?').get(node.goal_id);
@@ -3856,14 +4083,28 @@ function streamTutorial(req, res, node, format, note, codeFiles, withFolders, fo
           }
         } catch (e) { console.log('[tutorial] 文件夹资料载入失败:', e.message); }
       }
-      send({ status: `正在撰写「${String(node.title).slice(0, 18)}」的${format === 'html' ? ' HTML ' : ' Markdown '}教程（讲原理、分步实践、练习与自测，约需 1-3 分钟）…` });
-      const prompt = buildTutorialPrompt(goal, node, format, note, codeBlock);
-      let __raw = await aiText(prompt, model, 600000, null, null, '教程生成');
-      let txt = cleanTutorialText(await aiText(prompt, model, 600000, null, null, '教程生成'), format);
+      /* ===== 生成：外层规划 → 内层逐节 → Reflection 体检 ===== */
+      global.__tutScene = 'tutorial_gen';
+      let txt = '', planSteps = null;
+      if (format === 'md') {
+        const byPlan = await generateTutorialByPlan({
+          goal, node, note, codeBlock, model,
+          send,
+          aiText: (p, onEvent) => aiText(p, model, 600000, onEvent || null, null, '教程生成')
+        });
+        /* 分节生成成功时返回 {text, steps}；失败/不适合时返回空串，退回单次生成。 */
+        if (byPlan && byPlan.text) { txt = byPlan.text; planSteps = byPlan.steps; }
+      }
+      /* md 走分节生成；html 仍是单次（它是一整个页面，分节拼不出一个合法文档）。
+         分节生成失败时自动退回单次生成老路。 */
+      if (!txt) {
+        send({ status: `正在撰写「${String(node.title).slice(0, 18)}」的${format === 'html' ? ' HTML ' : ' Markdown '}教程（讲原理、分步实践、练习与自测，约需 1-3 分钟）…`, pct: 10 });
+        const prompt = buildTutorialPrompt(goal, node, format, note, codeBlock);
+        txt = cleanTutorialText(await aiText(prompt, model, 600000, null, null, '教程生成'), format);
+      }
       if (!txt || txt.length < 200) throw new Error('教程生成失败：AI 只写了 ' + (txt ? txt.length : 0) + ' 字就停了。原教程没动，可以点任务上的「🔄 重试」，或换个输出更长的模型再试');
       /* 体检：结构不完整多半是被输出上限截断（长度够、结构缺）。
          自动续写补齐；补不齐就把问题说清楚 —— 不能把半截教程当成功写进库。 */
-      global.__tutScene = 'tutorial_gen';
       let chk = tutIntegrity(txt, format);
       if (!chk.ok) {
         send({ status: '检测到教程被截断（' + chk.issues[0] + '），正在让 AI 补全…' });
@@ -3881,12 +4122,18 @@ function streamTutorial(req, res, node, format, note, codeFiles, withFolders, fo
       }
       const t = nowISO();
       const title = String(node.title).trim().slice(0, 120);
+      /* 保存阶段也要报进度：写完全文到落库之间还有备份等动作，
+         不报的话进度条会卡在 93% 好一会儿，看着像卡死了。 */
+      send({
+        status: '正在保存教程…', pct: 97,
+        steps: (planSteps || []).map(s => ({ key: s.key, label: s.label, state: s.key === 'save' ? 'active' : 'done', detail: s.detail }))
+      });
       const r = db.prepare('INSERT INTO tutorials (goal_id, node_id, title, format, content, code_files, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)')
         .run(goal.id, node.id, title, format, txt, JSON.stringify(codeList), t, t);
       const tid = Number(r.lastInsertRowid);
       db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(t, goal.id);
       backup();
-      send({ done: true, tutorial: { id: tid, node_id: node.id, title, format, created_at: t, chars: txt.length }, goal: getGoal(goal.id) });
+      send({ done: true, pct: 100, tutorial: { id: tid, node_id: node.id, title, format, created_at: t, chars: txt.length }, goal: getGoal(goal.id) });
       tk.done({ tutorialId: tid, length: txt.length });
     } catch (e) {
       tk.fail(e);
@@ -5233,6 +5480,30 @@ function extractEbookPrefFromAnswers(answers) {
     const gid = Number(u.searchParams.get('goalId') || 0);
     return sendJSON(res, 200, { tasks: tasks.list(gid || 0), status: tasks.status() });
   }
+  /* ---- AI 任务总览（左栏「AI 任务」页）：所有目标正在跑的 + 跑过的 ----
+     正在跑：内存队列（进程内，含 progress / steps / thinking，够画进度与阶段）
+     跑过的：task_runs 表（跨重启，含耗时与失败原因）
+     ⚠️ 历史只取**终态**行。status 还是 queued/running 的行，要么是此刻正在跑的
+     （已经在 running 里了，再列一遍是重复），要么是旧埋点一次任务写 2~3 行留下的
+     幽灵行（已修，但历史数据还在）—— 列出来只会让人以为任务卡住了。 */
+  if (p === '/api/ai-tasks' && method === 'GET') {
+    const live = tasks.list(0).filter(t => t.status === 'running' || t.status === 'queued');
+    const goals = db.prepare('SELECT id,title FROM goals ORDER BY id').all();
+    const gtitle = {};
+    for (const g of goals) gtitle[g.id] = g.title;
+    const rows = db.prepare(`SELECT id,goal_id,node_id,type,title,status,error,cost_ms,created_at,ended_at
+      FROM task_runs WHERE status IN ('done','failed','cancelled') ORDER BY id DESC LIMIT 300`).all();
+    return sendJSON(res, 200, {
+      running: live.map(t => Object.assign({}, t, { goalTitle: gtitle[t.goalId] || '' })),
+      history: rows.map(r => ({
+        runId: r.id, goalId: r.goal_id, goalTitle: gtitle[r.goal_id] || '（目标已删除）',
+        nodeId: r.node_id, type: r.type, title: r.title, status: r.status,
+        error: r.error || '', costMs: r.cost_ms || 0, createdAt: r.created_at, endedAt: r.ended_at
+      })),
+      goals: goals.map(g => ({ id: g.id, title: g.title })),
+      status: tasks.status()
+    });
+  }
   /* ---- 检索增强（RAG）：状态 / 重建索引 / 检索预览 ---- */
   if (p === '/api/rag/status' && method === 'GET') {
     const gid = Number(u.searchParams.get('goalId') || 0);
@@ -6083,3 +6354,11 @@ server.on('error', e => {
    Node 默认对 unhandledRejection 是直接终止进程的。 */
 process.on('unhandledRejection', e => { console.error('[未捕获的 Promise 拒绝]', (e && e.stack) || e); });
 process.on('uncaughtException', e => { console.error('[未捕获的异常]', (e && e.stack) || e); });
+
+/* 分节生成模块在这里才初始化：它要用到本文件里定义的一堆提示词块
+   （goalHeader / vizSpecLines / nodeSourcesBlock …），而 require 必须早于它们。
+   所以 require 工厂时把函数引用注进去，而不是把那些函数搬进 tut-plan.js。 */
+tutPlan = require('./tut-plan')({
+  goalHeader, goalQaBlock, constraintsBlock, siblingScopeBlock,
+  digestsBlock, nodeSourcesBlock, sourcesIndexBlock, vizSpecLines
+});

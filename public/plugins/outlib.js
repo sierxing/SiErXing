@@ -101,16 +101,19 @@
   function rowHTML(n) {
     const dir = isDir(n);
     const st = dir ? dirStat(n.id) : null;
-    const sizeTxt = dir ? (st.files + ' 个文件 · ' + fmtSize(st.bytes)) : fmtSize(n.size);
-    const canPrev = n.mime && /^image\/|^video\/|^audio\/|^text\/|application\/pdf/.test(n.mime);
-    return `<div class="olRow${picked === n.id ? ' picked' : ''}" data-row="${n.id}" draggable="1" data-drag="${n.id}" title="拖动可排序，拖到文件夹上可移进去">
-      <span class="olIc">${dir ? '📁' : '📄'}</span>
+    /* 本机没有文件本体（多端同步没带过来 / 超大文件 / 别的设备上删过）：
+       标出来并禁用下载，别让人点下去吃一个 404 才知道。 */
+    const lost = !dir && n.has_file === false;
+    const sizeTxt = lost ? '文件本体缺失' : (dir ? (st.files + ' 个文件 · ' + fmtSize(st.bytes)) : fmtSize(n.size));
+    const canPrev = !lost && n.mime && /^image\/|^video\/|^audio\/|^text\/|application\/pdf/.test(n.mime);
+    return `<div class="olRow${picked === n.id ? ' picked' : ''}${lost ? ' lost' : ''}" data-row="${n.id}" draggable="1" data-drag="${n.id}"${lost ? ' title="这条只有目录记录，文件本体没同步到本机（多端同步只传 20MB 以内的文件）"' : ' title="拖动可排序，拖到文件夹上可移进去"'}>
+      <span class="olIc">${dir ? '📁' : (lost ? '⚠️' : '📄')}</span>
       ${editing === n.id
         ? `<input class="olIn" data-edit="${n.id}" value="${esc(n.name)}">`
         : `<span class="olNm" data-open="${n.id}">${esc(n.name)}</span>`}
       <span class="olMeta"><span>${sizeTxt}</span><span>${esc((n.updated_at || '').slice(0, 10))}</span></span>
       <span class="olOps">
-        ${dir ? '' : `<button title="下载" data-dl="${n.id}">⬇</button>`}
+        ${dir ? '' : (lost ? '' : `<button title="下载" data-dl="${n.id}">⬇</button>`)}
         ${!dir && canPrev ? `<button title="预览" data-pv="${n.id}">👁</button>` : ''}
         ${dir ? `<button title="打包下载" data-zip="${n.id}">🧩</button>` : ''}
         <button title="改名" data-rn="${n.id}">✏️</button>

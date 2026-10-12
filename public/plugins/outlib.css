@@ -88,3 +88,11 @@
 /* 有右键菜单后，行尾那排小图标只在选中态显示，不再抢注意力 */
 .olRow .olOps{opacity:0;}
 .olRow.picked .olOps{opacity:1;}
+
+/* 文件本体没同步到本机的条目：整行压暗 + 左侧一道警示色，
+   免得用户对着一个打不开的条目以为是自己操作错了 */
+.olRow.lost{opacity:.66;}
+.olRow.lost:hover{opacity:1;}
+.olRow.lost .olNm{text-decoration:line-through; text-decoration-color:var(--danger,#ef4444);}
+.olRow.lost .olMeta span:first-child{color:var(--danger,#ef4444); font-weight:600;}
+.olRow.lost .olOps{opacity:1;}

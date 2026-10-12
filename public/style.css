@@ -2060,8 +2060,42 @@ body{padding-left:78px;}
 .taskMain{flex:1; min-width:0;}
 .taskTitle{font-size:12.5px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
 .taskMsg{font-size:11.5px; color:var(--muted); margin-top:2px; line-height:1.5;}
-.taskProg{height:4px; background:var(--soft); border-radius:3px; margin-top:5px; overflow:hidden;}
-.taskProg i{display:block; height:100%; background:var(--accent); transition:width .3s;}
+.taskProg{height:6px; background:var(--soft); border-radius:3px; margin-top:5px; overflow:hidden; position:relative;}
+/* 已用时长 + 百分比：进度本身 2 秒才拉一次，秒数自己每秒跳，肉眼能确认没卡死 */
+.taskProgWrap{margin-top:6px;}
+.taskProgNum{display:flex; justify-content:space-between; gap:8px; font-size:11px; color:var(--muted); margin-bottom:3px; font-variant-numeric:tabular-nums;}
+.taskProgNum > span:first-child{color:var(--accent); font-weight:700;}
+.taskProg i{display:block; height:100%; background:var(--accent); transition:width .45s ease; border-radius:3px;}
+/* 流动高光：百分比不动的时候条也在动，看着就不像卡死 */
+.taskProg i::after{
+  content:''; position:absolute; inset:0;
+  background:linear-gradient(90deg, transparent 0%, rgba(255,255,255,.55) 50%, transparent 100%);
+  width:40%; animation:taskShine 1.6s linear infinite;
+}
+@keyframes taskShine{ from{transform:translateX(-120%);} to{transform:translateX(320%);} }
+/* 没有真实百分比时（比如只有一步的任务）走不确定态：整条来回扫 */
+.taskProg.indet i{background:var(--soft); }
+.taskProg.indet i::before{
+  content:''; position:absolute; inset:0; width:35%; border-radius:3px;
+  background:var(--accent); animation:taskSweep 1.4s ease-in-out infinite;
+}
+@keyframes taskSweep{ 0%{left:-35%;} 50%{left:100%;} 100%{left:-35%;} }
+/* 阶段点：走到哪一步了一目了然 */
+.taskSteps{display:flex; gap:5px; flex-wrap:wrap; margin-top:6px;}
+.taskStep{
+  display:inline-flex; align-items:center; gap:4px; padding:1px 7px; border-radius:20px;
+  font-size:10.5px; background:var(--soft); color:var(--muted); white-space:nowrap;
+}
+.taskStep i{font-style:normal; width:9px; height:9px; display:inline-flex; align-items:center; justify-content:center; font-size:9px;}
+.taskStep.done{color:var(--accent); background:color-mix(in srgb, var(--accent) 12%, transparent);}
+.taskStep.active{color:#fff; background:var(--accent);}
+.taskStep.active i{width:11px; height:11px; border:2px solid rgba(255,255,255,.4); border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite;}
+.taskSteps.count .taskStep{font-size:11px;}
+/* 模型此刻在想/写什么：实时刷新的那一行 */
+.taskThink{
+  margin-top:6px; font-size:11px; color:var(--muted); line-height:1.45;
+  max-height:2.9em; overflow:hidden; word-break:break-all; opacity:.9;
+}
 .taskState{font-size:11.5px; color:var(--muted); flex:none;}
 /* 失败原因：默认截断一行，点开看全文（报错是黑盒时用户得知道为什么没成） */
 .taskErr{position:relative; margin-top:3px; font-size:11px; color:var(--danger); cursor:pointer; line-height:1.5;}
@@ -2547,3 +2581,46 @@ input,textarea{caret-color:var(--accent);}
   font-size:11px; color:var(--muted); line-height:1.5;
   padding:7px 9px 3px; border-top:1px solid var(--border); margin-top:4px;
 }
+
+/* ---- AI 任务页（左栏入口）：进行中 + 历史 ---- */
+.aitHeadHint{font-size:12.5px; color:var(--muted); margin-left:10px;}
+.aitSec{margin:18px 0 0;}
+.aitSecT{display:flex; align-items:center; gap:7px; font-size:13px; font-weight:700; margin-bottom:9px;}
+.aitSecN{
+  font-size:11px; font-weight:600; padding:1px 7px; border-radius:6px;
+  background:var(--soft); color:var(--muted); font-variant-numeric:tabular-nums;
+}
+.aitNone{font-size:12.5px; color:var(--muted); padding:11px 13px; border:1px dashed var(--border); border-radius:10px;}
+/* 进行中的卡片：复用任务中心的 .taskItem，只补两处 */
+.aitCard{align-items:flex-start;}
+.aitGoalTag{
+  font-size:11px; font-weight:600; margin-left:8px; padding:1px 7px; border-radius:6px;
+  background:var(--accent-soft); color:var(--accent); vertical-align:1px;
+}
+.aitOps{display:flex; flex-direction:column; align-items:flex-end; gap:7px;}
+.aitSt{font-size:11.5px; font-weight:600; white-space:nowrap;}
+.aitSt.running{color:var(--accent);}
+.aitSt.queued{color:var(--muted);}
+.aitSt.done{color:var(--ok, #0e9f6e);}
+.aitSt.failed{color:var(--danger);}
+.aitSt.cancelled{color:var(--muted);}
+/* 历史：按目标分组，一行一条 */
+.aitGroup{margin:0 0 14px;}
+.aitGroupH{
+  display:flex; align-items:center; gap:7px; padding:6px 2px; cursor:pointer;
+  font-size:12.5px; font-weight:600; color:var(--muted);
+}
+.aitGroupH:hover{color:var(--accent);}
+.aitRowWrap{border-bottom:1px solid var(--border);}
+.aitRowWrap:last-child{border-bottom:0;}
+.aitRow{display:flex; align-items:center; gap:10px; padding:8px 2px; cursor:pointer; border-radius:8px;}
+.aitRow:hover{background:var(--soft);}
+.aitRowIcon{font-size:14px;}
+.aitRowTitle{flex:1; min-width:0; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.aitRowMeta{font-size:11.5px; color:var(--muted); white-space:nowrap; font-variant-numeric:tabular-nums;}
+.aitErrBox{
+  font-size:12px; line-height:1.6; color:var(--danger); margin:0 0 9px; padding:8px 11px;
+  border-radius:9px; background:color-mix(in srgb, var(--danger) 7%, transparent);
+}
+/* 预计剩余时间：用户最想知道的就是"还要多久" */
+.taskEta{color:var(--muted); font-weight:400;}

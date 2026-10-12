@@ -20,7 +20,13 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3, metri
     note: t.note, status: t.status, message: t.message, progress: t.progress,
     createdAt: t.createdAt, startedAt: t.startedAt, endedAt: t.endedAt,
     error: t.error, result: t.result,
-    canRetry: typeof t._retry === 'function', retrying: !!t.retrying
+    canRetry: typeof t._retry === 'function', retrying: !!t.retrying,
+    /* 阶段清单 + 模型此刻在想什么：前端据此画动效进度条。
+       steps 是「这次的阶段划分」，由任务自己声明（有的任务只有一步，有的九步）；
+       thinking 是模型正在输出的推理/正文尾部，只在 running 时有意义。 */
+    steps: t.steps || null,
+    thinking: t.thinking || '',
+    eta: t.eta || ''
   });
 
   const list = (goalId) => [...tasks.values()]
@@ -46,9 +52,21 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3, metri
           const r = await next._run({
             signal: ac.signal,
             note: next.note,
-            progress: (p, msg) => {
+            progress: (p, msg, extra) => {
               if (p != null) next.progress = Math.max(0, Math.min(100, Math.round(p)));
               if (msg) next.message = String(msg).slice(0, 200);
+              /* extra 用来带"这次任务分哪几个阶段、现在卡在哪一步、模型在想什么"。
+                 只有传了才覆盖 —— 阶段清单在整个任务里是稳定的，每帧都重发没意义。 */
+              if (extra && typeof extra === 'object') {
+                if (Array.isArray(extra.steps)) next.steps = extra.steps.map(s => ({
+                  key: String(s.key || ''),
+                  label: String(s.label || '').slice(0, 40),
+                  state: s.state === 'done' ? 'done' : (s.state === 'active' ? 'active' : 'pending'),
+                  detail: String(s.detail || '').slice(0, 80)
+                }));
+                if (extra.thinking != null) next.thinking = String(extra.thinking).slice(-220);
+                if (extra.eta != null) next.eta = String(extra.eta).slice(0, 40);
+              }
             }
           });
           next.status = 'done';
@@ -175,7 +193,23 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3, metri
     return {
       id,
       signal: ac.signal,
-      progress: (p, msg) => { if (p != null) t.progress = Math.max(0, Math.min(100, Math.round(p))); if (msg) t.message = String(msg).slice(0, 200); },
+      /* extra = { steps, thinking }：给前端画动效进度条用。
+         ⚠️ 这一支（begin）才是教程生成走的路，pump 里那一支是 submit 走的 ——
+         两处都要认 extra，只改一处会出现"规划流程的进度条永远停在 0%"。 */
+      progress: (p, msg, extra) => {
+        if (p != null) t.progress = Math.max(0, Math.min(100, Math.round(p)));
+        if (msg) t.message = String(msg).slice(0, 200);
+        if (extra && typeof extra === 'object') {
+          if (Array.isArray(extra.steps)) t.steps = extra.steps.map(s => ({
+            key: String(s.key || ''),
+            label: String(s.label || '').slice(0, 40),
+            state: s.state === 'done' ? 'done' : (s.state === 'active' ? 'active' : 'pending'),
+            detail: String(s.detail || '').slice(0, 80)
+          }));
+          if (extra.thinking != null) t.thinking = String(extra.thinking).slice(-220);
+          if (extra.eta != null) t.eta = String(extra.eta).slice(0, 40);
+        }
+      },
       done: (result) => { t.status = 'done'; t.progress = 100; t.message = t.message || '完成'; t.result = result || null; t.endedAt = Date.now(); t._abort = null; if (M) { try { if (t._runRow) M.updTask(t._runRow, { status: 'done', costMs: t.endedAt - t.createdAt }); } catch (e) {} } log('[task] 完成 #' + id, type); },
       fail: (e) => {
         if (e && (e.cancelled || e.name === 'AbortError')) { t.status = 'cancelled'; t.message = '已停止'; }

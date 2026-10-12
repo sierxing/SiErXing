@@ -88,7 +88,10 @@ function olChildren(goalId, parentId) {
 }
 /* 目标下全部节点（客户端自己拼树） */
 function olAll(goalId) {
-  return db.prepare('SELECT id, goal_id, parent_id, kind, name, size, mime, sort_order, created_at, updated_at FROM outlib_nodes WHERE goal_id = ? ORDER BY sort_order, id').all(Number(goalId));
+  /* 必须带上 file 并走 olPublic：前端要靠 has_file 判断"这条打不开"，
+     而 has_file 是在 olPublic 里现算的。少 SELECT 一个 file，整条就废了。 */
+  return db.prepare('SELECT id, goal_id, parent_id, kind, name, file, size, mime, sort_order, created_at, updated_at FROM outlib_nodes WHERE goal_id = ? ORDER BY sort_order, id')
+    .all(Number(goalId)).map(olPublic).filter(Boolean);
 }
 /* 同目录内去重：xxx、xxx(2)、xxx(3) */
 function olUnique(goalId, parentId, name, exceptId) {
@@ -305,10 +308,14 @@ module.exports = {
     } catch (e) { (ctx.log || log || console.error)('[outlib] 清理目标产出失败:', e.message); }
   },
 
-  /* 备份只带目录结构：文件本体太大且与设备绑定，链路见文件头说明 */
+  /* 备份只带目录结构：文件本体太大且与设备绑定，链路见文件头说明。
+     ⚠️ 但 `file` 这一列必须带上 —— 它是 blob 的文件名。以前这里不 SELECT 它、
+     importData 又往回写 '' ，于是"恢复一次备份"就把所有产出文件的指针清空：
+     条目还在、点开全是 404。多端同步走的是 SELECT * 所以没中招，
+     但同一个坑埋在这儿，备份一恢复就踩。 */
   exportData(ctx) {
     try {
-      return ctx.db.prepare('SELECT id, goal_id, parent_id, kind, name, size, mime, sort_order, created_at, updated_at FROM outlib_nodes ORDER BY id').all();
+      return ctx.db.prepare('SELECT id, goal_id, parent_id, kind, name, file, size, mime, sort_order, created_at, updated_at FROM outlib_nodes ORDER BY id').all();
     } catch (e) { return []; }
   },
   importData(rows, ctx) {
@@ -318,8 +325,11 @@ module.exports = {
       const st = ctx.db.prepare('INSERT INTO outlib_nodes (id, goal_id, parent_id, kind, name, file, size, mime, sort_order, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)');
       for (const r of rows) {
         if (!r || !r.id || !r.goal_id || !r.name) continue;
+        /* file 是 blob 文件名。备份文件是可以被手改的，只放行安全字符，
+           别让一个 "../../.." 顺着它读出 data 目录外的东西。 */
+        const file = String(r.file == null ? '' : r.file).replace(/[^A-Za-z0-9._-]/g, '');
         st.run(Number(r.id), Number(r.goal_id), Number(r.parent_id || 0), r.kind === 'dir' ? 'dir' : 'file',
-          String(r.name).slice(0, 80), '', Number(r.size || 0), String(r.mime || ''), Number(r.sort_order || 0),
+          String(r.name).slice(0, 80), file, Number(r.size || 0), String(r.mime || ''), Number(r.sort_order || 0),
           String(r.created_at || ''), String(r.updated_at || ''));
       }
     } catch (e) { (ctx.log || log || console.error)('[outlib] 导入结构失败:', e.message); }
@@ -483,7 +493,17 @@ module.exports = {
         const row = olRow(u.pathname.match(/^\/api\/outlib\/dl\/(\d+)$/)[1]);
         if (!row || row.kind === 'dir') { res.writeHead(404); return res.end('not found'); }
         let buf;
-        try { buf = fs.readFileSync(olBlob(row.file)); } catch (e) { res.writeHead(404); return res.end('not found'); }
+        try { buf = fs.readFileSync(olBlob(row.file)); }
+        catch (e) {
+          /* 以前这里直接 404，界面上就是"点了没反应/下载失败"，
+             用户完全不知道是文件没同步过来。给一句能照着做的话。 */
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          return res.end(JSON.stringify({
+            ok: false,
+            error: '文件本体没在这台设备上（多半是多端同步没把它带过来，或文件已在本机删除）。'
+              + '在产出库里右键删除这条记录，或到「设置 → 多端同步」点「立即上传」把本机文件补传上去。'
+          }));
+        }
         const mime = row.mime || olMime(row.name) || 'application/octet-stream';
         const inline = u.searchParams && u.searchParams.get('inline') === '1' && olPreviewable(mime);
         const fname = encodeURIComponent(row.name);
@@ -545,9 +565,18 @@ module.exports = {
 /* 对外只暴露安全字段（file 是服务端 blob 名，绝不给前端） */
 function olPublic(row) {
   if (!row) return null;
-  return {
+  const o = {
     id: row.id, goal_id: row.goal_id, parent_id: row.parent_id, kind: row.kind,
     name: row.name, size: row.size, mime: row.mime, sort_order: row.sort_order,
     created_at: row.created_at, updated_at: row.updated_at
   };
+  /* 本机有没有这个文件的本体。多端同步只保证传得动 20MB 以内的，
+     更大的、或者在别的设备上被删掉的，目录结构会过来而文件不会 ——
+     与其让用户点下去吃一个 404，不如在列表上就标出来。 */
+  if (row.kind === 'file') {
+    let ok = false;
+    if (row.file) { try { ok = fs.statSync(olBlob(row.file)).isFile(); } catch (e) { ok = false; } }
+    o.has_file = ok;
+  }
+  return o;
 }
