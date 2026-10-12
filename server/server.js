@@ -3538,11 +3538,19 @@ function streamChat(req, res, goal, message, session, opts) {
         }
       });
       const parsed = parseChatOutput(fullText);
-      const reply = parsed.reply.slice(0, 20000);
+      let reply = parsed.reply.slice(0, 20000);
       if (!reply) throw new Error('AI 回复为空，请重试');
       /* ASK 模式下服务端直接丢弃任何 ops —— 不给模型"忘了规矩"的机会。
          前端也会拦一道，但边界必须在这里。 */
       const ops = askOnly ? [] : parsed.ops;
+      /* 模型"嘴上说已经交办了、其实没给出任何操作"——最常见的原因是回复写到一半被
+         输出上限截断，末尾那段 ops 直接丢了。实测用户就撞上过：AI 回「已提交，这次
+         拆小执行…」，而队列里什么都没有，用户以为在跑了。
+         这种情况必须在对话里说实话，别让人干等。 */
+      if (!ops.length && /已(?:经)?[^\n]{0,24}(?:交给|提交|交办|发起|安排)[^\n]{0,24}任务/.test(reply)) {
+        reply += '\n\n> ⚠️ **上面这些并没有真的交办** —— 这条回复没带出可执行的操作'
+          + '（多半是写太长被截断了）。请把要求写短一点再说一次，或把整篇拆成两三节分次提。';
+      }
       send({ reply });
       let applied = [], errors = [], vid = 0;
       if (ops.length) {
