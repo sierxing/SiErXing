@@ -3483,12 +3483,18 @@ function parseChatOutput(text) {
   }
   // 2) 兼容旧的 JSON 信封（可能混有前后说明文字）
   if (!ops.length) {
+    const bare = [];
     for (const o of extractJSONObjects(s)) {
       if (!o || typeof o !== 'object') continue;
       if (typeof o.reply === 'string' && o.reply.trim()) s = o.reply.trim();
-      if (Array.isArray(o.ops)) ops = takeOps(o.ops);
-      break;
+      if (Array.isArray(o.ops)) { ops = takeOps(o.ops); break; }
+      /* ⚠️ 模型**没写 ```ops 围栏、也没写 "ops":**，直接把操作对象摊在正文里
+         （实测收到过 `…},{"op":"constraint","text":"…"}]`）。以前这里遇到第一个
+         对象就 break，于是整条操作列表全丢 —— 用户看到"AI 说已交办、队列里却没有"。
+         现在把散落的合法 op 对象也收进来。 */
+      if (valid(o)) bare.push(o);
     }
+    if (!ops.length && bare.length) ops = takeOps(bare);
   }
   // 3) JSON 被截断时抢救操作列表
   if (!ops.length) {
@@ -3497,6 +3503,12 @@ function parseChatOutput(text) {
   }
   // 4) 清理正文里残留的内部指令片段
   s = s.replace(/```ops[\s\S]*$/i, '').trim();
+  /* 从裸 JSON 里恢复出来的操作，还得把那段 JSON 从正文剪掉 ——
+     否则用户会看到 {"op":"tutorial_edit",…} 这种内部指令。 */
+  if (ops.length) {
+    const bi = s.lastIndexOf('[{');
+    if (bi > 0 && /^\s*\{\s*"op"/.test(s.slice(bi + 1))) s = s.slice(0, bi).trim();
+  }
   const envIdx = s.search(/\{\s*"reply"\s*:|"\s*ops\s*"\s*:\s*\[/);
   if (envIdx >= 0) {
     const rep = extractReplyField(s);
