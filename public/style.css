@@ -2895,3 +2895,21 @@ select.sxiSelNative{display:none !important;}
   padding:3px 10px; font-size:11.5px; color:var(--muted); text-align:center;
   background:var(--soft); border-top:1px solid var(--border); border-bottom:1px solid var(--border);
 }
+
+/* ---- 教程阅读视图：宽度可拖 + Ctrl+滚轮只缩放正文 ----
+   --tut-w / --tut-zoom 由 app.js 的 tutViewApply() 写到 :root 上，存本机。 */
+.tutPage .tutBody,
+.tutPage .tutFrame{
+  /* 用 width 而不是 max-width —— max-width 只能**收窄**，拖出去放宽没反应。
+     同时夹一个窗口上限：否则拖太宽会顶出横向滚动条。 */
+  width:min(var(--tut-w, 100%), calc(100vw - 110px));
+  max-width:none;
+  margin-left:auto; margin-right:auto;
+}
+/* Markdown 教程：只放字号（卡片宽度由 --tut-w 管），行高跟着字号走 */
+.tutPage .tutBody.mdBody{font-size:calc(15px * var(--tut-zoom, 1));}
+.tutPage .tutBody.mdBody pre,
+.tutPage .tutBody.mdBody code{font-size:calc(0.86em);}
+/* 拖宽度时的全局反馈：文字不可选、光标保持 col-resize */
+body.tutResizing{cursor:col-resize !important; user-select:none;}
+body.tutResizing *{cursor:col-resize !important;}

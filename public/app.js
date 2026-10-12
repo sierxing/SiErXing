@@ -389,7 +389,7 @@ async function route() {
     else if (r.view === 'aitasks') { setHeader(r); await renderAiTasksPage(); }
     else if (r.view === 'map') { await loadGoal(r.id); setHeader(r); renderMapPage(); }
     else if (r.view === 'diff') { await loadGoal(r.id); setHeader(r); await renderDiffPage(r.vid); }
-    else if (r.view === 'tutorial') { setHeader(r); await renderTutorialPage(r.id); await aiBindGoal(state.tutGoalId); }
+    else if (r.view === 'tutorial') { setHeader(r); await renderTutorialPage(r.id); await aiBindGoal(state.tutGoalId); try { tutViewInit(); } catch (e) {} }
     else if (r.view === 'chat') { await loadGoal(r.id); setHeader(r); renderGoal(); }
 
     else if (r.view === 'plugin') { setHeader(r); await r.route.render(r.match, window.SiErXing); }
@@ -4473,6 +4473,105 @@ function openBarEditor(ns) {
   paint();
 }
 
+/* ============ 教程阅读视图：宽度可拖 + Ctrl+滚轮只缩放正文 ============
+   两个诉求（用户提的）：
+     ① 正文宽度现在写死 100%，只有放大整个页面才能调整 → 拖右边缘改宽度
+     ② Ctrl+滚轮希望只改**教程内**的字号；在教程外仍是浏览器整体缩放
+   都存本机 localStorage（阅读偏好，不做多端同步）。 */
+function tutView() {
+  if (!state.tutView) {
+    let v = { w: 0, z: 1 };
+    try { v = Object.assign(v, JSON.parse(localStorage.getItem('sierxing-tut-view') || '{}') || {}); } catch (e) {}
+    v.w = Math.max(0, Math.min(2400, Number(v.w) || 0));
+    v.z = Math.max(0.7, Math.min(2.2, Number(v.z) || 1));
+    state.tutView = v;
+  }
+  return state.tutView;
+}
+function tutViewSave() {
+  try { localStorage.setItem('sierxing-tut-view', JSON.stringify(tutView())); } catch (e) {}
+}
+function tutViewApply() {
+  const v = tutView();
+  const rs = document.documentElement.style;
+  rs.setProperty('--tut-w', v.w ? v.w + 'px' : '100%');   // 100% = 跟随容器（默认）
+  rs.setProperty('--tut-zoom', String(v.z));
+  /* HTML 教程在 iframe 里：用户看不到主文档的 CSS 变量，得写进它自己的文档。
+     用 zoom（而不是只改根字号）—— 教程里的 px 字号也才会跟着变。 */
+  try {
+    const d = tutDoc();
+    if (d && d !== document && d.documentElement) d.documentElement.style.zoom = String(v.z);
+  } catch (e) {}
+}
+function tutZoomBy(delta) {
+  const v = tutView();
+  v.z = Math.max(0.7, Math.min(2.2, Math.round((v.z + delta) * 100) / 100));
+  tutViewSave();
+  tutViewApply();
+  toast('正文字号 ' + Math.round(v.z * 100) + '%（Ctrl+滚轮调整；双击边缘线复位）');
+}
+/* 只在教程页生效；两侧都绑：主文档（Markdown 教程）+ iframe 内（HTML 教程） */
+function tutWheelBind(win) {
+  if (!win || win.__tutWheel) return;
+  win.__tutWheel = ev => {
+    if (!ev.ctrlKey) return;                 // 没按 Ctrl → 放行给浏览器（整页缩放）
+    ev.preventDefault();                     // 按了 Ctrl → 只改正文字号
+    tutZoomBy(ev.deltaY < 0 ? 0.1 : -0.1);
+  };
+  win.addEventListener('wheel', win.__tutWheel, { passive: false });
+}
+function tutViewInit() {
+  try { tutViewApply(); } catch (e) {}
+  tutWheelBind(window);
+  const f = document.getElementById('tutFrame');
+  if (f) {
+    const hook = () => { tutViewApply(); try { tutWheelBind(f.contentWindow); } catch (e) {} };
+    f.addEventListener('load', hook);
+    hook();
+  }
+  /* 拖右边缘改宽度：鼠标离正文列右边缘 14px 内出现 col-resize，按住横拖 */
+  const host = document.getElementById('app');
+  if (!host || host.__tutResize) return;
+  host.__tutResize = true;
+  const col = () => host.querySelector('.tutFrame') || host.querySelector('.tutBody');
+  let dragging = false, startX = 0, startW = 0;
+  host.addEventListener('mousemove', ev => {
+    if (dragging) return;
+    const c = col(); if (!c) return;
+    const r = c.getBoundingClientRect();
+    host.style.cursor = (ev.clientX > r.right - 14 && ev.clientX < r.right + 14) ? 'col-resize' : '';
+  });
+  host.addEventListener('mousedown', ev => {
+    const c = col(); if (!c) return;
+    const r = c.getBoundingClientRect();
+    if (!(ev.clientX > r.right - 14 && ev.clientX < r.right + 14)) return;
+    ev.preventDefault();
+    dragging = true; startX = ev.clientX; startW = r.width;
+    document.body.classList.add('tutResizing');
+  });
+  document.addEventListener('mousemove', ev => {
+    if (!dragging) return;
+    const v = tutView();
+    v.w = Math.max(420, Math.min(2400, Math.round(startW + (ev.clientX - startX) * 2)));
+    tutViewApply();
+  });
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove('tutResizing');
+    tutViewSave();
+    toast('正文宽度 ' + tutView().w + 'px（双击边缘线恢复自适应）');
+  });
+  /* 双击边缘线 → 恢复自适应宽度 + 100% 字号 */
+  host.addEventListener('dblclick', ev => {
+    const c = col(); if (!c) return;
+    const r = c.getBoundingClientRect();
+    if (!(ev.clientX > r.right - 14 && ev.clientX < r.right + 14)) return;
+    state.tutView = { w: 0, z: 1 };
+    tutViewSave(); tutViewApply();
+    toast('已恢复默认宽度与字号');
+  });
+}
 async function renderTutorialPage(tid) {
   app.innerHTML = '<p class="muted">加载教程…</p>';
   try { window.__tutCur = null; window.__tutTotal = 0; } catch (e) {}
