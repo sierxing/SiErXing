@@ -2108,19 +2108,55 @@ function chatRenderStream() {
   if (!el) { if (st) aiRenderMsgs(); return; }
   if (!st) return;
   const secs = Math.floor((Date.now() - st.t0) / 1000);
+  /* ① 思考文字：只动 textContent（最便宜），且**内容没变就不写**。
+     以前每个事件都无条件赋值，浏览器要为此重算这一段的布局。 */
   const think = el.querySelector('.chThink');
   if (think) {
     const txt = think.querySelector('.chThinkText');
-    if (st.thinking) { think.style.display = ''; if (txt) txt.textContent = st.thinking + '…' + (secs > 0 ? '（' + secs + 's）' : ''); }
-    else think.style.display = 'none';
+    const want = st.thinking ? '' : 'none';
+    if (think.style.display !== want) think.style.display = want;
+    if (st.thinking && txt) {
+      const s = st.thinking + '…' + (secs > 0 ? '（' + secs + 's）' : '');
+      if (txt.textContent !== s) txt.textContent = s;
+    }
   }
+  /* ② 正文：只在**可见文本真的变了**时重建。
+     实测在真实聊天 DOM 里整段重建 + 强制回流要 6.6ms（离屏只要 0.2ms），
+     而 SSE 每秒能推 30~80 次增量 —— 每次都重建的话光渲染就吃掉半秒/秒。 */
   const body = el.querySelector('.chText');
   const vis = trimOpsForStream(st.text);
-  if (body && vis) body.innerHTML = mdToHTML(vis);
+  if (body && vis && body.__vis !== vis) {
+    body.__vis = vis;
+    body.innerHTML = mdToHTML(vis);
+  }
   const prep = el.querySelector('.chPrep');
-  if (prep) prep.style.display = String(st.text).indexOf('```ops') >= 0 ? '' : 'none';
+  if (prep) {
+    const want = String(st.text).indexOf('```ops') >= 0 ? '' : 'none';
+    if (prep.style.display !== want) prep.style.display = want;
+  }
+  /* ③ 自动滚动：先读后写，且**只在用户本来贴着底部时**才滚。
+     原来无条件 scrollTop=scrollHeight，每个增量都强制一次同步布局；
+     而且用户想往上翻时会被一直拽回底部。 */
   const box = document.getElementById('adMsgs');
-  if (box) box.scrollTop = box.scrollHeight;
+  if (box) {
+    const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+    if (stick) box.scrollTop = box.scrollHeight;
+  }
+}
+
+/* 流式渲染合并（节流）。
+   SSE 增量最多每秒 80 次，单次真实渲染 6.6ms —— 不合并就是"页面卡住、
+   看着像没在动"。这里最多每 80ms 画一次，并**保证最后一次一定画到**
+   （否则文字会停在半截）。收尾（done）时调用方仍直接调 chatRenderStream。 */
+let _streamLastDraw = 0, _streamTimer = 0;
+function chatRenderStreamSoon() {
+  const now = Date.now();
+  if (now - _streamLastDraw >= 80) { _streamLastDraw = now; chatRenderStream(); return; }
+  if (_streamTimer) return;
+  _streamTimer = setTimeout(() => {
+    _streamTimer = 0; _streamLastDraw = Date.now();
+    if (state.aiStream) chatRenderStream();
+  }, 80 - (now - _streamLastDraw));
 }
 async function toggleChatDiff(btn) {
   const box = btn.closest('.chOps').querySelector('.chDiffBox');
@@ -2512,9 +2548,10 @@ async function aiSend() {
           const s = (state.aiSessions || []).find(x => x.id === state.aiSessionId);
           if (s) s.title = d.sessionTitle;
         }
-        if (d.thinking && state.aiStream) { state.aiStream.thinking = d.thinking; chatRenderStream(); }
-        if (d.text && state.aiStream) { state.aiStream.text += d.text; state.aiStream.thinking = ''; chatRenderStream(); }
-        if (d.status && state.aiStream) { state.aiStream.thinking = d.status; chatRenderStream(); }
+        /* 走节流版：这些回调每秒可能触发 30~80 次 */
+        if (d.thinking && state.aiStream) { state.aiStream.thinking = d.thinking; chatRenderStreamSoon(); }
+        if (d.text && state.aiStream) { state.aiStream.text += d.text; state.aiStream.thinking = ''; chatRenderStreamSoon(); }
+        if (d.status && state.aiStream) { state.aiStream.thinking = d.status; chatRenderStreamSoon(); }
         if (d.reply && state.aiStream) { state.aiStream.text = d.reply; state.aiStream.thinking = ''; chatRenderStream(); }
         if (d.done) {
           finished = true;

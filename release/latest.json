@@ -1,14 +1,14 @@
 {
-  "version": "1.10.41",
-  "buildVer": "98b123921c14",
-  "payload": "release/payload-1.10.41.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.41.sxar?ref=main",
+  "version": "1.10.42",
+  "buildVer": "b5fbe447629d",
+  "payload": "release/payload-1.10.42.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.42.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "7383a97b010c53eb4d93c74e2f1d2a15a256a53d3b56cba8576880e27f48aba7",
-  "size": 754493,
-  "unpackedSize": 2725129,
-  "publishedAt": "2026-10-12T04:02:37.967Z",
-  "notes": "修对话响应慢：代码库上下文不再无条件注入（无关问话的提示词从 7.1 万字降到 3.1 万字）",
+  "sha256": "30c0d22de5eb08d76648c792d66bd9a7d157d1a1459600af1750c15dcda58d43",
+  "size": 755409,
+  "unpackedSize": 2726948,
+  "publishedAt": "2026-10-12T04:09:18.427Z",
+  "notes": "修对话卡顿：流式渲染合并（每秒最多 12 次重绘，原来每个增量都整段重绘 + 强制回流）",
   "exeRequired": false
 }
