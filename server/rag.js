@@ -139,12 +139,15 @@ function lexicalScores(rows, query) {
   const total = weights.reduce((a, b) => a + b, 0) || 1;
   for (let i = 0; i < rows.length; i++) {
     const hay = (rows[i].text + ' ' + (rows[i].title || '')).toLowerCase();
+    /* 纯覆盖率：每个查询词「出现即计一次」，不按出现次数加权。
+       早先按 min(c,4) 计次，会让「只命中一半查询词、但反复出现」的段落
+       也饱和到 1.0，再次盖过语义分（实测把 10/20 个词的命中算成满分）。
+       覆盖率天然落在 0~1，与余弦同一量纲，直接可比。 */
     let s = 0;
     for (let k = 0; k < tokens.length; k++) {
-      const c = hay.split(tokens[k]).length - 1;
-      if (c > 0) s += Math.min(c, 4) * weights[k];
+      if (hay.indexOf(tokens[k]) >= 0) s += weights[k];
     }
-    scores[i] = Math.min(1, s / total);
+    scores[i] = s / total;
   }
   return scores;
 }
