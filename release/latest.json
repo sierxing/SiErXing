@@ -1,14 +1,14 @@
 {
-  "version": "1.10.42",
-  "buildVer": "b5fbe447629d",
-  "payload": "release/payload-1.10.42.sxar",
-  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.42.sxar?ref=main",
+  "version": "1.10.43",
+  "buildVer": "e4cc152a2906",
+  "payload": "release/payload-1.10.43.sxar",
+  "url": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/payload-1.10.43.sxar?ref=main",
   "manifestUrl": "https://atomgit.com/api/v5/repos/sierxing/SiErXing/contents/release/latest.json?ref=main",
   "releasesUrl": "https://atomgit.com/sierxing/SiErXing/releases",
-  "sha256": "30c0d22de5eb08d76648c792d66bd9a7d157d1a1459600af1750c15dcda58d43",
-  "size": 755409,
-  "unpackedSize": 2726948,
-  "publishedAt": "2026-10-12T04:09:18.427Z",
-  "notes": "修对话卡顿：流式渲染合并（每秒最多 12 次重绘，原来每个增量都整段重绘 + 强制回流）",
+  "sha256": "6a8ced6e99efc127e8c54a472cdf001f33759456b35410caaf979b27c7094eb5",
+  "size": 758063,
+  "unpackedSize": 2733588,
+  "publishedAt": "2026-10-12T04:22:28.216Z",
+  "notes": "节点依据不再只挂 1 条：资料索引全量下发（16→266 条）、规划要求每节点 3-5 条依据且写清是哪条要求导致它存在；节点面板「为什么有这一步」改为依据优先",
   "exeRequired": false
 }

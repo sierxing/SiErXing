@@ -2367,3 +2367,15 @@ input,textarea{caret-color:var(--accent);}
 .ccLabel .ccPct{color:var(--muted); font-weight:700; margin-left:2px;}
 .ccNode{display:flex; align-items:center; gap:5px;}
 .ccNode .sxi{color:var(--muted); opacity:.85;}
+
+/* ---- 节点面板「为什么有这一步」：依据升为主角 ---- */
+.npWhyEvid{margin:7px 0 8px;}
+.npWhyEvidHd{font-size:11.5px; font-weight:800; color:var(--muted); letter-spacing:.04em;
+  display:flex; align-items:center; gap:6px; margin-bottom:5px;}
+.npWhyCnt{font-weight:700; font-variant-numeric:tabular-nums; padding:0 6px; border-radius:5px;
+  background:var(--soft); color:var(--muted); font-size:10.5px;}
+.npWhyList{margin:0; padding-left:16px; display:flex; flex-direction:column; gap:5px;}
+.npWhyList li{font-size:12.5px; line-height:1.7; color:var(--text);}
+.npWhyList li b{color:var(--accent); font-weight:650; margin-right:5px;}
+.npWhyMore{font-size:11px; color:var(--muted); margin-top:5px; padding-left:16px;}
+.npWhyMiss{color:var(--warn); font-size:12px;}

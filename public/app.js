@@ -909,16 +909,17 @@ function showNodePanel(id, rerender) {
     .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0) || (a.id - b.id));
   const pos = sibs.findIndex(x => Number(x.id) === Number(n.id)) + 1;
   const scope = GP || P;                       // 这一支属于哪个阶段（任务→小目标→阶段）
+  /* 「为什么有这一步」= 用户点开最想知道的东西。
+     ⚠️ 原来是"它是这一级里的第 N/M 步 + 它属于「父标题」" —— 全是**结构位置**，
+     没有一句回答"凭什么做它"。用户的原话：「说不清楚为什么要存在，
+     执行的时候心里很不安，完全不知为什么」。
+     现在改成：**依据（哪条要求导致它存在）排最前**，结构位置降成一行元信息。 */
   const whyLines = [];
-  if (pos && sibs.length > 1) whyLines.push('它是这一级里的第 ' + pos + '/' + sibs.length + ' 步' + (P ? '（' + P.title + '）' : ''));
-  else if (P) whyLines.push('它属于「' + P.title + '」');
-  if (scope && scope.detail) {
-    /* 阶段的说明常常是一大段（150+ 字）—— 全塞进"为什么"卡里会把重点淹掉，
-       截到 110 字够交代来由；想看全文去那一级的卡片。 */
-    const d = String(scope.detail).replace(/\s+/g, ' ').trim();
-    whyLines.push(rewriteCites('这一支要达成的是：' + esc(d.length > 110 ? d.slice(0, 110) + '…' : d)));
-  }
   const evid = srcs.map(x => String(x.note || '').trim()).filter(Boolean);
+  const evidName = srcs.map(x => String(x.name || x.title || '').trim()).filter(Boolean);
+  const scopeD = scope && scope.detail ? String(scope.detail).replace(/\s+/g, ' ').trim() : '';
+  if (pos && sibs.length > 1) whyLines.push('在第 ' + pos + '/' + sibs.length + ' 步' + (P ? '（' + P.title + '）' : ''));
+  else if (P) whyLines.push('属于「' + P.title + '」');
   const steps = splitSteps(n.detail);
   div.innerHTML = `
     <div class="npHead">
@@ -928,7 +929,7 @@ function showNodePanel(id, rerender) {
       <button class="btn tiny" id="npClose">×</button>
     </div>
 
-    ${(pos || P || scope) ? `<div class="npWhere">${esc([LEVEL_NAME[n.level] || '', P && P.title ? '属于「' + P.title + '」' : '', (pos && sibs.length > 1) ? '第 ' + pos + '/' + sibs.length + ' 步' : '', n.hours ? '预计 ' + n.hours : ''].filter(Boolean).join(' · '))}</div>` : ''}
+    ${whyLines.length ? '' : ''}${(pos || P || scope) ? `<div class="npWhere">${esc([LEVEL_NAME[n.level] || '', P && P.title ? '属于「' + P.title + '」' : '', (pos && sibs.length > 1) ? '第 ' + pos + '/' + sibs.length + ' 步' : '', n.hours ? '预计 ' + n.hours : ''].filter(Boolean).join(' · '))}</div>` : ''}
 
     <div class="npTop">
       <div class="npStatus">
@@ -942,10 +943,15 @@ function showNodePanel(id, rerender) {
       ${n.artifact ? `<div class="npDoneArt"><span>产出物</span>${rewriteCites(esc(n.artifact))}</div>` : ''}
     </div>` : ''}
 
-    ${whyLines.length ? `<div class="npWhy">
+    ${(evid.length || whyLines.length || scopeD) ? `<div class="npWhy">
       <div class="npWhyHd">💡 为什么有这一步</div>
+      ${evid.length ? `<div class="npWhyEvid">
+        <div class="npWhyEvidHd">这一步的依据 <span class="npWhyCnt">${evid.length} 条</span></div>
+        <ul class="npWhyList">${evid.slice(0, 6).map((t, i) => `<li>${evidName[i] ? `<b>${esc(evidName[i])}</b>` : ''}${esc(t)}</li>`).join('')}</ul>
+        ${evid.length > 6 ? `<div class="npWhyMore">…还有 ${evid.length - 6} 条依据</div>` : ''}
+      </div>` : `<div class="npWhyLine npWhyMiss">这一步还没有标注依据 —— 点下面的「让 AI 改」补上，或自己关联资料库。</div>`}
+      ${scopeD ? `<div class="npWhyLine"><span class="npWhyK">这一支要达成的是</span>${rewriteCites(esc(scopeD.length > 140 ? scopeD.slice(0, 140) + '…' : scopeD))}</div>` : ''}
       ${whyLines.map(x => '<div class="npWhyLine">' + esc(x) + '</div>').join('')}
-      ${evid.length ? `<div class="npWhyLine"><span class="npWhyK">这一步的依据</span>${esc(evid.slice(0, 3).join('；'))}</div>` : ''}
     </div>` : ''}
 
     ${steps.length ? `<div class="npHow">
@@ -7610,7 +7616,7 @@ function ragSettingsHTML(s) {
     <label>向量模型 <span class="muted" style="font-weight:400;">（可选 —— 用于语义检索；不是所有服务商都提供，如 DeepSeek 暂无）</span></label>
     <div class="ccRow" style="margin-bottom:9px;">
       <label class="ccWide">API 地址
-        <span class="inWrap"><i>🔗</i><input class="mono" id="embBase" value="${esc(s.emb_base_url || '')}" placeholder="如 https://api.siliconflow.cn/v1" spellcheck="false"></span>
+        <span class="inWrap"><i>🔗</i><input class="mono" id="embBase" value="${esc(s.emb_base_url || '')}" placeholder="本地 Ollama：http://localhost:11434/v1" spellcheck="false"></span>
       </label>
       <label class="ccWide">API 密钥
         <span class="inWrap"><i>🔑</i><input type="password" id="embKey" value="" placeholder="${s.emb_has_key ? '已保存（留空则不修改）' : 'sk-…'}" spellcheck="false"></span>
@@ -7618,11 +7624,12 @@ function ragSettingsHTML(s) {
     </div>
     <div class="ccRow">
       <label class="ccWide">向量模型名
-        <span class="inWrap"><i>⌨️</i><input id="embModel" value="${esc(s.emb_model || '')}" placeholder="如 BAAI/bge-m3 / text-embedding-v3" spellcheck="false"></span>
+        <span class="inWrap"><i>⌨️</i><input id="embModel" value="${esc(s.emb_model || '')}" placeholder="如 bge-m3:latest / BAAI/bge-m3 / text-embedding-v3" spellcheck="false"></span>
       </label>
     </div>
-    <div class="mBtnGrid" id="embOpts" style="margin-top:8px;"><div class="hint">点「获取可用模型」列出该地址支持的模型，点一下填入上面；常用：硅基流动 BAAI/bge-m3、通义千问 text-embedding-v3、OpenAI text-embedding-3-small、本地 Ollama nomic-embed-text。</div></div>
+    <div class="mBtnGrid" id="embOpts" style="margin-top:8px;"><div class="hint">本机装了 Ollama 的话点下面「🦙 本地 Ollama」一键填好（免费、数据不出本机）；云端可用：硅基流动 BAAI/bge-m3、通义千问 text-embedding-v3、OpenAI text-embedding-3-small。</div></div>
     <div class="toolbarRow" style="margin-top:9px;">
+      <button class="btn tiny cbtn" id="embOllama">🦙 本地 Ollama</button>
       <button class="btn tiny cbtn" id="embFetch">🔄 获取可用模型</button>
       <button class="btn tiny cbtn" id="embTest">测试向量</button>
       <button class="btn tiny cbtn primary" id="embSave">保存向量配置</button>
@@ -8533,6 +8540,33 @@ async function renderSettings() {
     if (inp) inp.value = b.getAttribute('data-embopt');
     embOptsBox.querySelectorAll('[data-embopt]').forEach(x => x.classList.toggle('on', x === b));
   });
+  /* 一键接入本机 Ollama：填好地址 + 列出本机模型（标出能做向量化的） */
+  const embOllamaBtn = ragEl('embOllama');
+  if (embOllamaBtn) embOllamaBtn.addEventListener('click', async () => {
+    const base = ragEl('embBase');
+    const BASE = 'http://localhost:11434/v1';
+    if (base) base.value = BASE;
+    ragSay('embMsg', '正在探测本机 Ollama…');
+    try {
+      const r = await api('/api/ai/models-for', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ baseUrl: BASE, apiKey: '', useEmbKey: false }) });
+      const list = r.models || [];
+      const box = ragEl('embOpts');
+      /* 常见向量模型名特征：bge / m3 / nomic / mxbai / gte / e5 / jina / embed */
+      const isEmb = m => /(^|[-_/])(bge|m3|embed|embedding|nomic|mxbai|gte|e5|jina)/i.test(String(m).replace(/:.*$/, ''));
+      if (box) {
+        box.innerHTML = list.map(m => `<button type="button" class="mBtn" data-embopt="${esc(m)}">${esc(m)}${isEmb(m) ? ' <span style="color:var(--ok);font-size:11px;">· 向量</span>' : ''}</button>`).join('')
+          || '<div class="hint">Ollama 里还没有模型。先在终端跑一次 <code>ollama pull bge-m3</code>（中文效果好、约 1.2GB）。</div>';
+      }
+      if (list.length) {
+        ragSay('embMsg', `已连上本机 Ollama，共 <b>${list.length}</b> 个模型。带「· 向量」的能做向量化，点一下填入模型名，再点「测试向量」确认。`);
+      } else {
+        ragSay('embMsg', '<span style="color:var(--warn)">Ollama 在跑，但还没装模型。终端执行 <code>ollama pull bge-m3</code> 即可。</span>');
+      }
+    } catch (e) {
+      ragSay('embMsg', '<span style="color:var(--warn)">连不上本机 Ollama。确认它已启动（终端执行 <code>ollama serve</code>），或地址填了别的端口。</span>');
+    }
+  });
+
   const embTestBtn = ragEl('embTest');
   if (embTestBtn) embTestBtn.addEventListener('click', async () => {
     const v = embVals();

@@ -1616,11 +1616,40 @@ function nodeSourcesBlock(goal, node, maxLen) {
   return lines.join('\n');
 }
 /* 其它资料的索引（只给标题，避免把全部正文塞进节点级提示词） */
-function sourcesIndexBlock(goal, maxTitles, scopeNote) {
+/* 资料索引：给模型"有什么可依据"的全景。
+   ⚠️ 原来是 all.slice(0, maxTitles) —— 只列**最靠前的 N 条**。
+   用户攒到 290 条资料时，26 条自己提供的 + 264 条网络资料里只有前 16 条进得了
+   提示词，模型能引用的依据被硬卡在 16 条以内 —— 于是每个节点只能挂 1 条依据，
+   "这个节点为什么存在"就说不清楚了（线上就这么发生的）。
+   改成：**按类别分组、尽量全量列标题**（标题很短，290 条约 1.2 万字，比正文省得多），
+   并用字符预算兜底；「自己提供」的排最前并标出来（优先级最高）。 */
+function sourcesIndexBlock(goal, maxTitles, scopeNote, charBudget) {
   const all = sourcesOf(goal.id);
   if (!all.length) return '';
-  const lines = ['', scopeNote || '【资料库其它条目（仅索引，未展开正文；如本节点确实需要，可在资料标题里点明）】'];
-  for (const x of all.slice(0, maxTitles || 20)) lines.push('- [' + x.site + '｜' + x.kind + '] ' + x.title);
+  const budget = charBudget || 14000;
+  const isOwn = x => /用户提供|导入的资料|导入的代码库|待找书单/.test(String(x.site || ''));
+  const own = all.filter(isOwn), net = all.filter(x => !isOwn(x));
+  const head = scopeNote || ('【资料库索引（共 ' + all.length + ' 条：自己提供 ' + own.length
+    + ' / 网络检索 ' + net.length + '）—— 下面是全部条目的标题，规划时请从中挑与该节点最相关的多条作为依据，不要只挑 1 条】');
+  const lines = ['', head];
+  let used = head.length;
+  const push = (x, tag) => {
+    const line = '- ' + (Number(x.quality) === 1 ? '★' : '') + tag + '[' + x.site + '｜' + x.kind + '] ' + x.title;
+    if (used + line.length > budget) return false;
+    lines.push(line); used += line.length; return true;
+  };
+  let n = 0;
+  const cap = maxTitles || 400;
+  for (const x of own) { if (n++ >= cap || !push(x, '【自己提供】')) break; }
+  if (own.length) { lines.push(''); used += 1; }
+  const byKind = {};
+  for (const x of net) (byKind[x.kind || '其它'] = byKind[x.kind || '其它'] || []).push(x);
+  for (const k of Object.keys(byKind).sort((a, b) => byKind[b].length - byKind[a].length)) {
+    if (used > budget) break;
+    lines.push('▸ ' + k + '（' + byKind[k].length + '）'); used += k.length + 8;
+    for (const x of byKind[k]) { if (n++ >= cap || !push(x, '')) break; }
+  }
+  if (used > budget) lines.push('…（索引已按体积截断；需要更多时用检索结果）');
   return lines.join('\n');
 }
 /* 对话助理的资料库清单：和「节点级规划」的视角不同 —— 用户常问「资料库里有没有 /
@@ -2108,8 +2137,12 @@ async function buildSkeletonPrompt(goal) {
   lines.push('   · 反面示例（不要这样）：每个阶段都只给 4 个、把「Python 语法 + 数据结构 + 算法 + 工程规范」挤进一个目标里；');
   lines.push('   · 小目标要「能独立验收」、能力或成果导向（如「掌握 X 并完成 Y 练习」「能用 Z 做出 W」）；');
   lines.push('   · 【自检】输出前逐条核对：本阶段涉及的每个技术点/知识点，是否都能找到对应的小目标？没有就补。');
-  lines.push('4. 每个节点 detail 写 60-120 字：说明要达成什么、为什么这样安排。');
-  lines.push('5. 每个节点都要给 sources 依据：**阶段给 3-5 条、小目标给 1-3 条**（不要空着）；name 写明实际来源（站点名+标题要点，用户资料写「用户提供的资料」），note 写依据了什么要求/结论。');
+  lines.push('4. 每个节点 detail 写 60-120 字，并且**必须交代「为什么现在做它」**：要达成什么 + 它在整个目标里的作用（承接了什么、给后面的什么铺路）。用户点开最想知道的就是这个，不能只写做法。');
+  lines.push('5. 【依据就是这个节点存在的理由，必须写足】每个节点都给 sources 依据：**阶段 4-6 条、小目标 3-5 条**。');
+  lines.push('   · 千万不要只给 1 条 —— 一条依据撑不起一个节点，用户执行时会觉得「凭什么做这个」。');
+  lines.push('   · name 写实际来源（站点名 + 标题要点；用户提供的写「用户提供的资料：<标题>」，导入的代码库写「导入的代码库：<路径>」）。');
+  lines.push('   · note 必须写清「这条资料里的哪条要求/结论，导致了这个节点必须存在」，例如：「JD 明确要求 3 年 Go 经验，本节点补足语言基本功」「提炼汇总把 asyncio 列为必需，故单独成节点」「用户自述函数名写不出，本节点解决这个短板」。');
+  lines.push('   · 依据要分散：不同节点尽量引用不同资料，让整条路线的支撑面铺开；优先级 ① 用户提供的资料 ② 提炼汇总结论 ③ 检索到的片段 ④ 索引条目。');
   lines.push('   优先引用：① 用户提供的资料 ② 提炼汇总里的结论 ③ 下面列出的资料；不同阶段尽量引用与它最相关的不同资料，让依据分布开来。');
   lines.push('6. 路径必须匹配用户现状（零基础从基础开始，有基础则跳过）；顺序体现「真实工作中最看重什么」。');
   lines.push('7. 只输出一个 JSON 对象（不要其他文字或代码块标记），量控制在 28000 字符内（内容多时 detail 可精简到 40-80 字，但小目标不要省）：');
@@ -2128,7 +2161,7 @@ async function buildTasksPrompt(goal, stage, stageIndex) {
   lines.push(nodeSourcesBlock(goal, stage, 1000));
   const aug = await ragAugment(goal, String(stage.title || '') + ' ' + String(stage.detail || '').slice(0, 300), 8);
   if (aug) lines.push(aug);
-  lines.push(sourcesIndexBlock(goal, 16));
+  lines.push(sourcesIndexBlock(goal, 400, null, 14000));   // 全量索引：依据要挑得出来
   lines.push(askBlock(round, '本阶段任务细化'));
   lines.push('');
   lines.push(`【当前阶段】第 ${stageIndex + 1} 阶段：${stage.title}`);
@@ -2248,7 +2281,7 @@ async function buildExpandPrompt(goal, node, sources, folderCode) {
     lines.push(String(folderCode).slice(0, 15000));
   }
   lines.push(nodeTutorialBlock(node));
-  lines.push(sourcesIndexBlock(goal, 16));
+  lines.push(sourcesIndexBlock(goal, 400, null, 14000));   // 全量索引：依据要挑得出来
   lines.push(askBlock(node.ask_round || 0, '该节点的拆分'));
   lines.push('');
   lines.push('【要求】');
