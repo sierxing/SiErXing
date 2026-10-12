@@ -3275,6 +3275,18 @@ function normalizeFences(raw) {
   /* 行尾孤零零一个开围栏（后面什么都没有）：直接去掉 —— 留着只会渲染成一个**空代码块**
      （用户报的「这三个符号的下方还渲染了一个代码块」就是它）。放在配对判断之前，
      免得反而被算作"需要一个收尾"。 */
+  /* 裸围栏（**没标语言**）后面跟的若是**中文散文**，把它当模型的格式笔误直接删掉：
+     否则它会开一个代码块，把后面的正文整段吞进去（用户截图里那个大框就是这个）。
+     有语言标识的（```js / ```json / ```viz）和内容是代码的（中文占比低）一律不动。 */
+  t = t.split('\n').filter((ln, i, all) => {
+    if (!/^[ \t]*`{3,}[ \t]*$/.test(ln)) return true;
+    let j = i + 1;
+    while (j < all.length && !/^[ \t]*`{3,}[\w-]*[ \t]*$/.test(all[j])) j++;
+    const body = all.slice(i + 1, j).join('\n');
+    const cjk = (body.match(/[\u4e00-\u9fff]/g) || []).length;
+    const dense = body.replace(/\s/g, '').length || 1;
+    return cjk / dense < 0.5;          // 中文占比过半 → 判为笔误，丢掉这行围栏
+  }).join('\n');
   t = t.replace(/\n[ \t]*`{3,}[\w-]*[ \t]*$/, '');
   const fences = (t.match(/^\s*`{3,}[\w-]*\s*$/gm) || []).length;
   if (fences % 2 === 1) t += '\n```';
