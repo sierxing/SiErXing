@@ -5489,16 +5489,39 @@ function extractEbookPrefFromAnswers(answers) {
      （已经在 running 里，再列一遍是重复），要么是旧埋点一次任务写 2~3 行留下的
      幽灵行（那个 bug 已修，但历史数据还在）—— 列出来只会让人以为任务卡住了。 */
   const AIT_TERMINAL = "status IN ('done','failed','cancelled')";
+  /* 历史筛选条件：总览的汇总/分组和历史分页**必须用同一套** ——
+     否则会出现"筛了今天、分组标题却还写共 30"这种自相矛盾（实测踩到）。 */
+  const aitWhere = (uu) => {
+    const goal = Number(uu.searchParams.get('goal') || 0);
+    const status = String(uu.searchParams.get('status') || '');
+    const days = Number(uu.searchParams.get('days') || 0);
+    const qq = String(uu.searchParams.get('q') || '').trim().slice(0, 60);
+    const fromTs = String(uu.searchParams.get('from') || '').slice(0, 40);
+    const toTs = String(uu.searchParams.get('to') || '').slice(0, 40);
+    const where = [AIT_TERMINAL], args = [];
+    if (goal) { where.push('goal_id = ?'); args.push(goal); }
+    if (['done', 'failed', 'cancelled'].includes(status)) { where.push('status = ?'); args.push(status); }
+    /* created_at 老行是 'YYYY-MM-DD HH:MM:SS'、新行是 ISO（带 T），归一化后再比 */
+    if (days > 0 && !fromTs) { where.push("REPLACE(created_at,' ','T') >= ?"); args.push(new Date(Date.now() - days * 864e5).toISOString()); }
+    /* from/to 是**完整 ISO 时刻**（前端按本地日边界算好再换成 UTC）。
+       不让前端传 "2026-10-12" 这种日期串 —— 数据是 toISOString() 存的 UTC，
+       拿本地日期跟 UTC 串比会把"今天"切错 8 小时。 */
+    if (fromTs) { where.push("REPLACE(created_at,' ','T') >= ?"); args.push(fromTs); }
+    if (toTs) { where.push("REPLACE(created_at,' ','T') < ?"); args.push(toTs); }
+    if (qq) { where.push('title LIKE ?'); args.push('%' + qq + '%'); }
+    return { sql: where.join(' AND '), args };
+  };
   if (p === '/api/ai-tasks' && method === 'GET') {
     const live = tasks.list(0).filter(t => t.status === 'running' || t.status === 'queued');
     const goals = db.prepare('SELECT id,title FROM goals ORDER BY id').all();
     const gtitle = {};
     for (const g of goals) gtitle[g.id] = g.title;
-    const sum = db.prepare('SELECT COUNT(*) n, SUM(status=\'done\') d, SUM(status=\'failed\') f, SUM(status=\'cancelled\') c FROM task_runs WHERE ' + AIT_TERMINAL).get();
+    const W = aitWhere(u);
+    const sum = db.prepare('SELECT COUNT(*) n, SUM(status=\'done\') d, SUM(status=\'failed\') f, SUM(status=\'cancelled\') c FROM task_runs WHERE ' + W.sql).get(...W.args);
     /* 按目标聚合：每个目标一行汇总（总数 / 成败 / 最近一次时间），默认折叠就靠它 */
     const grp = db.prepare('SELECT goal_id, COUNT(*) n, SUM(status=\'done\') d, SUM(status=\'failed\') f,'
       + ' SUM(status=\'cancelled\') c, MAX(REPLACE(created_at,\' \',\'T\')) last_at, MAX(id) last_id'
-      + ' FROM task_runs WHERE ' + AIT_TERMINAL + ' GROUP BY goal_id ORDER BY last_id DESC').all();
+      + ' FROM task_runs WHERE ' + W.sql + ' GROUP BY goal_id ORDER BY last_id DESC').all(...W.args);
     return sendJSON(res, 200, {
       running: live.map(t => Object.assign({}, t, { goalTitle: gtitle[t.goalId] || '' })),
       summary: { total: sum.n || 0, done: sum.d || 0, failed: sum.f || 0, cancelled: sum.c || 0 },
@@ -5513,22 +5536,12 @@ function extractEbookPrefFromAnswers(answers) {
   /* 某个筛选条件下的一页历史。筛选全在 SQL 里做 —— 前端过滤等于迟早把上千条
      全塞进浏览器。offset/limit 分页，前端一组一次先拉 20 条。 */
   if (p === '/api/ai-tasks/history' && method === 'GET') {
-    const goal = Number(u.searchParams.get('goal') || 0);
-    const status = String(u.searchParams.get('status') || '');
-    const days = Number(u.searchParams.get('days') || 0);
-    const q = String(u.searchParams.get('q') || '').trim().slice(0, 60);
     const limit = Math.min(100, Math.max(1, Number(u.searchParams.get('limit') || 20)));
     const offset = Math.max(0, Number(u.searchParams.get('offset') || 0));
-    const where = [AIT_TERMINAL], args = [];
-    if (goal) { where.push('goal_id = ?'); args.push(goal); }
-    if (['done', 'failed', 'cancelled'].includes(status)) { where.push('status = ?'); args.push(status); }
-    /* created_at 老行是 'YYYY-MM-DD HH:MM:SS'、新行是 ISO（带 T），归一化后再比 */
-    if (days > 0) { where.push("REPLACE(created_at,' ','T') >= ?"); args.push(new Date(Date.now() - days * 864e5).toISOString()); }
-    if (q) { where.push('title LIKE ?'); args.push('%' + q + '%'); }
-    const w = where.join(' AND ');
-    const total = db.prepare('SELECT COUNT(*) n FROM task_runs WHERE ' + w).get(...args).n;
+    const W = aitWhere(u);
+    const total = db.prepare('SELECT COUNT(*) n FROM task_runs WHERE ' + W.sql).get(...W.args).n;
     const rows = db.prepare('SELECT id,goal_id,node_id,type,title,status,error,cost_ms,created_at'
-      + ' FROM task_runs WHERE ' + w + ' ORDER BY id DESC LIMIT ? OFFSET ?').all(...args, limit, offset);
+      + ' FROM task_runs WHERE ' + W.sql + ' ORDER BY id DESC LIMIT ? OFFSET ?').all(...W.args, limit, offset);
     const goals = db.prepare('SELECT id,title FROM goals').all();
     const gtitle = {};
     for (const g of goals) gtitle[g.id] = g.title;

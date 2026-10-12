@@ -2611,15 +2611,49 @@ input,textarea{caret-color:var(--accent);}
 /* —— 历史：筛选条 + 目标汇总行 —— */
 .aitFilters{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:11px;}
 .aitQ{
-  flex:1 1 190px; min-width:150px; border:1px solid var(--border); background:var(--card); color:var(--text);
-  border-radius:9px; padding:6px 10px; font-family:inherit; font-size:12.5px;
+  flex:1 1 180px; min-width:140px; height:32px; border:1px solid var(--border); background:var(--card);
+  color:var(--text); border-radius:9px; padding:0 11px; font-family:inherit; font-size:12.5px;
 }
-.aitQ:focus{outline:none; border-color:var(--accent);}
-.aitSel{
-  flex:0 0 auto; max-width:190px; border:1px solid var(--border); background:var(--card); color:var(--text);
-  border-radius:9px; padding:6px 8px; font-family:inherit; font-size:12.5px; cursor:pointer;
+.aitQ:focus{outline:none; border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);}
+.aitQ::placeholder{color:var(--muted);}
+/* 三个筛选按钮：不用原生 select（它展开后是系统菜单，跟 App 风格不搭），自画 */
+.aitFbtn{
+  display:inline-flex; align-items:center; gap:6px; height:32px; max-width:210px;
+  border:1px solid var(--border); background:var(--card); color:var(--text);
+  border-radius:9px; padding:0 11px; font-family:inherit; font-size:12.5px; cursor:pointer;
+  transition:border-color .15s, background .15s, color .15s;
 }
-.aitSel:focus{outline:none; border-color:var(--accent);}
+.aitFbtn:hover{border-color:var(--accent-border); background:var(--accent-soft);}
+.aitFbtn.on{border-color:var(--accent-border); background:var(--accent-soft); color:var(--accent); font-weight:600;}
+.aitFbtn .aitFLabel{overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:158px;}
+.aitFbtn .aitFCaret{font-size:9px; opacity:.55;}
+/* 弹层：跟「执行模式」那个菜单同一套观感 */
+.aitPop{
+  position:fixed; z-index:400; min-width:196px; max-width:330px; max-height:56vh; overflow:auto;
+  background:var(--card); border:1px solid var(--border); border-radius:12px;
+  box-shadow:var(--shadow-lg); padding:6px; animation:aitPopIn .13s cubic-bezier(.16,1,.3,1);
+}
+@keyframes aitPopIn{from{opacity:0; transform:translateY(-4px);} to{opacity:1; transform:none;}}
+.aitPopT{font-size:11.5px; color:var(--muted); padding:4px 9px 5px; letter-spacing:.04em;}
+.aitPopSep{height:1px; background:var(--border); margin:5px 4px;}
+.aitOpt{
+  display:flex; align-items:center; gap:7px; width:100%; text-align:left;
+  border:0; background:transparent; color:var(--text); cursor:pointer;
+  padding:7px 9px; border-radius:8px; font-family:inherit; font-size:12.8px;
+}
+.aitOpt:hover{background:var(--soft);}
+.aitOpt.on{background:var(--accent-soft); color:var(--accent); font-weight:600;}
+.aitOpt:before{content:''; width:11px; flex:0 0 11px; font-size:11px; color:var(--accent);}
+.aitOpt.on:before{content:'✓';}
+/* 自定义时间区间：两个原生日期框（点开就是日历，零依赖） */
+.aitRange{display:flex; align-items:center; gap:6px; padding:3px 9px 7px; flex-wrap:wrap;}
+.aitRange input[type=date]{
+  flex:1 1 96px; min-width:90px; height:31px; border:1px solid var(--border); border-radius:8px;
+  background:var(--bg); color:var(--text); font-family:inherit; font-size:12px; padding:0 6px;
+}
+.aitRange input[type=date]:focus{outline:none; border-color:var(--accent);}
+.aitRangeSep{flex:0 0 auto; color:var(--muted); font-size:12px;}
+.aitRange .btn{flex:0 0 auto; white-space:nowrap;}
 .aitGrp{border:1px solid var(--border); border-radius:12px; overflow:hidden; margin-bottom:9px; background:var(--card);}
 .aitGrp.open{border-color:var(--accent-border);}
 .aitGrpHd{

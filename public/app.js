@@ -9550,17 +9550,148 @@ function aitWhen(v) {
 }
 /* 本页的全部可变状态：筛选条件、哪些目标展开了、每组已加载的记录 */
 function aitS() {
-  if (!state.ait) state.ait = { filter: { goal: 0, status: '', days: 0, q: '' }, open: {}, rows: {} };
+  if (!state.ait) state.ait = {
+    /* preset: '' | today | 7 | 30 | custom；fromDate/toDate 是本地日历上的起止日
+       （给 <input type=date> 用），from/to 是按本地日边界换算好的 UTC 时刻（给服务端用）。 */
+    filter: { goal: 0, status: '', q: '', preset: '', from: '', to: '', fromDate: '', toDate: '' },
+    open: {}, rows: {}
+  };
   return state.ait;
 }
 function aitQuery(extra) {
   const f = aitS().filter, p = [];
   if (f.goal) p.push('goal=' + f.goal);
   if (f.status) p.push('status=' + encodeURIComponent(f.status));
-  if (f.days) p.push('days=' + f.days);
+  if (f.from) p.push('from=' + encodeURIComponent(f.from));
+  if (f.to) p.push('to=' + encodeURIComponent(f.to));
   if (f.q) p.push('q=' + encodeURIComponent(f.q));
   for (const k of Object.keys(extra || {})) p.push(k + '=' + encodeURIComponent(extra[k]));
   return p.length ? '?' + p.join('&') : '';
+}
+/* ---- 筛选条：三个**自画**的下拉 + 时间区间 ----
+   为什么不用原生 <select>：它展开后是操作系统的系统菜单，跟 App 风格完全不搭
+   （用户原话"太丑陋了"），而且没法做"自定义起止日期"。
+   时间粒度：保留 今天 / 最近 7 天 / 最近 30 天 三档快捷，另加**自定义起止日**
+   —— 能精确到"10月1日到10月9日"这种某一段。 */
+function aitGoalLabel() {
+  const f = aitS().filter;
+  if (!f.goal) return '全部目标';
+  const g = ((state.aitData && state.aitData.goals) || []).find(x => Number(x.id) === Number(f.goal));
+  return g ? g.title : '（目标已删除）';
+}
+function aitStatusLabel() {
+  const v = aitS().filter.status;
+  return v === 'done' ? '✓ 完成' : v === 'failed' ? '✗ 失败' : v === 'cancelled' ? '已停止' : '全部状态';
+}
+function aitShortDate(s) {
+  const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? (Number(m[2]) + '月' + Number(m[3]) + '日') : String(s || '');
+}
+function aitTimeLabel() {
+  const f = aitS().filter;
+  if (f.preset === 'today') return '今天';
+  if (f.preset === '7') return '最近 7 天';
+  if (f.preset === '30') return '最近 30 天';
+  if (f.preset === 'custom' && f.fromDate && f.toDate) return aitShortDate(f.fromDate) + ' – ' + aitShortDate(f.toDate);
+  return '全部时间';
+}
+function aitTimeOn() { return !!(aitS().filter.from || aitS().filter.to); }
+/* 本地某一天的 0 点 → UTC ISO。数据是 nowISO()/toISOString() 存的 UTC，
+   而"今天"必须按**本地**日历切（中国用户按 UTC 切会错 8 小时）。 */
+function aitDayISO(base, addDays) {
+  const d = new Date(base.getFullYear(), base.getMonth(), base.getDate() + (addDays || 0), 0, 0, 0, 0);
+  return d.toISOString();
+}
+function aitApplyPreset(preset) {
+  const f = aitS().filter, today = new Date();
+  f.preset = preset; f.fromDate = ''; f.toDate = '';
+  if (preset === 'today') { f.from = aitDayISO(today, 0); f.to = aitDayISO(today, 1); }
+  else if (preset === '7') { f.from = aitDayISO(today, -6); f.to = aitDayISO(today, 1); }
+  else if (preset === '30') { f.from = aitDayISO(today, -29); f.to = aitDayISO(today, 1); }
+  else { f.from = ''; f.to = ''; }
+}
+function aitApplyCustom() {
+  const f = aitS().filter;
+  const a = String((document.getElementById('aitFrom') || {}).value || '');
+  const b = String((document.getElementById('aitTo') || {}).value || '');
+  if (!a || !b) { toast('起止日期都要选上（也可以直接点上面的快捷档）'); return false; }
+  if (a > b) { toast('开始日期不能晚于结束日期'); return false; }
+  f.preset = 'custom'; f.fromDate = a; f.toDate = b;
+  f.from = new Date(a + 'T00:00:00').toISOString();
+  const e = new Date(b + 'T00:00:00'); e.setDate(e.getDate() + 1);
+  f.to = e.toISOString();
+  return true;
+}
+/* 筛选条里那三个按钮的文案（改动筛选后只更新文案，不重画整条 —— 重画会把
+   搜索框里正在输入的内容和焦点一起弄丢） */
+function aitPaintFilterBtns() {
+  const bar = document.getElementById('aitFilters');
+  if (!bar) return;
+  const set = (kind, text, on) => {
+    const b = bar.querySelector('[data-ait-open="' + kind + '"]');
+    if (!b) return;
+    b.querySelector('.aitFLabel').textContent = text;
+    b.classList.toggle('on', !!on);
+    if (text !== b.getAttribute('data-last')) { b.setAttribute('data-last', text); b.title = text; }
+  };
+  set('goal', aitGoalLabel(), !!aitS().filter.goal);
+  set('status', aitStatusLabel(), !!aitS().filter.status);
+  set('time', aitTimeLabel(), aitTimeOn());
+}
+let aitPopEl = null;
+function aitPopClose() { if (aitPopEl) { aitPopEl.remove(); aitPopEl = null; } }
+function aitPopShow(btn, kind) {
+  const already = aitPopEl && aitPopEl.getAttribute('data-kind') === kind;
+  aitPopClose();
+  if (already) return;
+  const data = state.aitData || {}, f = aitS().filter;
+  const d = document.createElement('div');
+  d.className = 'aitPop';
+  d.setAttribute('data-kind', kind);
+  const opt = (pick, label, on, title) =>
+    `<button class="aitOpt ${on ? 'on' : ''}" data-ait-pick="${pick}"${title ? ' title="' + esc(title) + '"' : ''}>${esc(label)}</button>`;
+  if (kind === 'goal') {
+    d.innerHTML = '<div class="aitPopT">按目标筛选</div>'
+      + opt('goal:0', '全部目标', !f.goal)
+      + ((data.goals || []).map(g => opt('goal:' + g.id, g.title, Number(f.goal) === Number(g.id), g.title)).join(''));
+  } else if (kind === 'status') {
+    d.innerHTML = '<div class="aitPopT">按状态筛选</div>'
+      + opt('status:', '全部状态', !f.status)
+      + opt('status:done', '✓ 完成', f.status === 'done')
+      + opt('status:failed', '✗ 失败', f.status === 'failed')
+      + opt('status:cancelled', '已停止', f.status === 'cancelled');
+  } else {
+    d.innerHTML = '<div class="aitPopT">时间范围</div>'
+      + `<button class="aitOpt ${!aitTimeOn() ? 'on' : ''}" data-ait-time="all">全部时间</button>`
+      + `<button class="aitOpt ${f.preset === 'today' ? 'on' : ''}" data-ait-time="today">今天</button>`
+      + `<button class="aitOpt ${f.preset === '7' ? 'on' : ''}" data-ait-time="7">最近 7 天</button>`
+      + `<button class="aitOpt ${f.preset === '30' ? 'on' : ''}" data-ait-time="30">最近 30 天</button>`
+      + '<div class="aitPopSep"></div><div class="aitPopT">自定义（精确到某几天）</div>'
+      + `<div class="aitRange">
+           <input type="date" id="aitFrom" value="${esc(f.fromDate || '')}" aria-label="开始日期">
+           <span class="aitRangeSep">—</span>
+           <input type="date" id="aitTo" value="${esc(f.toDate || '')}" aria-label="结束日期">
+           <button class="btn small primary" id="aitRangeGo">应用</button>
+         </div>`;
+  }
+  document.body.appendChild(d);
+  const r = btn.getBoundingClientRect();
+  d.style.top = (r.bottom + 6) + 'px';
+  d.style.left = Math.max(8, Math.min(r.left, window.innerWidth - d.offsetWidth - 8)) + 'px';
+  aitPopEl = d;
+}
+/* 改完筛选统一走的收尾：清掉展开状态（换筛选后旧的那一组就不作数了） */
+async function aitAfterFilterChange() {
+  const st = aitS();
+  st.open = {}; st.rows = {};
+  if (st.filter.goal) st.open[st.filter.goal] = true;
+  /* 汇总与分组也吃同一套筛选，所以换筛选要重拉一次总览 —— 否则筛了"今天"，
+     分组标题还写"共 30"（实测踩到过） */
+  try { state.aitData = await api('/api/ai-tasks' + aitQuery()); } catch (e) {}
+  aitPaintRun(state.aitData || {});
+  aitPaintHist();
+  aitPaintFilterBtns();
+  if (st.filter.goal) { await aitLoadRows(st.filter.goal, false); aitPaintHist(); }
 }
 /* 「正在执行」的卡片。
    进度 / **所有阶段点** / 实时思考直接用任务中心那套 `taskProgressHTML` ——
@@ -9713,24 +9844,23 @@ async function renderAiTasksPage() {
   aitS();
   app.innerHTML = '<p class="muted">正在读取 AI 任务…</p>';
   let data;
-  try { data = await api('/api/ai-tasks'); } catch (e) {
+  try { data = await api('/api/ai-tasks' + aitQuery()); } catch (e) {
     app.innerHTML = `<div class="page"><div class="pageHead"><h2 class="title">🤖 AI 任务</h2></div>
       <div class="emptyBox" style="margin-top:30px;"><div class="ebIcon">⚠️</div><div class="ebTitle">读取失败</div><div class="ebText">${esc(e.message)}</div></div></div>`;
     return;
   }
   state.aitData = data;
   const f = aitS().filter;
-  const opts = (list, cur) => list.map(o => `<option value="${esc(String(o[0]))}" ${String(o[0]) === String(cur) ? 'selected' : ''}>${esc(o[1])}</option>`).join('');
   app.innerHTML = `<div class="page">
     <div class="pageHead"><h2 class="title">🤖 AI 任务</h2><span class="aitHeadHint" id="aitHint"></span></div>
     <div id="aitRun"></div>
     <div class="aitSec">
       <div class="aitSecT">历史记录<span class="aitSecN">${(data.summary || {}).total || 0}</span></div>
-      <div class="aitFilters">
+      <div class="aitFilters" id="aitFilters">
         <input id="aitQ" class="aitQ" placeholder="搜任务标题…" value="${esc(f.q)}">
-        <select id="aitFGoal" class="aitSel">${opts([[0, '全部目标']].concat((data.goals || []).map(g => [g.id, g.title])), f.goal)}</select>
-        <select id="aitFStatus" class="aitSel">${opts([[ '', '全部状态'], ['done', '✓ 完成'], ['failed', '✗ 失败'], ['cancelled', '已停止']], f.status)}</select>
-        <select id="aitFDays" class="aitSel">${opts([[0, '全部时间'], [1, '今天'], [7, '最近 7 天'], [30, '最近 30 天']], f.days)}</select>
+        <button class="aitFbtn" data-ait-open="goal"><span class="aitFLabel">${esc(aitGoalLabel())}</span><span class="aitFCaret">▾</span></button>
+        <button class="aitFbtn" data-ait-open="status"><span class="aitFLabel">${esc(aitStatusLabel())}</span><span class="aitFCaret">▾</span></button>
+        <button class="aitFbtn" data-ait-open="time"><span class="aitFLabel">${esc(aitTimeLabel())}</span><span class="aitFCaret">▾</span></button>
         <span class="spacer"></span>
         <button class="btn tiny" id="aitToggleAll">展开全部</button>
       </div>
@@ -9747,7 +9877,7 @@ async function renderAiTasksPage() {
   aiTasksTimer = setInterval(async () => {
     if (parseRoute().view !== 'aitasks') { aiTasksStopPoll(); return; }
     try {
-      const d = await api('/api/ai-tasks');
+      const d = await api('/api/ai-tasks' + aitQuery());
       const before = ((state.aitData || {}).summary || {}).total || 0;
       state.aitData = d;
       aitPaintRun(d);
@@ -9768,21 +9898,38 @@ function bindAiTasks() {
     };
     q.addEventListener('input', () => { clearTimeout(t); t = setTimeout(run, 350); });
   }
-  const bindSel = (id, key, num) => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.addEventListener('change', async () => {
-      const st = aitS();
-      st.filter[key] = num ? Number(el.value) : el.value;
-      st.open = {}; st.rows = {};          // 筛选一换，之前展开的那些就不作数了
-      if (st.filter.goal) st.open[st.filter.goal] = true;
-      aitPaintRun(state.aitData || {}); aitPaintHist();
-      if (st.filter.goal) { await aitLoadRows(st.filter.goal, false); aitPaintHist(); }
-    });
-  };
-  bindSel('aitFGoal', 'goal', true);
-  bindSel('aitFStatus', 'status', false);
-  bindSel('aitFDays', 'days', true);
+  /* 三个下拉按钮 + 弹层里的选项。弹层是 body 下的浮动元素，所以选项和"应用"
+     都走**文档级委托**，只绑一次（每次进页都绑会越积越多）。 */
+  const bar = document.getElementById('aitFilters');
+  if (bar) bar.addEventListener('click', e => {
+    const b = e.target.closest('[data-ait-open]');
+    if (b) { e.stopPropagation(); aitPopShow(b, b.getAttribute('data-ait-open')); return; }
+  });
+  if (!window.__aitPopBound) {
+    window.__aitPopBound = true;
+    document.addEventListener('click', e => {
+      if (!aitPopEl) return;
+      if (e.target.closest && (e.target.closest('.aitPop') || e.target.closest('[data-ait-open]'))) return;
+      aitPopClose();
+    }, true);
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') aitPopClose(); });
+    window.addEventListener('scroll', () => aitPopClose(), true);
+    document.addEventListener('click', async e => {
+      const pick = e.target.closest && e.target.closest('[data-ait-pick]');
+      if (pick) {
+        const v = pick.getAttribute('data-ait-pick');
+        if (v.indexOf('goal:') === 0) aitS().filter.goal = Number(v.slice(5)) || 0;
+        else aitS().filter.status = v.slice(7);
+        aitPopClose(); await aitAfterFilterChange();
+        return;
+      }
+      const tm = e.target.closest && e.target.closest('[data-ait-time]');
+      if (tm) { aitApplyPreset(tm.getAttribute('data-ait-time')); aitPopClose(); await aitAfterFilterChange(); return; }
+      if (e.target.closest && e.target.closest('#aitRangeGo')) {
+        if (aitApplyCustom()) { aitPopClose(); await aitAfterFilterChange(); }
+      }
+    }, true);
+  }
   const all = document.getElementById('aitToggleAll');
   if (all) all.addEventListener('click', async () => {
     const data = state.aitData || {};
