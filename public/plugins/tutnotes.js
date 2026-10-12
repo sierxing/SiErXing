@@ -407,6 +407,13 @@
   function attachDoc(doc) {
     if (!doc || doc.__tnBound) return;
     doc.__tnBound = true;
+    /* ⚠️ 拖选过程中 selectionchange 会**连续触发**，每触发一次就把浮出小条
+       重画一遍 —— 用户看到的就是一直闪。所以按住鼠标时一律不响应，
+       等松开（mouseup）再浮出来；键盘选（shift+方向键）没有按下鼠标，照常浮出。 */
+    let pointerDown = false;
+    doc.addEventListener('mousedown', () => { pointerDown = true; }, true);
+    doc.addEventListener('mouseup', () => { pointerDown = false; }, true);   // 先于下面那个 mouseup 执行
+    const onSel = () => { if (pointerDown) return; onUp(); };
     doc.addEventListener('mouseup', e => {
       const m = e.target && e.target.closest && e.target.closest('mark.tnm');
       if (m) {
@@ -415,7 +422,7 @@
       }
       onUp();
     }, true);
-    doc.addEventListener('selectionchange', onUp, true);
+    doc.addEventListener('selectionchange', onSel, true);
   }
   function bindOnce() {
     if (bound) return;
