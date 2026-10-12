@@ -2411,3 +2411,63 @@ input,textarea{caret-color:var(--accent);}
   padding-left:9px; border-left:2px solid var(--accent-border);
 }
 .npWhyMissSoft{color:var(--muted); font-size:12px;}
+
+/* ============================================================
+   依据信息源：排版重做
+   原来每条是"左侧一条竖线 + 名字 + 批注 + 正文折叠"，
+   而「移除」用 position:absolute 钉在面板最右边 —— 名字短的时候
+   中间留出一大片空白，看着就是"没对齐的松散几行"。
+   现在改成**有边界的卡片**：名字/标签在左、操作在右（留白被边框收住，
+   不再像悬空），批注缩进在名字下面，正文折叠收进卡内。
+   ============================================================ */
+.npSrcList{display:flex; flex-direction:column; gap:7px;}
+.npSrc{
+  position:relative; border:1px solid var(--border); border-radius:10px;
+  background:var(--card); padding:9px 11px 9px 12px; transition:.14s;
+  border-left:3px solid var(--accent-border);
+}
+.npSrc:hover{border-color:var(--accent-border);}
+.npSrc.isStar{border-left-color:var(--ok);}
+.npSrc:hover .npsrcDel{opacity:1;}
+/* 顶部一行：名字 + 标签 …… 操作（右侧对齐但被边框收住） */
+.npSrcHd{display:flex; align-items:center; gap:7px; min-width:0;}
+.npSrcName{
+  font-size:12.5px; font-weight:650; color:var(--text); min-width:0; flex:1;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; word-break:normal;
+}
+.npSrc .sxi{color:var(--muted); flex:none;}
+.npSrc.isStar .sxi{color:var(--ok);}
+.npSrcKind{
+  font-size:10px; padding:1px 6px; border-radius:5px; flex:none;
+  background:var(--soft); color:var(--muted); white-space:nowrap;
+}
+.npSrcStar{font-size:10px; padding:1px 6px; border-radius:5px; flex:none;
+  background:var(--ok-soft); color:var(--ok); font-weight:700;}
+/* 操作：平时淡，悬停/聚焦才明显（少占视觉重量） */
+.npSrcOps{display:flex; align-items:center; gap:4px; flex:none;}
+.npSrc .npsrcDel{
+  position:static; opacity:.35; transition:.14s; flex:none;
+  font-size:13px; line-height:1; padding:2px 6px; border-radius:6px;
+}
+.npSrc .npsrcDel:hover{opacity:1; background:rgba(224,36,36,.1);}
+/* 批注：缩进在名字下方，与名字左对齐成一条视觉轴 */
+.npSrcNote{
+  font-size:12px; color:var(--muted); line-height:1.65; margin-top:5px;
+  padding-left:1px; overflow-wrap:anywhere;
+}
+.npSrcNote b{color:var(--text); font-weight:600;}
+/* 正文折叠：收进卡内，标题行做轻一点 */
+.npSrcBody{margin-top:7px; border-radius:8px; background:var(--soft); border:0;}
+.npSrcBody summary{cursor:pointer; padding:5px 9px; font-size:11.5px; color:var(--muted); list-style:none;}
+.npSrcBody summary::-webkit-details-marker{display:none;}
+.npSrcBody summary:hover{color:var(--accent);}
+.npSrcBody .mdBody{padding:2px 10px 9px; font-size:12.8px;}
+
+/* 窄面板里（节点面板宽度有限）名字允许多行，别用省略号吃掉关键信息 */
+@media (max-width:520px){
+  .npSrcName{white-space:normal; overflow:visible; text-overflow:clip;}
+}
+
+/* 「为什么有这一步」：只讲原因；一句轻提示把"依据清单"指向下面的折叠区 */
+.npWhyCite{font-size:11.5px; color:var(--muted); margin-top:6px;}
+.npWhySelfLine{font-size:13px; line-height:1.85;}

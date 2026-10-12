@@ -944,6 +944,7 @@ function showNodePanel(id, rerender) {
   const n = state.goal.nodes.find(x => x.id === id);
   if (!n) return;
   const srcs = safeParse(n.sources, []);
+  state.__npSrcs = srcs;   // 依据卡片的「正文」按钮按 index 回取（面板每次重绘）
   const tuts = tutorialsOfNode(id);   // 修复：原来漏了这行，节点面板一打开就报 tuts is not defined
   const old = document.getElementById('nodePanel');
   if (old) old.remove();
@@ -969,14 +970,17 @@ function showNodePanel(id, rerender) {
      现在改成：**依据（哪条要求导致它存在）排最前**，结构位置降成一行元信息。 */
   const whyLines = [];
   const evid = srcs.map(x => String(x.note || '').trim()).filter(Boolean);
-  const evidName = srcs.map(x => String(x.name || x.title || '').trim()).filter(Boolean);
   const scopeD = scope && scope.detail ? String(scope.detail).replace(/\s+/g, ' ').trim() : '';
   if (pos && sibs.length > 1) whyLines.push('在第 ' + pos + '/' + sibs.length + ' 步' + (P ? '（' + P.title + '）' : ''));
   else if (P) whyLines.push('属于「' + P.title + '」');
   /* 把 detail 拆成"理由"和"做法"两半（见 splitDetailRationale 的说明） */
   const rd = splitDetailRationale(n.detail);
   const whyFromDetail = rd.why;
-  const steps = splitSteps(rd.how.length ? rd.how.join('\n') : n.detail);
+  /* ⚠️ 兜底不要回退成整段 detail：那样【为什么】那几行会被再当成步骤显示一遍
+     （实测节点只有【为什么】没有【怎么做】时，"怎么做"里又原样出现同一段理由）。
+     有理由可摘时就不再兜底，宁可不显示步骤，也不重复。 */
+  const steps = rd.how.length ? splitSteps(rd.how.join('\n'))
+    : (whyFromDetail.length ? [] : splitSteps(n.detail));
   /* 「这一支要达成的是」以前硬截 140 字 + "…"，用户看不到后半段（线上反馈）。
      现在整段放进 DOM，靠 CSS 折 2 行；确实超出才显示「展开」。 */
   requestAnimationFrame(() => {
@@ -1012,13 +1016,10 @@ function showNodePanel(id, rerender) {
       ${whyFromDetail.length ? `<div class="npWhySelf">
         ${whyFromDetail.map(x => `<div class="npWhySelfLine">${rewriteCites(esc(x))}</div>`).join('')}
       </div>` : ''}
-      ${evid.length ? `<div class="npWhyEvid">
-        <div class="npWhyEvidHd">这一步的依据 <span class="npWhyCnt">${evid.length} 条</span></div>
-        <ul class="npWhyList">${evid.slice(0, 6).map((t, i) => `<li>${evidName[i] ? `<b>${esc(evidName[i])}</b>` : ''}${esc(t)}</li>`).join('')}</ul>
-        ${evid.length > 6 ? `<div class="npWhyMore">…还有 ${evid.length - 6} 条依据</div>` : ''}
-      </div>` : (whyFromDetail.length
-          ? `<div class="npWhyLine npWhyMissSoft">这个节点的依据只写在说明里，还没有跟资料库里的具体条目挂钩 —— 想让它可追溯，点下面的「让 AI 改」补上依据。</div>`
-          : `<div class="npWhyLine npWhyMiss">这一步还没有标注依据 —— 点下面的「让 AI 改」补上，或自己关联资料库。</div>`)}
+      ${!whyFromDetail.length ? `<div class="npWhyLine npWhyMiss">
+        这个节点还没有写"为什么" —— 点下面的「让 AI 改」让它补上（会说清这个任务对你目标的作用）。
+      </div>` : ''}
+      ${srcs.length ? `<div class="npWhyCite">依据 ${srcs.length} 条资料${srcs.length ? '（来源列在下面的「依据信息源」里）' : ''}</div>` : ''}
       ${scopeD ? `<div class="npWhyLine"><span class="npWhyK">这一支要达成的是</span><span class="npWhyClamp" data-clamp="1">${rewriteCites(esc(scopeD))}</span><button class="npWhyTg" data-clamp-tg="1" hidden>展开</button></div>` : ''}
       ${whyLines.map(x => '<div class="npWhyLine">' + esc(x) + '</div>').join('')}
     </div>` : ''}
@@ -1047,10 +1048,32 @@ function showNodePanel(id, rerender) {
             return { x, i, body, isStar, name: String(x.name || x.title || '').trim() || '（未命名来源）', note: String(x.note || '').trim() };
           });
           const HEAD = 3;
+          /* 每张卡：一行头（类型标签 + 名字 + 优质 + 操作），批注在下面。
+             类型标签从来源名/站点里认出来，让用户一眼分类。 */
+          const kindOf = o => {
+            const t = o.name + ' ' + String(o.x.site || '') + ' ' + String(o.x.kind || '');
+            if (/代码库/.test(t)) return '代码库';
+            if (/JD|招聘|岗位/.test(t)) return 'JD';
+            if (/面经|面试|一面|二面/.test(t)) return '面经';
+            if (/提炼汇总|汇总/.test(t)) return '汇总';
+            if (/用户提供/.test(t)) return '自己提供';
+            if (/电子书|书单/.test(t)) return '书';
+            if (/路线|路径/.test(t)) return '路线';
+            return String(o.x.kind || '资料').slice(0, 6);
+          };
           const head = items.slice(0, HEAD).map(o => `<div class="npSrc ${o.isStar ? 'isStar' : ''}">
-              <div class="npSrcName">${o.isStar ? sxi('check', 14) : sxi('link', 14)}${esc(o.name)}${o.isStar ? '<span class="chip ok" style="margin-left:6px;">优质</span>' : ''}<button class="btn tiny danger npsrcDel" data-npsrc-del="${o.i}">移除</button></div>
+              <div class="npSrcHd">
+                ${o.isStar ? sxi('check', 14) : sxi('link', 14)}
+                <span class="npSrcName" title="${esc(o.name)}">${esc(o.name)}</span>
+                <span class="npSrcKind">${esc(kindOf(o))}</span>
+                ${o.isStar ? '<span class="npSrcStar">优质</span>' : ''}
+                <div class="npSrcOps">
+                  ${o.body ? `<button class="btn tiny" data-npsrc-body="${o.i}" title="展开 / 收起资料正文">正文 ${o.body.length}</button>` : ''}
+                  <button class="btn tiny danger npsrcDel" data-npsrc-del="${o.i}" title="移除这条依据">×</button>
+                </div>
+              </div>
               ${o.note ? `<div class="npSrcNote">${esc(o.note)}</div>` : ''}
-              ${o.body ? `<details class="npSrcBody"><summary>查看资料库正文（${o.body.length} 字）</summary><div class="mdBody">${mdToHTML(o.body.slice(0, 4000))}</div></details>` : ''}
+              <div class="npSrcBodyBox" hidden></div>
             </div>`).join('');
           const rest = items.slice(HEAD);
           const chip = o => `<button class="npSrcChip${o.isStar ? ' isStar' : ''}" data-npsrc-note="${esc(o.note || o.name)}">${o.isStar ? '★ ' : ''}${esc(o.name.length > 20 ? o.name.slice(0, 20) + '…' : o.name)}</button>`;
@@ -3241,6 +3264,27 @@ document.addEventListener('click', e => {
     if (box) {
       const open = box.classList.toggle('isOpen');
       clampTg.textContent = open ? '收起' : '展开';
+    }
+    return;
+  }
+  const bodyBtn = e.target.closest && e.target.closest('[data-npsrc-body]');
+  if (bodyBtn) {
+    const card = bodyBtn.closest('.npSrc');
+    const box = card && card.querySelector('.npSrcBodyBox');
+    if (box) {
+      if (!box.hidden) { box.hidden = true; bodyBtn.classList.remove('primary'); return; }
+      if (!box.getAttribute('data-filled')) {
+        const idx = Number(bodyBtn.getAttribute('data-npsrc-body'));
+        const cur = (state.__npSrcs || [])[idx];
+        const lib = cur ? findLibSource({ name: cur.name, title: cur.name }) : null;
+        const body = lib ? String(lib.content || lib.snippet || '') : '';
+        box.innerHTML = body
+          ? '<div class="mdBody">' + mdToHTML(body.slice(0, 4000)) + '</div>'
+          : '<div class="muted" style="font-size:12px;padding:6px 2px;">资料库里找不到这条的正文（可能已被删除或还没导入全文）。</div>';
+        box.setAttribute('data-filled', '1');
+      }
+      box.hidden = false;
+      bodyBtn.classList.add('primary');
     }
     return;
   }
