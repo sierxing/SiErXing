@@ -129,18 +129,23 @@ function lexicalScores(rows, query) {
   const tokens = tokensOf(query);
   const scores = new Array(rows.length).fill(0);
   if (!tokens.length) return scores;
-  let max = 0;
+  /* 归一化用「查询词权重总和」，不是「本批命中的最高分」。
+     旧写法除以 max，会把本批里相对最强的那个命中抬成 1.0 —— 哪怕它只命中
+     一两个常见二字词；而向量余弦通常只有 0.5~0.7，于是 max(sem*1.05, lex)
+     里词面永远赢，装了向量模型也白装。
+     改成按查询词覆盖率计分后，词面分是「命中了查询的多大比例」这一绝对量，
+     才和语义分可比：命中最全的仍是 1.0，只擦到边的就落到 0.1 以下。 */
+  const weights = tokens.map(t => (t.length >= 3 ? 2 : 1));
+  const total = weights.reduce((a, b) => a + b, 0) || 1;
   for (let i = 0; i < rows.length; i++) {
     const hay = (rows[i].text + ' ' + (rows[i].title || '')).toLowerCase();
     let s = 0;
-    for (const t of tokens) {
-      const c = hay.split(t).length - 1;
-      if (c > 0) s += Math.min(c, 4) * (t.length >= 3 ? 2 : 1);
+    for (let k = 0; k < tokens.length; k++) {
+      const c = hay.split(tokens[k]).length - 1;
+      if (c > 0) s += Math.min(c, 4) * weights[k];
     }
-    scores[i] = s;
-    if (s > max) max = s;
+    scores[i] = Math.min(1, s / total);
   }
-  if (max > 0) for (let i = 0; i < scores.length; i++) scores[i] = scores[i] / max;
   return scores;
 }
 
