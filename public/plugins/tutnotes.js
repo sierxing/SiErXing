@@ -251,6 +251,14 @@
   /* 读当前选区 → {root, range, abs, text}；读不到返回 null（lastWhy 说明原因）。
      ⚠️ 不碰 DOM（除了可能的索引重建），选区原样保留。 */
   function grabSelection() {
+    /* 监听是绑在 document 上的、离开教程页也不会自动解绑 —— 必须自己挡一道：
+       否则在别的页面（引用资料/汇报卡里到处是 .mdBody）选中一段文字，
+       tutRoot() 会退化成那个 .mdBody，提示签和菜单就会冒出来，点下去还带着上一篇教程的 id。 */
+    if (!tid) { why('没有挂载教程'); return null; }
+    try {
+      const rr = SiErXing.parseRoute ? SiErXing.parseRoute() : null;
+      if (rr && rr.view !== 'tutorial') { why('不在教程页'); return null; }
+    } catch (e) {}
     const root = R();
     if (!root) { why('拿不到正文根（tutRoot 为空）'); return null; }
     let sel = null;
