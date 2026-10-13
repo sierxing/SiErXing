@@ -3129,14 +3129,86 @@ function pickTutorialSection(content, message) {
   const end = hrs[best.i + 1] ? hrs[best.i + 1].index : c.length;
   return '《' + best.title + '》\n' + c.slice(start, end).slice(0, 4000);
 }
+/* 找从 start 处的 [ / { 开始、与之配对的那个括号的下标；找不到（被截断）返回 -1。 */
+function bracketEnd(s, start) {
+  let depth = 0, inStr = false, esc = false;
+  for (let k = start; k < s.length; k++) {
+    const c = s[k];
+    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '[' || c === '{') depth++;
+    else if (c === ']' || c === '}') { depth--; if (depth === 0) return k; }
+  }
+  return -1;
+}
+/* 剥掉正文里形如 [{"op":…}] 的操作 JSON 段（按括号配对扫，串里的 ] } 不算数）。
+   不是操作数组的 JSON（例如用户贴的资料）原样保留 —— 别把用户真正的话删了。 */
+function stripOpsArrays(text) {
+  let out = '', rest = String(text || '');
+  for (let guard = 0; rest && guard < 50; guard++) {
+    const i = rest.search(/\[\s*\{\s*"/);
+    if (i < 0) { out += rest; break; }
+    out += rest.slice(0, i);
+    const end = bracketEnd(rest, i);
+    if (end < 0) break;                                   // 没闭合 = 半截操作 JSON，整段丢
+    const seg = rest.slice(i, end + 1);
+    if (!/"op"\s*:|"type"\s*:/.test(seg)) out += seg;      // 别的 JSON 留着
+    rest = rest.slice(end + 1);
+  }
+  return out;
+}
+/* 把 ``` 围栏补齐：奇数个说明有孤零零一个 ```（模型抄历史留下的），删掉多余的。 */
+function dropLoneFence(s) {
+  let n = (String(s).match(/```/g) || []).length;
+  while (n % 2 === 1) {
+    const i = s.lastIndexOf('```');
+    if (i < 0) break;
+    s = s.slice(0, i) + s.slice(i + 3);
+    n--;
+  }
+  return s;
+}
+/* 【回喂历史前必须做的一步】剥掉历史消息里的"操作 JSON"，只留人类可读正文。
+   ⚠️ 线上真实翻车（用户已反馈 4 次以上）：对话窗口从"固定 12 条"放宽成"按 26000 字取"
+   之后，历史里那些巨大的 ops JSON（形如 {"op":"tutorial_edit","feedback":"…几千字…"}）
+   被**原样喂回**给模型，模型于是开始模仿它们：回复末尾照抄一段半截 JSON 尾巴，
+   甚至把上一轮的操作当自己的输出。
+   实测 chats id=299（985 字）：整条回复里既没有 `[{` 也没有 `{"op"`，末尾却是
+   `…不改技术结论与验收标准。"}]` —— 那段正是历史 id=284/286 里旧 tutorial_edit 的尾部。
+   注意：只剥 ```ops 块与 {"op":…} JSON 段，用户真正写的修改意见正文一个字都不动。 */
+function stripOpsFromText(content) {
+  let s = String(content || '');
+  s = s.replace(/```ops[ \t]*\r?\n[\s\S]*?(?:```|$)/gi, ' ');       // 1) ```ops 代码块（未闭合的半个也剥）
+  s = stripOpsArrays(s);                                            // 2) 成对完整的 [{…"op"…}] 操作数组
+  // 3) 散落的 {"op":…} 对象 —— 半截数组（模型把开头的 `[{` 也吞掉时）就靠这条。
+  s = s.replace(/\{\s*"op"\s*:[\s\S]{0,4000}?\}\s*\]?/g, ' ');
+  // 4) 剩下的 JSON 尾巴（例如 `…验收标准。"}]`、`…纯概念。"},]`）。
+  //    两道约束避免误伤用户粘贴的 JSON：前面不能是字母数字（`"x"}` 这种值结尾就不碰）、
+  //    后面必须是换行 / 结尾 / 代码围栏。
+  s = s.replace(/(?<![A-Za-z0-9])"[ \t]*\}[ \t]*\]?[ \t]*[,，]?[ \t]*\]?(?=[ \t]*(?:\r?\n|$|`{3}))/g, ' ');
+  s = s.replace(/[ \t]*,[ \t]*\[[ \t]*(?=\r?\n|$)/g, ' ');          // 5) 尾巴孤立的 `, [`
+  s = dropLoneFence(s);                                             // 6) 孤立的 ``` 围栏
+  return s.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ').trim();
+}
+/* 单条消息按字数保头保尾截断 —— 防止一条几万字的回复吃光整个预算。 */
+function clipHeadTail(s, max) {
+  const t = String(s || '').replace(/\s+/g, ' ').trim();
+  const cap = max || 1200;
+  if (t.length <= cap) return t;
+  const head = Math.round(cap * 0.6), tail = cap - head;
+  return t.slice(0, head) + ' 〔中间省略 ' + (t.length - cap) + ' 字〕 ' + t.slice(-tail);
+}
 /* 按字数取"最近 N 轮"对话：从最新往回装，装不下就停。
-   比"固定条数"适应性强得多 —— 短消息能带回几十轮，长回复也不会一条吃光预算。 */
+   比"固定条数"适应性强得多 —— 短消息能带回几十轮，长回复也不会一条吃光预算。
+   每条都先 stripOpsFromText（剥操作 JSON）+ clipHeadTail（单条上限 1200 字）。 */
 function pickChatWindow(rows, budget) {
   const out = [];
   let used = 0;
   for (let i = rows.length - 1; i >= 0; i--) {
     const c = rows[i];
-    const txt = (c.role === 'user' ? '用户：' : '你：') + String(c.content || '').replace(/\s+/g, ' ').slice(0, 4000);
+    const body = clipHeadTail(stripOpsFromText(c.content), 1200);
+    if (!body) continue;   // 整条就是操作 JSON（剥完没正文了）→ 不带，免得诱发照抄
+    const txt = (c.role === 'user' ? '用户：' : '你：') + body;
     if (out.length && used + txt.length > budget) break;
     out.unshift(txt);
     used += txt.length;
@@ -3210,6 +3282,7 @@ async function buildChatPrompt(goal, message, sessionId, opts) {
     const w = pickChatWindow(chats, 26000);
     lines.push('');
     lines.push('【最近的对话】' + (w.dropped ? '（更早的 ' + w.dropped + ' 条太长，这次没带上；需要时请用户复述）' : ''));
+    lines.push('（下面是历史对话的**正文**，其中的操作当时已经执行过了 —— 不要照抄，也不要模仿它们的格式。）');
     lines.push(w.lines.join('\n'));
   }
   lines.push('');
@@ -3526,6 +3599,72 @@ function parseChatOutput(text) {
   if (!s) s = ops.length ? '已按你的要求更新路线图。' : '（AI 没有输出内容，请重试）';
   return { reply: s, ops };
 }
+/* 承诺性表述识别：AI 说"已交办 / 已提交任务"，或"我这就改 / 我将重写这一节教程"。
+   只在 ops 为空时用它触发兜底，所以宁可窄一点，别为普通回答白跑一次 AI 调用。 */
+function looksLikePromise(reply) {
+  const s = String(reply || '');
+  if (/已(?:经)?[^\n]{0,24}(?:交给|提交|交办|发起|安排)[^\n]{0,24}任务/.test(s)) return true;
+  if (/(?:已|我)[^\n]{0,20}(?:交给|提交给|交办给)[^\n]{0,14}(?:教程|后台|任务)/.test(s)) return true;
+  if (/(?:我|将|会)[^\n]{0,12}(?:这就|马上|立刻|现在|去)?[^\n]{0,8}(?:修改|重写|改这|更新这|调整这)[^\n]{0,14}(?:教程|这一节|本节|这一篇|这一块)/.test(s)) return true;
+  return false;
+}
+/* 「模型嘴上答应、却没写 ops」的兜底补一刀。
+   病根：正文与 ops 挤在一次回复里 —— 模型输出长正文时**根本没写 ops**（不是被截断，
+   所以"截断抢救"那条路救不了，见 parseChatOutput 第 3 步）。
+   实测 chats id=299：985 字的回复里既没有 `[{` 也没有 `{"op"`，末尾却抄了历史里旧
+   tutorial_edit 的 JSON 尾巴，用户以为交办了、队列里却什么都没有。
+   对策：再用**极小的一次性请求**让它把刚才答应的事表达成 JSON 操作数组（走 AI 埋点，
+   scene='助手对话-补操作'）；最多试 2 次，拿不到就返回空数组，沿用"并没有真的交办"提示。 */
+const OPS_SPEC_LINES = [
+  '{"op":"add","parent_id":<父节点id>,"title":"","detail":"","artifact":"","acceptance":"","hours":""}',
+  '{"op":"update","id":<id>,"title":"","detail":"","artifact":"","acceptance":"","hours":""}',
+  '{"op":"delete","id":<id>}   {"op":"move","id":<id>,"parent_id":<新父节点id>}',
+  '{"op":"status","id":<id>,"status":"todo|doing|done"}   {"op":"constraint","text":""}',
+  '{"op":"add_source","title":"","kind":"JD|面经|大纲|笔记|资料","content":"","url":"","site":""}',
+  '{"op":"delete_source","title":"关键词"}',
+  '{"op":"update_goal","fields":{"title":"","profile":"","weekly_hours":"","deadline":"","materials":""}}',
+  '{"op":"digest"}   {"op":"collect"}',
+  '{"op":"tutorial_edit","tutorial_id":<编号>,"feedback":"修改意见（改哪里、改成什么样）"}'
+];
+async function recoverChatOps(goal, message, reply, o, model, sig) {
+  const lines = [
+    '【任务】你刚才回复了用户，但那次的回复里**没有输出可执行的操作（ops）**。',
+    '现在请把"你刚才答应要做的那件事"表达成一个 JSON 操作数组。',
+    '',
+    '【只输出 JSON 数组本身】不要解释、不要 Markdown 代码围栏、不要 JSON 信封。',
+    '',
+    goalHeader(goal)
+  ];
+  lines.push('【当前路线图（方括号内是节点 id，只能引用这些 id）】');
+  lines.push(roadmapOutline(goal.id) || '（暂无节点）');
+  try {
+    const tl = db.prepare('SELECT id,title FROM tutorials WHERE goal_id = ? ORDER BY updated_at DESC, id DESC LIMIT 8').all(goal.id);
+    if (tl.length) lines.push('【这个目标的教程】' + tl.map(t => '#' + t.id + ' ' + String(t.title || '').slice(0, 40)).join(' ｜ '));
+  } catch (e) {}
+  const tutId = Number((o && o.tutorial && o.tutorial.id) || 0);
+  if (tutId) lines.push('【用户当前打开的是教程】#' + tutId);
+  lines.push('');
+  lines.push('【可用的操作】');
+  for (const l of OPS_SPEC_LINES) lines.push('   ' + l);
+  lines.push('');
+  lines.push('【用户的消息】' + String(message || '').slice(0, 800));
+  lines.push('【你刚才的回复（节选）】' + String(reply || '').slice(-1500));
+  lines.push('');
+  lines.push('【铁律】确实没有要执行的操作就输出 []；不要编造 id；除 JSON 数组外不要输出任何内容。');
+  const prompt = lines.join('\n');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let raw = '';
+    try {
+      raw = await ai.text({ prompt, model: model || currentModel(), timeoutMs: 90000, signal: sig, scene: '助手对话-补操作' });
+    } catch (e) {
+      if (e && e.cancelled) throw e;   // 用户点了「停止」→ 别硬续
+      continue;
+    }
+    const ops = parseChatOutput(raw).ops;
+    if (ops.length) return ops;
+  }
+  return [];
+}
 function streamChat(req, res, goal, message, session, opts) {
   const o = opts || {};
   const askOnly = o.mode === 'ask';
@@ -3562,14 +3701,21 @@ function streamChat(req, res, goal, message, session, opts) {
       if (!reply) throw new Error('AI 回复为空，请重试');
       /* ASK 模式下服务端直接丢弃任何 ops —— 不给模型"忘了规矩"的机会。
          前端也会拦一道，但边界必须在这里。 */
-      const ops = askOnly ? [] : parsed.ops;
-      /* 模型"嘴上说已经交办了、其实没给出任何操作"——最常见的原因是回复写到一半被
-         输出上限截断，末尾那段 ops 直接丢了。实测用户就撞上过：AI 回「已提交，这次
-         拆小执行…」，而队列里什么都没有，用户以为在跑了。
-         这种情况必须在对话里说实话，别让人干等。 */
-      if (!ops.length && /已(?:经)?[^\n]{0,24}(?:交给|提交|交办|发起|安排)[^\n]{0,24}任务/.test(reply)) {
-        reply += '\n\n> ⚠️ **上面这些并没有真的交办** —— 这条回复没带出可执行的操作'
-          + '（多半是写太长被截断了）。请把要求写短一点再说一次，或把整篇拆成两三节分次提。';
+      let ops = askOnly ? [] : parsed.ops;
+      /* 模型"嘴上说已经交办了、其实没给出任何操作"——两种原因：
+         ① 回复写到一半被输出上限截断，末尾那段 ops 直接丢了；
+         ② **根本没写 ops**（长正文里 ops 最容易丢，实测 chats id=299）。
+         ①的抢救在 parseChatOutput 里；②这里补一刀：先用极小的一次性请求让它把
+         刚答应的事表达成 JSON 操作数组，补不到才在对话里说实话，别让人干等。 */
+      if (!ops.length && !askOnly && looksLikePromise(reply)) {
+        send({ status: '正在补齐可执行的操作…' });
+        ops = await recoverChatOps(goal, message, reply, o, model, sig);
+      }
+      /* ⚠️ 措辞必须准确：这次病根是"没写 ops"，**不是**被截断 ——
+         写成"多半被截断"会把用户引导去"把要求写短"，而真正该做的是重试。 */
+      if (!ops.length && looksLikePromise(reply)) {
+        reply += '\n\n> ⚠️ **上面这些并没有真的交办** —— 这条回复只说了要做，却没带出可执行的操作'
+          + '（可能模型漏写了，也可能写太长被截断）。请把要求写短一点再说一次，或把整篇拆成两三节分次提。';
       }
       send({ reply });
       let applied = [], errors = [], vid = 0;
