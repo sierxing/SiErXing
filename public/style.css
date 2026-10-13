@@ -2972,3 +2972,39 @@ body.tutResizing *{cursor:col-resize !important;}
 /* 笔记栏的 #nnView 是 overflow:auto，描边画在盒子外面、贴着左右边缘那两笔会被裁掉。
    给它留出描边的余量（只动内边距，不动别的规则）：内容短到不滚动时照样能看见整圈框。 */
 #nnView{padding:1px 4px;}
+
+/* ===================== 就地编辑单块（教程正文 / 笔记栏共用）=====================
+   用户要求：点哪一块，就**只**把那一块变成 Markdown 编辑框，其余内容照常渲染。
+   上面一条小工具条（说明 + 保存/取消），下面是这一块的源码 markdown。
+   配色沿用卡片 + accent 系，和工具条「✎ 手动编辑」的整篇编辑器（.tutEditorWrap）
+   是同一套设计语言，不会显得突兀。 */
+.mdInlineEdit{
+  margin:10px 0;
+  border:1px solid var(--accent-border);
+  border-radius:var(--r-sm);
+  background:var(--card);
+  box-shadow:var(--shadow-sm);
+  overflow:hidden;
+}
+.mdInlineEdit .mieBar{
+  display:flex; align-items:center; gap:8px;
+  padding:6px 10px;
+  border-bottom:1px solid var(--border);
+  background:var(--accent-soft);
+  font-size:12px;
+}
+.mdInlineEdit .mieTag{font-weight:600; color:var(--accent);}
+.mdInlineEdit .mieHint{color:var(--muted); opacity:.85;}
+.mdInlineEdit .mieTa{
+  display:block; width:100%; box-sizing:border-box;
+  border:0; outline:none; resize:vertical;
+  padding:10px 12px; min-height:58px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:12.8px; line-height:1.7;
+  background:var(--card); color:var(--text);
+}
+.mdInlineEdit .mieTa:focus{background:var(--soft);}
+/* 笔记栏比较窄：工具条挤一挤，别让提示文字把按钮顶到看不见 */
+#nnView .mdInlineEdit{margin:6px 0;}
+#nnView .mdInlineEdit .mieBar{flex-wrap:wrap; row-gap:2px; padding:5px 8px;}
+#nnView .mdInlineEdit .mieHint{display:none;}

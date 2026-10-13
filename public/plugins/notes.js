@@ -8,11 +8,31 @@
  * 由 app.js 在教程页挂载/卸载（仅当组件启用时）。
  */
 (function () {
-  const { api, esc, toast, mdToHTML, mdPickOffset } = SiErXing;
+  const { api, esc, toast, mdToHTML, mdPickOffset, mdPickTarget, mdInlineEdit, editKeysBind } = SiErXing;
 
   let tid = 0, nodeId = 0, nodeTitle = '';
   let current = '';          // 已保存的内容
   let editing = false;
+  let nnUnbind = null;       // 整篇编辑框的 Ctrl+S/Esc 解绑函数
+
+  /* 笔记落库的**唯一**入口：整篇编辑与就地编辑单块都走它，别写两份 PUT */
+  function notePut(nid, content) {
+    return api('/api/nodes/' + nid + '/note', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: content }) });
+  }
+  function nowShort(t) { return String(t || '').slice(0, 16).replace('T', ' '); }
+  /* 保存一块笔记后就地重画渲染态：不重建面板、不丢滚动位置（点哪改哪的主路径用） */
+  function nnRerenderView() {
+    const view = document.getElementById('nnView');
+    if (!view) { showView(); return; }
+    const y = view.scrollTop;
+    view.innerHTML = mdToHTML(current, { srcLines: true });
+    view.scrollTop = y;
+  }
+  function nnTopButtons(state) {   // state: 'view' | 'inline' | 'full'
+    const eb = document.getElementById('nnEditBtn'); if (eb) eb.hidden = state !== 'view';
+    const sb = document.getElementById('nnSaveBtn'); if (sb) { sb.hidden = state !== 'full'; sb.disabled = false; sb.textContent = '💾 保存'; }
+    const cb = document.getElementById('nnCancelBtn'); if (cb) cb.hidden = state === 'view';
+  }
 
   function panelEl() { return document.getElementById('nodeNotes'); }
   function tabEl() { return document.getElementById('nnTab'); }
@@ -54,6 +74,8 @@
   /* ---- 视图态：直接看渲染效果 ---- */
   function showView() {
     editing = false;
+    if (nnUnbind) { try { nnUnbind(); } catch (e) {} nnUnbind = null; }
+    if (mdInlineEdit && mdInlineEdit.active()) mdInlineEdit.close(true);
     const body = document.getElementById('nnBody');
     if (!body) return;
     /* srcLines:true → 每个块带上 data-src（源码起始行号）。悬停描边（app.js 的
@@ -70,12 +92,7 @@
       if (ev.target && ev.target.closest && ev.target.closest('a')) return;
       showEdit(ev);
     });
-    const eb = document.getElementById('nnEditBtn');
-    if (eb) { eb.hidden = false; }
-    const sb = document.getElementById('nnSaveBtn');
-    if (sb) sb.hidden = true;
-    const cb = document.getElementById('nnCancelBtn');
-    if (cb) cb.hidden = true;
+    nnTopButtons('view');
   }
 
   /* ---- 编辑态：单个框里写 ---- */
@@ -85,6 +102,30 @@
     editing = true;
     const body = document.getElementById('nnBody');
     if (!body) return;
+    /* 主路径（用户要求）：**只把点到的那一块**就地变成 markdown 编辑框，其余照常渲染。
+       跟教程正文共用 app.js 的 mdInlineEdit —— 同一套实现、同一套 Ctrl+S/Esc。
+       没有 data-src/data-srce 的内容（老笔记、非 Markdown 样式）退回下面的整篇编辑。 */
+    try {
+      const view = document.getElementById('nnView');
+      const target = e && e.target ? e.target : null;
+      const pk = (view && target && typeof mdPickTarget === 'function') ? mdPickTarget(target, view) : null;
+      if (pk && mdInlineEdit && mdInlineEdit.open(pk, {
+        tag: '编辑这一块（Markdown 源码）',
+        getSrc: () => current,
+        onCancel: () => { editing = false; nnTopButtons('view'); },
+        save: async (next) => {
+          const r = await notePut(nodeId, next);
+          current = next;
+          editing = false;
+          setStatus('已保存 ' + (nowShort(r.updated_at) || ''));
+          setCount();
+          toast('笔记已保存（只改了这一块）');
+          nnRerenderView();
+          nnTopButtons('view');
+          return true;
+        }
+      })) { nnTopButtons('inline'); return; }
+    } catch (err) {}
     /* ⚠️ 下面要整体替换 DOM，选中区/滚动位置会没，所以先把"想改哪"记下来 */
     let anchor = '', word = '', ratio = 0, pick = -1;
     try {
@@ -123,16 +164,9 @@
       const lh = parseFloat(window.getComputedStyle(ta).lineHeight) || 20;
       ta.scrollTop = Math.max(0, (line - 1) * lh - ta.clientHeight * 0.3);
     } catch (err) {}
-    ta.addEventListener('keydown', e => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); doSave(); }
-      if (e.key === 'Escape') { doCancel(); }
-    });
-    const eb = document.getElementById('nnEditBtn');
-    if (eb) eb.hidden = true;
-    const sb = document.getElementById('nnSaveBtn');
-    if (sb) { sb.hidden = false; sb.disabled = false; sb.textContent = '💾 保存'; }
-    const cb = document.getElementById('nnCancelBtn');
-    if (cb) cb.hidden = false;
+    if (nnUnbind) { try { nnUnbind(); } catch (err2) {} nnUnbind = null; }
+    nnUnbind = editKeysBind(() => doSave(), () => doCancel());
+    nnTopButtons('full');
   }
 
   async function doSave() {
@@ -141,9 +175,9 @@
     const sb = document.getElementById('nnSaveBtn');
     if (sb) { sb.disabled = true; sb.textContent = '保存中…'; }
     try {
-      const r = await api('/api/nodes/' + nodeId + '/note', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: ta.value }) });
+      const r = await notePut(nodeId, ta.value);
       current = ta.value;
-      setStatus('已保存 ' + (r.updated_at || '').slice(0, 16).replace('T', ' '));
+      setStatus('已保存 ' + nowShort(r.updated_at));
       setCount();
       toast('笔记已保存');
       showView();
@@ -158,7 +192,20 @@
   }
 
   function flush() {
-    // 切走页面时：编辑中没保存的内容尽力送出去
+    // 切走页面时：编辑中没保存的内容尽力送出去（整篇编辑与就地编辑都要）
+    if (mdInlineEdit && mdInlineEdit.active()) {
+      try {
+        const val = mdInlineEdit.value();
+        if (val != null && val !== current) {
+          fetch('/api/nodes/' + nodeId + '/note', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: val }), keepalive: true
+          }).catch(() => {});
+        }
+      } catch (e) {}
+      try { mdInlineEdit.close(false); } catch (e) {}
+      return;
+    }
     if (!editing) return;
     try {
       const ta = document.getElementById('nnEditor');

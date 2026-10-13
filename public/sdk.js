@@ -97,7 +97,9 @@ window.SiErXing = (function () {
   /* mdPickOffset：把「鼠标点到的那块 → 它在 Markdown 源码里的字符偏移」交给组件用
      （笔记栏的"点哪改哪"就靠它）。和 app.js 里画悬停描边用的是同一套判断，
      组件不必自己再猜一遍文本位置。 */
-  const HOST_KEYS = ['app', 'api', 'esc', 'toast', 'go', 'state', 'mdToHTML', 'fmtDate', 'safeParse', 'parseRoute', 'rerender', 'loadGoal', 'ensureGoal', 'aiToggle', 'mdPickOffset'];
+  const HOST_KEYS = ['app', 'api', 'esc', 'toast', 'go', 'state', 'mdToHTML', 'fmtDate', 'safeParse', 'parseRoute', 'rerender', 'loadGoal', 'ensureGoal', 'aiToggle', 'mdPickOffset',
+    /* 「就地编辑单块」共用能力（教程正文 / 笔记栏）：范围切片 + 编辑框生命周期 + 快捷键 */
+    'mdPickTarget', 'mdSrcRange', 'mdInlineEdit', 'editKeysBind'];
   function bridge() {
     if (!host) return;
     for (const k of HOST_KEYS) {

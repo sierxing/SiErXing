@@ -1,6 +1,12 @@
 /* 思而行 · 前端逻辑（原生 JS，零依赖） */
 
 const app = document.getElementById('app');
+/* ⚠️ 就地编辑单块的状态必须声明在**文件最前面**：第 82 行有个"教程页尽早渲染"的
+   模块级调用（deep-link 到 #/t/<id> 时先画一遍），它会走到 renderTutorialPage →
+   mdInlineActive()。声明放在后面的定义块里就是 TDZ，报了
+   "Cannot access 'mdInlineSt' before initialization"（被那行的 try 吞掉，
+   表现为"教程页第一次渲染静默失败"）。跟 AI_MODES 是同一类坑。 */
+let mdInlineSt = null;                         // 同一时刻只允许一块在就地编辑（详见 mdInlineOpen）
 /* 服务商预设：选一个就自动填好官方 Base URL，用户不用手打地址。
    模型列表不在这里写死 —— 填完地址与密钥后向该服务的 /models 现取，
    取不到时服务端会退回各服务商的常用模型（见 server/ai.js 的 PROVIDERS）。
@@ -1758,6 +1764,11 @@ selBoxInit();   // 文档级监听：导图页 Ctrl+拖拽框选
 /* ===== 教程：手动编辑与保存 ===== */
 const TUTMANUAL_BOUND = true;
 let tutEditing = false;
+/* 当前教程页**渲染时用的那份源码**（markdown）。就地编辑单块要拿它切行，
+   所以 renderTutorialPage 渲染 md 教程时把它留下来 —— 用"渲染的这份"而不是重新拉取，
+   保证 data-src 的行号跟它一定对得上。 */
+let tutRenderedSrc = '';
+let tutManualUnbind = null;
 /* 进入手动编辑时算出源码偏移。优先级：
    ① 用户点中的那段文字（anchorOff，最准，"点哪儿改哪儿"）
    ② Markdown 且目录追踪到当前章节标题 → 找对应 # 行
@@ -1872,6 +1883,128 @@ function mdPickHoverBind() {
   document.addEventListener('mouseleave', clear, true);
 }
 mdPickHoverBind();
+/* ===================== 就地编辑单块（教程正文 / 笔记栏共用这一套） =====================
+   老做法：点一块 → 弹出**整篇** markdown 的 textarea，用户还得自己滚到那一行。
+   新做法（用户要求）：只把**被点到的那一块**就地换成编辑框，框里是这一块的源码
+   markdown，其余内容照常渲染 —— 改哪显示哪。
+   行范围从渲染时标的 data-src / data-srce 读（见 mdToHTML 的 srcAttr2），
+   所以围栏代码块、表格、列表、引用、标题都能原样取出这一段源码。
+   Ctrl+S / Esc 的处理统一走 editKeysBind()（**为什么见那里的注释**）。 */
+
+/* 统一的「编辑框快捷键」：Ctrl/Cmd+S = 保存，Esc = 取消。
+   ⚠️ 用户实测「按 Ctrl+S 不保存、点工具栏保存却可以」，根因就在这个键盘处理上：
+   ① 原来监听挂在 **textarea 自己**身上 —— 用户点了别处（焦点漂走）、或编辑器被重绘
+      替换掉之后，按键就再也到不了它，Ctrl+S 变成浏览器的「保存网页」，页面毫无反应。
+      现在挂到 document 的**捕获阶段**，并且只在编辑框还在时才动作 → 焦点在哪都拦得住。
+   ② key 判断太窄：CapsLock 开着时 Ctrl+S 给的是 key='S'，`e.key==='s'` 直接漏掉；
+      再补 code==='KeyS'（不受大小写 / 键盘布局影响），两条命中其一即保存。
+   ③ 必须 preventDefault 拦掉浏览器默认的「保存网页」。
+   合成事件（dispatchEvent）能过不代表真按键能过，所以验收一律用 CDP Input.dispatchKeyEvent。 */
+function editKeysBind(onSave, onCancel) {
+  const h = e => {
+    const k = String(e.key == null ? '' : e.key).toLowerCase();
+    if ((e.ctrlKey || e.metaKey) && (k === 's' || e.code === 'KeyS')) { e.preventDefault(); e.stopPropagation(); onSave(); return; }
+    if (k === 'escape') { e.preventDefault(); e.stopPropagation(); onCancel(); }
+  };
+  document.addEventListener('keydown', h, true);
+  return () => { try { document.removeEventListener('keydown', h, true); } catch (e2) {} };
+}
+/* 从渲染块读出源码行范围 [a,b)；读不到（没标的块，如 HTML 教程里渲染出来的东西）返回 null */
+function mdSrcRange(el) {
+  try {
+    if (!el || !el.getAttribute) return null;
+    const a = el.getAttribute('data-src'), b = el.getAttribute('data-srce');
+    if (a == null || !/^\d+$/.test(String(a))) return null;
+    const s = parseInt(a, 10);
+    let e = (b != null && /^\d+$/.test(String(b))) ? parseInt(b, 10) : -1;
+    if (!(e > s)) e = s + 1;
+    return [s, e];
+  } catch (err) { return null; }
+}
+function mdSliceLines(src, a, b) {
+  const lines = String(src == null ? '' : src).replace(/\r\n/g, '\n').split('\n');
+  a = Math.max(0, Math.min(lines.length, a | 0));
+  b = Math.max(a, Math.min(lines.length, b | 0));
+  return lines.slice(a, b).join('\n');
+}
+/* 用 text 替换 src 的第 [a,b) 行；末尾多余的换行吃掉一个，免得每保存一次就多空一行 */
+function mdSpliceLines(src, a, b, text) {
+  const lines = String(src == null ? '' : src).replace(/\r\n/g, '\n').split('\n');
+  a = Math.max(0, Math.min(lines.length, a | 0));
+  b = Math.max(a, Math.min(lines.length, b | 0));
+  const rep = String(text == null ? '' : text).replace(/\r\n/g, '\n').replace(/\n+$/, '').split('\n');
+  return lines.slice(0, a).concat(rep).concat(lines.slice(b)).join('\n');
+}
+
+function mdInlineActive() { return !!(mdInlineSt && mdInlineSt.editor && mdInlineSt.editor.isConnected); }
+function mdInlineValue() {                     // 当前编辑框里的"整篇新源码"（未保存时给 flush 用）
+  const st = mdInlineSt;
+  if (!st || !st.ta) return null;
+  const rg = mdSrcRange(st.pickEl);
+  if (!rg) return null;
+  let src = '';
+  try { src = String(st.opts.getSrc ? st.opts.getSrc() : '') || ''; } catch (e) {}
+  return mdSpliceLines(src, rg[0], rg[1], st.ta.value);
+}
+/* 就地打开一块：pickEl 是渲染时带 data-src/data-srce 的那块，opts：
+     getSrc(): string            当前整篇源码
+     save(newSrc): Promise<bool> 保存（PUT + 重渲染），返回 true = 成功
+     tag / onCancel              可选 */
+function mdInlineOpen(pickEl, opts) {
+  opts = opts || {};
+  if (!pickEl || !pickEl.parentNode) return false;
+  const rg = mdSrcRange(pickEl);
+  if (!rg) return false;
+  if (mdInlineSt) mdInlineClose(true);         // 换一块编辑：先把上一块原样放回去（丢弃未保存的改动）
+  let src = '';
+  try { src = String(opts.getSrc ? opts.getSrc() : '') || ''; } catch (e) { src = ''; }
+  const raw = mdSliceLines(src, rg[0], rg[1]);
+  const editor = document.createElement('div');
+  editor.className = 'mdInlineEdit';
+  editor.innerHTML = '<div class="mieBar"><span class="mieTag">' + esc(opts.tag || '编辑这一块（Markdown 源码）') + '</span>'
+    + '<span class="mieHint">改完 Ctrl+S 或点「💾 保存」· Esc 取消</span>'
+    + '<div class="spacer"></div>'
+    + '<button type="button" class="btn tiny primary" data-mie="save">💾 保存</button>'
+    + '<button type="button" class="btn tiny" data-mie="cancel">取消</button></div>'
+    + '<textarea class="mieTa" spellcheck="false" wrap="soft"></textarea>';
+  const ta = editor.querySelector('.mieTa');
+  ta.value = raw;
+  try { ta.rows = Math.max(3, Math.min(28, raw.split('\n').length + 1)); } catch (e) {}
+  pickEl.parentNode.replaceChild(editor, pickEl);
+  const unbind = editKeysBind(() => mdInlineSave(), () => mdInlineClose(true));
+  mdInlineSt = { editor, ta, pickEl, opts, rg, busy: false, unbind };
+  editor.querySelector('[data-mie="save"]').addEventListener('click', mdInlineSave);
+  editor.querySelector('[data-mie="cancel"]').addEventListener('click', () => mdInlineClose(true));
+  try { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } catch (e) {}
+  return true;
+}
+/* restore=true：取消（把原来的渲染块放回去）；false：只把编辑框拿掉（保存成功/被别的操作收掉） */
+function mdInlineClose(restore) {
+  const st = mdInlineSt;
+  if (!st) return;
+  mdInlineSt = null;
+  try { if (st.unbind) st.unbind(); } catch (e) {}
+  try {
+    if (restore && st.editor && st.editor.parentNode && st.pickEl) st.editor.parentNode.replaceChild(st.pickEl, st.editor);
+    else if (st.editor && st.editor.parentNode) st.editor.parentNode.removeChild(st.editor);
+  } catch (e) {}
+  if (restore) { try { if (st.opts && st.opts.onCancel) st.opts.onCancel(); } catch (e) {} }
+}
+async function mdInlineSave() {
+  const st = mdInlineSt;
+  if (!st || st.busy) return;
+  st.busy = true;
+  const btn = st.editor && st.editor.querySelector('[data-mie="save"]');
+  if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
+  const next = mdInlineValue();
+  let ok = false;
+  try { ok = next == null ? false : await (st.opts.save ? st.opts.save(next) : Promise.resolve(false)); }
+  catch (e) { toast(e && e.message ? e.message : '保存失败'); ok = false; }
+  if (mdInlineSt !== st) return;               // 保存期间被别的操作收掉了
+  if (ok) mdInlineClose(false);
+  else { st.busy = false; if (btn) { btn.disabled = false; btn.textContent = '💾 保存'; } }
+}
+
 /* 从点中的那段文字里挑几段"最可能在源码里逐字出现"的内容，去源码里找偏移。
    （只作为兜底：渲染没标 data-src 的场合，如 HTML 教程、教程版本预览）
    ⚠️ 渲染时有几处会往正文里塞东西：引用角标 [123456] → <sup class="cite">⧉</sup>，
@@ -1944,12 +2077,11 @@ async function tutManualEnter(anchorEl) {
   }
   const ta = document.getElementById('tutEditor');
   ta.value = src;
-  /* Ctrl+S / Cmd+S 保存（Esc 取消）—— 必须 preventDefault，否则浏览器弹"保存网页"。
-     走的是与工具条「💾 保存」完全相同的 tutManualSave()，不是第二份保存逻辑。 */
-  ta.addEventListener('keydown', e => {
-    if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); tutManualSave(); }
-    if (e.key === 'Escape') { tutManualCancel(); }
-  });
+  /* Ctrl+S / Cmd+S 保存（Esc 取消）—— 走与工具条「💾 保存」完全相同的 tutManualSave()。
+     ⚠️ 挂在 document 捕获阶段（不是 textarea 自己）：焦点漂走 / 编辑器被重绘后
+     Ctrl+S 才算得住；key 判断也放宽到大写 S 与 code=KeyS。见 editKeysBind 的注释。 */
+  if (tutManualUnbind) { try { tutManualUnbind(); } catch (e0) {} }
+  tutManualUnbind = editKeysBind(() => tutManualSave(), () => tutManualCancel());
   // 跳到"要改的那一段"，而不是从头开始找
   let editJumpSec = 0;
   try {
@@ -1978,6 +2110,24 @@ async function tutManualEnter(anchorEl) {
   toast(anchorOff >= 0 ? '已进入编辑并定位到你点的那一段（Ctrl+S 或「💾 保存」）'
     : '已进入编辑模式' + (editJumpSec ? '（已定位到第 ' + editJumpSec + ' 节附近）' : '（共 ' + src.length + ' 字）'));
 }
+/* 教程正文落库的**唯一**入口：工具条「💾 保存」、整篇编辑的 Ctrl+S、就地编辑单块，
+   三处都走它 —— 不写第二份 PUT 逻辑（服务端会先存一版历史，可回滚）。 */
+async function tutPutContent(tid, content) {
+  return await api('/api/tutorials/' + tid, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: content }) });
+}
+/* 保存成功后同步内存里的两份缓存：当前渲染用的源码 + state.goal 里的教程对象。
+   不做的话重新进入教程 / 版本对比会拿到旧正文。 */
+function tutRawCachePut(tid, content) {
+  try { if (parseRoute().view === 'tutorial') tutRenderedSrc = content; } catch (e) {}
+  try {
+    const t = ((state.goal && state.goal.tutorials) || []).find(x => Number(x.id) === Number(tid));
+    if (t) t.content = content;
+  } catch (e) {}
+}
+/* 保存后刷新 state.tutUpdatedAt：任务轮询靠它判断"服务端内容变了"，不更新会立刻触发一次无感刷新 */
+async function refreshTutUpdatedAt(tid) {
+  try { const d = await api('/api/tutorials/' + tid); if (d && d.tutorial) state.tutUpdatedAt = d.tutorial.updated_at || ''; } catch (e) {}
+}
 /* 保存 / 取消：工具条按钮与编辑器里的 Ctrl+S / Esc 共用这两个函数（只有一份逻辑） */
 async function tutManualSave() {
   const rr = parseRoute();
@@ -1988,14 +2138,17 @@ async function tutManualSave() {
   if (sb && sb.disabled) return;                 // 保存中，别重复提交（Ctrl+S 连按）
   if (sb) { sb.disabled = true; sb.textContent = '保存中…'; }
   try {
-    await api('/api/tutorials/' + rr.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: ta.value }) });
+    await tutPutContent(rr.id, ta.value);
+    tutRawCachePut(rr.id, ta.value);
     toast('✅ 已保存（可在「📜 版本对比」回滚）');
     tutEditing = false;
+    if (tutManualUnbind) { try { tutManualUnbind(); } catch (e0) {} tutManualUnbind = null; }
     try { const w = document.getElementById('tutEditorWrap'); if (w) w.remove(); } catch (e2) {}
     const sv3 = document.getElementById('tutSaveBtn'); if (sv3) sv3.hidden = true;
     const cb3 = document.getElementById('tutCancelBtn'); if (cb3) cb3.hidden = true;
     const mb3 = document.getElementById('tutManualBtn'); if (mb3) mb3.textContent = '✎ 手动编辑';
     if (state.goal) { try { await loadGoal(state.goal.id); } catch (e2) {} }
+    await refreshTutUpdatedAt(rr.id);
     renderTutorialPage(rr.id);
   } catch (err) { toast(err.message); }
   if (sb) { sb.disabled = false; sb.textContent = '💾 保存'; }
@@ -2003,6 +2156,7 @@ async function tutManualSave() {
 async function tutManualCancel() {
   const rr = parseRoute();
   tutEditing = false;
+  if (tutManualUnbind) { try { tutManualUnbind(); } catch (e0) {} tutManualUnbind = null; }
   try { const w = document.getElementById('tutEditorWrap'); if (w) w.remove(); } catch (e2) {}
   try {
     const ce = document.getElementById('tutFrame') || tutRoot();
@@ -2014,6 +2168,38 @@ async function tutManualCancel() {
   if (state.goal) { try { await loadGoal(state.goal.id); } catch (e2) {} }
   try { await renderTutorialPage(rr.id); } catch (e2) { location.reload(); }
   toast('已取消编辑');
+}
+/* ===== 教程正文：双击一块 → 只编辑这一块（就地）=====
+   用户原话：「只把方框里的那一坨东西用 MD 显示，让用户能修改，其他地方都是正常渲染」。
+   拿不到行范围（HTML 教程、没有 data-src 的块）就退回整篇编辑（tutManualEnter）。 */
+function tutInlineEnter(pickEl) {
+  const rr = parseRoute();
+  if (rr.view !== 'tutorial' || !pickEl) return false;
+  const beforeTop = (() => { try { return pickEl.getBoundingClientRect().top; } catch (e) { return 0; } })();
+  return mdInlineOpen(pickEl, {
+    tag: '编辑这一块（Markdown 源码）',
+    getSrc: () => tutRenderedSrc,
+    save: async (next) => {
+      await tutPutContent(rr.id, next);
+      tutRawCachePut(rr.id, next);
+      toast('✅ 已保存这一块（想整篇改可点「✎ 手动编辑」）');
+      await refreshTutUpdatedAt(rr.id);
+      tutRerenderBody(next, pickEl.getAttribute('data-src'), beforeTop);
+      return true;
+    }
+  });
+}
+/* 保存后只重画正文（不整页刷新），并把刚编辑的那一块拉回原来的视口位置 —— 阅读位置不跳。
+   为什么不"只重画这一块"：改一次可能从一段变成标题+列表好几块，还可能牵动列表/引用的
+   上下文，整块重排才跟服务端一致；保住滚动位置就足以做到"看不出页面动过"。 */
+function tutRerenderBody(next, startLine, beforeTop) {
+  const body = document.querySelector('#app .tutBody');
+  if (!body) return;
+  try { body.innerHTML = mdToHTML(next, { viz: true, srcLines: true }); } catch (e) { return; }
+  try {
+    const el = body.querySelector('[data-src="' + String(startLine) + '"]');
+    if (el) { const d = el.getBoundingClientRect().top - (beforeTop || 0); if (Math.abs(d) > 2) window.scrollBy(0, d); }
+  } catch (e) {}
 }
 /* 正文里**双击**一段 → 进编辑（单击太容易误触，用户反馈过）。链接/按钮/引用角标/划线段/图上都不抢；
    刚拖选过文字（要划线或复制）也不抢。 */
@@ -2037,7 +2223,12 @@ function tutBindClickEdit() {
     if (!root || !root.contains(t)) return;
     const rr = parseRoute();
     if (rr.view !== 'tutorial') return;
-    tutManualEnter(t);
+    /* 主路径：只把双击的这一块就地变成 markdown 编辑框（悬停描的就是它）。
+       已经就地编辑着就别再开，免得越点越多。 */
+    if (mdInlineActive()) return;
+    const pick = mdPickTarget(t, root);
+    if (pick && mdSrcRange(pick) && tutInlineEnter(pick)) return;
+    tutManualEnter(t);   // 兜底：整篇编辑
   });
 }
 tutBindClickEdit();
@@ -3815,10 +4006,18 @@ function mdToHTML(text, opts) {
   /* ⚠️ normalizeFences 会拆行（```python x=1 → 两行）/丢行/末尾补收尾，
      所以"归一化后的行号"并不等于源码行号，必须靠 lmap 映射回原始行。
      映射不到（补出来的收尾围栏）就退回自身行号，反正没人会点它。 */
-  const srcAttr = ln => {
+  const mapLine = ln => (lmap && lmap[ln] != null) ? lmap[ln] : ln;
+  /* 块的行范围 [a,b)（b 是"这一块吃掉的最后一行"的源码行号 + 1）—— 就地编辑单块
+     （mdInlineOpen）靠它把这一块的源码 markdown 原样切出来。只加属性、不动渲染结构：
+     把 data-src / data-srce 都剥掉后，输出跟不传 srcLines 时逐字节相同。
+     结束行取**最后一行 + 1**（不是下一块的行号）：这样中间被 normalizeFences 丢掉的
+     笔误行也一并落在范围内，替换时才不会残留半行。 */
+  const srcAttr2 = (a, b) => {
     if (!srcOn) return '';
-    const raw = (lmap && lmap[ln] != null) ? lmap[ln] : ln;
-    return ' data-src="' + (lineBase + raw) + '"';
+    const s = lineBase + mapLine(a);
+    let e = lineBase + mapLine(b > a ? b - 1 : a) + 1;
+    if (!(e > s)) e = s + 1;
+    return ' data-src="' + s + '" data-srce="' + e + '"';
   };
   let html = '', i = 0;
   const mdRow = c => {
@@ -3850,7 +4049,7 @@ function mdToHTML(text, opts) {
       // 没找到收尾围栏 → 这行其实不是围栏开头，当普通文本处理
       // （否则末尾会凭空多出一个空的 <pre>）
       // ⚠️ 这里只能 i = start + 1，不能退回 start：那会让同一行被反复重新判定，死循环。
-      if (!closed) { i = start + 1; html += '<p' + srcAttr(start) + '>' + mdInline(mdEscape(line)) + '</p>'; continue; }
+      if (!closed) { i = start + 1; html += '<p' + srcAttr2(start, start + 1) + '>' + mdInline(mdEscape(line)) + '</p>'; continue; }
       i++;
       /* 可视化块：```viz ... ``` 里的 HTML 会被塞进一个沙箱 iframe 真跑起来。
          为什么要 iframe：教程正文里直接插 HTML 会和外层样式互相污染、脚本还可能
@@ -3868,7 +4067,7 @@ function mdToHTML(text, opts) {
           /* 兜底渲染成代码块时，顺手认一下语言（JSON / python / bash…）并上高亮，
              比标一个没意义的 "viz" 强 —— 实测线上就有模型把一段 JSON 塞进 ```viz。 */
           const guess = hlGuessLang(vcode);
-          html += '<pre class="mdVizText"' + srcAttr(buf.length ? start + 1 : start)
+          html += '<pre class="mdVizText"' + srcAttr2(start, i)
             + (guess ? ' data-lang="' + mdEscape(guess) + '"' : '')
             + '><code>' + hlCode(vcode, guess) + '</code></pre>';
           continue;
@@ -3877,16 +4076,17 @@ function mdToHTML(text, opts) {
           + mdEscapeAttr(vizSrcdoc(vcode)) + '"></iframe></div>';
         continue;
       }
-      /* data-src 指向**代码第一行**（不是围栏那行）：双击代码块该进代码，
-         不是停在 ```lang 上（mdPickOffset 里还有一层同样目的的兜底）。 */
-      html += '<pre' + srcAttr(buf.length ? start + 1 : start)
+      /* data-src 指向**开围栏行**、data-srce 指向**收围栏之后**：这样就地编辑拿到的
+         源码含首尾围栏（```lang … ```），改完原样写回。双击代码块仍进代码里 ——
+         mdPickOffset 里有一条"落在围栏行上就往后挪一行"的兜底。 */
+      html += '<pre' + srcAttr2(start, i)
         + (fence[2] ? ' data-lang="' + mdEscape(fence[2]) + '"' : '') + '><code>'
         + hlCode(buf.join('\n'), fence[2] || hlGuessLang(buf.join('\n'))) + '</code></pre>';
       continue;
     }
     // 标题：中文里 `##标题` 不加空格很常见，这里容忍没有空格的情况
     const h = line.match(/^\s*(#{1,6})\s*(.*)$/);
-    if (h && h[2].trim()) { const n = h[1].length; html += '<h' + n + srcAttr(i) + '>' + mdInline(mdEscape(h[2])) + '</h' + n + '>'; i++; continue; }
+    if (h && h[2].trim()) { const n = h[1].length; html += '<h' + n + srcAttr2(i, i + 1) + '>' + mdInline(mdEscape(h[2])) + '</h' + n + '>'; i++; continue; }
     if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { html += '<hr>'; i++; continue; }
     if (/^\s*>\s?/.test(line)) {
       const bqStart = i;
@@ -3895,7 +4095,7 @@ function mdToHTML(text, opts) {
       /* 引用里的内容要递归渲染。`>` 是一行对一个原始行，所以子块的 data-src 必须整体加上
          「引用首行在源码里的行号」当基准（lineBase）—— 否则子块行号从 0 开始，全指错地方。 */
       const bqBase = lineBase + ((lmap && lmap[bqStart] != null) ? lmap[bqStart] : bqStart);
-      html += '<blockquote' + srcAttr(bqStart) + '>'
+      html += '<blockquote' + srcAttr2(bqStart, i) + '>'
         + mdToHTML(buf.join('\n'), srcOn ? { srcLines: true, lineBase: bqBase } : undefined)
         + '</blockquote>';
       continue;
@@ -3908,8 +4108,8 @@ function mdToHTML(text, opts) {
       while (i < lines.length && lines[i].includes('|') && lines[i].trim()) { rLines.push(i); rows.push(mdRow(lines[i])); i++; }
       /* 表头与每个 td 各标自己的起始行：双击某个单元格要落到那一行的源码，
          而不是整张表的第一行。 */
-      html += '<table' + srcAttr(hLine) + '><thead><tr>' + header.map(c => '<th' + srcAttr(hLine) + '>' + mdInline(mdEscape(c)) + '</th>').join('')
-        + '</tr></thead><tbody>' + rows.map((r, ri) => '<tr>' + r.map(c => '<td' + srcAttr(rLines[ri]) + '>' + mdInline(mdEscape(c)) + '</td>').join('') + '</tr>').join('')
+      html += '<table' + srcAttr2(hLine, i) + '><thead><tr>' + header.map(c => '<th' + srcAttr2(hLine, hLine + 1) + '>' + mdInline(mdEscape(c)) + '</th>').join('')
+        + '</tr></thead><tbody>' + rows.map((r, ri) => '<tr>' + r.map(c => '<td' + srcAttr2(rLines[ri], rLines[ri] + 1) + '>' + mdInline(mdEscape(c)) + '</td>').join('') + '</tr>').join('')
         + '</tbody></table>';
       continue;
     }
@@ -3933,8 +4133,10 @@ function mdToHTML(text, opts) {
           i++;
         } else break;
       }
-      html += '<' + (ordered ? 'ol' : 'ul') + srcAttr(iLines.length ? iLines[0] : i)
-        + '>' + items.map((x, k) => '<li' + srcAttr(iLines[k] != null ? iLines[k] : i) + '>' + x + '</li>').join('')
+      const ulStart = iLines.length ? iLines[0] : i;
+      const liEnd = k => (iLines[k + 1] != null ? iLines[k + 1] : i);
+      html += '<' + (ordered ? 'ol' : 'ul') + srcAttr2(ulStart, i)
+        + '>' + items.map((x, k) => '<li' + srcAttr2(iLines[k] != null ? iLines[k] : i, liEnd(k)) + '>' + x + '</li>').join('')
         + '</' + (ordered ? 'ol' : 'ul') + '>';
       continue;
     }
@@ -3950,7 +4152,7 @@ function mdToHTML(text, opts) {
        会走到这里 buf 为空且 i 没前进 → 外层 while 无限转、标签页卡死。
        所以"什么都没吃掉"时必须强制前进一行。 */
     if (!buf.length) i++;
-    if (buf.length) html += '<p' + srcAttr(pStart) + '>' + buf.map(x => mdInline(mdEscape(x))).join('<br>') + '</p>';
+    if (buf.length) html += '<p' + srcAttr2(pStart, i) + '>' + buf.map(x => mdInline(mdEscape(x))).join('<br>') + '</p>';
   }
   /* 教程模式下把「**标签** + 后续内容」打包成卡片（见 tutGroupCallouts）。
      只在教程里做：对话/汇总要的是紧凑，卡片会把短回复撑得很松散。 */
@@ -5054,6 +5256,9 @@ async function renderTutorialPage(tid) {
   await ensureCiteCache(t ? t.goal_id : 0);   // 正文里的 [id] 引用要能解释成节点/资料
   const isHtml = t.format === 'html';
   try { state.tutFmt = t.format; state.tutNodeId = node ? node.id : 0; } catch (e) {}
+  /* 记下**这份被渲染的源码**：就地编辑单块按 data-src/data-srce 切行要用它，
+     必须与生成 DOM 的是同一份（重新 GET 一份万一不一致，行号就错位了）。 */
+  tutRenderedSrc = isHtml ? '' : (t.content || '');
   const sizeK = Math.max(1, Math.round((t.content || '').length / 1000));
   app.innerHTML = `<div class="tutPage">
     <div class="tutSticky">
@@ -10828,6 +11033,8 @@ function pluginGoButtonsBind() {
   SiErXing.provide({
     app, api, esc, toast, go, state, mdToHTML, fmtDate, safeParse, parseRoute,
     rerender: rerenderCurrent, loadGoal, ensureGoal, aiToggle, mdPickOffset,
+    mdPickTarget, mdSrcRange, editKeysBind,
+    mdInlineEdit: { open: mdInlineOpen, close: mdInlineClose, active: mdInlineActive, value: mdInlineValue, range: mdSrcRange, slice: mdSliceLines, splice: mdSpliceLines },
     mount: () => { if (BOOTED) pluginGoButtonsBind(); },
     ready: false
   });
@@ -10837,6 +11044,8 @@ function pluginGoButtonsBind() {
   SiErXing.provide({
     app, api, esc, toast, go, state, mdToHTML, fmtDate, safeParse, parseRoute,
     rerender: rerenderCurrent, loadGoal, ensureGoal, aiToggle, mdPickOffset,
+    mdPickTarget, mdSrcRange, editKeysBind,
+    mdInlineEdit: { open: mdInlineOpen, close: mdInlineClose, active: mdInlineActive, value: mdInlineValue, range: mdSrcRange, slice: mdSliceLines, splice: mdSpliceLines },
     mount: () => { if (BOOTED) { route(); } },
     ready: true
   });
