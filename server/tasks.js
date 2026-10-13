@@ -20,7 +20,11 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3, metri
     note: t.note, status: t.status, message: t.message, progress: t.progress,
     createdAt: t.createdAt, startedAt: t.startedAt, endedAt: t.endedAt,
     error: t.error, result: t.result,
-    canRetry: typeof t._retry === 'function', retrying: !!t.retrying,
+    canRetry: typeof t._retry === 'function', retrying: !!t.retrying, cancelling: !!t.cancelling,
+    /* 距上一次"有进展"多久。前端据此把"进度恒 0%、计时器一直跳"的任务标出来
+       （真实翻过：任务 6 分 38 秒没动静，用户只能干等）。
+       用服务端算好的毫秒数而不是时间戳，免去前后端时钟不同步的麻烦。 */
+    idleMs: t._tick ? Math.max(0, Date.now() - t._tick) : 0,
     /* 阶段清单 + 模型此刻在想什么：前端据此画动效进度条。
        steps 是「这次的阶段划分」，由任务自己声明（有的任务只有一步，有的九步）；
        thinking 是模型正在输出的推理/正文尾部，只在 running 时有意义。 */
@@ -37,6 +41,72 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3, metri
   const running = () => [...tasks.values()].filter(t => t.status === 'running');
   const queued = () => [...tasks.values()].filter(t => t.status === 'queued');
 
+  /* ---- 终态收口 + 看门狗 ----
+     为什么要收口：任务的**每一条退出路径**都必须落到 done/failed/cancelled。
+     真实翻过：拆分任务的"按意见调整"那条分支里漏了 done()，AI 早就跑完、节点也写进库了，
+     任务卡片却一直显示"进行中 6 分 38 秒"（进度恒 0%），用户以为还在跑 ——
+     其实永远不会再有下一步。这里两件事：
+       ① finalize() 统一落终态，且**只生效一次**（看门狗先判定失败后，
+         原本挂住的 _run 哪天回来了也不许把 failed 覆盖成 done）；
+       ② 无进展超时：距上次 progress/消息更新超过 stallMs 还是 running → 判定失败，
+          给出人话原因，并 abort 掉底层调用。
+     默认 12 分钟：比代码里最长的单次 AI 超时（600s）还宽，宁可晚一点误判，
+     也不能把正在跑的长任务掐死。可用 SIERXING_TASK_STALL_MS 调（测试用得到）。 */
+  const stallMs = Math.max(5000, Number(process.env.SIERXING_TASK_STALL_MS) || 12 * 60 * 1000);
+  const touch = t => { t._tick = Date.now(); };
+  const humanMs = ms => (ms < 60000 ? Math.round(ms / 1000) + ' 秒' : Math.round(ms / 60000) + ' 分钟');
+
+  function finalize(t, status, opts) {
+    if (!t || t._final) return false;
+    const o = opts || {};
+    t._final = true;
+    t.status = status;
+    if (status === 'done') { t.progress = 100; t.message = t.message || '完成'; }
+    if (status === 'cancelled') t.message = '已停止';
+    if (status === 'failed') {
+      t.error = o.error ? String(o.error) : (t.error || '未知错误');
+      t.message = o.message || ('失败：' + t.error.slice(0, 120));
+    }
+    if (o.result !== undefined) t.result = o.result;
+    t.endedAt = Date.now();
+    t._abort = null;
+    t.cancelling = false;
+    if (M) {
+      try {
+        const st = { status: t.status, error: t.error || '', costMs: Math.max(0, t.endedAt - t.createdAt) };
+        if (t._runRow) M.updTask(t._runRow, st);
+        else {
+          t._runRow = M.insTask({ goalId: t.goalId, nodeId: t.nodeId, type: t.type, title: t.title, attempts: 1, ...st });
+        }
+      } catch (e) {}
+    }
+    pump();
+    return true;
+  }
+
+  /* 看门狗：只在有 running 任务时才转，进程退出不拦（unref） */
+  let watchdog = null;
+  function startWatchdog() {
+    if (watchdog) return;
+    const every = Math.max(1000, Math.min(30000, Math.floor(stallMs / 4)));
+    watchdog = setInterval(() => {
+      const now = Date.now();
+      for (const t of tasks.values()) {
+        if (t.status !== 'running' || t._final || !t._tick) continue;
+        if (now - t._tick < stallMs) continue;
+        const idle = humanMs(now - t._tick);
+        log('[task] 看门狗：#' + t.id, t.type, '已 ' + idle + '没有任何进展，判定失败');
+        try { if (t._abort) t._abort.abort(); } catch (e) {}
+        finalize(t, 'failed', {
+          error: '任务卡住了：已经 ' + idle + '没有任何进展（AI 调用没返回、或有分支忘了收尾），已自动停止',
+          message: '可能卡住了：' + idle + '没有进展，已自动停止'
+        });
+      }
+    }, every);
+    if (watchdog.unref) watchdog.unref();
+  }
+  startWatchdog();
+
   function pump() {
     while (running().length < maxConcurrent) {
       const next = queued()[0];
@@ -46,6 +116,7 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3, metri
       next.message = next.message || '开始处理…';
       const ac = new AbortController();
       next._abort = ac;
+      touch(next);
       log('[task] 开始 #' + next.id, next.type, next.title);
       (async () => {
         try {
@@ -53,6 +124,7 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3, metri
             signal: ac.signal,
             note: next.note,
             progress: (p, msg, extra) => {
+              touch(next);   // 有进展就刷新看门狗
               if (p != null) next.progress = Math.max(0, Math.min(100, Math.round(p)));
               if (msg) next.message = String(msg).slice(0, 200);
               /* extra 用来带"这次任务分哪几个阶段、现在卡在哪一步、模型在想什么"。
@@ -69,35 +141,19 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3, metri
               }
             }
           });
-          next.status = 'done';
-          next.progress = 100;
-          next.message = next.message || '完成';
-          next.result = r || null;
           log('[task] 完成 #' + next.id, next.type);
+          /* 只写状态，收尾动作（endedAt / 落库 / pump）统一走 finalize ——
+             任务卡住时就是靠它保证"任何退出路径都有终态"。 */
+          finalize(next, 'done', { result: r || null });
         } catch (e) {
           if (e && (e.cancelled || e.name === 'AbortError')) {
-            next.status = 'cancelled';
-            next.message = '已停止';
+            log('[task] 结束 #' + next.id, 'cancelled');
+            finalize(next, 'cancelled');
           } else {
-            next.status = 'failed';
-            next.error = e && e.message ? e.message : String(e);
-            next.message = '失败：' + next.error.slice(0, 120);
+            const msg = e && e.message ? e.message : String(e);
+            log('[task] 结束 #' + next.id, 'failed', msg);
+            finalize(next, 'failed', { error: msg });
           }
-          log('[task] 结束 #' + next.id, next.status, next.error || '');
-        } finally {
-          next.endedAt = Date.now();
-          next._abort = null;
-          if (M) {
-            try {
-              const st = {
-                status: next.status, error: next.error || '',
-                costMs: Math.max(0, next.endedAt - next.createdAt)
-              };
-              if (next._runRow) M.updTask(next._runRow, st);
-              else M.insTask({ goalId: next.goalId, nodeId: next.nodeId, type: next.type, title: next.title, attempts: 1, ...st });
-            } catch (e) {}
-          }
-          pump();
         }
       })();
     }
@@ -110,7 +166,8 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3, metri
       id, type, title: String(title || '').slice(0, 120), goalId: goalId || 0, nodeId: nodeId || 0,
       note: String(note || '').slice(0, 1000), status: 'queued', message: message || '排队中…',
       progress: 0, createdAt: Date.now(), startedAt: 0, endedAt: 0, error: '', result: null,
-      _run: run, _abort: null, _retry: typeof retry === 'function' ? retry : null
+      _run: run, _abort: null, _retry: typeof retry === 'function' ? retry : null,
+      _tick: Date.now(), _final: false
     });
     if (M) {
       try {
@@ -155,8 +212,28 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3, metri
   function cancel(id) {
     const t = tasks.get(Number(id));
     if (!t) return { ok: false, error: '任务不存在' };
-    if (t.status === 'queued') { t.status = 'cancelled'; t.message = '已取消'; t.endedAt = Date.now(); pump(); return { ok: true }; }
-    if (t.status === 'running' && t._abort) { try { t._abort.abort(); } catch (e) {} return { ok: true }; }
+    if (t.status === 'queued') { finalize(t, 'cancelled'); return { ok: true }; }
+    if (t.status === 'running' && t._abort) {
+      /* 立刻改文案并打标记：以前这里只 abort()，任务卡片还停在原步骤那句话
+         （"正在撰写第 5 节…"），看着像点了没反应。
+         ⚠️ abort() 只能掐掉**当前那一次** AI 请求，剩下的步骤得靠各流程自己在
+         步间检查 signal —— 这里同时给出 cancelling，让界面如实说"正在停止"。 */
+      t.cancelling = true;
+      t.message = '正在停止…';
+      try { t._abort.abort(); } catch (e) {}
+      /* 兜底：有些分支早已跑完、只是漏了 done()（进程不重启就永远 running）。
+         这时候 abort 谁也掐不到，卡片会一直"正在停止…"。给个宽限期，到点按取消落终态。 */
+      const tid = t.id;
+      const grace = setTimeout(() => {
+        const x = tasks.get(tid);
+        if (x && x.status === 'running' && x.cancelling && !x._final) {
+          log('[task] 取消宽限到点，#' + tid, '直接落终态（没有可中断的调用在跑）');
+          finalize(x, 'cancelled');
+        }
+      }, Math.min(30000, Math.max(5000, Math.floor(stallMs / 4))));
+      if (grace.unref) grace.unref();
+      return { ok: true };
+    }
     return { ok: false, error: '任务已结束' };
   }
 
@@ -184,11 +261,15 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3, metri
       id, type, title: String(title || '').slice(0, 120), goalId: goalId || 0, nodeId: nodeId || 0,
       note: String(note || '').slice(0, 1000), status: 'running', message: message || '处理中…',
       progress: 0, createdAt: Date.now(), startedAt: Date.now(), endedAt: 0, error: '', result: null,
-      _run: null, _abort: ac,
+      _run: null, _abort: ac, _final: false,
       _retry: typeof retry === 'function' ? retry : autoRetry()
     };
     tasks.set(id, t);
-    if (M) { try { if (t._runRow) M.updTask(t._runRow, { status: 'running' }); } catch (e) {} }
+    touch(t);
+    /* 开始就落一行 task_runs。以前 begin 这条路只在结束时 updTask，但 _runRow 从没被赋过值 ——
+       于是一条卡住的 begin 任务在 task_runs 里**一行都没有**（现场就是这样：表里只有 #75~77，
+       卡住的 #2 查无此行），事后根本看不出它发生过。 */
+    if (M) { try { t._runRow = M.insTask({ goalId: t.goalId, nodeId: t.nodeId, type: t.type, title: t.title, status: 'running', attempts: 1 }); } catch (e) {} }
     log('[task] 开始 #' + id, type, t.title);
     return {
       id,
@@ -197,6 +278,7 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3, metri
          ⚠️ 这一支（begin）才是教程生成走的路，pump 里那一支是 submit 走的 ——
          两处都要认 extra，只改一处会出现"规划流程的进度条永远停在 0%"。 */
       progress: (p, msg, extra) => {
+        touch(t);
         if (p != null) t.progress = Math.max(0, Math.min(100, Math.round(p)));
         if (msg) t.message = String(msg).slice(0, 200);
         if (extra && typeof extra === 'object') {
@@ -210,13 +292,14 @@ module.exports = function createTasks({ log = () => {}, maxConcurrent = 3, metri
           if (extra.eta != null) t.eta = String(extra.eta).slice(0, 40);
         }
       },
-      done: (result) => { t.status = 'done'; t.progress = 100; t.message = t.message || '完成'; t.result = result || null; t.endedAt = Date.now(); t._abort = null; if (M) { try { if (t._runRow) M.updTask(t._runRow, { status: 'done', costMs: t.endedAt - t.createdAt }); } catch (e) {} } log('[task] 完成 #' + id, type); },
+      done: (result) => { log('[task] 完成 #' + id, type); finalize(t, 'done', { result: result || null }); },
       fail: (e) => {
-        if (e && (e.cancelled || e.name === 'AbortError')) { t.status = 'cancelled'; t.message = '已停止'; }
-        else { t.status = 'failed'; t.error = (e && e.message) || String(e); t.message = '失败：' + t.error.slice(0, 120); }
-        t.endedAt = Date.now(); t._abort = null;
-        if (M) { try { if (t._runRow) M.updTask(t._runRow, { status: t.status, error: t.error || '', costMs: t.endedAt - t.createdAt }); } catch (e) {} }
-        log('[task] 结束 #' + id, t.status, t.error || '');
+        if (e && (e.cancelled || e.name === 'AbortError')) { log('[task] 结束 #' + id, 'cancelled'); finalize(t, 'cancelled'); }
+        else {
+          const msg = (e && e.message) || String(e);
+          log('[task] 结束 #' + id, 'failed', msg);
+          finalize(t, 'failed', { error: msg });
+        }
       }
     };
   }

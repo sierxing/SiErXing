@@ -486,8 +486,12 @@ function streamJDImage(req, res, goal, dataUrl, note, reuseSourceId) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   const tk = (typeof tasks !== 'undefined' && tasks) ? tasks.begin({ type: 'image', title: '识别图片：' + String(goal.title || '').slice(0, 20), goalId: goal.id, nodeId: 0, note: note || '' }) : null;
   const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} if (tk && obj && obj.status) tk.progress(undefined, obj.status); };
+  /* 取消判据同样是 task 的 signal：识别请求要带 signal，写库前要再查一次。 */
+  const sig = tk ? tk.signal : null;
+  const checkStop = () => { if (sig && sig.aborted) { const e = new Error('已停止'); e.cancelled = true; throw e; } };
   (async () => {
     let fname = '', buf = null, mime = '';
+    let failed = false;   // 失败/取消后不许再 tk.done()：那会把"已停止"显示成"✓ 完成"
     try {
       const m = String(dataUrl || '').match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
       if (!m) throw new Error('图片格式不支持（请粘贴 PNG/JPG/WebP 图片）');
@@ -502,7 +506,7 @@ function streamJDImage(req, res, goal, dataUrl, note, reuseSourceId) {
       fs.writeFileSync(fpath, buf);
       send({ status: '图片已收到，AI 正在识别并提炼信息…', file: fname });
       const model = currentVisionModel();
-      let txt = await aiTextFiles(buildImagePrompt(note), model, [fpath], 300000);
+      let txt = await aiTextFiles(buildImagePrompt(note), model, [fpath], 300000, sig);
       let data = extractJSON(txt);
       let notice = '';
       if (looksNoVision(txt)) throw noVisionError();
@@ -510,10 +514,11 @@ function streamJDImage(req, res, goal, dataUrl, note, reuseSourceId) {
         console.log('[jdfile] 结构化提炼失败，原始输出前 500 字:', String(txt || '').slice(0, 500).replace(/\n/g, ' '));
         send({ status: '第一次没解析成功，正在重新整理…' });
         try {
-          txt = await aiTextFiles(buildImagePrompt(note) + '\n\n【重要】上一次的输出不是合法 JSON。请严格只输出一个 JSON 对象：不要解释文字、不要前后缀、不要多个对象，字符串内不要出现未转义的换行。', model, [fpath], 300000);
+          txt = await aiTextFiles(buildImagePrompt(note) + '\n\n【重要】上一次的输出不是合法 JSON。请严格只输出一个 JSON 对象：不要解释文字、不要前后缀、不要多个对象，字符串内不要出现未转义的换行。', model, [fpath], 300000, sig);
           if (looksNoVision(txt)) throw noVisionError();
           data = extractJSON(txt);
         } catch (e) {
+          if (e && (e.cancelled || e.name === 'AbortError')) throw e;   // 取消要抛出去，别当成"重试失败"
       if (tk) tk.fail(e);
           console.log('[jdfile] 重试失败:', e.message);
           if (/不支持读图/.test(e.message)) throw e;
@@ -527,6 +532,7 @@ function streamJDImage(req, res, goal, dataUrl, note, reuseSourceId) {
         data = { type: '资料', title: firstLine.slice(0, 40), summary: '', raw_text: raw.slice(0, 4000) };
         notice = '结构化提炼没成功，已按图片原文导入资料库（可重试或换一张更清晰的截图）';
       }
+      checkStop();   /* 取消后不许再写资料源/jd_images */
       const t = nowISO();
       const type = String(data.type || '').trim() || '资料';
         const from = data.source || data.company || '';
@@ -556,13 +562,18 @@ function streamJDImage(req, res, goal, dataUrl, note, reuseSourceId) {
       backup();
       send({ done: true, notice, jd: { id: Number(jr.lastInsertRowid), file: fname, title, source_id: sourceId }, extracted: data, goal: getGoal(goal.id), sources: sourcesOf(goal.id) });
     } catch (e) {
+      failed = true;
+      if (tk) tk.fail(e);
+      if (e && (e.cancelled || e.name === 'AbortError')) { send({ cancelled: true, status: '已停止识别' }); return res.end(); }
       try {
         db.prepare('INSERT INTO jd_images (goal_id,file,mime,size,title,extracted,status,error,source_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
           .run(goal.id, fname || '', mime || '', buf ? buf.length : 0, '未识别：' + String(fname || '').slice(0, 40), '', 'failed', e.message, 0, nowISO());
       } catch (e2) {}
       send({ error: e.message });
     }
-    if (tk) tk.done({ ok: true });
+    /* 只在这里兜底标完成：失败/取消时绝不能调 done —— 那会把"已停止"显示成"✓ 完成"
+       （而且任务层的终态保护已经生效，这里再调也不会覆盖，留着只会误导）。 */
+    if (tk && !failed) tk.done({ ok: true });
     res.end();
   })();
 }

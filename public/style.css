@@ -2072,6 +2072,11 @@ body{padding-left:78px;}
 .taskMain{flex:1; min-width:0;}
 .taskTitle{font-size:12.5px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
 .taskMsg{font-size:11.5px; color:var(--muted); margin-top:2px; line-height:1.5;}
+/* 「可能卡住了」：任务几分钟没有任何进展时给一句人话 + 该怎么做（停止/重试） */
+.taskStall{font-size:11.5px; color:#c2410c; background:#fff7ed; border:1px solid #fed7aa; border-radius:6px; padding:3px 6px; margin-top:4px; line-height:1.5;}
+:root[data-theme="dark"] .taskStall{color:#fdba74; background:rgba(194,65,12,.14); border-color:rgba(253,186,116,.35);}
+.taskPill.stalled{border-color:#fdba74; background:#fff7ed; color:#c2410c;}
+:root[data-theme="dark"] .taskPill.stalled{background:rgba(194,65,12,.16); color:#fdba74;}
 .taskProg{height:6px; background:var(--soft); border-radius:3px; margin-top:5px; overflow:hidden; position:relative;}
 /* 已用时长 + 百分比：进度本身 2 秒才拉一次，秒数自己每秒跳，肉眼能确认没卡死 */
 .taskProgWrap{margin-top:6px;}

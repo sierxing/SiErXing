@@ -332,6 +332,62 @@ function withTimeout(ms, outer) {
   };
 }
 
+/* ---------------- 读响应体：必须自己盯着 signal 和"多久没数据" ----------------
+ * ⚠️ fetch 的 signal 只管到「响应头到达」为止：openaiRequest 一拿到 res 就 t.done()，
+ * 超时计时器和取消监听全被摘掉 —— 而大模型 99% 的时间花在**吐正文**上。
+ * 于是出现两种真实翻过的故障：
+ *   ① 取消不生效：用户点了停止，当前这次调用照样把整段输出读完才结束
+ *      （实测：取消后仍多打 8 次调用、多跑 10.6 秒）；
+ *   ② 挂住不返回：上游连上了却一直不吐字，没有任何超时会触发，任务永远 running。
+ * 所以 response body 一律走这里读：外 signal 一变红立刻中断，idleMs 没有字节就判超时。
+ * idleMs 可用 SIERXING_AI_IDLE_MS 覆盖（测试用得到）。 */
+const AI_IDLE_MS = Math.max(5000, Number(process.env.SIERXING_AI_IDLE_MS) || 120000);
+function cancelledErr() { const e = new Error('已停止'); e.cancelled = true; return e; }
+function bodyTimeoutErr(idleMs) {
+  return new Error('AI 响应超时：超过 ' + Math.round(idleMs / 1000) + ' 秒没有收到任何内容（服务商或网络卡住了），可在设置里调大超时时间或稍后重试');
+}
+async function pumpBody(res, opts) {
+  const o = opts || {};
+  const signal = o.signal || null;
+  const idleMs = Math.max(5000, Number(o.idleMs) || AI_IDLE_MS);
+  if (!res || !res.body) return '';   // 没有 body（204 之类）：当作空内容，交给调用方判错
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let idle = null, timedOut = false, aborted = false, out = '';
+  const kill = () => { try { reader.cancel(); } catch (e) {} };
+  const arm = () => { if (idle) clearTimeout(idle); idle = setTimeout(() => { timedOut = true; kill(); }, idleMs); };
+  const onAbort = () => { aborted = true; kill(); };
+  if (signal) {
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  }
+  arm();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      arm();
+      if (!value) continue;
+      const piece = dec.decode(value, { stream: true });
+      /* 给了 onChunk 就边收边处理（SSE 流）；没给就把整段攒起来返回（非流式 JSON）。 */
+      if (o.onChunk) o.onChunk(piece);
+      else out += piece;
+    }
+  } catch (e) {
+    if ((signal && signal.aborted) || aborted) throw cancelledErr();
+    if (timedOut) throw bodyTimeoutErr(idleMs);
+    throw e;
+  } finally {
+    if (idle) clearTimeout(idle);
+    if (signal) signal.removeEventListener('abort', onAbort);
+    kill();
+  }
+  /* reader.cancel() 会让挂着的 read() 以 done:true 收场，所以循环外再判一次 */
+  if ((signal && signal.aborted) || aborted) throw cancelledErr();
+  if (timedOut) throw bodyTimeoutErr(idleMs);
+  return out;
+}
+
 function httpErrorText(status, body) {
   let extra = '';
   try {
@@ -440,39 +496,38 @@ async function openaiText(c, opts) {
      以前流式这条路完全不处理截断（只有非流式的 openaiLongText 会续写），
      真实翻过：规划骨架写一半断掉 → 报"没有可用阶段"。 */
   const readStream = async r0 => {
-    const reader = r0.body.getReader();
-    const dec = new TextDecoder();
     let buf = '', text = '', lastThink = '', finish = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      for (const raw of lines) {
-        const line = raw.trim();
-        if (!line || !line.startsWith('data:')) continue;
-        const payload = line.slice(5).trim();
-        if (payload === '[DONE]') continue;
-        let j;
-        try { j = JSON.parse(payload); } catch (e) { continue; }
-        const ch = j.choices && j.choices[0];
-        if (ch && ch.finish_reason) finish = ch.finish_reason;
-        const delta = ch && (ch.delta || ch.message);
-        if (!delta) continue;
-        if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
-          lastThink += delta.reasoning_content;
-          onEvent({ thinking: lastThink.replace(/\s+/g, ' ').slice(-60) });
-        } else if (typeof delta.reasoning === 'string' && delta.reasoning) {
-          lastThink += delta.reasoning;
-          onEvent({ thinking: lastThink.replace(/\s+/g, ' ').slice(-60) });
-        }
-        if (typeof delta.content === 'string' && delta.content) {
-          text += delta.content;
-          onEvent({ text: delta.content });
+    await pumpBody(r0, {
+      signal,
+      onChunk: chunk => {
+        buf += chunk;
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const raw of lines) {
+          const line = raw.trim();
+          if (!line || !line.startsWith('data:')) continue;
+          const payload = line.slice(5).trim();
+          if (payload === '[DONE]') continue;
+          let j;
+          try { j = JSON.parse(payload); } catch (e) { continue; }
+          const ch = j.choices && j.choices[0];
+          if (ch && ch.finish_reason) finish = ch.finish_reason;
+          const delta = ch && (ch.delta || ch.message);
+          if (!delta) continue;
+          if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
+            lastThink += delta.reasoning_content;
+            onEvent({ thinking: lastThink.replace(/\s+/g, ' ').slice(-60) });
+          } else if (typeof delta.reasoning === 'string' && delta.reasoning) {
+            lastThink += delta.reasoning;
+            onEvent({ thinking: lastThink.replace(/\s+/g, ' ').slice(-60) });
+          }
+          if (typeof delta.content === 'string' && delta.content) {
+            text += delta.content;
+            onEvent({ text: delta.content });
+          }
         }
       }
-    }
+    });
     return { text, finish };
   };
   let text = '', rounds = 0, grown = 0;
@@ -510,7 +565,15 @@ async function openaiText(c, opts) {
 const CONTINUE_SUFFIX = '\n\n（上次输出到这里就中断了，请从中断处紧接着继续往下输出剩余部分：不要重复已输出的内容，不要加开头语或解释）';
 async function openaiOnce(c, messages, mdl, maxTokens, timeoutMs, signal) {
   const res = await openaiRequest(c, { model: mdl, messages, stream: false, max_tokens: maxTokens }, timeoutMs, signal);
-  const j = await res.json().catch(() => null);
+  /* 非流式这两条路（对话/规划/教程都可能走）也一样：body 必须能被取消、也必须有超时。
+     idleMs 用这次调用自己的超时额度 —— 非流式本来就是一整段一起到，没有"流式心跳"可依赖。 */
+  let j = null;
+  try {
+    j = JSON.parse(await pumpBody(res, { signal, idleMs: timeoutMs || c.timeoutMs || 300000 }));
+  } catch (e) {
+    if (e && (e.cancelled || e.name === 'AbortError' || /响应超时/.test(String(e.message)))) throw e;
+    j = null;
+  }
   const ch = j && j.choices && j.choices[0];
   const text = ch && ch.message && ch.message.content;
   if (typeof text !== 'string') {

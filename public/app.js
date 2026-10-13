@@ -1393,6 +1393,15 @@ const TASK_META = {
   restate: { icon: '🧠', label: '用自己的话' }
 };
 function taskActive(t) { return t && (t.status === 'running' || t.status === 'queued'); }
+/* 多久没进展就在卡片上标"可能卡住了"。90 秒：比正常一次 AI 调用（几十秒）宽，
+   又远短于真正卡住的那种"几分钟一动不动"，够用户早点动手，不用干等。 */
+const TASK_STALL_HINT_MS = 90000;
+function taskIdleText(ms) {
+  const s = Math.max(0, Math.round(Number(ms || 0) / 1000));
+  if (s < 60) return s + ' 秒';
+  if (s < 3600) return Math.round(s / 60) + ' 分钟';
+  return Math.round(s / 3600) + ' 小时';
+}
 function taskBarEnsure() {
   let el = document.getElementById('taskBar');
   if (!el) {
@@ -1451,8 +1460,10 @@ function taskBarRender() {
   if (!active.length && !recent.length) { el.hidden = true; el.innerHTML = ''; return; }
   el.hidden = false;
   const open = state.taskOpen;
-  el.innerHTML = `<button class="taskPill ${active.length ? 'busy' : ''}" id="taskPill">
-      ${active.length ? `<span class="spinner" style="width:12px;height:12px;border-width:2px;"></span> ${active.length} 个 AI 任务进行中` : `🤖 AI 任务（${recent.length}）`}
+  /* 卡住的任务必须在不展开列表时也能看见 —— 否则用户以为"还在跑"，其实早没动静了。 */
+  const stalled = active.filter(t => (t.idleMs || 0) > TASK_STALL_HINT_MS);
+  el.innerHTML = `<button class="taskPill ${active.length ? 'busy' : ''}${stalled.length ? ' stalled' : ''}" id="taskPill">
+      ${active.length ? `<span class="spinner" style="width:12px;height:12px;border-width:2px;"></span> ${stalled.length ? stalled.length + ' 个任务可能卡住了' : active.length + ' 个 AI 任务进行中'}` : `🤖 AI 任务（${recent.length}）`}
       <span class="taskCaret">${open ? '▾' : '▸'}</span>
     </button>
     ${open ? `<div class="taskList">
@@ -1465,9 +1476,12 @@ function taskBarRender() {
             <div class="taskMsg">${esc(t.message || '')}${t.nodeId ? ' · 节点 #' + t.nodeId : ''}${t.note ? ' · 备注：' + esc(String(t.note).slice(0, 40)) : ''}</div>
             ${t.status === 'failed' && t.error && t.error.length > 46 ? `<div class="taskErr" data-task-err="${t.id}" title="点开看完整原因">${esc(String(t.error).slice(0, 46))}… <span class="taskErrMore">看原因</span></div>` : ''}
             ${t.status === 'running' ? taskProgressHTML(t) : ''}
+            ${t.status === 'running' && (t.idleMs || 0) > TASK_STALL_HINT_MS
+              ? `<div class="taskStall">⚠️ 可能卡住了：${taskIdleText(t.idleMs)}没有任何进展${t.canRetry ? ' —— 点「停止」结束它，再点「🔄 重试」原样重跑' : ' —— 点「停止」结束它，然后重新发起这一条'}</div>`
+              : ''}
           </div>
           ${taskActive(t)
-            ? `<button class="btn tiny" data-task-cancel="${t.id}">停止</button>`
+            ? `<button class="btn tiny" data-task-cancel="${t.id}">${t.cancelling ? '停止中…' : '停止'}</button>`
             : `<span class="taskState">${t.status === 'done' ? '✓ 完成' : t.status === 'failed' ? '✗ 失败' : '已停止'}</span>`}
           ${!taskActive(t) && t.canRetry
             ? `<button class="btn tiny retry" data-task-retry="${t.id}" ${t.retrying ? 'disabled' : ''} title="${t.status === 'done' ? '再跑一次同样的任务' : '失败后一键重跑：入参照旧，不用重新打一遍那段话'}">${t.retrying ? '提交中…' : '🔄 重试'}</button>`

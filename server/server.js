@@ -995,9 +995,10 @@ async function collectForGoal(goal, onProgress, signal) {
   if (!queries.length && !plan.asked) {
     onProgress({ status: '正在按目标制定搜集方案…' });
     try {
-      queries = await recommendCollectPlan(fresh);
+      queries = await recommendCollectPlan(fresh, null, signal);
       saveCollectPlan(fresh.id, { asked: true, queries, updatedAt: nowISO() });
     } catch (e) {
+      if (e && (e.cancelled || e.name === 'AbortError')) throw e;
       console.log('[collect] 方案推荐失败，用默认模板:', e.message);
       queries = collectQueries(goal.title);
     }
@@ -1037,8 +1038,8 @@ function buildCollectPlanPrompt(goal) {
   L.push('[{"kind":"理论","q":"行为经济学 心理账户 前景理论 解读","days":365}]');
   return L.join('\n');
 }
-async function recommendCollectPlan(goal, timeoutMs) {
-  const txt = await aiText(buildCollectPlanPrompt(goal), currentModel(), timeoutMs || 120000, null, null, '资料收集');
+async function recommendCollectPlan(goal, timeoutMs, signal) {
+  const txt = await aiText(buildCollectPlanPrompt(goal), currentModel(), timeoutMs || 120000, null, signal || null, '资料收集');
   let arr = extractJSON(txt);
   if (!Array.isArray(arr)) {
     const m = String(txt || '').match(/\[[\s\S]*\]/);
@@ -1081,8 +1082,8 @@ function buildEbookRecommendPrompt(goal) {
   L.push('[{"title":"书名","author":"作者（不详留空）","pitch":"一句话推荐理由","public_domain":false,"where":"微信读书有售","en":""}]');
   return L.join('\n');
 }
-async function recommendEbooks(goal, timeoutMs) {
-  const txt = await aiText(buildEbookRecommendPrompt(goal), currentModel(), timeoutMs || 120000, null, null, '电子书推荐');
+async function recommendEbooks(goal, timeoutMs, signal) {
+  const txt = await aiText(buildEbookRecommendPrompt(goal), currentModel(), timeoutMs || 120000, null, signal || null, '电子书推荐');
   let arr = extractJSON(txt);
   if (!Array.isArray(arr)) {
     const m = String(txt || '').match(/\[[\s\S]*\]/);
@@ -1191,11 +1192,12 @@ async function fetchEbooksForGoal(goal, send, signal) {
     // 问卷里没写具体书：AI 现场按目标推荐
     send({ status: '正在按目标推荐入门书单…' });
     try {
-      const rec = await recommendEbooks(fresh);
+      const rec = await recommendEbooks(fresh, null, signal);
       books = rec;
       pref.books = (pref.books || []).concat(books);
       saveEbookPref(fresh.id, pref);
     } catch (e) {
+      if (e && (e.cancelled || e.name === 'AbortError')) throw e;
       console.log('[ebooks] 推荐书单失败:', e.message);
       return { skipped: true, note: '书单推荐失败' };
     }
@@ -4082,12 +4084,27 @@ function tutGenRetry(node, format, note, codeFiles, withFolders, folderFiles) {
     return 0;   // 新任务 id 由前端从任务列表里看（提交即刻可见）
   };
 }
+/* 「AI 拆分」的重试：以前它没有重试闭包，任务卡住/失败后卡片上**连个重试按钮都没有**，
+   用户只能把那段很长的意见再打一遍（最容易出错的地方）。这里照教程那条做法补上。 */
+function expandRetry(node, feedback) {
+  return async () => {
+    const nid = node && node.id ? Number(node.id) : 0;
+    if (!nid) return 0;
+    await localSelfPost('/api/nodes/' + nid + '/expand', { feedback: feedback || '' });
+    return 0;
+  };
+}
 /* ===== 分节式教程生成：外层规划 → 内层逐节 → Reflection 定向补写 =====
    任何一步出问题（规划解析不出、大面积截断、Reflection 一直不合格）都返回空串，
    由调用方退回单次生成 —— 最坏情况和改造前一样，不会更差。 */
-async function generateTutorialByPlan({ goal, node, note, codeBlock, model, send, aiText }) {
+async function generateTutorialByPlan({ goal, node, note, codeBlock, model, send, aiText, checkStop }) {
   const TP = tutPlan;
   const title = String(node.title || '').trim().slice(0, 120);
+  /* 步间取消检查。之前这里一个都没有：aiText 连 signal 都没往下传，于是点"停止"
+     只掐掉当前那一次请求，规划照样跑完、剩下几节照样写、自检照样查、
+     最后照样把整篇写进库（实测：取消后还打了 8 次 AI 调用、10.6 秒后才结束）。
+     每一"步"开始前查一次，取消就抛 cancelled 一路退出，绝不吞。 */
+  const stop = () => { if (typeof checkStop === 'function') checkStop(); };
 
   /* ---------- 进度上报 ----------
      进度条要"让人感觉在推进"，就得有真实百分比而不是一个转圈的图标。
@@ -4135,13 +4152,18 @@ async function generateTutorialByPlan({ goal, node, note, codeBlock, model, send
 
   /* ---------- 1) 外层：规划 ---------- */
   let plan = null;
+  stop();
   try {
     phase('plan', P.plan - 4, '正在规划教程大纲（先定要讲哪几节）…');
     plan = TP.parsePlan(await aiText(TP.buildPlanPrompt(goal, node, note, codeBlock), onStream));
   } catch (e) {
+    /* ⚠️ 取消不能在这里被吞掉：以前吞掉后 return '' 会让调用方**退回单次生成**，
+       等于用户点了停止，系统反而又起一次几分钟的全文生成，最后照样写库。 */
+    if (e && (e.cancelled || e.name === 'AbortError')) throw e;
     console.log('[tutorial] 规划失败，退回单次生成：', e.message);
     return '';
   }
+  stop();
   if (!plan) { console.log('[tutorial] 大纲解析不出，退回单次生成'); return ''; }
   console.log('[tutorial] 规划出 ' + plan.length + ' 节：' + plan.map(s => s.title + (s.viz ? '(viz)' : '')).join(' / '));
   emit(P.plan, '大纲已定：共 ' + plan.length + ' 节', plan.map(s => s.title).join(' / ').slice(0, 78));
@@ -4166,6 +4188,7 @@ async function generateTutorialByPlan({ goal, node, note, codeBlock, model, send
   };
 
   async function genSection(i) {
+    stop();
     const sec = plan[i];
     const secT0 = Date.now();
     /* 相邻节标题当衔接锚点。上一节若已写完，顺手把它结尾带上（并行下拿不到就算了，
@@ -4175,11 +4198,14 @@ async function generateTutorialByPlan({ goal, node, note, codeBlock, model, send
     const prevTail = (i > 0 && parts[i - 1]) ? parts[i - 1].slice(-500) : '';
     let body = '', why = '';
     for (let round = 1; round <= 2; round++) {
+      stop();
       let p = TP.buildSectionPrompt(sec, i + 1, plan.length, plan, prevTail, title, codeBlock, { prevSec, nextSec });
       if (round > 1 && why) p += TP.retryHint(why);
       try {
         body = cleanTutorialText(await aiText(p, onStream), 'md');
       } catch (e) {
+        /* 取消要抛出去，不能 here 当成"这一节没写完"再重写一遍 */
+        if (e && (e.cancelled || e.name === 'AbortError')) throw e;
         console.log('[tutorial] 第 ' + (i + 1) + ' 节生成抛错：', e.message);
         body = ''; why = e.message;
       }
@@ -4219,7 +4245,8 @@ async function generateTutorialByPlan({ goal, node, note, codeBlock, model, send
       await genSection(i);
     }
   })()));
-  const bad = badSet.size;
+  stop();
+  let bad = badSet.size;   // let：Reflection 阶段会把 bad 归零（HEAD 里是 const，走到那儿必崩）
   if (!parts.filter(Boolean).join('\n\n').length) return '';
   console.log('[tutorial] 逐节生成结束，总耗时 ' + Math.round((Date.now() - t0) / 1000) + 's / ' + plan.length + ' 节');
 
@@ -4228,12 +4255,14 @@ async function generateTutorialByPlan({ goal, node, note, codeBlock, model, send
   /* ---------- 3) Reflection：对着大纲核对，定向补写 ---------- */
   curKey = 'review';
   for (let pass = 1; pass <= 2; pass++) {
+    stop();
     const gaps = plan.filter(s => !TP.sectionPresent(txt, s.title));
     let review = null;
     emit(P.write + (pass - 1) * 5, '正在自检教程完整性（Reflection 第 ' + pass + ' 轮）…', '第 ' + pass + ' 轮自检');
     try {
       review = TP.parseReview(await aiText(TP.buildReviewPrompt(title, plan, txt), onStream));
     } catch (e) {
+      if (e && (e.cancelled || e.name === 'AbortError')) throw e;
       console.log('[tutorial] 自检抛错：', e.message);
     }
     const miss = []
@@ -4255,9 +4284,13 @@ async function generateTutorialByPlan({ goal, node, note, codeBlock, model, send
     const want = (miss.length ? miss : vizBad).slice(0, 4);
     let add = '';
     try {
+      stop();
       emit(P.write + 4, '正在补写缺失的章节：' + want.slice(0, 3).join('、') + '…', '补写 ' + want.length + ' 节');
       add = cleanTutorialText(await aiText(TP.buildFillPrompt(plan, want, title, txt), onStream), 'md');
-    } catch (e) { console.log('[tutorial] 补写抛错：', e.message); }
+    } catch (e) {
+      if (e && (e.cancelled || e.name === 'AbortError')) throw e;
+      console.log('[tutorial] 补写抛错：', e.message);
+    }
     if (!add || add.length < 150) { console.log('[tutorial] 补写没产出可用内容，停止'); break; }
     txt = txt + '\n\n' + add;
     bad = 0;
@@ -4265,6 +4298,7 @@ async function generateTutorialByPlan({ goal, node, note, codeBlock, model, send
   emit(P.review, '自检完成，共 ' + plan.length + ' 节', plan.length + ' 节全部到位');
 
   /* 最后一道机械闸：分节拼接理论上不会出现奇数围栏，真出现就别交付半成品。 */
+  stop();
   const fin = tutIntegrity(txt, 'md');
   if (!fin.ok) {
     console.log('[tutorial] 分节生成结果仍有问题：' + fin.issues.join('；') + ' —— 退回单次生成');
@@ -4296,6 +4330,12 @@ function streamTutorial(req, res, node, format, note, codeFiles, withFolders, fo
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   const model = currentModel();
   const tk = tasks.begin({ type: 'tutorial', title: '生成教程：' + (node ? node.title : ''), goalId: node ? node.goal_id : 0, nodeId: node ? node.id : 0, note: note || '', retry: tutGenRetry(node, format, note, codeFiles, withFolders, folderFiles) });
+  /* 取消的**唯一判据**是 tk.signal（用户点停止 → tasks.cancel → abort）。
+     ⚠️ 以前这里每一步 AI 调用都把 signal 写成 null，等于教程生成**完全无法取消**：
+     abort 掐不掉任何请求，规划/逐节/自检/补写一路跑完，最后还照样 INSERT 进库。
+     现在：signal 一路传下去（aiText / 源码挑选 / 续写补齐），每步之间 checkStop()。 */
+  const signal = tk.signal;
+  const checkStop = () => { if (signal.aborted) { const e = new Error('已停止'); e.cancelled = true; throw e; } };
   /* SSE 响应是"一次性输出"：重试发回来的这份没人读，所以显式说明一下，
      免得后来看日志的人以为前端断流了。 */
     /* obj 里的 pct / steps / thinking 一并转给任务中心 —— 前端据此画动效进度条。
@@ -4310,6 +4350,7 @@ function streamTutorial(req, res, node, format, note, codeFiles, withFolders, fo
     };
   (async () => {
     try {
+      checkStop();
       const goal = db.prepare('SELECT * FROM goals WHERE id = ?').get(node.goal_id);
       if (!goal) throw new Error('目标不存在');
       // 结合源码：只读项目根下白名单文件（code-read 强制过滤），失败不阻断
@@ -4351,14 +4392,17 @@ function streamTutorial(req, res, node, format, note, codeFiles, withFolders, fo
           const auto = await nodeFolders.prepareNodeCode({
             aiText, model: (currentModel && currentModel()) || '',
             db, nodeId: Number(node.id), title: node.title, detail: node.detail,
-            budget: room, skipRoots: pickedRoots, send
+            budget: room, skipRoots: pickedRoots, send, signal
           });
           if (auto.list.length) {
             codeBlock += (codeBlock ? '\n\n' : '') + auto.block;
             for (const f of auto.list) codeList.push({ root: f.root, path: f.path });
             send({ status: `已载入文件夹资料 ${auto.list.length} 个文件作为讲解依据…` });
           }
-        } catch (e) { console.log('[tutorial] 文件夹资料载入失败:', e.message); }
+        } catch (e) {
+          if (e && (e.cancelled || e.name === 'AbortError')) throw e;
+          console.log('[tutorial] 文件夹资料载入失败:', e.message);
+        }
       }
       /* ===== 生成：外层规划 → 内层逐节 → Reflection 体检 ===== */
       global.__tutScene = 'tutorial_gen';
@@ -4366,18 +4410,19 @@ function streamTutorial(req, res, node, format, note, codeFiles, withFolders, fo
       if (format === 'md') {
         const byPlan = await generateTutorialByPlan({
           goal, node, note, codeBlock, model,
-          send,
-          aiText: (p, onEvent) => aiText(p, model, 600000, onEvent || null, null, '教程生成')
+          send, checkStop,
+          aiText: (p, onEvent) => aiText(p, model, 600000, onEvent || null, signal, '教程生成')
         });
         /* 分节生成成功时返回 {text, steps}；失败/不适合时返回空串，退回单次生成。 */
         if (byPlan && byPlan.text) { txt = byPlan.text; planSteps = byPlan.steps; }
       }
       /* md 走分节生成；html 仍是单次（它是一整个页面，分节拼不出一个合法文档）。
          分节生成失败时自动退回单次生成老路。 */
+      checkStop();   /* 取消后绝不"退回单次生成"再起一次全文重写 */
       if (!txt) {
         send({ status: `正在撰写「${String(node.title).slice(0, 18)}」的${format === 'html' ? ' HTML ' : ' Markdown '}教程（讲原理、分步实践、练习与自测，约需 1-3 分钟）…`, pct: 10 });
         const prompt = buildTutorialPrompt(goal, node, format, note, codeBlock);
-        txt = cleanTutorialText(await aiText(prompt, model, 600000, null, null, '教程生成'), format);
+        txt = cleanTutorialText(await aiText(prompt, model, 600000, null, signal, '教程生成'), format);
       }
       if (!txt || txt.length < 200) throw new Error('教程生成失败：AI 只写了 ' + (txt ? txt.length : 0) + ' 字就停了。原教程没动，可以点任务上的「🔄 重试」，或换个输出更长的模型再试');
       /* 体检：结构不完整多半是被输出上限截断（长度够、结构缺）。
@@ -4387,7 +4432,7 @@ function streamTutorial(req, res, node, format, note, codeFiles, withFolders, fo
         send({ status: '检测到教程被截断（' + chk.issues[0] + '），正在让 AI 补全…' });
         const fixed = await repairTruncatedText({
           raw: txt, format, title: node.title, issues: chk.issues,
-          runText: (p) => aiText(p, model, 600000)
+          runText: (p) => aiText(p, model, 600000, null, signal, '教程生成')
         });
         txt = fixed.text; chk = tutIntegrity(txt, format);
         if (!chk.ok) {
@@ -4397,6 +4442,10 @@ function streamTutorial(req, res, node, format, note, codeFiles, withFolders, fo
             + '。教程未保存，点任务上的「🔄 重试」可原样重跑');
         }
       }
+      /* ⚠️ 落库前最后一道闸：用户点了停止就一个字节都不许写。
+         改之前最刺眼的一种：取消后整篇照样生成完，教程被 INSERT 进库 ——
+         用户以为"停止了"，刷新一看多了一篇新教程。 */
+      checkStop();
       const t = nowISO();
       const title = tutorialDefaultTitle(node, t);
       /* 保存阶段也要报进度：写完全文到落库之间还有备份等动作，
@@ -4896,8 +4945,20 @@ function redactText(raw) {
     let feedback = '', answers = null;
     try { const b = await readBody(req); feedback = String(b.feedback || '').trim(); if (b && typeof b.answers === 'object') answers = b.answers; } catch (e) {}
     res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache' });
-    const tk = tasks.begin({ type: 'expand', title: 'AI 拆分：' + (n ? n.title : ''), goalId: n ? n.goal_id : 0, nodeId: id, note: feedback });
-      const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} if (obj && obj.status) tk.progress(undefined, obj.status); };
+    const tk = tasks.begin({ type: 'expand', title: 'AI 拆分：' + (n ? n.title : ''), goalId: n ? n.goal_id : 0, nodeId: id, note: feedback, retry: expandRetry(n, feedback) });
+    /* 同教程那条约定：signal 传进每一次 AI 调用，写入前再查一次取消。
+       漏传 signal 的后果和教程一样 —— 点了停止，剩下的调用照打、节点照写。 */
+    const sig = tk.signal;
+    const checkStop = () => { if (sig.aborted) { const e = new Error('已停止'); e.cancelled = true; throw e; } };
+    const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} if (obj && obj.status) tk.progress(undefined, obj.status); };
+    /* ⚠️ 每条退出路径都必须落终态。这里原来有三条路直接 return 而**没调用 tk.done()**：
+       「按意见调整」的调整成功分支 + 两个"需要先问几个问题"分支。
+       现场就是这样卡住的：AI 跑完（39.9s）、节点也写进库了，
+       任务卡片却永远显示"进行中 6 分 38 秒"、进度恒 0%（用户看到的是前端计时器）。
+       现在统一走 ok/bad：谁先到谁说了算，后面的 done/fail 一律不再覆盖。 */
+    let settled = false;
+    const ok = (r) => { if (!settled) { settled = true; tk.done(r || { ok: true }); } };
+    const bad = (e) => { if (!settled) { settled = true; tk.fail(e); } };
     (async () => {
       try {
         const goal = db.prepare('SELECT * FROM goals WHERE id = ?').get(n.goal_id);
@@ -4919,27 +4980,32 @@ function redactText(raw) {
             send({ status: '正在读挂载文件夹的源码，拆分会沿代码真实结构走…' });
             const g = await nodeFolders.prepareNodeCode({
               aiText, model, db, nodeId: Number(id),
-              title: n.title, detail: n.detail, budget: 15000
+              title: n.title, detail: n.detail, budget: 15000, signal: sig
             });
             if (g.block) {
               expandCode = g.block;
               send({ status: `已读入挂载文件夹的 ${g.list.length} 个源码文件，拆分会沿代码真实结构走…` });
             }
           }
-        } catch (e) { console.log('[expand] 文件夹代码载入失败:', e.message); }
+        } catch (e) {
+          if (e && (e.cancelled || e.name === 'AbortError')) throw e;
+          console.log('[expand] 文件夹代码载入失败:', e.message);
+        }
         if (feedback) {
           // 带用户意见调整现有子任务
           send({ status: '正在根据你的意见调整划分…' });
           const kids = db.prepare('SELECT title, detail, status FROM nodes WHERE parent_id = ? ORDER BY sort_order, id').all(n.id);
-          const txt = await aiText(await buildRefineNodePrompt(goal, n, kids, feedback, expandCode), model, 300000, null, null, '节点细化');
+          const txt = await aiText(await buildRefineNodePrompt(goal, n, kids, feedback, expandCode), model, 300000, null, sig, '节点细化');
           const data = extractJSON(txt);
           if (data && Array.isArray(data.questions) && data.questions.length) {
             saveNodeQuestions(n.id, data, feedback);
             send({ questions: { questions: data.questions }, stage: 'expand', nodeId: n.id, nodeTitle: n.title, feedback, goal: getGoal(goal.id) });
+            ok({ awaitingQuestions: true });   // 要等用户回答：这也是一个终态，不能留着 running
             res.end();
             return;
           }
           if (!data || !Array.isArray(data.tasks) || !data.tasks.length) throw new Error('调整结果解析失败，请重试');
+          checkStop();   /* 取消后一个节点都不许写 */
           const vid = beginVersion(goal.id, reason);
           const statusByTitle = {};
           for (const k of kids) statusByTitle[k.title] = k.status;
@@ -4956,30 +5022,35 @@ function redactText(raw) {
           const report = await finishVersion(goal, vid, reason);
           backup();
           send({ done: true, added, refined: true, goal: getGoal(goal.id), report, versionId: vid });
+          ok({ added, refined: true });   // ← 现场就是漏了这一句：调整成功却永远"进行中"
         } else {
           // 无意见：先搜集资料，再生成细分（回答追问后的续跑不再重复搜集）
           if (!answers && goalCompOn(goal.id, 'sources')) {
             const before = db.prepare('SELECT COUNT(*) AS n FROM sources WHERE goal_id = ?').get(goal.id).n;
             try {
-              await fetchEbooksForGoal(goal, s => send(s), null);
+              await fetchEbooksForGoal(goal, s => send(s), sig);
             } catch (e) {
+              if (e && (e.cancelled || e.name === 'AbortError')) throw e;
               send({ status: '电子书阶段跳过：' + e.message });
             }
-            await collectSources(goal, nodeQueries(n.title), s => send(s));
+            await collectSources(goal, nodeQueries(n.title), s => send(s), sig);
             const after = db.prepare('SELECT COUNT(*) AS n FROM sources WHERE goal_id = ?').get(goal.id).n;
             send({ status: `信息源新增 ${after - before} 条（共 ${after} 条），开始制定拆分计划…`, sources: sourcesOf(goal.id) });
           }
           send({ status: '开始制定拆分计划…' });
+          checkStop();
           var vid = beginVersion(goal.id, reason);
-          const txt = await aiText(await buildExpandPrompt(goal, n, null, expandCode), model, 300000, null, null, '骨架展开');
+          const txt = await aiText(await buildExpandPrompt(goal, n, null, expandCode), model, 300000, null, sig, '骨架展开');
           const data = extractJSON(txt);
           if (data && Array.isArray(data.questions) && data.questions.length) {
             saveNodeQuestions(n.id, data, feedback);
             send({ questions: { questions: data.questions }, stage: 'expand', nodeId: n.id, nodeTitle: n.title, feedback, goal: getGoal(goal.id) });
+            ok({ awaitingQuestions: true });
             res.end();
             return;
           }
           if (!data || !Array.isArray(data.tasks) || !data.tasks.length) throw new Error('拆分结果解析失败，请重试');
+          checkStop();   /* 取消后一个节点都不许写 */
           const childLevel = Math.min(n.level + 1, 5);
           let order = db.prepare('SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM nodes WHERE parent_id = ?').get(n.id).n;
           let added = 0;
@@ -4990,13 +5061,13 @@ function redactText(raw) {
           db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), goal.id);
           const report2 = await finishVersion(goal, vid, reason);
           backup();
-          tk.done({ ok: true });
+          ok({ added });
           send({ done: true, added, goal: getGoal(goal.id), sources: sourcesOf(goal.id), report: report2, versionId: vid });
         }
       } catch (e) {
         /* 失败分支到此为止：绝不能再调 tk.done()，否则 failed 会被覆盖成"✓ 完成"，
            任务失败在任务中心显示成成功，用户完全看不出出了什么事。 */
-        tk.fail(e);
+        bad(e);
         send({ error: e.message });
       }
       res.end();
@@ -5225,6 +5296,9 @@ const tutEditMatch = p.match(/^\/api\/tutorials\/(\d+)\/edit$/);
           progress(pct == null ? null : pct, msg || null, { steps: est, thinking: think != null ? think : thinkTail });
         };
         stepAt(0, 5, '正在按你的意见修改教程…');
+        /* 同教程生成那条约定：AI 调用都带 signal，写入前再查一次 ——
+           点了停止就该一步都不落，不能"改了库里却没告诉用户"。 */
+        const stopCheck = () => { if (signal && signal.aborted) { const e = new Error('已停止'); e.cancelled = true; throw e; } };
         let editCodeBlock = '';
         try {
           const stored = JSON.parse((tut && tut.code_files) || '[]');
@@ -5386,9 +5460,11 @@ function structureLoss(before, after, feedback) {
             + '确实想整篇重写，请在意见里加上"允许重写结构"');
         }
         // 先存旧版（教程版本表），再覆盖正文 —— 改坏了能从历史版本恢复
+        stopCheck();
         stepAt(4, 90, '正在保存新版本…');
         try { saveTutorialVersion(tid, 'AI 修改：' + String(feedback || '').slice(0, 100)); } catch (e) {}
         // 保留历史版本（写入 goal_versions 便于回滚），再覆盖教程内容
+        stopCheck();
         try {
           const vid = beginVersion(tut.goal_id, '教程修改：' + String(tut.title || '').slice(0, 20));
           db.prepare('UPDATE tutorials SET content = ?, updated_at = ? WHERE id = ?').run(out, nowISO(), tid);

@@ -218,6 +218,9 @@ async function prepareNodeCode(o) {
   const { aiText, model, db, nodeId, title, detail } = o || {};
   if (typeof aiText !== 'function' || !db || !nodeId) return empty;
   const send = typeof o.send === 'function' ? o.send : () => {};
+  /* signal 可传可不传：教程/拆分取消时，让"AI 挑文件"这一步也能立刻停下，
+     而不是白打一次调用再等下一个检查点。 */
+  const signal = o.signal || null;
   const budget = Math.max(5000, Math.min(60000, Number(o.budget) || 30000));
   const skipRoots = o.skipRoots instanceof Set ? o.skipRoots : new Set();
   const realOf = p => { try { return fs.realpathSync(p); } catch (e) { return path.resolve(p); } };
@@ -232,13 +235,14 @@ async function prepareNodeCode(o) {
     send({ status: 'AI 正在看文件清单，挑这次要读的源码…' });
     const sel = buildSelectionList(entries, 1200);
     const picked = await selectFilesWithAI(aiText, model,
-      { title, detail, listText: sel.text, allow: sel.allow, timeoutMs: 120000 });
+      { title, detail, listText: sel.text, allow: sel.allow, timeoutMs: 120000, signal });
     const g = readSelectedFiles(picked.picked, budget);
     if (g.list.length) {
       send({ status: `AI 挑了 ${g.list.length} 个文件：${picked.picked.slice(0, 3).map(x => String(x.path).split('/').pop()).join('、')}${g.list.length > 3 ? '…' : ''}` });
       return g;
     }
   } catch (err) {
+    if (err && (err.cancelled || err.name === 'AbortError')) throw err;
     console.log('[node-folders] AI 选文件失败，回落启发式:', err.message);
   }
   try {
@@ -328,7 +332,7 @@ async function selectFilesWithAI(aiText, model, opts) {
     '=== 文件清单 ===',
     listText
   ].filter(x => x !== '').join('\n');
-  const raw = await aiText(prompt, model, o.timeoutMs || 120000);
+  const raw = await aiText(prompt, model, o.timeoutMs || 120000, null, o.signal || null);
   const j = pickJSONObject(raw);
   if (!j || !Array.isArray(j.files)) throw new Error('AI 没给出文件清单');
   const out = [];
