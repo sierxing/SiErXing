@@ -5267,9 +5267,8 @@ async function renderTutorialPage(tid) {
       <button class="btn small" data-tbtn id="tutEditBtn" title="在右侧对话栏里说你想怎么改，AI 会按意见修改（保留原有内容，只改需要改的地方）">💬 让 AI 修改</button>
       <button class="btn small" data-tbtn id="tutVersBtn" title="每次 AI 修改/手动保存都会留一版，改坏了从这里恢复（恢复前会自动存当前版，所以恢复也可撤销）">🕘 历史版本</button>
       <button class="btn small" data-tbtn id="tutTocBtn" title="显示 / 隐藏左侧目录">📑 目录</button>
-      ${(goalCompOn(goal, 'notes') && window.NodeNotes) ? `<button class="btn small" data-tbtn id="tutNoteBtn" title="展开 / 收起右侧笔记栏">🗒 笔记</button>` : ''}
+      ${((goalCompOn(goal, 'notes') || goalCompOn(goal, 'tutnotes')) && window.NodeNotes) ? `<button class="btn small" data-tbtn id="tutNoteBtn" title="展开 / 收起右侧笔记栏（🗒 Markdown 笔记 / 📌 划线笔记 两个页签）">🗒 笔记</button>` : ''}
       ${(goalCompOn(goal, 'tutbookmark') && window.TutBookmark) ? `<button class="btn small" data-tbtn id="tutBmBtn" title="随时标记阅读位置（不用翻到底部）">🔖 标签</button>` : ''}
-      ${(goalCompOn(goal, 'tutnotes') && window.TutNotes) ? `<button class="btn small" data-tbtn id="tutNoteMarkBtn" title="在正文里选中文字就能划线、写批注">📌 划线笔记</button>` : ''}
       ${goalCompOn(goal, 'restate') ? `<button class="btn small" data-tbtn id="tutRestateBtn" title="循序渐进把知识点变成你自己的话：先搞懂前因后果，AI 一次只追问最关键的一个缺口、给方向不给答案">🧠 用自己的话</button>` : ''}
       ${goalCompOn(goal, 'quiz') ? `<button class="btn small" data-tbtn id="tutQuizBtn" title="按这篇教程逐点考察掌握情况（一次一题，答错可追问）">📝 测验</button>` : ''}
       ${(goalCompOn(goal, 'workspace') && window.Workspace) ? `<button class="btn small primary" data-tbtn id="tutCodeBtn" title="为当前节点建好代码目录并用 VSCode 打开，边看教程边写代码（子目录嵌在父目录下，无需手动管理）">💻 写代码</button>` : ''}
@@ -5314,7 +5313,7 @@ async function renderTutorialPage(tid) {
   }
   setTimeout(() => { try { tutTocBuild(tid); } catch (e) {} }, 200);   // 侧边目录大纲
   const tutNoteBtn = document.getElementById('tutNoteBtn');
-  if (tutNoteBtn && window.NodeNotes && goalCompOn(goal, 'notes')) {
+  if (tutNoteBtn && window.NodeNotes && (goalCompOn(goal, 'notes') || goalCompOn(goal, 'tutnotes'))) {
     const nid = node ? node.id : 0;
     tutNoteBtn.addEventListener('click', () => window.NodeNotes.toggle(tid, nid, node ? node.title : ''));
     if (nid) window.NodeNotes.mount(tid, nid, node.title);
@@ -5332,10 +5331,10 @@ async function renderTutorialPage(tid) {
     const tbb = document.getElementById('tutBmBtn');
     if (tbb) tbb.addEventListener('click', () => window.TutBookmark.toggle(tid));
   }
-  /* 划线笔记：正文可能是主文档（Markdown），也可能是 iframe（HTML）—— 插件自己等正文就绪 */
+  /* 划线笔记：正文可能是主文档（Markdown），也可能是 iframe（HTML）—— 插件自己等正文就绪。
+     入口已并进右侧「🗒 笔记」栏的「📌 划线笔记」页签（TutNotes.renderInto），工具条上不再单设按钮：
+     两个按钮一个功能只会互相矛盾，这里只负责装载状态机 + 把监听挂到正文上。 */
   if (window.TutNotes && goalCompOn(goal, 'tutnotes')) {
-    const tnb = document.getElementById('tutNoteMarkBtn');
-    if (tnb) tnb.addEventListener('click', () => window.TutNotes.toggle());
     try { window.TutNotes.mount(tid); } catch (e) { console.warn('[tutnotes] mount 失败', e); }
   }
   if (goalCompOn(goal, 'restate')) {

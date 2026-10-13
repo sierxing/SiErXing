@@ -1,15 +1,23 @@
 /**
  * 思而行 · 前端插件：教程划线笔记（像 WPS 那样划重点）
  * ------------------------------------------------------------------
- * · 在教程正文里选中一段文字 → 浮出小条 → 点颜色即高亮（也可下划线）
+ * · 在教程正文里选中一段文字 → **右键** → 高亮 / 下划线 / 写批注 / 复制
  * · 划完立刻弹一张小卡，可以写批注（不写也行，只划重点）
  * · 点正文里的高亮 → 重新打开那张卡改批注 / 换颜色 / 删掉
- * · 右侧清单列出这篇教程的全部笔记，点一条跳到正文对应位置
+ * · 清单不自己开浮窗了：并入右侧「🗒 笔记」栏的「📌 划线笔记」页签
+ *   （notes.js 调用 window.TutNotes.renderInto(el) 把清单渲染进它的容器，
+ *     状态机仍然只在这里一份；同时正文里的划线 / 右键能力不受影响）
  *
  * 定位：记「相对正文纯文本的字符区间」+ 原文 + 前后各 24 字上下文。
  *   教程没变 → 区间直接命中；教程被 AI 改过 → 用原文+上下文找回位置并写回（自愈）。
  * ⚠️ 正文可能在 iframe 里（HTML 教程），所以一律走宿主提供的
  *   tutDoc() / tutWin() / tutRoot()，不要直接用 document / window。
+ * ⚠️ 教程正文会被**就地重画**（tutRerenderBody 直接换 .tutBody.innerHTML：改一块、
+ *   AI 改一版都会）。那一刻：① 上方的 <mark> 全被抹掉 ② 我们缓存的 index/nodeMap
+ *   指向的是**已经从文档里摘掉的旧文本节点** —— 于是后面读选区时 absOf 一律返回 -1，
+ *   表现就是「改了教程内容后划线失效（选中不出现任何东西）」。所以这里有两道自愈：
+ *   读选区前 ensureIndex()（索引脏了就重建，不碰 DOM、不影响选区），
+ *   以及 MutationObserver → 正文被重画后自动 apply() 把高亮画回来。
  */
 'use strict';
 (function () {
@@ -27,10 +35,13 @@
   let index = [];              // [{node, start, end}] 正文纯文本的字符区间 → 文本节点
   let nodeMap = new Map();
   let ft = '';                 // 正文纯文本（缓存，apply/detect 都用它）
-  let panelEl = null, barEl = null, cardEl = null;
+  let panelEl = null, barEl = null, cardEl = null, ctxEl = null;
+  let embedded = false;        // 清单是渲染进别人的容器（notes.js 的页签）还是自带浮窗
+  let onChange = null;         // 渲染进容器后的回调（页签上的条数徽标用它刷新）
   let pending = null;          // 当前选中的内容
   let bound = false;
-  let flashTimer = null;
+  let flashTimer = null, hintTimer = null;
+  let mo = null, syncTimer = null;
 
   /* ================= 正文定位 ================= */
   const X = () => (window.tutDoc ? tutDoc() : document);
@@ -65,6 +76,13 @@
     }
     ft = index.map(x => x.node.nodeValue).join('');
     return pos;
+  }
+  /* 索引是否已经过期：正文被重画后，index 里的文本节点都不在文档里了。
+     过期就重建 —— buildIndex **不动 DOM**，所以当前选区不会被打乱。 */
+  function ensureIndex(root) {
+    try { if (index.length && root && root.contains(index[0].node)) return false; } catch (e) {}
+    buildIndex(root);
+    return true;
   }
   /* 去掉上次画的高亮，把正文还原成纯文本（索引才稳定） */
   function unwrap(root) {
@@ -197,19 +215,84 @@
     buildIndex(root);
   }
 
-  /* ================= 选区浮条 ================= */
-  function hideBar() { if (barEl) { barEl.remove(); barEl = null; } }
-  function showBar(rect) {
-    hideBar();
+  /* ================= 正文被重画后的自愈 ================= */
+  /* 正文被 tutRerenderBody / 整页重画换掉后，<mark> 会全部消失（innerHTML 直接换了）。
+     没有这一步，用户改完教程内容就再也划不上 —— 这正是用户报的那个 bug。 */
+  function needReapply(root) {
+    try {
+      if (!root || !tid) return false;
+      if (!notes.some(n => n.text)) return false;
+      return !root.querySelector('mark.tnm');
+    } catch (e) { return false; }
+  }
+  function scheduleSync() {
+    if (syncTimer) return;
+    syncTimer = setTimeout(() => {
+      syncTimer = null;
+      const root = R();
+      if (!needReapply(root)) return;
+      apply(root);
+      renderPanel();
+    }, 60);
+  }
+  function watch(root) {
+    if (mo) { try { mo.disconnect(); } catch (e) {} mo = null; }
+    if (!root || !root.nodeType) return;
+    try {
+      mo = new MutationObserver(() => scheduleSync());
+      mo.observe(root, { childList: true, subtree: true });
+    } catch (e) { mo = null; }
+  }
+
+  /* ================= 读选区 ================= */
+  /* 排查用：记录上一次"为什么没读到选区 / 没出现菜单"（划不动时先看这里） */
+  let lastWhy = '（还没读过选区）';
+  const why = w => { lastWhy = w; hideHint(); };
+  /* 读当前选区 → {root, range, abs, text}；读不到返回 null（lastWhy 说明原因）。
+     ⚠️ 不碰 DOM（除了可能的索引重建），选区原样保留。 */
+  function grabSelection() {
+    const root = R();
+    if (!root) { why('拿不到正文根（tutRoot 为空）'); return null; }
+    let sel = null;
+    try { sel = W().getSelection ? W().getSelection() : null; } catch (e) { sel = null; }
+    if (!sel || !sel.rangeCount || sel.isCollapsed) { why('没有选中内容'); return null; }
+    const range = sel.getRangeAt(0);
+    try {
+      if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return why('选区不在正文里'), null;
+    } catch (e) { return why('读选区出错：' + e.message), null; }
+    /* 正文被重画过 → 缓存的索引指向已摘掉的旧文本节点，先重建（不碰 DOM，选区不受影响） */
+    ensureIndex(root);
+    const abs = rangeAbs(range);
+    if (!abs) return why('算不出偏移（选中的不是正文文本）'), null;
+    const text = ft.slice(abs.start, abs.end);
+    if (!String(text || '').trim()) return why('选中的是空白'), null;
+    lastWhy = '已读出选区';
+    return { root, range, abs, text: String(text) };
+  }
+  function setPending(g) {
+    pending = {
+      start: g.abs.start, end: g.abs.end,
+      text: String(g.text).slice(0, 2000),
+      prefix: ft.slice(Math.max(0, g.abs.start - 24), g.abs.start),
+      suffix: ft.slice(g.abs.end, g.abs.end + 24)
+    };
+    return pending;
+  }
+
+  /* ================= 选中后的提示小签 + 右键菜单 ================= */
+  /* 提示小签：只提示"右键可以划线"，**pointer-events:none** ——
+     它盖在文字上也点不到（用户报的痛点是误触，不是小条本身），2.5 秒后自己缩回去。 */
+  function hideHint() { if (barEl) { barEl.remove(); barEl = null; } if (hintTimer) { clearTimeout(hintTimer); hintTimer = null; } }
+  function showHint(rect) {
+    hideHint();
+    if (!rect || (!rect.width && !rect.height)) return;
     barEl = document.createElement('div');
-    barEl.className = 'tnBar';
-    barEl.innerHTML = COLORS.map(c => '<button class="tnSw tnSw-' + c.k + '" data-tncolor="' + c.k + '" title="' + esc(c.name) + '"></button>').join('')
-      + '<span class="tnSep"></span>'
-      + '<button class="tnBtn" data-tnstyle="underline" title="只画下划线，不铺底色">下划线</button>';
+    barEl.className = 'tnHint';
+    barEl.setAttribute('aria-hidden', 'true');
+    barEl.innerHTML = '<span class="tnHintDot"></span>右键 → 高亮 / 下划线 / 写批注';
     document.body.appendChild(barEl);
     place(barEl, rect);
-    barEl.querySelectorAll('[data-tncolor]').forEach(b => b.addEventListener('mousedown', ev => { ev.preventDefault(); ev.stopPropagation(); create(b.getAttribute('data-tncolor'), 'highlight'); }));
-    barEl.querySelectorAll('[data-tnstyle]').forEach(b => b.addEventListener('mousedown', ev => { ev.preventDefault(); ev.stopPropagation(); create('yellow', b.getAttribute('data-tnstyle')); }));
+    hintTimer = setTimeout(hideHint, 2500);
   }
   /* 浮层定位：正文在 iframe 里时要加上 iframe 的偏移 */
   function place(el, rect) {
@@ -224,42 +307,90 @@
     el.style.top = Math.max(8, Math.min(cy - h - 8, window.innerHeight - h - 8)) + 'px';
     el.style.visibility = '';
   }
-  /* 排查用：记录上一次"为什么没浮出小条"（划不动时先看这里） */
-  let lastWhy = '（还没读过选区）';
-  const why = w => { lastWhy = w; hideBar(); };
-  function onUp() { setTimeout(readSel, 10); }
-  function readSel() {
-    const root = R();
-    if (!root) return why('拿不到正文根（tutRoot 为空）');
-    let sel = null;
-    try { sel = W().getSelection ? W().getSelection() : null; } catch (e) { sel = null; }
-    if (!sel || !sel.rangeCount || sel.isCollapsed) return why('没有选中内容');
-    if (!index.length) return why('正文索引是空的（mount 可能还没跑完）');
-    const range = sel.getRangeAt(0);
-    try {
-      if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return why('选区不在正文里');
-    } catch (e) { return why('读选区出错：' + e.message); }
-    const abs = rangeAbs(range);
-    if (!abs) return why('算不出偏移（选中的不是正文文本）');
-    const text = ft.slice(abs.start, abs.end);
-    if (!String(text || '').trim()) return why('选中的是空白');
-    pending = {
-      start: abs.start, end: abs.end,
-      text: String(text).slice(0, 2000),
-      prefix: ft.slice(Math.max(0, abs.start - 24), abs.start),
-      suffix: ft.slice(abs.end, abs.end + 24)
-    };
-    let rect = null;
-    try { rect = range.getBoundingClientRect(); } catch (e) { rect = null; }
-    if (!rect || (!rect.width && !rect.height)) return why('选区没有可见位置（rect 为空）');
-    lastWhy = '已浮出';
-    showBar(rect);
+  function hideCtx() { if (ctxEl) { ctxEl.remove(); ctxEl = null; } }
+  const noteDisplay = n => {
+    const t = String((n && n.text) || '').replace(/\s+/g, ' ').trim();
+    return t.length > 80 ? t.slice(0, 80) + '…' : t;
+  };
+  /* 右键菜单：**复用应用既有的 .ctxMenu**（app.js 里 route()/点别处/Esc/滚动 都会把它收掉，
+     这里只管建和定位，别再造一套关闭逻辑）。x/y 用鼠标坐标 —— 隐藏元素的 rect 全是 0，
+     用它定位菜单会跑到页面左上角。*/
+  function showCtx(x, y) {
+    hideCtx();
+    if (!pending) return;
+    const swatches = attr => COLORS.map(c =>
+      '<button class="tnSw tnSw-' + c.k + '" ' + attr + '="' + c.k + '" title="' + esc(c.name) + '"></button>').join('');
+    const el = document.createElement('div');
+    el.className = 'ctxMenu tnCtxMenu';
+    el.innerHTML =
+      '<div class="ctxTitle" title="' + esc(pending.text) + '">划线笔记｜' + esc(noteDisplay(pending)) + '</div>'
+      + '<div class="tnCtxRow"><span class="tnCtxLb">高亮</span>' + swatches('data-tnctx-hl') + '</div>'
+      + '<div class="tnCtxRow"><span class="tnCtxLb">下划线</span>' + swatches('data-tnctx-ul') + '</div>'
+      + '<div class="ctxSep"></div>'
+      + '<button data-tnctx="note">✎ 写批注</button>'
+      + '<button data-tnctx="copy">⧉ 复制</button>'
+      + '<button data-tnctx="cancel">✕ 取消</button>';
+    /* 先清掉别的右键菜单（同一时刻只留一个），再按 app.js openMoreMenu 的同一套夹取算法定位 */
+    document.querySelectorAll('.ctxMenu').forEach(m => m.remove());
+    document.body.appendChild(el);
+    el.style.left = '0px'; el.style.top = '0px'; el.style.visibility = 'hidden';
+    const w = el.offsetWidth || 240, h = el.offsetHeight || 170;
+    el.style.left = Math.max(8, Math.min(x, window.innerWidth - w - 8)) + 'px';
+    el.style.top = Math.max(8, Math.min(y, window.innerHeight - h - 8)) + 'px';
+    el.style.visibility = '';
+    ctxEl = el;
+    /* ⚠️ 菜单里的按钮用 mousedown 处理：click 之前浏览器可能先把选区清掉（右键后的左键点击），
+       在 mousedown 就把活干完最稳。 */
+    const act = (fn) => ev => { ev.preventDefault(); ev.stopPropagation(); hideCtx(); fn(); };
+    el.querySelectorAll('[data-tnctx-hl]').forEach(b => b.addEventListener('mousedown', act(() => create(b.getAttribute('data-tnctx-hl'), 'highlight', { keepSel: true }))));
+    el.querySelectorAll('[data-tnctx-ul]').forEach(b => b.addEventListener('mousedown', act(() => create(b.getAttribute('data-tnctx-ul'), 'underline', { keepSel: true }))));
+    const q = s => el.querySelector('[data-tnctx="' + s + '"]');
+    q('note').addEventListener('mousedown', act(() => create('yellow', 'highlight', { keepSel: true, card: true })));
+    q('copy').addEventListener('mousedown', act(copySel));
+    q('cancel').addEventListener('mousedown', act(() => {}));
   }
-  async function create(color, style) {
+  async function copySel() {
+    const t = pending ? pending.text : '';
+    if (!t) return;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(t);
+      else {
+        const ta = document.createElement('textarea');
+        ta.value = t;
+        ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+      }
+      toast('已复制选中的文字');
+    } catch (e) { toast('复制失败：' + ((e && e.message) || '浏览器拒绝了剪贴板')); }
+  }
+  /* 划完把选区**还回**高亮那一段：用户要求"选区不用清，能看到刚才选的是哪"。
+     正文被拆过文本节点，原来的 range 多半已经失效，所以直接用高亮元素重选一次。 */
+  function reselect(id) {
+    try {
+      const m = R().querySelector('mark.tnm[data-tnid="' + id + '"]');
+      if (!m) return;
+      const doc = X();
+      const sel = W().getSelection();
+      if (!sel) return;
+      const r = doc.createRange();
+      r.selectNodeContents(m);
+      sel.removeAllRanges();
+      sel.addRange(r);
+    } catch (e) {}
+  }
+  /* ================= 建一条划线 ================= */
+  /* opts.keepSel：从右键菜单进来的不清选区（用户还要看得见自己选的是哪）
+     opts.card   ：是否立刻弹批注卡（右键菜单里的「高亮 / 下划线」不弹 —— 卡一弹就抢焦点，
+                   选区看着就没了；要写批注有单独的「✎ 写批注」，过后点一下高亮也能改）。 */
+  async function create(color, style, opts) {
+    opts = opts || {};
     if (!pending) return;
     const p = pending;
-    hideBar();
-    try { W().getSelection && W().getSelection().removeAllRanges(); } catch (e) {}
+    hideCtx(); hideHint();
+    if (!opts.keepSel) { try { W().getSelection && W().getSelection().removeAllRanges(); } catch (e) {} }
     try {
       const r = await api('/api/tutnotes', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -269,9 +400,10 @@
       notes.sort((a, b) => (Number(a.start) || 0) - (Number(b.start) || 0) || (a.id - b.id));
       apply(R());
       renderPanel();
-      /* 划完立刻给张卡写批注（不写也行） */
+      if (opts.keepSel) reselect(r.note.id);
       const m = R().querySelector('mark.tnm[data-tnid="' + r.note.id + '"]');
-      if (m) openCard(m, r.note);
+      if (opts.card && m) openCard(m, r.note);
+      else toast(style === 'underline' ? '已加下划线（点一下可写批注）' : '已高亮（点一下可写批注）');
     } catch (e) { toast(e.message); }
   }
 
@@ -332,10 +464,6 @@
     cardEl.querySelector('[data-tncdel]').addEventListener('click', () => del(note));
     cardEl.querySelector('[data-tncclose]').addEventListener('click', closeCard);
   }
-  const noteDisplay = n => {
-    const t = String((n && n.text) || '').replace(/\s+/g, ' ').trim();
-    return t.length > 80 ? t.slice(0, 80) + '…' : t;
-  };
   async function del(note) {
     if (!confirm('删掉这条笔记？\n\n「' + noteDisplay(note) + '」')) return;
     try {
@@ -346,35 +474,79 @@
     } catch (e) { toast(e.message); }
   }
 
-  /* ================= 右侧清单 ================= */
+  /* ================= 清单（可渲染进别人的容器） ================= */
   let onlyNotes = false;
+  const countOf = () => ({ all: notes.length, withNote: notes.filter(x => String(x.note || '').trim()).length });
   function renderPanel() {
+    const n = countOf();
+    if (onChange) { try { onChange(n); } catch (e) {} }
     if (!panelEl) return;
-    const list = notes.filter(n => !onlyNotes || String(n.note || '').trim());
+    const list = notes.filter(x => !onlyNotes || String(x.note || '').trim());
     const box = panelEl.querySelector('.tnPanelList');
-    box.innerHTML = list.length ? list.map(n => `
-      <div class="tnItem" data-tnitem="${n.id}">
-        <span class="tnItemBar tnSw-${n.color}${n.style === 'underline' ? ' u' : ''}"></span>
+    box.innerHTML = list.length ? list.map(x => `
+      <div class="tnItem" data-tnitem="${x.id}">
+        <span class="tnItemBar tnSw-${x.color}${x.style === 'underline' ? ' u' : ''}"></span>
         <div class="tnItemB">
-          <div class="tnItemQ">${esc(noteDisplay(n))}</div>
-          ${String(n.note || '').trim() ? '<div class="tnItemN">' + esc(String(n.note).slice(0, 300)) + '</div>' : '<div class="tnItemN muted">（只划了重点，没写批注）</div>'}
-          <div class="tnItemT">${esc(String(n.created_at || '').slice(5, 16).replace('T', ' '))}</div>
+          <div class="tnItemQ">${esc(noteDisplay(x))}</div>
+          ${String(x.note || '').trim() ? '<div class="tnItemN">' + esc(String(x.note).slice(0, 300)) + '</div>' : '<div class="tnItemN muted">（只划了重点，没写批注）</div>'}
+          <div class="tnItemT">${esc(String(x.created_at || '').slice(5, 16).replace('T', ' '))}</div>
         </div>
-        <button class="tnBtn tiny danger" data-tndel="${n.id}" title="删除">×</button>
+        <button class="tnBtn tiny danger" data-tndel="${x.id}" title="删除">×</button>
       </div>`).join('')
-      : '<p class="tnEmpty">' + (onlyNotes ? '还没有写过批注的笔记。' : '在正文里选中一段文字，就能划线、写批注。') + '</p>';
-    const n1 = notes.length, n2 = notes.filter(x => String(x.note || '').trim()).length;
-    panelEl.querySelector('.tnCount').textContent = n1 ? (n1 + ' 条' + (n2 ? '（' + n2 + ' 条带批注）' : '')) : '';
+      : '<p class="tnEmpty">' + (onlyNotes ? '还没有写过批注的笔记。' : '在正文里选中一段文字 → 右键 → 高亮 / 下划线 / 写批注。') + '</p>';
+    const c = panelEl.querySelector('.tnCount');
+    if (c) c.textContent = n.all ? (n.all + ' 条' + (n.withNote ? '（' + n.withNote + ' 条带批注）' : '')) : '';
     box.querySelectorAll('[data-tnitem]').forEach(el => el.addEventListener('click', e => {
       if (e.target.closest('[data-tndel]')) return;
       jumpTo(Number(el.getAttribute('data-tnitem')));
     }));
     box.querySelectorAll('[data-tndel]').forEach(b => b.addEventListener('click', () => {
-      const n = notes.find(x => Number(x.id) === Number(b.getAttribute('data-tndel')));
-      if (n) del(n);
+      const x = notes.find(v => Number(v.id) === Number(b.getAttribute('data-tndel')));
+      if (x) del(x);
     }));
-    const f = panelEl.querySelector('#tnOnly');
+    const f = panelEl.querySelector('.tnOnlyCb');
     if (f) f.checked = onlyNotes;
+  }
+  /* 把清单渲染进指定容器（notes.js 的「📌 划线笔记」页签用它）。
+     状态机留在这里，notes.js 不需要知道 notes/index/mark 这些事。 */
+  function renderInto(el, opts) {
+    if (!el) return;
+    onChange = (opts && opts.onChange) || null;
+    if (panelEl === el) { renderPanel(); return; }
+    if (embedded && panelEl) { try { panelEl.innerHTML = ''; panelEl.classList.remove('tnPanel', 'tnEmbed'); } catch (e) {} }
+    panelEl = el;
+    embedded = true;
+    el.classList.add('tnPanel', 'tnEmbed');
+    el.innerHTML = `<div class="tnPanelHd"><b>📌 划线笔记</b><span class="tnCount"></span><span style="flex:1"></span>
+        <label class="tnOnly"><input type="checkbox" class="tnOnlyCb"> 只看带批注的</label></div>
+      <div class="tnPanelList"></div>`;
+    const cb = el.querySelector('.tnOnlyCb');
+    if (cb) cb.addEventListener('change', e => { onlyNotes = !!e.target.checked; renderPanel(); });
+    renderPanel();
+  }
+  /* 容器没了（收起笔记栏 / 路由切换）：把引用清掉，别往已经摘掉的节点上写 */
+  function detachPanel() {
+    onChange = null;
+    if (embedded && panelEl) {
+      try { panelEl.innerHTML = ''; panelEl.classList.remove('tnPanel', 'tnEmbed'); } catch (e) {}
+    }
+    panelEl = null;
+    embedded = false;
+  }
+  /* 旧的浮窗形态：兼容外部调用（现在入口已并进笔记栏，默认不再用） */
+  function togglePanel(force) {
+    if (panelEl && !embedded && force !== true) { panelEl.remove(); panelEl = null; return; }
+    if (panelEl) return;
+    panelEl = document.createElement('div');
+    panelEl.className = 'tnPanel';
+    panelEl.innerHTML = `<div class="tnPanelHd"><b>📌 划线笔记</b><span class="tnCount"></span><span style="flex:1"></span>
+        <label class="tnOnly"><input type="checkbox" class="tnOnlyCb"> 只看带批注的</label>
+        <button class="tnBtn" data-tnpanelclose="1">×</button></div>
+      <div class="tnPanelList"></div>`;
+    document.body.appendChild(panelEl);
+    panelEl.querySelector('[data-tnpanelclose]').addEventListener('click', () => togglePanel(false));
+    panelEl.querySelector('.tnOnlyCb').addEventListener('change', e => { onlyNotes = !!e.target.checked; renderPanel(); });
+    renderPanel();
   }
   function jumpTo(id) {
     const m = R().querySelector('mark.tnm[data-tnid="' + id + '"]');
@@ -384,60 +556,72 @@
     if (flashTimer) clearTimeout(flashTimer);
     flashTimer = setTimeout(() => { try { m.classList.remove('tnFlash'); } catch (e) {} }, 1600);
   }
-  function togglePanel(force) {
-    if (panelEl && force !== true) { panelEl.remove(); panelEl = null; return; }
-    if (panelEl) return;
-    panelEl = document.createElement('div');
-    panelEl.className = 'tnPanel';
-    panelEl.innerHTML = `
-      <div class="tnPanelHd"><b>📌 划线笔记</b><span class="tnCount"></span><span style="flex:1"></span>
-        <label class="tnOnly"><input type="checkbox" id="tnOnly"> 只看带批注的</label>
-        <button class="tnBtn" data-tnpanelclose="1">×</button></div>
-      <div class="tnPanelList"></div>`;
-    document.body.appendChild(panelEl);
-    panelEl.querySelector('[data-tnpanelclose]').addEventListener('click', () => togglePanel(false));
-    panelEl.querySelector('#tnOnly').addEventListener('change', e => { onlyNotes = !!e.target.checked; renderPanel(); });
-    renderPanel();
-  }
 
   /* ================= 挂载 / 卸载 ================= */
   /* 一个文档（主文档 or iframe 文档）上的监听：
-     · mouseup → 点高亮打开批注卡；否则读选区决定要不要浮出小条
-     · selectionchange → 同上（键盘选中也要能浮出来） */
+     · contextmenu → 正文里**有选中文字**才接管：弹划线菜单；没选中就放行系统菜单
+     · mouseup → 点高亮打开批注卡；顺带读一次选区（只为把 why 记进 debug，便于排查）
+     · selectionchange → 同上（键盘选中也要能出提示签） */
   function attachDoc(doc) {
     if (!doc || doc.__tnBound) return;
     doc.__tnBound = true;
-    /* ⚠️ 拖选过程中 selectionchange 会**连续触发**，每触发一次就把浮出小条
+    /* ⚠️ 拖选过程中 selectionchange 会**连续触发**，每触发一次就把提示签
        重画一遍 —— 用户看到的就是一直闪。所以按住鼠标时一律不响应，
-       等松开（mouseup）再浮出来；键盘选（shift+方向键）没有按下鼠标，照常浮出。 */
+       等松开（mouseup）再处理；键盘选（shift+方向键）没有按下鼠标，照常提示。 */
     let pointerDown = false;
     doc.addEventListener('mousedown', () => { pointerDown = true; }, true);
     doc.addEventListener('mouseup', () => { pointerDown = false; }, true);   // 先于下面那个 mouseup 执行
-    const onSel = () => { if (pointerDown) return; onUp(); };
+    const onSel = () => { if (pointerDown) return; probe(); };
     doc.addEventListener('mouseup', e => {
       const m = e.target && e.target.closest && e.target.closest('mark.tnm');
       if (m) {
         const n = notes.find(x => Number(x.id) === Number(m.getAttribute('data-tnid')));
-        if (n) { hideBar(); openCard(m, n); return; }
+        if (n) { hideHint(); hideCtx(); openCard(m, n); return; }
       }
-      onUp();
+      probe();
     }, true);
     doc.addEventListener('selectionchange', onSel, true);
+    /* 右键：只有"正文里有选中文字"才接管，其余一律放行系统菜单
+       （用户还要用系统菜单复制 / 搜索 / 翻译，别一律劫持）。 */
+    doc.addEventListener('contextmenu', e => {
+      const g = grabSelection();
+      if (!g) return;                       // 没选中 → 原生菜单
+      e.preventDefault();
+      e.stopPropagation();
+      setPending(g);
+      const f = document.getElementById('tutFrame');
+      const off = inFrame() && f ? f.getBoundingClientRect() : { left: 0, top: 0 };
+      hideHint();
+      showCtx(off.left + e.clientX, off.top + e.clientY);
+    }, true);
+  }
+  /* 松开鼠标 / 键盘选中后：读一次选区、浮出提示签（不弹菜单，用户要右键才动） */
+  function probe() { setTimeout(readSel, 10); }
+  function readSel() {
+    const g = grabSelection();
+    if (!g) return;
+    setPending(g);
+    let rect = null;
+    try { rect = g.range.getBoundingClientRect(); } catch (e) { rect = null; }
+    if (!rect || (!rect.width && !rect.height)) return why('选区没有可见位置（rect 为空）');
+    lastWhy = '已浮出提示签';
+    showHint(rect);
   }
   function bindOnce() {
     if (bound) return;
     bound = true;
     attachDoc(document);
-    /* 点别处 → 收起浮条/卡片（浮层都在主文档里，绑主文档就够） */
+    /* 点别处 → 收起提示签 / 卡片 / 右键菜单（浮层都在主文档里，绑主文档就够）。
+       ⚠️ 右键（button=2）也要走这里：先把上一次的菜单收掉，本次的由 contextmenu 再弹。 */
     document.addEventListener('mousedown', e => {
-      if (e.target && e.target.closest && (e.target.closest('.tnBar') || e.target.closest('.tnCard') || e.target.closest('.tnPanel') || e.target.closest('mark.tnm'))) return;
-      hideBar(); closeCard();
+      if (e.target && e.target.closest && (e.target.closest('.tnHint') || e.target.closest('.tnCard') || e.target.closest('.tnPanel') || e.target.closest('.tnCtxMenu') || e.target.closest('mark.tnm'))) return;
+      hideHint(); closeCard(); hideCtx();
     });
   }
   function mount(tutorialId) {
     tid = Number(tutorialId) || 0;
     if (!tid) return;
-    closeCard(); hideBar();
+    closeCard(); hideHint();
     bindOnce();
     /* HTML 教程正文在 iframe 里：等它 load 完（最多等 3 秒），别对着空文档建索引 */
     let tries = 0;
@@ -446,6 +630,7 @@
       const root = R();
       const okRoot = root && (root.childNodes || []).length > 3;
       if (!okRoot && tries < 15) return setTimeout(boot, 200);
+      watch(root);                       // 正文被重画 → 自动把高亮画回来
       load().then(() => {
         /* 正文在 iframe 里 → 把监听也绑到 iframe 的 document 上 */
         attachDoc(X());
@@ -461,23 +646,39 @@
     notes = (r.notes || []).map(n => Object.assign({}, n));
     notes.sort((a, b) => (Number(a.start) || 0) - (Number(b.start) || 0) || (a.id - b.id));
   }
-  function unmount() { closeCard(); hideBar(); if (panelEl) { panelEl.remove(); panelEl = null; } tid = 0; notes = []; ft = ''; index = []; nodeMap = new Map(); }
+  function unmount() {
+    closeCard(); hideHint(); hideCtx();
+    if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; }
+    if (mo) { try { mo.disconnect(); } catch (e) {} mo = null; }
+    if (panelEl && !embedded) { try { panelEl.remove(); } catch (e) {} }
+    onChange = null; panelEl = null; embedded = false;
+    tid = 0; notes = []; ft = ''; index = []; nodeMap = new Map(); pending = null;
+  }
+  /* 教程页工具条上的条数徽标（按钮已并入笔记栏，这里同时兼容旧按钮） */
   async function badge(tutorialId) {
+    let n = notes.length;
     try {
       const r = await api('/api/tutnotes?tutorial_id=' + (tutorialId || tid));
-      const n = (r.notes || []).length;
-      const btn = document.getElementById('tutNoteMarkBtn');
-      if (btn) {
-        btn.textContent = n ? ('📌 划线笔记 ' + n) : '📌 划线笔记';
-        btn.title = n ? (n + ' 条划线笔记 —— 点开看清单') : '在正文里选中文字就能划线、写批注';
-      }
+      n = (r.notes || []).length;
     } catch (e) {}
+    const btn = document.getElementById('tutNoteMarkBtn');
+    if (btn) {
+      btn.textContent = n ? ('📌 划线笔记 ' + n) : '📌 划线笔记';
+      btn.title = n ? (n + ' 条划线笔记 —— 点开看清单') : '在正文里选中文字 → 右键就能划线、写批注';
+    }
+    if (onChange) { try { onChange(countOf()); } catch (e) {} }
   }
 
   window.TutNotes = {
     mount, unmount, toggle: togglePanel, badge,
+    renderInto, detach: detachPanel,
+    count: countOf,
     refresh: () => { apply(R()); renderPanel(); },
-    /* 调试：为何没浮出小条 / 索引与笔记数量 */
-    debug: () => ({ why: lastWhy, ft: ft.length, notes: notes.length, nodes: index.length, id: tid })
+    /* 调试：为何没读到选区 / 索引与笔记数量 / 高亮有没有画上 / 菜单是不是开着 */
+    debug: () => ({
+      why: lastWhy, ft: ft.length, notes: notes.length, nodes: index.length, id: tid,
+      marks: (() => { try { return R().querySelectorAll('mark.tnm').length; } catch (e) { return -1; } })(),
+      bound: !!document.__tnBound, embedded, panel: !!panelEl, menu: !!ctxEl, pending: !!pending
+    })
   };
 })();

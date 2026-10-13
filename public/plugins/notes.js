@@ -2,8 +2,11 @@
 /**
  * 思而行 · 前端扩展组件：学习笔记
  * ------------------------------------------------------------------
- * 教程页右侧栏：在对应节点记录 Markdown 笔记，一边看教程一边记；
- * 单个框体：平时直接看渲染效果，点编辑改完保存；
+ * 教程页右侧栏，两个页签（手动切换，选中状态记在 localStorage）：
+ *   · 🗒 Markdown 笔记 —— 绑在当前节点上，平时直接看渲染效果，点哪句改哪句
+ *   · 📌 划线笔记     —— 这篇教程里划的重点 / 批注，点一条跳到正文对应位置
+ * 划线页签里的清单**不是**这里实现的：状态机在 tutnotes.js（window.TutNotes），
+ * 这里只调用 TutNotes.renderInto(容器) 把它渲染进来、并且不要把它的正文能力弄丢。
  * 可折叠（边缘小标签随时找回）、可拖动调宽。
  * 由 app.js 在教程页挂载/卸载（仅当组件启用时）。
  */
@@ -28,16 +31,30 @@
     view.innerHTML = mdToHTML(current, { srcLines: true });
     view.scrollTop = y;
   }
-  function nnTopButtons(state) {   // state: 'view' | 'inline' | 'full'
+  function nnTopButtons(state) {   // state: 'view' | 'inline' | 'full' | 'tut'（划线页签：三个按钮都藏）
     const eb = document.getElementById('nnEditBtn'); if (eb) eb.hidden = state !== 'view';
     const sb = document.getElementById('nnSaveBtn'); if (sb) { sb.hidden = state !== 'full'; sb.disabled = false; sb.textContent = '💾 保存'; }
-    const cb = document.getElementById('nnCancelBtn'); if (cb) cb.hidden = state === 'view';
+    const cb = document.getElementById('nnCancelBtn'); if (cb) cb.hidden = state === 'view' || state === 'tut';
   }
 
   function panelEl() { return document.getElementById('nodeNotes'); }
   function tabEl() { return document.getElementById('nnTab'); }
   function isOpen() { try { return localStorage.getItem('sierxing-notes-open') !== '0'; } catch (e) { return true; } }
   function setOpen(v) { try { localStorage.setItem('sierxing-notes-open', v ? '1' : '0'); } catch (e) {} }
+  /* 当前页签（沿用现有 storage 命名习惯）：sierxing-notes-tab = 'md' | 'tut'。
+     effTab 是"这一栏实际显示着的"页签 —— 某个页签的组件被关掉 / 没有节点可挂时会回落到另一个，
+     那个回落结果也要记住，否则 showView() 里按 curTab() 判断会拿错页签、把编辑按钮又放出来。 */
+  let effTab = null;
+  function storedTab() { try { return localStorage.getItem('sierxing-notes-tab') === 'tut' ? 'tut' : 'md'; } catch (e) { return 'md'; } }
+  function curTab() { return effTab || storedTab(); }
+  function setTabStored(v) { try { localStorage.setItem('sierxing-notes-tab', v); } catch (e) {} }
+  /* 组件是否启用（跟 app.js 的 goalCompOn 同一套三段回退：目标级 → 全局 → 默认） */
+  function compOn(id) { try { return SiErXing.pluginEnabled(SiErXing.state && SiErXing.state.tutGoal, id); } catch (e) { return true; } }
+  const mdOn = () => compOn('notes');
+  const tutOn = () => compOn('tutnotes');
+  /* Markdown 笔记是绑在**节点**上的：教程对应的任务被删掉时没有节点可挂，
+     这一页就只剩「📌 划线笔记」（划线是绑教程的，不依赖节点）。 */
+  const mdOk = () => mdOn() && !!nodeId;
   function width() {
     try { const w = Number(localStorage.getItem('sierxing-notes-w')) || 340; return Math.max(280, Math.min(560, w)); }
     catch (e) { return 340; }
@@ -58,6 +75,12 @@
   function setCount() {
     const el = document.getElementById('nnCount');
     if (el) el.textContent = current ? ('共 ' + current.length + ' 字') : '';
+  }
+  /* 划线页签上的条数徽标（TutNotes 渲染完清单回调过来） */
+  function setTutCount(n) {
+    const p = panelEl();
+    const el = p && p.querySelector('.nnTbN');
+    if (el) el.textContent = (n && n.all) ? (' ' + n.all) : '';
   }
   /* 把"人看到的一段话"变成几个"最可能在 Markdown 源码里逐字出现"的候选片段：
      整段 + 前缀 + 按标点/换行切出来的短句（列表项被折成一行时光靠整段找不到）。 */
@@ -92,7 +115,7 @@
       if (ev.target && ev.target.closest && ev.target.closest('a')) return;
       showEdit(ev);
     });
-    nnTopButtons('view');
+    if (curTab() === 'md') nnTopButtons('view');
   }
 
   /* ---- 编辑态：单个框里写 ---- */
@@ -248,36 +271,82 @@
     });
   }
 
+  /* ---- 页签切换：Markdown 笔记 / 划线笔记 ---- */
+  function switchTab(t) {
+    if (t !== 'md' && t !== 'tut') return;
+    effTab = t;
+    setTabStored(t);
+    applyTab();
+  }
+  function applyTab() {
+    const p = panelEl();
+    if (!p) return;
+    const hasMd = mdOk(), hasTut = tutOn();
+    let t = curTab();
+    if (t === 'md' && !hasMd && hasTut) t = 'tut';
+    if (t === 'tut' && !hasTut && hasMd) t = 'md';
+    effTab = t;
+    p.querySelectorAll('[data-nntb]').forEach(b => b.classList.toggle('on', b.getAttribute('data-nntb') === t));
+    const mdBody = p.querySelector('#nnBody'), tutBody = p.querySelector('#nnTutBody');
+    if (mdBody) mdBody.hidden = t !== 'md';
+    if (tutBody) tutBody.hidden = t !== 'tut';
+    /* 划线清单：把容器交给 TutNotes 渲染（状态机仍然只在 tutnotes.js 一份） */
+    if (t === 'tut' && window.TutNotes && typeof window.TutNotes.renderInto === 'function' && tutBody) {
+      window.TutNotes.renderInto(tutBody, { onChange: setTutCount });
+    } else if (window.TutNotes && typeof window.TutNotes.detach === 'function') {
+      window.TutNotes.detach();
+    }
+    if (t === 'md') nnTopButtons(mdInlineEdit && mdInlineEdit.active() ? 'inline' : 'view');
+    else nnTopButtons('tut');
+  }
+
   window.NodeNotes = {
     /* 挂载右侧笔记栏（教程页渲染后调用） */
     mount(tutorialId, nid, ntitle) {
       if (tutorialId != null) tid = tutorialId;
       if (nid != null) nodeId = nid;
       if (ntitle != null) nodeTitle = ntitle;
-      if (!nodeId) return;
+      /* ⚠️ 没有节点（教程对应的任务被删了）也照样开栏：那就只有「📌 划线笔记」页签 ——
+         划线是绑教程的，不依赖节点。 */
       if (!isOpen()) { showTab(); return; }
-      if (panelEl()) return;
+      if (panelEl()) { applyTab(); return; }
       const tb = tabEl();
       if (tb) tb.remove();
       const div = document.createElement('aside');
       div.id = 'nodeNotes';
       div.className = 'nodeNotes';
-      div.innerHTML = `<div class="nnHead"><span>🗒 笔记</span><span class="nnSub" title="${esc(nodeTitle)}">${esc(String(nodeTitle).slice(0, 18))}</span><div class="spacer"></div>
+      div.title = String(nodeTitle || '');
+      div.innerHTML = `<div class="nnHead">
+        <div class="nnTabs">
+          <button class="nnTb" data-nntb="md" title="跟着这个节点的 Markdown 笔记：点哪句改哪句">🗒 Markdown 笔记</button>
+          <button class="nnTb" data-nntb="tut" title="这篇教程里划的重点 / 批注：正文里选中文字后右键就能划">📌 划线笔记<span class="nnTbN"></span></button>
+        </div>
+        <div class="spacer"></div>
         <button class="btn tiny" id="nnEditBtn">✎ 编辑</button>
         <button class="btn tiny primary" id="nnSaveBtn" hidden>💾 保存</button>
         <button class="btn tiny" id="nnCancelBtn" hidden>取消</button>
         <button class="btn tiny" id="nnHide" title="收起（边缘小标签可再打开）">收起 »</button></div>
-        <div class="nnMeta"><span id="nnStatus">…</span><span id="nnCount"></span></div>
+        <div class="nnMeta"><span id="nnStatus">…</span><span class="spacer"></span><span class="nnSub" title="${esc(nodeTitle)}">${esc(String(nodeTitle).slice(0, 14))}</span><span id="nnCount"></span></div>
         <div id="nnBody"></div>
+        <div id="nnTutBody" class="nnTutBody" hidden></div>
         <div class="nnResize" id="nnResize" title="拖动调宽"></div>`;
       document.body.appendChild(div);
       applyWidth(width());
+      const mdBtn = div.querySelector('[data-nntb="md"]');
+      const tutBtn = div.querySelector('[data-nntb="tut"]');
+      mdBtn.hidden = !mdOk();
+      tutBtn.hidden = !tutOn();
+      mdBtn.addEventListener('click', () => switchTab('md'));
+      tutBtn.addEventListener('click', () => switchTab('tut'));
       div.querySelector('#nnHide').addEventListener('click', () => window.NodeNotes.hide());
       div.querySelector('#nnEditBtn').addEventListener('click', showEdit);
       div.querySelector('#nnSaveBtn').addEventListener('click', doSave);
       div.querySelector('#nnCancelBtn').addEventListener('click', doCancel);
       bindDrag();
+      applyTab();
       (async () => {
+        if (!mdOn()) { setStatus('本目标已关闭 Markdown 笔记'); setCount(); showView(); return; }
+        if (!nodeId) { setStatus('这个教程对应的任务已不存在，只看划线笔记'); setCount(); showView(); return; }
         setStatus('加载中…');
         try {
           const r = await api('/api/nodes/' + nodeId + '/note');
@@ -294,6 +363,7 @@
     hide() {
       flush();
       setOpen(false);
+      if (window.TutNotes && typeof window.TutNotes.detach === 'function') { try { window.TutNotes.detach(); } catch (e) {} }
       const p = panelEl();
       if (p) p.remove();
       showTab();
@@ -309,6 +379,8 @@
     /* 路由切换时清理 */
     unmount() {
       flush();
+      effTab = null;               // 下一栏的页签重新按 storage + 可用性推
+      if (window.TutNotes && typeof window.TutNotes.detach === 'function') { try { window.TutNotes.detach(); } catch (e) {} }
       const p = panelEl();
       if (p) p.remove();
       const tb = tabEl();
