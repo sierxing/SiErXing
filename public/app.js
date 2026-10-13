@@ -369,9 +369,10 @@ async function route() {
     if (tw && tw.__tutTocScroll) { tw.removeEventListener('scroll', tw.__tutTocScroll); tw.__tutTocScroll = null; }
     if (window.__tutTocScroll) { window.removeEventListener('scroll', window.__tutTocScroll); window.__tutTocScroll = null; }
     window.__tutTocWin = null;
+    if (window.__tutTocTimer) { clearInterval(window.__tutTocTimer); window.__tutTocTimer = null; }   // 目录的兜底对时也停掉
   } catch (e) {}
   // 换页要把"上次位置"的锁重置，否则新教程进来时不会重新读取它的书签
-  try { window.__tutTocTid = null; window.__tutTocRestoring = false; } catch (e) {}
+  try { window.__tutTocTid = null; window.__tutTocRestoring = false; window.__tutTocNeedRestore = false; } catch (e) {}
   const r = parseRoute();
   try { tutProgressFlush(); } catch (e) {}   // 离开教程页先把阅读位置记上（DOM 替换前）
   const backScroll = navTrack();   // 先记滚动（此时还是旧页面），返回导航则带回待恢复位置
@@ -416,8 +417,11 @@ async function route() {
         }
       }
     }
-    if (backScroll != null) {
-      // 返回导航：渲染完回到离开时的位置（内容可能是异步图片，补一次）
+    /* 返回导航：渲染完回到离开时的位置（内容可能是异步图片，补一次）。
+       ⚠️ 教程页**不走这条**：它自己有一套按锚点恢复的机制（tutRestoreSettled，见 tutTocBuild），
+       两边都设 scrollTop 就是两套机制抢同一个位置 —— 正是"刷新/打开目录跳位置"那类问题的温床。
+       教程页的位置统一由锚点恢复负责（它还能扛住正文高度变化）。 */
+    if (backScroll != null && r.view !== 'tutorial') {
       requestAnimationFrame(() => { try { window.scrollTo(0, backScroll); } catch (e) {} });
       setTimeout(() => { try { window.scrollTo(0, backScroll); } catch (e) {} }, 150);
     }
@@ -1564,7 +1568,9 @@ async function refreshTutorialIfUpdated(tid, finished) {
   const serverUpdated = (detail.tutorial && detail.tutorial.updated_at) || '';
   if (state.tutUpdatedAt && serverUpdated && serverUpdated === state.tutUpdatedAt) return { refreshed: false };  // 同一目标别的教程的任务
   const y = window.scrollY;
-  try { await renderTutorialPage(tid); } catch (e) { toast(e.message); return { refreshed: false }; }
+  /* keepPos=true：整页重画要把阅读位置按锚点对回去（纯像素的 window.scrollTo 在
+     正文高度变了之后会偏；HTML 教程正文在 iframe 里，主窗口的 scrollTo 更是无效） */
+  try { await renderTutorialPage(tid, true); } catch (e) { toast(e.message); return { refreshed: false }; }
   try { window.scrollTo(0, y); } catch (e) {}
   toast('✅ 教程已更新');
   return { refreshed: true };
@@ -2198,7 +2204,7 @@ function tutInlineEnter(pickEl) {
       tutRawCachePut(rr.id, next);
       toast('✅ 已保存这一块（想整篇改可点「✎ 手动编辑」）');
       await refreshTutUpdatedAt(rr.id);
-      tutRerenderBody(next, pickEl.getAttribute('data-src'), beforeTop);
+      tutRerenderBody(next, pickEl.getAttribute('data-src'), beforeTop, rr.id);
       return true;
     }
   });
@@ -2206,10 +2212,15 @@ function tutInlineEnter(pickEl) {
 /* 保存后只重画正文（不整页刷新），并把刚编辑的那一块拉回原来的视口位置 —— 阅读位置不跳。
    为什么不"只重画这一块"：改一次可能从一段变成标题+列表好几块，还可能牵动列表/引用的
    上下文，整块重排才跟服务端一致；保住滚动位置就足以做到"看不出页面动过"。 */
-function tutRerenderBody(next, startLine, beforeTop) {
+function tutRerenderBody(next, startLine, beforeTop, tid) {
   const body = document.querySelector('#app .tutBody');
   if (!body) return;
   try { body.innerHTML = mdToHTML(next, { viz: true, srcLines: true }); } catch (e) { return; }
+  /* ⚠️ 正文重画后必须重建目录（并重新挂滚动追踪）：旧闭包里的标题节点已经脱离文档，
+     它们的 rect 全是 0 → 当前节被算成**最后一节** → 阅读位置被写成"最末尾"，
+     刷新就跳到教程末尾（用户报的正是这个）。重建时绝不能再触发"回到上次位置"。 */
+  try { window.__tutTocNeedRestore = false; window.__tutTocRestoring = false; } catch (e) {}
+  if (tid) { try { tutTocBuild(tid); } catch (e) {} }
   try {
     const el = body.querySelector('[data-src="' + String(startLine) + '"]');
     if (el) { const d = el.getBoundingClientRect().top - (beforeTop || 0); if (Math.abs(d) > 2) window.scrollBy(0, d); }
@@ -2275,6 +2286,166 @@ function tutRoot() {
   catch (e) { return null; }
 }
 function tutHeadEl(i) { try { return tutDoc().getElementById('tutsec-' + i); } catch (e) { return null; } }
+/* ===== 阅读位置锚点：存"读到哪一块 + 这一块距视口顶部多少像素" =====
+   ⚠️ 三个坑（用户报：「没法定位到上次看到哪，刷新后直接移动到教程最末尾」）：
+   ① **就地编辑单块保存后正文整段重画**（tutRerenderBody），而目录的滚动追踪闭包里
+      还攥着上一批**已经脱离文档**的标题节点 —— 它们的 getBoundingClientRect() 全是 0，
+      「0 <= 140」恒真，于是当前节被算成**最后一节**并写进 localStorage，
+      刷新就按"最后一节"恢复 = 直接跳到教程末尾。实测：中部（第 16/38 节、scrollTop 14061）
+      就地保存后立刻变成第 37/38 节（pos 键被写成 "37"），刷新后 scrollTop = 28121 = 文档底部。
+      → 用 isConnected + 零尺寸双重过滤挡住，并在重画后重建目录（见 tutRerenderBody）。
+   ② 只存节号、按"标题放到顶栏下方 110px"恢复，会把"节内读到一半"丢回节首（实测差 500+ 像素）。
+      → 额外存视口顶部那一块的 data-src 行号 + 它距视口顶的偏移，恢复时按锚点对齐。
+   ③ viz 块是沙箱 iframe，高度靠 postMessage 上报（60/400/900ms 都可能变），恢复只跳一次会偏。
+      → 恢复后在校正窗口内反复对齐，直到高度与锚点都不再变（见 tutRestoreSettled）。 */
+function tutAnchorLine(el) {
+  try {
+    const raw = el && el.getAttribute ? el.getAttribute('data-src') : null;
+    if (raw == null || raw === '') return -1;    // ⚠️ Number(null) === 0 —— 不判空会把"没有 data-src"
+    const v = Number(raw);                       //    当成"第 0 行"，HTML 教程的锚点会去找不存在的块
+    return Number.isFinite(v) ? v : -1;
+  } catch (e) { return -1; }
+}
+/* 复原锚点元素：**与保存时同一套查找顺序**，否则存的是 A 的位置、恢复找的是 B。
+   ① Markdown：data-src 行号（源码位置，改正文/改高度都不影响）
+   ② 没有 data-src 的块（viz 可视化框等）：正文第 idx 个直接子元素 + 标签名校验
+   ③ HTML 教程：节标题 tutsec-N */
+function tutAnchorElOf(at) {
+  try {
+    if (!at) return null;
+    const root = tutRoot();
+    if (!root) return null;
+    const line = Number(at.line);
+    if (Number.isFinite(line) && line >= 0) {
+      const el = root.querySelector('[data-src="' + line + '"]');
+      if (el) return el;
+    }
+    const idx = Number(at.idx);
+    if (Number.isFinite(idx) && idx >= 0 && root.children[idx]) {
+      const el = root.children[idx];
+      if (!at.tag || el.tagName === at.tag) return el;
+    }
+    if (Number.isFinite(Number(at.sec))) return tutHeadEl(Number(at.sec));
+  } catch (e) {}
+  return null;
+}
+/* 视口顶部那一块（正文块 + 目录标题都算），返回 {sec,line,idx,tag,off} */
+function tutAnchorNow(heads, cur) {
+  try {
+    const body = tutRoot();
+    const sec = Number(cur) || 0;
+    if (body) {
+      /* 候选 = 带 data-src 的块 + 正文的直接子元素（viz 可视化框没有 data-src，
+         只认 data-src 的话视口落在 700px 高的图表里就会拿"下面第一块"当锚点，实测偏 747px）。
+         ⚠️ 但把**整篇正文那个大 wrapper**当锚点等于存了个纯像素（它的 top 就是滚动量本身，
+         HTML 教程实测偏 1973px）——高度超过 1.5 屏的直接子元素一律不要。 */
+      const vh = tutWin().innerHeight || 800;
+      const kids = [].slice.call(body.children).filter(k => {
+        try { const r = k.getBoundingClientRect(); return !(r.height > Math.max(200, vh * 1.5)); } catch (e) { return false; }
+      });
+      const cands = (body.__tutBlocks && body.__tutBlocks.length ? body.__tutBlocks
+        : [].slice.call(body.querySelectorAll('[data-src]'))).concat(kids);
+      let above = null, aboveTop = -Infinity, below = null, belowTop = Infinity;
+      for (const b of cands) {
+        if (!b || !b.isConnected) continue;              // 重画后残留的旧节点
+        const r = b.getBoundingClientRect();
+        if (!r.width && !r.height) continue;             // 还没排版/被隐藏 → 量不准
+        if (r.top <= 8) { if (r.top > aboveTop) { aboveTop = r.top; above = b; } }
+        else if (r.top < belowTop) { belowTop = r.top; below = b; }
+      }
+      const el = above || below;
+      if (el) {
+        let idx = -1;
+        for (let i = 0; i < body.children.length; i++) { if (body.children[i] === el) { idx = i; break; } }
+        if (idx < 0 && el.closest) {                     // 嵌套块（表格单元格/列表项）→ 取它所在的直接子元素
+          const topEl = [].slice.call(body.children).find(c => c.contains(el));
+          if (topEl) idx = [].slice.call(body.children).indexOf(topEl);
+        }
+        const at = { sec: sec, line: tutAnchorLine(el), idx: idx, tag: el.tagName || '' };
+        const canon = tutAnchorElOf(at) || el;           // 恢复时会找的那一个；偏移量必须按它量
+        at.tag = canon.tagName || at.tag;                // 嵌套块（td/li）要换成它所在直接子元素的标签
+        at.idx = (function () {                          // 同上：idx 也要指回直接子元素
+          try { for (let i = 0; i < body.children.length; i++) if (body.children[i] === canon) return i; } catch (e) {}
+          return idx;
+        })();
+        at.off = Math.round(canon.getBoundingClientRect().top);
+        return at;
+      }
+    }
+    const h = (heads && heads[sec]) || tutHeadEl(sec);
+    if (h && h.isConnected) {
+      const r = h.getBoundingClientRect();
+      if (r.width || r.height) return { sec: sec, line: -1, idx: -1, tag: h.tagName || '', off: Math.round(r.top) };
+    }
+  } catch (e) {}
+  return null;
+}
+/* 按锚点算目标滚动量；找不到锚点（内容全变了）返回 null */
+function tutAnchorTarget(at) {
+  try {
+    if (!at) return null;
+    const el = tutAnchorElOf(at);
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    if (!r.width && !r.height) return null;             // 还没上屏 → 等下一次校正
+    return Math.max(0, Math.round(r.top + tutWin().scrollY - (Number(at.off) || 0)));
+  } catch (e) { return null; }
+}
+/* 恢复阅读位置：先跳一次（不平滑，一进来就动画一大段很晃），再校正到正文稳定为止。
+   opts.noLock：别碰 __tutTocRestoring（整页重画后对位置时用，那时没有"恢复锁"） */
+function tutRestoreSettled(at, opts) {
+  const w = tutWin();
+  const lock = !(opts && opts.noLock);
+  /* 校正时刻表，约 3.4s 后强制收工。
+     ⚠️ 不能"一稳定就收工"：viz 沙箱 iframe 的高度是它自己 postMessage 上报的
+     （60/400ms + 之后每 900ms 一次），正文高度常在 1s 后才定型 ——
+     实测过早收工会留下 118px 的偏移。所以至少要跑满 1.3s 才允许收工。 */
+  const holds = [0, 120, 300, 650, 1100, 1700, 2400, 3200];
+  const t0 = Date.now();
+  let done = false, sig = '', stable = 0, step = 0;
+  /* 用户在恢复期间自己动手了（滚轮/触摸/按键/拖滚动条）→ 立刻停手，别跟人抢。
+     ⚠️ 不能拿"scrollY 变了多少"当判据：我们自己的 scrollTo、以及浏览器给上屏内容
+     变化做的滚动锚定（scroll anchoring）都会发 scroll 事件，会被误判成"用户在滚" ——
+     实测校正循环因此提前收工，停在偏 783px 的地方。只听真实输入事件。 */
+  function onInput() { finish(); }
+  function finish() {
+    if (done) return;
+    done = true;
+    try {
+      w.removeEventListener('wheel', onInput);
+      w.removeEventListener('touchstart', onInput);
+      w.removeEventListener('keydown', onInput);
+      w.removeEventListener('mousedown', onInput);
+    } catch (e) {}
+    try { tutDoc().body.style.overflowAnchor = ''; } catch (e) {}   // 放开滚动锚定
+    if (lock) { try { window.__tutTocRestoring = false; } catch (e) {} }
+  }
+  try {
+    w.addEventListener('wheel', onInput, { passive: true });
+    w.addEventListener('touchstart', onInput, { passive: true });
+    w.addEventListener('keydown', onInput);
+    w.addEventListener('mousedown', onInput);
+    /* 恢复期间先关掉滚动锚定：viz 块/图片还在改高度，锚定会跟我们抢同一个滚动位
+       （实测它把恢复好的 14061 顶回 14844）。高度变化交给下面的校正循环，收工再放开。 */
+    tutDoc().body.style.overflowAnchor = 'none';
+  } catch (e) {}
+  const tick = () => {
+    if (done) return;
+    try {
+      const y = tutAnchorTarget(at);
+      if (y != null && Math.abs((w.scrollY || 0) - y) > 2) w.scrollTo(0, y);
+    } catch (e) {}
+    /* 文档高度 + 目标位置都不再变 = 正文稳定了 → 提前收工（别一直锁着位置回写） */
+    let s = '';
+    try { const t = tutAnchorTarget(at); s = (tutDoc().body ? tutDoc().body.scrollHeight : 0) + '|' + (t == null ? -1 : t); } catch (e) {}
+    stable = (s && s === sig) ? stable + 1 : 0;
+    sig = s;
+    step++;
+    if (step >= holds.length || (stable >= 2 && Date.now() - t0 >= 1300)) return finish();
+    setTimeout(tick, holds[step] == null ? 400 : holds[step]);
+  };
+  tick();
+}
 /* HTML 教程的**正文自带**目录（AI 常写 <nav class="toc"><a href="#s1">…</a></nav>）跳转失效时，
    用户看到的就是"点了没反应"。真实原因：那份教程被截断了 —— 目录列 12 节，正文只写到第 3 节，
    #s4…#s12 这些锚点压根不存在（线上真事，教程 id=52）。
@@ -2378,12 +2549,27 @@ function tutTocBuild(tid) {
      否则等于每次打开教程都把书签清成 0，下次自然回不去原来那一节。 */
   if (window.__tutTocTid !== Number(tid)) {
     window.__tutTocTid = Number(tid);
-    let sv = 0;
+    /* 优先读「锚点」（块行号 + 距视口顶的偏移）；没有锚点（老数据 / HTML 教程还没写过）
+       就退回老的节号，按"标题放到顶栏下方 110px"恢复。 */
+    let sv = 0, at = null;
     try { sv = Number(localStorage.getItem('sierxing-tut-pos-' + tid) || 0); } catch (e) {}
-    window.__tutTocSaved = (sv > 0 && sv < heads.length) ? sv : 0;
-    window.__tutTocRestoring = true;   // 恢复期间不要回写位置
+    try { at = JSON.parse(localStorage.getItem('sierxing-tut-at-' + tid) || 'null'); } catch (e) {}
+    if (at && typeof at === 'object' && (Number(at.line) >= 0 || Number(at.sec) > 0 || Math.abs(Number(at.off) || 0) > 8)) {
+      window.__tutTocSaved = {
+        sec: Number(at.sec) || 0,
+        line: Number(at.line) >= 0 ? Number(at.line) : -1,
+        off: Number(at.off) || 0
+      };
+    } else {
+      window.__tutTocSaved = (sv > 0 && sv < heads.length) ? { sec: sv, line: -1, off: 110 } : null;
+    }
+    window.__tutTocNeedRestore = true;   // 只此一次（重画正文/切目录不许再跳）
+    window.__tutTocRestoring = true;     // 恢复期间不要回写位置
   }
   heads.forEach((h, i) => { h.id = 'tutsec-' + i; });
+  /* 正文块缓存（阅读位置锚点每帧都要用）：querySelectorAll 对几万字的教程太贵，
+     每次重建目录（含正文重画后）刷新一次即可。 */
+  try { const rb = tutRoot(); if (rb) rb.__tutBlocks = [].slice.call(rb.querySelectorAll('[data-src]')); } catch (e) {}
   const w = tutWin();   // Markdown = window；HTML 教程 = iframe 内部那个 window
   // 面板只在展开时建；追踪常驻（书签要用）
   const old = document.getElementById('tutToc'); if (old) old.remove();
@@ -2442,19 +2628,41 @@ function tutTocBuild(tid) {
     if (raf) return;
     raf = requestAnimationFrame(() => {
       raf = 0;
-      let cur = 0;
+      /* ⚠️ 两个过滤缺一不可（"刷新跳到教程末尾"的根因就在这）：
+         · !h.isConnected —— 就地编辑保存后正文重画，闭包里的标题已脱离文档；
+         · 零尺寸 —— 隐藏 / 尚未排版的标题，getBoundingClientRect() 返回全 0，
+           而 0 <= 140 恒真，cur 会一路加到**最后一节**并被存成阅读位置。
+         量不到一个标题时这一帧就当没量到：沿用上次的 cur，且**不写** localStorage。 */
+      let cur = 0, saw = 0;
       for (let i = 0; i < heads.length; i++) {
-        const r = heads[i].getBoundingClientRect();
-        if (r.top <= 140) cur = i; else break;
+        const h = heads[i];
+        if (!h || !h.isConnected) continue;
+        const r = h.getBoundingClientRect();
+        if (!r.width && !r.height) continue;
+        if (r.top <= 140) { cur = i; saw++; } else break;
       }
+      const measurable = saw > 0;
+      if (!measurable) cur = (window.__tutCur && window.__tutCur.idx) || 0;
       const items = toc.querySelectorAll('[data-toc]');
       if (items.length) items.forEach(a => a.classList.toggle('active', Number(a.getAttribute('data-toc')) === cur));
       /* 章节多的时候（比如 HTML 教程动辄四五十节），当前节往往在目录可视区之外，
-         高亮了也看不见 = 看起来像没生效。变化时才滚一下，别每帧都动。 */
+         高亮了也看不见 = 看起来像没生效。变化时才滚一下，别每帧都动。
+         ⚠️ 这里用**手动设 .tutTocScroll.scrollTop**，不能用 act.scrollIntoView()：
+         scrollIntoView 会一路滚所有可滚动祖先（含主文档/iframe），于是"打开目录"
+         这个动作本身就把正文滚到了别处（用户报的"打开目录突然滚到上一次的章节"）。
+         手动滚只动目录列表这一层，正文 scrollTop 一定不变。 */
       if (cur !== toc.__active) {
         toc.__active = cur;
         const act = items[cur];
-        if (act && act.scrollIntoView) { try { act.scrollIntoView({ block: 'nearest' }); } catch (e) {} }
+        const sc = document.getElementById('tutTocScroll');
+        if (act && sc) {
+          try {
+            /* 用 rect 差值算（offsetTop 的参照物是 .tutToc 的 padding box，不是滚动容器） */
+            const diff = act.getBoundingClientRect().top - sc.getBoundingClientRect().top;
+            const top = sc.scrollTop + diff - (sc.clientHeight - act.offsetHeight) / 2;   // 居中
+            sc.scrollTop = Math.max(0, Math.min(sc.scrollHeight - sc.clientHeight, top));
+          } catch (e) {}
+        }
       }
       try { window.__tutCur = { idx: cur, title: String((heads[cur] || {}).textContent || '').trim().slice(0, 80) }; } catch (e) {}
       try { tutProgressSave(tid, false); } catch (e) {}
@@ -2466,30 +2674,43 @@ function tutTocBuild(tid) {
         const pct = Math.min(100, Math.round(h / tot * 100));
         prog.textContent = '阅读位置：第 ' + (cur + 1) + '/' + heads.length + ' 节 · 全文 ' + pct + '%';
       }
-      try { if (!window.__tutTocRestoring) localStorage.setItem('sierxing-tut-pos-' + tid, String(cur)); } catch (e) {}
+      try {
+        if (measurable && !window.__tutTocRestoring) {
+          localStorage.setItem('sierxing-tut-pos-' + tid, String(cur));   // 兼容老键（节号）
+          const at = tutAnchorNow(heads, cur);                            // 锚点：块行号 + 视口内偏移
+          if (at) {
+            const j = String(tid) + '|' + JSON.stringify(at);
+            if (j !== window.__tutAtJSON) { window.__tutAtJSON = j; localStorage.setItem('sierxing-tut-at-' + tid, j.slice(String(tid).length + 1)); }
+          }
+        }
+      } catch (e) {}
     });
   };
   w.removeEventListener('scroll', w.__tutTocScroll || (() => {}));
   w.__tutTocScroll = onScroll;
   w.addEventListener('scroll', onScroll, { passive: true });
   try { window.__tutTocWin = w; } catch (e) {}   // 记下监听挂在哪，切页时要摘掉
-  onScroll();
-  // 回到上次阅读位置（直接跳过去，不要平滑滚动：一进来就动画一大段很晃）
+  /* 兜底对时（每秒一次，rAF 节流后成本极低）：正文高度会自己变（viz 沙箱 iframe 上报高度、
+     图片上屏、AI 侧栏开合），这些**不产生 scroll 事件** —— 只靠滚动回调时，
+     目录的高亮会"卡"在旧章节上，和正文实际读到的章节对不上（用户报的第二半）。
+     ⚠️ 它只改高亮/阅读位置显示，绝不碰 scrollTop。 */
+  try { if (window.__tutTocTimer) clearInterval(window.__tutTocTimer); } catch (e) {}
   try {
-    const saved = window.__tutTocSaved || 0;
-    if (saved > 0 && saved < heads.length) {
-      setTimeout(() => {
-        const h = tutHeadEl(saved);
-        if (h) {
-          const y = Math.max(0, h.getBoundingClientRect().top + w.scrollY - 110);
-          try { w.scrollTo(0, y); } catch (e) { try { w.scrollTo({ top: y, behavior: 'auto' }); } catch (e2) {} }
-        }
-        window.__tutTocRestoring = false;
-      }, 350);
-    } else {
-      window.__tutTocRestoring = false;
-    }
-  } catch (e) { window.__tutTocRestoring = false; }
+    window.__tutTocTimer = setInterval(() => {
+      try { if (document.visibilityState === 'hidden') return; } catch (e) {}
+      onScroll();
+    }, 1000);
+  } catch (e) {}
+  onScroll();
+  /* 回到上次阅读位置：按锚点跳一次 → 再校正到正文稳定
+     （viz 块/图片会把文档撑高，只跳一次会偏；校验用的是"这一块 + 视口内偏移"，不是像素比例）。
+     只做一次：重画正文 / 手动切目录都会再调 tutTocBuild，绝不能再跳回去。 */
+  if (window.__tutTocNeedRestore) {
+    window.__tutTocNeedRestore = false;
+    const at = window.__tutTocSaved;
+    if (at) setTimeout(() => { try { tutRestoreSettled(at); } catch (e) { window.__tutTocRestoring = false; } }, 60);
+    else { try { window.__tutTocRestoring = false; } catch (e) {} }
+  }
 }
 
 
@@ -2702,7 +2923,7 @@ function openTutVersions(tid) {
         await api('/api/tutorials/' + tid + '/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version_id: Number(b.getAttribute('data-vrestore')) }) });
         close();
         toast('已恢复 ✓ 当前版已自动存档');
-        try { await renderTutorialPage(tid); } catch (err) { location.reload(); }
+        try { await renderTutorialPage(tid, true); } catch (err) { location.reload(); }
       } catch (err) { toast(err.message); }
     }));
   };
@@ -5315,7 +5536,21 @@ function tutViewInit() {
     toast('已恢复默认宽度与字号');
   });
 }
-async function renderTutorialPage(tid) {
+async function renderTutorialPage(tid, keepPos) {
+  /* 同一个教程的**整页重画**（🕘 历史版本恢复、AI 改版、任务轮询）：先记下当前锚点，
+     渲染完再对回去。否则正文被整段换掉时文档先变短，浏览器把滚动夹回顶部 ——
+     用户看到的就是"位置又跳了"（实测 14061 → 0）。锚点 = 块行号 + 视口内偏移。
+     ⚠️ 只认调用方显式要求（keepPos）：深链进来时 renderTutorialPage 会被调两次
+     （模块加载时 + route()），第二次进来 DOM 里已经躺着刚渲染好的同一篇教程，
+     照"DOM 是同名教程"去记锚点就会把"顶部"当成阅读位置，把 localStorage 里的真位置覆盖掉。 */
+  let tutKeepAt = null;
+  try {
+    const rr0 = parseRoute();
+    if (keepPos && rr0.view === 'tutorial' && Number(rr0.id) === Number(tid) && Number(window.__tutRenderedTid) === Number(tid) &&
+        (document.getElementById('tutFrame') || document.querySelector('#app .tutBody'))) {
+      tutKeepAt = tutAnchorNow(null, (window.__tutCur && window.__tutCur.idx) || 0);
+    }
+  } catch (e) {}
   app.innerHTML = '<p class="muted">加载教程…</p>';
   try { window.__tutCur = null; window.__tutTotal = 0; } catch (e) {}
   const r = await api('/api/tutorials/' + tid);
@@ -5436,6 +5671,10 @@ async function renderTutorialPage(tid) {
     if (!confirm('删除这份教程？')) return;
     try { await api('/api/tutorials/' + tid, { method: 'DELETE' }); toast('已删除'); go('#/g/' + t.goal_id); } catch (e) { toast(e.message); }
   });
+  /* 整页重画后把阅读位置对回去（见函数开头记下的 tutKeepAt）：
+     等正文（含 iframe 的 HTML 教程）就绪，再按锚点跳 + 校正到高度稳定为止。 */
+  if (tutKeepAt) setTimeout(() => { try { tutRestoreSettled(tutKeepAt, { noLock: true }); } catch (e) {} }, isHtml ? 300 : 150);
+  try { window.__tutRenderedTid = Number(tid); } catch (e) {}
 }
 
 async function renderDiffPage(vid) {
