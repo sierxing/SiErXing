@@ -13,6 +13,11 @@
   --shadow:0 4px 16px rgba(23,26,43,.06);
   --shadow-lg:0 16px 44px rgba(23,26,43,.14);
   --r-sm:8px; --r:12px; --r-lg:16px;
+  /* 语法高亮配色（浅色）：偏柔和的经典配色，在浅底上对比够但不刺眼。
+     主题文件只覆盖上面那些变量，这里不覆盖也没关系，颜色照样能用。 */
+  --tk-cm:#8a8f9e; --tk-st:#0a7d4a; --tk-nu:#b0540a; --tk-kw:#9333c8;
+  --tk-bi:#0b63c5; --tk-va:#b45309; --tk-pp:#c2410c; --tk-at:#0b63c5;
+  --code-bg:#fafbfe; --code-border:#e6e8f2;
 }
 :root[data-theme="dark"]{
   --bg:#0e1016; --card:#161923; --text:#e7e9f0; --muted:#9aa1b2;
@@ -25,6 +30,10 @@
   --shadow-sm:0 1px 2px rgba(0,0,0,.4);
   --shadow:0 4px 16px rgba(0,0,0,.35);
   --shadow-lg:0 16px 44px rgba(0,0,0,.5);
+  /* 深色底上要提亮、降饱和，否则紫/蓝发糊 */
+  --tk-cm:#7b8296; --tk-st:#7ee2a8; --tk-nu:#f0a868; --tk-kw:#d8a0f0;
+  --tk-bi:#7fb4ff; --tk-va:#f2b866; --tk-pp:#f79a5c; --tk-at:#7fb4ff;
+  --code-bg:#12151f; --code-border:#252a3a;
 }
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
@@ -38,6 +47,9 @@
     --shadow-sm:0 1px 2px rgba(0,0,0,.4);
     --shadow:0 4px 16px rgba(0,0,0,.35);
     --shadow-lg:0 16px 44px rgba(0,0,0,.5);
+    --tk-cm:#7b8296; --tk-st:#7ee2a8; --tk-nu:#f0a868; --tk-kw:#d8a0f0;
+    --tk-bi:#7fb4ff; --tk-va:#f2b866; --tk-pp:#f79a5c; --tk-at:#7fb4ff;
+    --code-bg:#12151f; --code-border:#252a3a;
   }
 }
 *{box-sizing:border-box; margin:0; padding:0;}
@@ -2939,3 +2951,24 @@ body.tutResizing *{cursor:col-resize !important;}
   border-radius:7px;
   cursor:text;
 }
+
+/* ---- 「点哪儿改哪儿」的悬停描边：教程正文 + 笔记渲染态共用一套 ----
+   挂在哪个元素上由 app.js 的 mdPickTarget() 决定 —— 它和"点下去光标落到哪段源码"
+   是**同一个判断**（mdPickOffset 也调它），所以描出来的范围永远等于将要编辑的那块，
+   不会出现"描 A 块、点下去却改 B 处"这种更误导的提示。
+   教程正文双击进入、笔记单击进入，触发手势各自不变，只有描边观感统一。 */
+.mdClickPick{
+  outline:1.5px solid var(--accent-border);
+  outline-offset:3px;
+  border-radius:7px;
+  cursor:text;
+}
+/* 目录/正文里那条老规则（.tutBody :is(…):hover）只认"鼠标下那个标签"，跟真正的编辑
+   目标不总是一致（点在引用里的段落上时，它会把外层 blockquote 也描一圈）。描边统一
+   交给 .mdClickPick 之后，把旧规则多描出来的那圈收掉，免得同一处出现两层框。 */
+.tutPage .tutBody :is(p,li,h1,h2,h3,h4,h5,h6,blockquote,pre,dt,dd,figcaption):hover:not(.mdClickPick){
+  outline:none;
+}
+/* 笔记栏的 #nnView 是 overflow:auto，描边画在盒子外面、贴着左右边缘那两笔会被裁掉。
+   给它留出描边的余量（只动内边距，不动别的规则）：内容短到不滚动时照样能看见整圈框。 */
+#nnView{padding:1px 4px;}

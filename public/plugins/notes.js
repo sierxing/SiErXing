@@ -8,7 +8,7 @@
  * 由 app.js 在教程页挂载/卸载（仅当组件启用时）。
  */
 (function () {
-  const { api, esc, toast, mdToHTML } = SiErXing;
+  const { api, esc, toast, mdToHTML, mdPickOffset } = SiErXing;
 
   let tid = 0, nodeId = 0, nodeTitle = '';
   let current = '';          // 已保存的内容
@@ -56,8 +56,11 @@
     editing = false;
     const body = document.getElementById('nnBody');
     if (!body) return;
+    /* srcLines:true → 每个块带上 data-src（源码起始行号）。悬停描边（app.js 的
+       mdPickHoverBind）与下面单击定位都靠它，两边共用 mdPickTarget/mdPickOffset，
+       所以"描出来的块"= "点下去会改的那块"（教程正文同一套）。 */
     body.innerHTML = current.trim()
-      ? `<div id="nnView" class="mdBody" title="点一下正文，就在这一句上开始改">${mdToHTML(current)}</div>`
+      ? `<div id="nnView" class="mdBody" title="点一下正文，就在这一句上开始改">${mdToHTML(current, { srcLines: true })}</div>`
       : `<div id="nnView" class="nnEmpty">还没有笔记，点右上「编辑」开始记<br><span class="muted">支持 Markdown（标题/列表/代码/加粗）</span></div>`;
     const v = document.getElementById('nnView');
     /* 笔记栏里用**单击**：用户要的就是"点哪改哪"（教程正文那边用双击，
@@ -76,18 +79,21 @@
   }
 
   /* ---- 编辑态：单个框里写 ---- */
-  /* 从光标处开始改：双击（或点「编辑」）那一下落在哪，编辑框光标就停在源码对应位置；
+  /* 从光标处开始改：点（或点「编辑」按钮）那一下落在哪，编辑框光标就停在源码对应位置；
      定位不到就按视图态的滚动比例折算，总之不许每次都跳回开头。 */
   function showEdit(e) {
     editing = true;
     const body = document.getElementById('nnBody');
     if (!body) return;
     /* ⚠️ 下面要整体替换 DOM，选中区/滚动位置会没，所以先把"想改哪"记下来 */
-    let anchor = '', word = '', ratio = 0;
+    let anchor = '', word = '', ratio = 0, pick = -1;
     try {
       const view = document.getElementById('nnView');
       const target = e && e.target ? e.target : null;
       if (target && view) {
+        /* ① 渲染时标的源码行号（最准；跟悬停描边同一个判据） */
+        if (typeof mdPickOffset === 'function') pick = mdPickOffset(current, target, view);
+        /* ② 老办法按文字匹配 —— 只在没标 data-src 的内容上兜底 */
         let d = target;
         while (d && d !== view && d.parentNode) {
           const tag = String(d.tagName || '').toLowerCase();
@@ -103,9 +109,9 @@
     body.innerHTML = `<textarea id="nnEditor" spellcheck="false" placeholder="Markdown 笔记，Ctrl+S 保存"></textarea>`;
     const ta = document.getElementById('nnEditor');
     ta.value = current;
-    let p = -1;
-    for (const c of anchorCands(anchor)) { const i = current.indexOf(c); if (i >= 0) { p = i; break; } }
+    let p = pick;
     if (p >= 0 && word) { const w = current.indexOf(word, p); if (w >= 0 && w < p + 400) p = w; }
+    if (p < 0) for (const c of anchorCands(anchor)) { const i = current.indexOf(c); if (i >= 0) { p = i; break; } }
     if (p < 0 && word) { const i = current.indexOf(word); if (i >= 0) p = i; }
     if (p < 0) p = Math.round(ratio * current.length);
     p = Math.max(0, Math.min(current.length, p));

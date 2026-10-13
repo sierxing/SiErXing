@@ -1796,7 +1796,84 @@ function tutEditPos(src, fmt, ratioFb, anchorOff) {
 function tutClickRoot() {
   try { return document.querySelector('#app .tutBody') || null; } catch (e) { return null; }
 }
+/* ===== 「点哪儿改哪儿」的唯一判据（教程正文 / 笔记渲染态共用）=====
+   渲染时 mdToHTML 给每个块标了 data-src = 该块的**源码起始行号**（opts.srcLines）。
+   这里从鼠标下的元素往上找最近的、带 data-src 的那块 —— **悬停描边**与**点下去定位**
+   都走这个函数，所以"描出来的块"与"点下去会改的那块"必定是同一个（先渲染后定位，
+   不可能出现描 A 块、光标落 B 处）。
+   为什么不再按文字在源码里找（老办法）：标题带 `##`、列表带 `-`、表格带 `|`、
+   代码块带围栏，渲染后的文字跟源码对不上；同一句话出现两次还会匹到更早那处 ——
+   实测双击 h2 会掉回文档开头（`## 1.5 小时掌握 MCP` 那行）。 */
+function mdPickTarget(el, root) {
+  try {
+    let d = el;
+    while (d && d !== root && d.parentNode) {
+      if (d.getAttribute) {
+        const v = d.getAttribute('data-src');
+        if (v != null && /^\d+$/.test(String(v))) return d;
+      }
+      d = d.parentNode;
+    }
+  } catch (e) {}
+  return null;
+}
+/* 源码第 line 行（0 基）的字符偏移 */
+function mdLineOff(src, line) {
+  const s = String(src == null ? '' : src);
+  let off = 0;
+  for (let k = 0, n = Math.max(0, line | 0); k < n; k++) {
+    const j = s.indexOf('\n', off);
+    if (j < 0) return s.length;
+    off = j + 1;
+  }
+  return Math.min(off, s.length);
+}
+/* 由 mdPickTarget 找到的那块算出它在 src 里的字符偏移；拿不到返回 -1（调用方自己兜底）。
+   ⚠️ 落在围栏行（```lang）上时往后挪一行 —— 代码块双击该进代码里，不是停在围栏上。 */
+function mdPickOffset(src, el, root) {
+  const pick = mdPickTarget(el, root);
+  if (!pick) return -1;
+  const ln = parseInt(pick.getAttribute('data-src'), 10);
+  if (!(ln >= 0)) return -1;
+  const s = String(src == null ? '' : src);
+  let off = mdLineOff(s, ln);
+  if (String(pick.tagName || '').toUpperCase() === 'PRE') {
+    const ls = s.lastIndexOf('\n', Math.max(0, off - 1)) + 1;
+    let le = s.indexOf('\n', ls); if (le < 0) le = s.length;
+    if (le < s.length && /^\s*`{3,}/.test(s.slice(ls, le))) off = le + 1;
+  }
+  return off;
+}
+/* 悬停反馈：鼠标滑到哪一块就把哪一块描出来（教程正文 + 笔记渲染态共用一套 .mdClickPick）。
+   触发手势各自不变（教程双击、笔记单击），这里只负责"描哪一块"。 */
+function mdPickHoverBind() {
+  if (document.__mdPickHover) return;
+  document.__mdPickHover = true;
+  let cur = null;
+  const clear = () => { if (cur) { try { cur.classList.remove('mdClickPick'); } catch (e) {} cur = null; } };
+  document.addEventListener('mouseover', e => {
+    const t = e.target;
+    if (!t || !t.closest) { clear(); return; }
+    const root = t.closest('.tutBody') || t.closest('#nnView');
+    /* 链接 / 按钮 / 引用角标 / 划线段 / 图：点了不编辑，就别描（否则等于骗人） */
+    if (!root || t.closest('a,button,input,textarea,select,svg,img,sup.cite,mark.tnm')) { clear(); return; }
+    const pick = mdPickTarget(t, root);
+    if (pick === cur) return;
+    clear();
+    if (pick) { cur = pick; pick.classList.add('mdClickPick'); }
+  });
+  document.addEventListener('mouseout', e => {
+    if (!cur) return;
+    const to = e.relatedTarget;
+    if (to && cur.contains && cur.contains(to)) return;   // 还在同一块里，别闪
+    clear();
+  });
+  document.addEventListener('scroll', clear, true);
+  document.addEventListener('mouseleave', clear, true);
+}
+mdPickHoverBind();
 /* 从点中的那段文字里挑几段"最可能在源码里逐字出现"的内容，去源码里找偏移。
+   （只作为兜底：渲染没标 data-src 的场合，如 HTML 教程、教程版本预览）
    ⚠️ 渲染时有几处会往正文里塞东西：引用角标 [123456] → <sup class="cite">⧉</sup>，
    所以先去掉 ⧉ 再匹配（否则整段都找不着、只能退回滚动比例）。 */
 function tutTextAnchor(src, txt) {
@@ -1845,11 +1922,19 @@ async function tutManualEnter(anchorEl) {
   } catch (e) {}
   if (!src) src = (tut && tut.content) || '';
   if (!src) { tutEditing = false; toast('教程内容加载失败，请刷新后重试'); return; }
-  const anchorOff = anchorEl ? tutAnchorOff(anchorEl, tutClickRoot(), src) : -1;
+  /* 定位：① mdToHTML 渲染时标的源码行号（最准，标题/列表/表格/代码块都准）
+             ② 老办法按文字匹配（只在没标 data-src 时兜底，如 HTML 教程、版本预览）
+            —— 两条都失败就交给 tutEditPos 按阅读位置兜底，**绝不跳回开头**。 */
+  let anchorOff = -1;
+  if (anchorEl) {
+    const root = tutClickRoot();
+    anchorOff = mdPickOffset(src, anchorEl, root);
+    if (anchorOff < 0) anchorOff = tutAnchorOff(anchorEl, root, src);
+  }
   const wrap = document.createElement('div');
   wrap.id = 'tutEditorWrap';
   wrap.className = 'tutEditorWrap';
-  wrap.innerHTML = '<div class="tutEditorBar">正在编辑（' + (fmt === 'md' ? 'Markdown' : 'HTML') + '）· 改完点「💾 保存」，或点「取消」放弃</div><textarea id="tutEditor" spellcheck="false"></textarea>';
+  wrap.innerHTML = '<div class="tutEditorBar">正在编辑（' + (fmt === 'md' ? 'Markdown' : 'HTML') + '）· 改完点「💾 保存」（或 Ctrl+S），点「取消」放弃</div><textarea id="tutEditor" spellcheck="false"></textarea>';
   if (contentEl && contentEl.parentNode) {
     contentEl.style.display = 'none';
     contentEl.parentNode.insertBefore(wrap, contentEl);
@@ -1859,6 +1944,12 @@ async function tutManualEnter(anchorEl) {
   }
   const ta = document.getElementById('tutEditor');
   ta.value = src;
+  /* Ctrl+S / Cmd+S 保存（Esc 取消）—— 必须 preventDefault，否则浏览器弹"保存网页"。
+     走的是与工具条「💾 保存」完全相同的 tutManualSave()，不是第二份保存逻辑。 */
+  ta.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); tutManualSave(); }
+    if (e.key === 'Escape') { tutManualCancel(); }
+  });
   // 跳到"要改的那一段"，而不是从头开始找
   let editJumpSec = 0;
   try {
@@ -1884,8 +1975,45 @@ async function tutManualEnter(anchorEl) {
   const mb = document.getElementById('tutManualBtn'); if (mb) mb.textContent = '✎ 编辑中…';
   const cb = document.getElementById('tutCancelBtn');
   if (cb) cb.hidden = false;
-  toast(anchorOff >= 0 ? '已进入编辑并定位到你点的那一段（Ctrl+S 保存不了这里，点「💾 保存」）'
+  toast(anchorOff >= 0 ? '已进入编辑并定位到你点的那一段（Ctrl+S 或「💾 保存」）'
     : '已进入编辑模式' + (editJumpSec ? '（已定位到第 ' + editJumpSec + ' 节附近）' : '（共 ' + src.length + ' 字）'));
+}
+/* 保存 / 取消：工具条按钮与编辑器里的 Ctrl+S / Esc 共用这两个函数（只有一份逻辑） */
+async function tutManualSave() {
+  const rr = parseRoute();
+  if (rr.view !== 'tutorial') return;
+  const ta = document.getElementById('tutEditor');
+  if (!ta) return;
+  const sb = document.getElementById('tutSaveBtn');
+  if (sb && sb.disabled) return;                 // 保存中，别重复提交（Ctrl+S 连按）
+  if (sb) { sb.disabled = true; sb.textContent = '保存中…'; }
+  try {
+    await api('/api/tutorials/' + rr.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: ta.value }) });
+    toast('✅ 已保存（可在「📜 版本对比」回滚）');
+    tutEditing = false;
+    try { const w = document.getElementById('tutEditorWrap'); if (w) w.remove(); } catch (e2) {}
+    const sv3 = document.getElementById('tutSaveBtn'); if (sv3) sv3.hidden = true;
+    const cb3 = document.getElementById('tutCancelBtn'); if (cb3) cb3.hidden = true;
+    const mb3 = document.getElementById('tutManualBtn'); if (mb3) mb3.textContent = '✎ 手动编辑';
+    if (state.goal) { try { await loadGoal(state.goal.id); } catch (e2) {} }
+    renderTutorialPage(rr.id);
+  } catch (err) { toast(err.message); }
+  if (sb) { sb.disabled = false; sb.textContent = '💾 保存'; }
+}
+async function tutManualCancel() {
+  const rr = parseRoute();
+  tutEditing = false;
+  try { const w = document.getElementById('tutEditorWrap'); if (w) w.remove(); } catch (e2) {}
+  try {
+    const ce = document.getElementById('tutFrame') || tutRoot();
+    if (ce) ce.style.display = '';
+  } catch (e2) {}
+  const sv2 = document.getElementById('tutSaveBtn'); if (sv2) sv2.hidden = true;
+  const cb2 = document.getElementById('tutCancelBtn'); if (cb2) cb2.hidden = true;
+  const mb2 = document.getElementById('tutManualBtn'); if (mb2) mb2.textContent = '✎ 手动编辑';
+  if (state.goal) { try { await loadGoal(state.goal.id); } catch (e2) {} }
+  try { await renderTutorialPage(rr.id); } catch (e2) { location.reload(); }
+  toast('已取消编辑');
 }
 /* 正文里**双击**一段 → 进编辑（单击太容易误触，用户反馈过）。链接/按钮/引用角标/划线段/图上都不抢；
    刚拖选过文字（要划线或复制）也不抢。 */
@@ -1918,43 +2046,10 @@ document.addEventListener('click', async e => {
   const sb = e.target.closest && e.target.closest('#tutSaveBtn');
   const cb0 = e.target.closest && e.target.closest('#tutCancelBtn');
   if (!eb && !sb && !cb0) return;
-  const rr = parseRoute();
-  if (rr.view !== 'tutorial') return;
-  const tut = ((state.goal && state.goal.tutorials) || []).find(x => Number(x.id) === Number(rr.id));
+  if (parseRoute().view !== 'tutorial') return;
   if (eb) { await tutManualEnter(null); return; }
-  const cbtn = e.target.closest && e.target.closest('#tutCancelBtn');
-  if (cbtn) {
-    tutEditing = false;
-    try { const w = document.getElementById('tutEditorWrap'); if (w) w.remove(); } catch (e2) {}
-    try {
-      const ce = document.getElementById('tutFrame') || tutRoot();
-      if (ce) ce.style.display = '';
-    } catch (e2) {}
-    const sv2 = document.getElementById('tutSaveBtn'); if (sv2) sv2.hidden = true;
-    const cb2 = document.getElementById('tutCancelBtn'); if (cb2) cb2.hidden = true;
-    const mb2 = document.getElementById('tutManualBtn'); if (mb2) mb2.textContent = '✎ 手动编辑';
-    if (state.goal) { try { await loadGoal(state.goal.id); } catch (e2) {} }
-    try { await renderTutorialPage(rr.id); } catch (e2) { location.reload(); }
-    toast('已取消编辑');
-    return;
-  }
-  if (sb) {
-    const ta = document.getElementById('tutEditor');
-    if (!ta) return;
-    sb.disabled = true; sb.textContent = '保存中…';
-    try {
-      await api('/api/tutorials/' + rr.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: ta.value }) });
-      toast('✅ 已保存（可在「📜 版本对比」回滚）');
-      tutEditing = false;
-      try { const w = document.getElementById('tutEditorWrap'); if (w) w.remove(); } catch (e2) {}
-      const sv3 = document.getElementById('tutSaveBtn'); if (sv3) sv3.hidden = true;
-      const cb3 = document.getElementById('tutCancelBtn'); if (cb3) cb3.hidden = true;
-      const mb3 = document.getElementById('tutManualBtn'); if (mb3) mb3.textContent = '✎ 手动编辑';
-      if (state.goal) { try { await loadGoal(state.goal.id); } catch (e2) {} }
-      renderTutorialPage(rr.id);
-    } catch (err) { toast(err.message); }
-    sb.disabled = false; sb.textContent = '💾 保存';
-  }
+  if (cb0) { await tutManualCancel(); return; }
+  if (sb) { await tutManualSave(); }
 });
 /* ===== 教程大纲（侧边栏）：点击跳转 + 当前章节高亮 + 阅读进度 ===== */
 /* ⚠️ 教程正文**不一定在主文档里**：
@@ -3365,6 +3460,215 @@ function bindTutorialCard() {
 function mdEscape(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
+
+/* ===================== 教程正文的「标签卡片」 =====================
+   教程是按固定骨架生成的：做什么 → 为什么这样做 → 具体怎么做 → 预期结果/如何自检 →
+   常见错误与排查 …。模型每次都会把这些标签写成 `**标签**` 单独一段。
+   但它们渲染出来只是一行加粗字，跟正文没区别 —— 于是整篇看起来就是"一大坨文字，
+   抓不到重点"（用户的原话）。
+   这里把「标签段 + 它后面紧跟的内容」识别出来，包成带图标和颜色的卡片。
+   纯渲染层处理：不用改提示词，**已有的老教程也能立刻受益**。 */
+const CALL_LABELS = [
+  { re: /^(做什么|怎么做|具体怎么做|操作步骤|动手做)$/, cls: 'step', icon: '🛠', name: '做什么' },
+  { re: /^(为什么(这样做|这么做|要这样)?|原因|原理)$/, cls: 'why', icon: '💡', name: '为什么这样做' },
+  { re: /^(预期结果|预期结果如何自检|如何自检|怎么自检|自检|自检方法|验证方法)$/, cls: 'check', icon: '✅', name: '预期结果 / 如何自检' },
+  { re: /^(常见错误与排查|常见错误|常见问题|排错|排查|避坑|坑|踩坑|陷阱)$/, cls: 'warn', icon: '⚠️', name: '常见错误与排查' },
+  { re: /^(重点|重点与坑|关键点|核心|要点|记住)$/, cls: 'key', icon: '⭐', name: '重点' },
+  { re: /^(注意|提示|小技巧|技巧|经验|贴士|建议)$/, cls: 'tip', icon: '📌', name: '提示' },
+  { re: /^(面试官会问|面试高频追问|面试高频|面试追问|可能会被问|面试怎么答)$/, cls: 'iv', icon: '🎤', name: '面试会问' },
+  { re: /^(验收标准|完成标准|做到什么程度算完成)$/, cls: 'goal', icon: '🎯', name: '验收标准' }
+];
+const calloutNorm = s => String(s || '').replace(/[\s　]/g, '').replace(/[：:。，,、/／]+$/, '');
+/* 主标签：再次出现就意味着"换了一组"（换了一步、换了一条错误清单）。
+   辅助标签（为什么这样做 / 预期结果 / 提示）可以在同一组里重复。 */
+const PRIMARY_KINDS = { step: 1, warn: 1, goal: 1, iv: 1 };
+/* 一个段落片段是不是「**标签**：正文」这种形态。
+   ⚠️ 实际语料里标签**九成和正文同段**（"**做什么**：找一个 Skill 目录…"），
+   独占一段的反而是少数。只认独占形态的话卡片一个都出不来 —— 实测过。 */
+function calloutOf(seg) {
+  const m = String(seg || '').match(/^<strong>([\s\S]{1,26}?)<\/strong>\s*[：:]?\s*([\s\S]*)$/);
+  if (!m) return null;
+  const key = calloutNorm(m[1].replace(/[\/／]/g, ''));
+  if (!key) return null;
+  for (const L of CALL_LABELS) if (L.re.test(key)) return { kind: L, label: m[1].trim(), value: String(m[2] || '').trim() };
+  return null;
+}
+/* 把 HTML 切成**顶层块**。不能拿正则偷懒（`<ul>` 里有嵌套 `<ul>`，
+   惰性匹配会在内层 `</ul>` 就停住，把列表腰斩），所以按同名标签计数配对。 */
+function tutSplitBlocks(html) {
+  const out = [];
+  const OPEN = /^<(h[1-6]|p|ul|ol|pre|table|blockquote|div|hr|figure)\b/i;
+  let i = 0, guard = 0;
+  while (i < html.length && guard++ < 20000) {
+    const m = OPEN.exec(html.slice(i));
+    if (!m) { const rest = html.slice(i); if (rest.trim()) out.push(rest); break; }
+    if (m.index > 0) {
+      const pre = html.slice(i, i + m.index);
+      if (pre.trim()) out.push(pre);
+      i += m.index;
+    }
+    const tag = m[1].toLowerCase();
+    if (tag === 'hr') { const e = html.indexOf('>', i); out.push(html.slice(i, e + 1)); i = e + 1; continue; }
+    const scan = new RegExp('<' + tag + '\\b|</' + tag + '\\s*>', 'gi');
+    scan.lastIndex = i;
+    let depth = 0, end = -1, mm;
+    while ((mm = scan.exec(html))) {
+      if (mm[0][1] === '/') { depth--; if (depth <= 0) { end = mm.index + mm[0].length; break; } }
+      else depth++;
+      if (depth > 300) break;
+    }
+    if (end < 0) { out.push(html.slice(i)); break; }
+    out.push(html.slice(i, end));
+    i = end;
+  }
+  return out;
+}
+/* 把标签包装成「行」：连续的标签行合成一张卡片，一行一个标签。
+   读起来就是一张对照表 —— 做什么 / 为什么这样做 / 预期结果各占一行，
+   比原来"整段加粗字混在正文里"清楚得多。 */
+function tutGroupCallouts(html) {
+  const blocks = tutSplitBlocks(html);
+  const out = [];
+  let card = null;
+  const flush = () => {
+    if (!card || !card.rows.length) { card = null; return; }
+    /* ⚠️ 类名必须带 mdc- 前缀：直接叫 step / warn 会撞上项目里已有的全局类
+       （.step 是 18×18 的步骤徽标：圆形 + 白字），于是卡片行被压成一个小圆点、
+       内容变成白字白底彻底看不见 —— 实测翻过这个车。 */
+    out.push('<div class="mdCall">' + card.rows.map(r =>
+      '<div class="mdCallRow mdc-' + r.cls + '"' + (r.attr || '') + '>'
+      + '<div class="mdCallK"><span class="mdCallIcon">' + r.icon + '</span>' + r.label + '</div>'
+      + '<div class="mdCallV">' + (r.html || '') + '</div>'
+      + '</div>').join('') + '</div>');
+    card = null;
+  };
+  const lastOpen = () => card && card.rows.length && !card.rows[card.rows.length - 1].html;
+  for (const b of blocks) {
+    /* 标题和分隔线是硬边界：卡片不跨章节 */
+    if (/^<h[1-6]\b/i.test(b) || /^<hr/i.test(b)) { flush(); out.push(b); continue; }
+    if (/^<p\b/i.test(b)) {
+      /* ⚠️ 这里原来写死 /^<p>/，段落一旦带上 data-src（`<p data-src="865">`）就剥不掉前缀，
+         接着 calloutOf 认不出标签 → 卡片不再成形（渲染会变）。改成认「带任意属性的 <p …>」。
+         并把段落的属性搬到卡片行上：内容进了卡片后 <p> 外壳就没了，不搬的话
+         「点哪儿改哪儿」找不到这块对应哪段源码（见 mdPickTarget）。 */
+      const pm = b.match(/^<p\b([^>]*)>/);
+      const pAttr = pm ? pm[1] : '';
+      const inner = b.replace(/^<p\b[^>]*>/, '').replace(/<\/p>$/, '');
+      const segs = inner.split('<br>');
+      if (calloutOf(segs[0])) {
+        if (!card) card = { rows: [] };
+        if (card.rows.length >= 10) flush();
+        if (!card) card = { rows: [] };
+        let cur = null;
+        for (const seg of segs) {
+          const c = calloutOf(seg);
+          if (c) {
+            if (cur) card.rows.push(cur);
+            /* 「做什么」这类**主标签**再次出现 = 换了一步，另起一张卡。
+               不然整节会并成一张十行的巨卡，反而看不出有几步（实测过）。 */
+            if (PRIMARY_KINDS[c.kind.cls] && card.rows.some(r => r.cls === c.kind.cls)) {
+              flush();
+              card = { rows: [] };
+            }
+            cur = { label: c.label, cls: c.kind.cls, icon: c.kind.icon, html: c.value, attr: pAttr };
+          } else if (cur) {
+            cur.html = (cur.html ? cur.html + '<br>' : '') + seg;
+          }
+        }
+        if (cur) card.rows.push(cur);
+        continue;
+      }
+      /* 普通段落：卡片最后一行还没内容 → 当作它的内容（"**做什么**" 独占一段的写法） */
+      if (lastOpen()) { card.rows[card.rows.length - 1].html = b; continue; }
+      flush();
+      out.push(b);
+      continue;
+    }
+    /* 列表 / 代码块 / 表格：同样可以当上一行的内容 */
+    if (lastOpen()) { card.rows[card.rows.length - 1].html = b; continue; }
+    flush();
+    out.push(b);
+  }
+  flush();
+  return out.join('');
+}
+
+/* ===== 零依赖语法高亮 =====
+   为什么自己写：本项目是零依赖 + 离线可用（本机 exe、内网也能跑），引 CDN 会让
+   没网的机器白屏，引 npm 依赖又违反零依赖纪律。规模上也不需要通用引擎 ——
+   实测线上 2349 个代码块里 99% 就是下面这十几种语言。
+   做法：每种语言一条**合并正则**（注释|字符串|数字|关键字|内置|变量…），
+   一次线性扫描，匹配之外的原样转义。没有回溯风险、不会死循环 ——
+   mdToHTML 那条路被正则回溯坑过一次（AGENTS.md 第 13 条），这里不重蹈。
+   ⚠️ 加新语言时：每个分支都必须至少吃掉 1 个字符，否则 exec 会原地打转。 */
+const HL_LANGS = {
+  python: () => /(?<cm>#[^\n]*)|(?<st>[rbfuRBFU]{0,2}(?:'''[\s\S]*?'''|"""[\s\S]*?"""|'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\\n])*"))|(?<nu>\b\d[\d_]*(?:\.\d*)?(?:[eE][+-]?\d+)?\b)|(?<kw>\b(?:False|None|True|and|as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield)\b)|(?<bi>\b(?:print|len|range|str|int|float|list|dict|set|tuple|bool|open|sum|min|max|abs|enumerate|zip|sorted|reversed|isinstance|type|input|super|self|cls|Exception|ValueError|KeyError|TypeError|IndexError|AttributeError|RuntimeError|StopIteration|__init__|__name__|__main__)\b)/g,
+  bash: () => /(?<cm>#[^\n]*)|(?<st>'(?:[^'\n])*'|"(?:\\.|[^"\\\n])*")|(?<va>\$\{[^}\n]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$[0-9@#?*!$-])|(?<nu>\b\d+\b)|(?<kw>\b(?:if|then|else|elif|fi|for|while|until|do|done|case|esac|function|return|export|local|source|set|unset|read|exit|shift|trap|eval|exec|declare|printf|echo|cd|ls|cat|grep|egrep|sed|awk|cut|sort|uniq|head|tail|wc|find|xargs|curl|wget|git|npm|npx|pnpm|yarn|pip|pip3|python|python3|node|docker|docker-compose|kubectl|make|mkdir|rm|rmdir|cp|mv|touch|chmod|chown|sudo|apt|apt-get|brew|systemctl|service|ssh|scp|tar|zip|unzip|jq|tee|tr|diff|which|env)\b)/g,
+  json: () => /(?<st>"(?:\\.|[^"\\])*")|(?<nu>-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)|(?<kw>\b(?:true|false|null)\b)/g,
+  yaml: () => /(?<cm>#[^\n]*)|(?<st>'(?:[^'\n])*'|"(?:\\.|[^"\\\n])*")|(?<at>^[ \t]*-?[ \t]*[A-Za-z_][\w.-]*(?=\s*:))|(?<nu>\b-?\d+(?:\.\d+)?\b)|(?<kw>\b(?:true|false|null|yes|no|on|off|~)\b)/gm,
+  sql: () => /(?<cm>--[^\n]*|\/\*[\s\S]*?\*\/)|(?<st>'(?:''|[^'\n])*')|(?<nu>\b\d+(?:\.\d+)?\b)|(?<kw>\b(?:SELECT|FROM|WHERE|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|TABLE|INDEX|VIEW|DROP|ALTER|ADD|COLUMN|PRIMARY|KEY|FOREIGN|REFERENCES|NOT|NULL|DEFAULT|UNIQUE|JOIN|LEFT|RIGHT|INNER|OUTER|ON|AS|AND|OR|IN|LIKE|BETWEEN|GROUP|BY|ORDER|HAVING|LIMIT|OFFSET|DISTINCT|COUNT|SUM|AVG|MIN|MAX|CASE|WHEN|THEN|ELSE|END|UNION|ALL|EXISTS|IS|ASC|DESC|WITH|BEGIN|COMMIT|ROLLBACK|TRANSACTION|IF|EXPLAIN|ANALYZE|PRAGMA|INTEGER|TEXT|REAL|BLOB|NUMERIC|VARCHAR|BOOLEAN|TIMESTAMP|PRIMARY|AUTOINCREMENT)\b)/gi,
+  js: () => /(?<cm>\/\/[^\n]*|\/\*[\s\S]*?\*\/)|(?<st>`(?:\\.|[^`\\])*`|'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\\n])*")|(?<nu>\b\d+(?:\.\d+)?(?:n)?\b|0[xX][0-9a-fA-F]+)|(?<kw>\b(?:await|async|break|case|catch|class|const|continue|default|delete|do|else|export|extends|finally|for|from|function|get|if|import|in|instanceof|let|new|of|return|set|static|super|switch|this|throw|try|typeof|var|void|while|yield|interface|type|enum|implements|readonly|public|private|declare|as|satisfies)\b)|(?<bi>\b(?:true|false|null|undefined|NaN|Infinity|console|window|document|JSON|Object|Array|String|Number|Boolean|Promise|Map|Set|Date|Math|RegExp|Error)\b)/g,
+  markdown: () => /(?<cm>^\s*>.*$)|(?<st>`[^`\n]+`|```[\s\S]*?```)|(?<kw>^#{1,6}[^\n]*$)|(?<bi>\*\*[^*\n]+\*\*)|(?<nu>^\s*(?:[-*+]|\d+\.)\s)/gm,
+  powershell: () => /(?<cm>#[^\n]*)|(?<st>'(?:''|[^'\n])*'|"(?:`"|[^"\n])*")|(?<va>\$[A-Za-z_][\w:]*|\$\{[^}\n]*\})|(?<nu>\b\d+(?:\.\d+)?\b)|(?<kw>\b(?:function|param|if|else|elseif|foreach|for|while|do|until|switch|return|break|continue|try|catch|finally|throw|begin|process|end|filter|in|not|and|or|Write-Host|Write-Output|Get-ChildItem|Get-Content|Set-Content|New-Item|Remove-Item|Test-Path|Join-Path|Select-Object|Where-Object|ForEach-Object|\$true|\$false|\$null)\b)/gi,
+  dockerfile: () => /(?<cm>#[^\n]*)|(?<st>"(?:\\.|[^"\\\n])*"|'(?:[^'\n])*')|(?<kw>^\s*(?:FROM|RUN|CMD|LABEL|MAINTAINER|EXPOSE|ENV|ADD|COPY|ENTRYPOINT|VOLUME|USER|WORKDIR|ARG|ONBUILD|HEALTHCHECK|SHELL|AS)\b)|(?<va>\$\{?[\w]+\}?)/gim,
+  nginx: () => /(?<cm>#[^\n]*)|(?<st>"(?:\\.|[^"\\\n])*"|'(?:[^'\n])*')|(?<kw>^\s*(?:server|location|upstream|events|http|include|listen|server_name|root|index|proxy_pass|proxy_set_header|rewrite|return|add_header|try_files|gzip|ssl_certificate|ssl_certificate_key|client_max_body_size|access_log|error_log|worker_processes)\b)|(?<va>\$[\w]+)/gim,
+  html: () => /(?<cm>&lt;!--[\s\S]*?--&gt;|<!--[\s\S]*?-->)|(?<st>"[^"]*"|'[^']*')|(?<kw><\/?[A-Za-z][\w:-]*|\/?>)|(?<at>\b[A-Za-z-]+(?==))/g,
+  css: () => /(?<cm>\/\*[\s\S]*?\*\/)|(?<st>"[^"\n]*"|'[^'\n]*')|(?<nu>#[0-9a-fA-F]{3,8}\b|\b\d+(?:\.\d+)?(?:px|em|rem|%|s|ms|vh|vw|fr|deg)?\b)|(?<at>^[ \t]*[.#][\w-]+|@[\w-]+|::?[\w-]+)|(?<kw>\b(?:var|calc|rgb|rgba|hsl|url|linear-gradient|radial-gradient|flex|grid|absolute|relative|fixed|sticky|none|block|inline)\b)/gm,
+  cpp: () => /(?<cm>\/\/[^\n]*|\/\*[\s\S]*?\*\/)|(?<pp>^\s*#\s*\w+)|(?<st>"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')|(?<nu>\b\d+(?:\.\d+)?\b)|(?<kw>\b(?:auto|bool|break|case|catch|char|class|const|constexpr|continue|default|delete|do|double|else|enum|explicit|extern|false|float|for|friend|if|inline|int|long|namespace|new|nullptr|operator|private|protected|public|return|short|sizeof|static|struct|switch|template|this|throw|true|try|typedef|typename|using|virtual|void|volatile|while|std|string|vector|map|set|cout|cin|endl|printf|size_t)\b)/g,
+  toml: () => /(?<cm>#[^\n]*)|(?<st>"(?:\\.|[^"\\\n])*"|'(?:[^'\n])*')|(?<kw>^[ \t]*\[+[^\]]+\]+)|(?<at>^[ \t]*[\w.-]+(?=\s*=))|(?<nu>\b\d+(?:\.\d+)?\b)|(?<bi>\b(?:true|false)\b)/gm,
+  csv: () => /(?<st>^[^\n,]*)/gm
+};
+/* 类型别名 → 上面某一种 */
+const HL_ALIAS = {
+  py: 'python', python3: 'python',
+  sh: 'bash', shell: 'bash', zsh: 'bash', console: 'bash', powershell: 'powershell', ps1: 'powershell', pwsh: 'powershell',
+  javascript: 'js', jsx: 'js', ts: 'js', typescript: 'js', tsx: 'js', node: 'js', mjs: 'js', cjs: 'js',
+  yml: 'yaml', md: 'markdown', docker: 'dockerfile', 'docker-file': 'dockerfile',
+  html: 'html', xml: 'html', svg: 'html', vue: 'html',
+  cxx: 'cpp', cc: 'cpp', c: 'cpp', h: 'cpp', hpp: 'cpp', java: 'cpp', go: 'cpp', rust: 'cpp', rs: 'cpp', kotlin: 'cpp', swift: 'cpp', cs: 'cpp', csharp: 'cpp',
+  ini: 'toml', conf: 'toml', cfg: 'toml',
+  sqlite: 'sql', mysql: 'sql', postgres: 'sql', postgresql: 'sql'
+};
+/* 没标语言的块：只在**信号很强**时才猜，猜错比不猜更烦人。
+   目录树（├──）、纯输出、列表这类一律不猜，原样显示。 */
+function hlGuessLang(code) {
+  const s = String(code || '');
+  if (!s.trim()) return '';
+  if (/^\s*[\{\[]/.test(s)) { try { JSON.parse(s); return 'json'; } catch (e) {} }
+  if (/[├└]──|^\s*\.{1,2}\/\s*$/m.test(s)) return '';                 // 目录树/路径列表
+  const py = (s.match(/\b(?:def|import|from|class|elif|lambda|print)\b/g) || []).length;
+  const sh = (s.match(/^\s*(?:\$ |(?:npm|npx|pnpm|yarn|pip|pip3|python3?|git|docker|curl|wget|cd|ls|mkdir|cat|export|source|apt|brew|sudo|make|node)\b)/gm) || []).length;
+  const yamlKv = (s.match(/^\s*[\w.-]+:\s*\S/gm) || []).length;
+  if (sh >= 2 && sh >= py) return 'bash';
+  if (py >= 2) return 'python';
+  if (yamlKv >= 3) return 'yaml';
+  return '';
+}
+function hlEscape(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+/* 把一段源码变成带 <span class="tk-xx"> 的 HTML。
+   ⚠️ 兜底：万一某个分支能匹配空串，exec 会原地打转 —— 用 m.index===lastIndex 时
+   强制 lastIndex+1 顶出去，再配一个上限计数，绝不让它卡住标签页。 */
+function hlCode(code, lang) {
+  const raw = String(code == null ? '' : code);
+  const key = HL_ALIAS[String(lang || '').toLowerCase()] || String(lang || '').toLowerCase();
+  if (!HL_LANGS[key]) return hlEscape(raw);
+  const re = HL_LANGS[key]();
+  let out = '', last = 0, m, guard = 0;
+  const LIMIT = raw.length + 1000;
+  while ((m = re.exec(raw)) && guard++ < LIMIT) {
+    if (re.lastIndex === m.index) { re.lastIndex = m.index + 1; continue; }   // 防原地打转
+    if (m.index > last) out += hlEscape(raw.slice(last, m.index));
+    const g = m.groups || {};
+    const cls = g.cm ? 'tk-cm' : g.st ? 'tk-st' : g.nu ? 'tk-nu' : g.va ? 'tk-va'
+      : g.kw ? 'tk-kw' : g.bi ? 'tk-bi' : g.pp ? 'tk-pp' : g.at ? 'tk-at' : '';
+    out += cls ? '<span class="' + cls + '">' + hlEscape(m[0]) + '</span>' : hlEscape(m[0]);
+    last = m.index + m[0].length;
+  }
+  if (last < raw.length) out += hlEscape(raw.slice(last));
+  return out;
+}
 /* 放进 HTML 属性里的转义（srcdoc 要整段 HTML 塞进双引号属性） */
 function mdEscapeAttr(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -3412,56 +3716,110 @@ function mdInline(s) {
   s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
   return s;
 }
-/* 把与文字挤在一行的 ``` 围栏拆到独立行（题面/粘贴内容里常见） */
-function normalizeFences(raw) {
+/* 把与文字挤在一行的 ``` 围栏拆到独立行（题面/粘贴内容里常见）
+   mapOut（可选）：传数组进来时，逐行记下「输出行号 → 原始行号」。
+   为什么需要它：下面会拆行（```python x=1 → 两行）、丢行（裸围栏笔误连收尾一起丢）、
+   末尾补收尾，所以输出行号跟源码行号会整体漂移 —— mdToHTML 要给块标 data-src
+   （教程「双击哪儿改哪儿」按行定位，见 tutManualEnter），必须能映射回原始行。
+   不传就完全保持原来的行为。 */
+function normalizeFences(raw, mapOut) {
   let t = String(raw == null ? '' : raw).replace(/\r\n/g, '\n');
-  /* ⚠️ 这里原来写成 /(```+[ \t]*[\w+-]*)[ \t]*([^\n`])/ —— 贪婪的 [\w+-]* 会回溯，
-     把 ```` ```python\n ```` 拆成 ```` ```pytho\nn ````：语言标识少掉最后一个字母，
-     代码块里凭空多出一行字母 n（用户报的就是「首行被吞 + 语言标识错位」）。
-     语言标识后面必须**真的有空白**、且空白后面**真的有内容**，才允许拆行；
-     这样"标识+换行"、"标识+行尾空格"都不会误伤。 */
-  /* ⚠️ 「开围栏后面直接跟内容」只对**代码**拆行。原来无条件拆，于是 AI 在句子里写
-     行内三反引号（`…、**所有 ``` 必须闭合、不截断**`）时也被拆成独立一行 →
-     行内符号变成开围栏 → 后面整段被吞进代码块（用户报的「在代码块里的是：
-     必须闭合、不截断**…」正是这条）。判据：紧跟的是中日韩文字 = 在写散文，不拆。 */
-  const cjk = ch => /[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/.test(ch);
-  t = t.replace(/(```+[ \t]*[\w+-]*[ \t]+)([^\s\n`])/g, (m, a, b) => cjk(b) ? m : a + '\n' + b);
-  /* ⚠️ 只在本行**到这儿就结束**（或只剩语言标识）时才拆行 —— 那才是"开围栏"。
-     原来无条件拆：AI 写「…、**所有 ``` 必须闭合…**」这种**行内**三反引号时，
-     被硬拆成独立一行 → 一个行内符号变成开围栏 → 它后面整段都被吞进代码块
-     （用户报的「在代码块里的是：必须闭合、不截断**…」就是这个）。 */
-  t = t.replace(/([^\n`])(```+)(?=[\w-]*[ \t]*$)/gm, '$1\n$2');
-  /* ⚠️ 围栏**没配对**时，渲染会把从它开始的所有内容一路吞进代码块 ——
-     用户报的现象正是这个：自己消息里带了一个 ```，于是 **加粗**、]}、"}] 这些
-     全被当代码原样显示、下面整段都成了代码块。
-     这里数一下开围栏：**奇数就补一个收尾**，让代码块在它该结束的地方结束，
-     它后面的文字照常按 markdown 渲染。（判断用与 mdToHTML 同一套正则，
-     免得把「```python 后面还跟着文字」这种误判成围栏。） */
-  /* 行尾孤零零一个开围栏（后面什么都没有）：直接去掉 —— 留着只会渲染成一个**空代码块**
-     （用户报的「这三个符号的下方还渲染了一个代码块」就是它）。放在配对判断之前，
-     免得反而被算作"需要一个收尾"。 */
-  /* 裸围栏（**没标语言**）后面跟的若是**中文散文**，把它当模型的格式笔误直接删掉：
-     否则它会开一个代码块，把后面的正文整段吞进去（用户截图里那个大框就是这个）。
-     有语言标识的（```js / ```json / ```viz）和内容是代码的（中文占比低）一律不动。 */
-  t = t.split('\n').filter((ln, i, all) => {
-    if (!/^[ \t]*`{3,}[ \t]*$/.test(ln)) return true;
-    let j = i + 1;
-    while (j < all.length && !/^[ \t]*`{3,}[\w-]*[ \t]*$/.test(all[j])) j++;
-    const body = all.slice(i + 1, j).join('\n');
+  /* 把正文里的围栏规范化成「每行一个」。做这几件事：
+       1) 开围栏后面直接跟内容 → 拆成「开围栏行 + 内容行」（```python x=1 这种）
+       2) 裸围栏后面跟中文散文 → 判为笔误，连它的收尾一起丢掉
+       3) 结尾还开着 → 补一个收尾，免得渲染时把后面的内容一路吞进代码块
+
+     ⚠️ 三个必须遵守的约束（每一条都是踩过的坑）：
+     a. **围栏内部一律不改**。viz 块的 HTML、JS 模板串里的反引号、代码里的
+        `<code>```json ... ```</code>` 都长着围栏的样子，改了就等于凭空造出/
+        删掉围栏。实测：教程 1 正文里有一句 `<code>```json … ```</code>`，
+        被"行内围栏拆行"那条规则拆出一个假围栏，整篇配对随之错位。
+     b. **收尾围栏永远不该被删**。合法收尾就是一个裸 ``` 且后面跟着（中文）正文 ——
+        "后面是中文就当笔误删"会批量删掉所有真正的收尾，块边界全部错位，
+        表现就是"整个教程都以文字形式显示"。只能在**没有块开着**时考虑删。
+     c. 删了开围栏就必须连它的裸收尾一起删，否则后面每个块都挪一格、级联错位。 */
+  const src = t.split('\n');
+  const out = [];
+  const lmap = mapOut || null;
+  if (lmap) lmap.length = 0;                       // 传进来的数组可能被复用过
+  const put = (s, li) => { out.push(s); if (lmap) lmap.push(li); };
+  let open = null;                                  // { mark, len }
+  const fenceAt = s2 => {
+    const m = String(s2).match(/^[ \t]*(`{3,}|~{3,})[ \t]*([\w+-]*)[ \t]*$/);
+    return m ? { mark: m[1][0], len: m[1].length, lang: m[2] || '' } : null;
+  };
+  const isProse = body => {
+    if (!String(body).trim()) return true;          // 后面什么都没有 = 空代码块
     const cjk = (body.match(/[\u4e00-\u9fff]/g) || []).length;
     const dense = body.replace(/\s/g, '').length || 1;
-    return cjk / dense < 0.5;          // 中文占比过半 → 判为笔误，丢掉这行围栏
-  }).join('\n');
-  t = t.replace(/\n[ \t]*`{3,}[\w-]*[ \t]*$/, '');
-  const fences = (t.match(/^\s*`{3,}[\w-]*\s*$/gm) || []).length;
-  if (fences % 2 === 1) t += '\n```';
+    if (cjk / dense < 0.5) return false;
+    /* 有代码特征就不算散文：中文注释的代码块也长这样 */
+    return !/[{};]|\bdef\s|\bclass\s|\bconst\s|\bvar\s|\bfunction\s|\bimport\s|\bSELECT\s|\$\s|=>|<\/?[a-zA-Z]+[\s>]/.test(body);
+  };
+  for (let i = 0; i < src.length; i++) {
+    const ln = src[i];
+    if (open) {                                     // —— 围栏内部：只找收尾，内容原样 ——
+      const f = fenceAt(ln);
+      if (f && f.mark === open.mark && f.len >= open.len && !f.lang) open = null;
+      put(ln, i);
+      continue;
+    }
+    /* 开围栏后面直接跟内容：拆行（约束 a：只在这里、即围栏外面做） */
+    const m = ln.match(/^[ \t]*(`{3,}|~{3,})([ \t]*[\w+-]+)?[ \t]+(\S.*)$/);
+    if (m) {
+      const mark = m[1], lang = (m[2] || '').trim(), rest = m[3];
+      /* 没有语言标识、后面又是中文散文 → 这是夹在句子里的符号，不是代码块开头 */
+      if (!lang && isProse(rest)) { put(rest, i); continue; }
+      /* 拆成两行：两行都记同一原始行号（内容其实就在这一行上） */
+      put(mark + lang, i);
+      open = { mark: mark[0], len: mark.length };
+      put(rest, i);
+      continue;
+    }
+    const f = fenceAt(ln);
+    if (f) {
+      if (f.lang) { open = { mark: f.mark, len: f.len }; put(ln, i); continue; }
+      /* 裸围栏 + 当前没有块开着 = 它会**新开**一块 → 才可能是笔误 */
+      let j = i + 1;
+      while (j < src.length && !fenceAt(src[j])) j++;
+      const body = src.slice(i + 1, j).join('\n');
+      if (isProse(body)) {
+        const nf = fenceAt(src[j]);
+        if (nf && !nf.lang) i = j;                  // 约束 c：连裸收尾一起丢
+        continue;
+      }
+      open = { mark: f.mark, len: f.len };
+      put(ln, i);
+      continue;
+    }
+    put(ln, i);
+  }
+  t = out.join('\n');
+  // 约束 3：补收尾（补出来的那行源码里其实没有，映射到末尾之后，好过缺一项）
+  if (open) { t += '\n' + open.mark.repeat(open.len); if (lmap) lmap.push(src.length); }
   return t;
 }
+
 function mdToHTML(text, opts) {
   /* opts.viz：把 ```viz 围栏渲染成沙箱 iframe 里的活页面（教程专用，见下方说明）。
      默认关闭 —— 聊天/汇总里的 ```viz 仍按普通代码块显示，避免模型偶发写出时用户看到空白框。 */
   const vizOn = !!(opts && opts.viz);
-  const lines = normalizeFences(text).split('\n');
+  /* opts.srcLines：给每个块标 `data-src="源码起始行号"` —— 教程正文与笔记渲染态要它来
+     做「点哪儿改哪儿」（见 mdPickTarget）。别的调用方不传：属性虽是惰性的，但既然没用，
+     就别白塞（也会让聊天/汇总的 HTML 无谓变大）。
+     opts.lineBase：块引用里递归渲染子块时，子块行号要加上父块在源码里的起始行。 */
+  const srcOn = !!(opts && opts.srcLines);
+  const lineBase = (opts && opts.lineBase) || 0;
+  const lmap = srcOn ? [] : null;
+  const lines = normalizeFences(text, lmap).split('\n');
+  /* ⚠️ normalizeFences 会拆行（```python x=1 → 两行）/丢行/末尾补收尾，
+     所以"归一化后的行号"并不等于源码行号，必须靠 lmap 映射回原始行。
+     映射不到（补出来的收尾围栏）就退回自身行号，反正没人会点它。 */
+  const srcAttr = ln => {
+    if (!srcOn) return '';
+    const raw = (lmap && lmap[ln] != null) ? lmap[ln] : ln;
+    return ' data-src="' + (lineBase + raw) + '"';
+  };
   let html = '', i = 0;
   const mdRow = c => {
     let p = c.split('|');
@@ -3492,7 +3850,7 @@ function mdToHTML(text, opts) {
       // 没找到收尾围栏 → 这行其实不是围栏开头，当普通文本处理
       // （否则末尾会凭空多出一个空的 <pre>）
       // ⚠️ 这里只能 i = start + 1，不能退回 start：那会让同一行被反复重新判定，死循环。
-      if (!closed) { i = start + 1; html += '<p>' + mdInline(mdEscape(line)) + '</p>'; continue; }
+      if (!closed) { i = start + 1; html += '<p' + srcAttr(start) + '>' + mdInline(mdEscape(line)) + '</p>'; continue; }
       i++;
       /* 可视化块：```viz ... ``` 里的 HTML 会被塞进一个沙箱 iframe 真跑起来。
          为什么要 iframe：教程正文里直接插 HTML 会和外层样式互相污染、脚本还可能
@@ -3507,45 +3865,64 @@ function mdToHTML(text, opts) {
            所以先验一下：没有真 HTML 标签就退回 <pre>，至少等宽字体 + 保留缩进对齐，
            字符画还能看；真要图示应该由模型按提示词改写成 HTML/SVG。 */
         if (!/<[a-zA-Z][\w-]*[\s\S]*>/.test(vcode)) {
-          html += '<pre class="mdVizText" data-lang="viz"><code>' + mdEscape(vcode) + '</code></pre>';
+          /* 兜底渲染成代码块时，顺手认一下语言（JSON / python / bash…）并上高亮，
+             比标一个没意义的 "viz" 强 —— 实测线上就有模型把一段 JSON 塞进 ```viz。 */
+          const guess = hlGuessLang(vcode);
+          html += '<pre class="mdVizText"' + srcAttr(buf.length ? start + 1 : start)
+            + (guess ? ' data-lang="' + mdEscape(guess) + '"' : '')
+            + '><code>' + hlCode(vcode, guess) + '</code></pre>';
           continue;
         }
         html += '<div class="mdViz"><iframe class="mdVizFrame" sandbox="allow-scripts" loading="lazy" srcdoc="'
           + mdEscapeAttr(vizSrcdoc(vcode)) + '"></iframe></div>';
         continue;
       }
-      html += '<pre' + (fence[2] ? ' data-lang="' + mdEscape(fence[2]) + '"' : '') + '><code>' + mdEscape(buf.join('\n')) + '</code></pre>';
+      /* data-src 指向**代码第一行**（不是围栏那行）：双击代码块该进代码，
+         不是停在 ```lang 上（mdPickOffset 里还有一层同样目的的兜底）。 */
+      html += '<pre' + srcAttr(buf.length ? start + 1 : start)
+        + (fence[2] ? ' data-lang="' + mdEscape(fence[2]) + '"' : '') + '><code>'
+        + hlCode(buf.join('\n'), fence[2] || hlGuessLang(buf.join('\n'))) + '</code></pre>';
       continue;
     }
     // 标题：中文里 `##标题` 不加空格很常见，这里容忍没有空格的情况
     const h = line.match(/^\s*(#{1,6})\s*(.*)$/);
-    if (h && h[2].trim()) { const n = h[1].length; html += '<h' + n + '>' + mdInline(mdEscape(h[2])) + '</h' + n + '>'; i++; continue; }
+    if (h && h[2].trim()) { const n = h[1].length; html += '<h' + n + srcAttr(i) + '>' + mdInline(mdEscape(h[2])) + '</h' + n + '>'; i++; continue; }
     if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { html += '<hr>'; i++; continue; }
     if (/^\s*>\s?/.test(line)) {
+      const bqStart = i;
       const buf = [];
       while (i < lines.length && /^\s*>\s?/.test(lines[i])) { buf.push(lines[i].replace(/^\s*>\s?/, '')); i++; }
-      html += '<blockquote>' + mdToHTML(buf.join('\n')) + '</blockquote>';
+      /* 引用里的内容要递归渲染。`>` 是一行对一个原始行，所以子块的 data-src 必须整体加上
+         「引用首行在源码里的行号」当基准（lineBase）—— 否则子块行号从 0 开始，全指错地方。 */
+      const bqBase = lineBase + ((lmap && lmap[bqStart] != null) ? lmap[bqStart] : bqStart);
+      html += '<blockquote' + srcAttr(bqStart) + '>'
+        + mdToHTML(buf.join('\n'), srcOn ? { srcLines: true, lineBase: bqBase } : undefined)
+        + '</blockquote>';
       continue;
     }
     if (line.includes('|') && lines[i + 1] && isSep(lines[i + 1])) {
+      const hLine = i;
       const header = mdRow(line);
       i += 2;
-      const rows = [];
-      while (i < lines.length && lines[i].includes('|') && lines[i].trim()) { rows.push(mdRow(lines[i])); i++; }
-      html += '<table><thead><tr>' + header.map(c => '<th>' + mdInline(mdEscape(c)) + '</th>').join('')
-        + '</tr></thead><tbody>' + rows.map(r => '<tr>' + r.map(c => '<td>' + mdInline(mdEscape(c)) + '</td>').join('') + '</tr>').join('')
+      const rows = [], rLines = [];
+      while (i < lines.length && lines[i].includes('|') && lines[i].trim()) { rLines.push(i); rows.push(mdRow(lines[i])); i++; }
+      /* 表头与每个 td 各标自己的起始行：双击某个单元格要落到那一行的源码，
+         而不是整张表的第一行。 */
+      html += '<table' + srcAttr(hLine) + '><thead><tr>' + header.map(c => '<th' + srcAttr(hLine) + '>' + mdInline(mdEscape(c)) + '</th>').join('')
+        + '</tr></thead><tbody>' + rows.map((r, ri) => '<tr>' + r.map(c => '<td' + srcAttr(rLines[ri]) + '>' + mdInline(mdEscape(c)) + '</td>').join('') + '</tr>').join('')
         + '</tbody></table>';
       continue;
     }
     if (/^\s*[-*+]\s+/.test(line) || /^\s*\d+[.)]\s+/.test(line)) {
       const ordered = /^\s*\d+[.)]\s+/.test(line);
-      const items = [];
+      const items = [], iLines = [];
       while (i < lines.length) {
         const l = lines[i];
         const ul = l.match(/^\s*[-*+]\s+(.*)$/);
         const ol = l.match(/^\s*\d+[.)]\s+(.*)$/);
         if (ul || ol) {
           if (!!ol !== ordered) break;
+          iLines.push(i);                            // 每个li自己的源码起始行
           const txt = ul ? ul[1] : ol[1];
           const cb = txt.match(/^\[([ xX])\]\s*(.*)$/);
           if (cb) items.push('<input type="checkbox" disabled' + (cb[1].toLowerCase() === 'x' ? ' checked' : '') + '> ' + mdInline(mdEscape(cb[2])));
@@ -3556,9 +3933,12 @@ function mdToHTML(text, opts) {
           i++;
         } else break;
       }
-      html += '<' + (ordered ? 'ol' : 'ul') + '>' + items.map(x => '<li>' + x + '</li>').join('') + '</' + (ordered ? 'ol' : 'ul') + '>';
+      html += '<' + (ordered ? 'ol' : 'ul') + srcAttr(iLines.length ? iLines[0] : i)
+        + '>' + items.map((x, k) => '<li' + srcAttr(iLines[k] != null ? iLines[k] : i) + '>' + x + '</li>').join('')
+        + '</' + (ordered ? 'ol' : 'ul') + '>';
       continue;
     }
+    const pStart = i;
     const buf = [];
     while (i < lines.length) {
       const l = lines[i];
@@ -3570,8 +3950,11 @@ function mdToHTML(text, opts) {
        会走到这里 buf 为空且 i 没前进 → 外层 while 无限转、标签页卡死。
        所以"什么都没吃掉"时必须强制前进一行。 */
     if (!buf.length) i++;
-    if (buf.length) html += '<p>' + buf.map(x => mdInline(mdEscape(x))).join('<br>') + '</p>';
+    if (buf.length) html += '<p' + srcAttr(pStart) + '>' + buf.map(x => mdInline(mdEscape(x))).join('<br>') + '</p>';
   }
+  /* 教程模式下把「**标签** + 后续内容」打包成卡片（见 tutGroupCallouts）。
+     只在教程里做：对话/汇总要的是紧凑，卡片会把短回复撑得很松散。 */
+  if (vizOn) html = tutGroupCallouts(html);
   return rewriteCites(html);
 }
 /* ============ AI 引用的上标标注（[节点id] → 点击查看引用了什么） ============
@@ -4702,7 +5085,7 @@ async function renderTutorialPage(tid) {
     <div class="tutMeta">${node ? '对应任务：' + esc(node.title) : ''}${goal ? '　·　所属目标：' + esc(goal.title) : ''}　·　生成于 ${esc(fmtDate(t.created_at))}${(goalCompOn(goal, 'workspace') && window.Workspace) ? '　·　<span class="wsHint" id="wsHint"></span>' : ''}</div>
     ${isHtml
       ? `<iframe class="tutFrame" id="tutFrame" sandbox="allow-scripts allow-same-origin allow-popups"></iframe>`
-      : `<div class="tutBody mdBody">${mdToHTML(t.content, { viz: true })}</div>`}
+      : `<div class="tutBody mdBody">${mdToHTML(t.content, { viz: true, srcLines: true })}</div>`}
     <!-- 书签为浮动面板（顶栏按钮呼出），此处不占位 -->
   </div>`;
   if (isHtml) {
@@ -10444,7 +10827,7 @@ function pluginGoButtonsBind() {
 (async function boot() {
   SiErXing.provide({
     app, api, esc, toast, go, state, mdToHTML, fmtDate, safeParse, parseRoute,
-    rerender: rerenderCurrent, loadGoal, ensureGoal, aiToggle,
+    rerender: rerenderCurrent, loadGoal, ensureGoal, aiToggle, mdPickOffset,
     mount: () => { if (BOOTED) pluginGoButtonsBind(); },
     ready: false
   });
@@ -10453,7 +10836,7 @@ function pluginGoButtonsBind() {
   await loadFrontendPlugins();
   SiErXing.provide({
     app, api, esc, toast, go, state, mdToHTML, fmtDate, safeParse, parseRoute,
-    rerender: rerenderCurrent, loadGoal, ensureGoal, aiToggle,
+    rerender: rerenderCurrent, loadGoal, ensureGoal, aiToggle, mdPickOffset,
     mount: () => { if (BOOTED) { route(); } },
     ready: true
   });
