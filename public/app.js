@@ -1887,19 +1887,23 @@ async function tutManualEnter(anchorEl) {
   toast(anchorOff >= 0 ? '已进入编辑并定位到你点的那一段（Ctrl+S 保存不了这里，点「💾 保存」）'
     : '已进入编辑模式' + (editJumpSec ? '（已定位到第 ' + editJumpSec + ' 节附近）' : '（共 ' + src.length + ' 字）'));
 }
-/* 正文里单击一段 → 进编辑。链接/按钮/引用角标/划线段/图上都不抢；
+/* 正文里**双击**一段 → 进编辑（单击太容易误触，用户反馈过）。链接/按钮/引用角标/划线段/图上都不抢；
    刚拖选过文字（要划线或复制）也不抢。 */
 function tutBindClickEdit() {
   if (document.__tutClickEdit) return;
   document.__tutClickEdit = true;
-  document.addEventListener('click', e => {
+  /* ⚠️ 用**双击**触发（单击太容易误触：选字、想滑轮滚动都可能点上一下）。
+     但双击本身会让浏览器选中光标下的那个词，而下面原本有一条"有选中就不编辑"的
+     判断（那是给单击写的）—— 直接改成 dblclick 会被它全部挡掉。
+     所以这里把选区**折叠掉**再继续：既不误触，又能让编辑从双击的那个词开始。 */
+  document.addEventListener('dblclick', e => {
     if (tutEditing) return;
     const t = e.target;
     if (!t || !t.closest) return;
     if (t.closest('a,button,input,textarea,select,svg,img,sup.cite,mark.tnm,[data-toc]')) return;
     try {
       const sel = window.getSelection ? window.getSelection() : null;
-      if (sel && !sel.isCollapsed && String(sel.toString()).trim()) return;
+      if (sel && !sel.isCollapsed) sel.collapseToStart();   // 收掉双击自动选中的词
     } catch (err) {}
     const root = tutClickRoot();
     if (!root || !root.contains(t)) return;

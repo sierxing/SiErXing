@@ -57,10 +57,16 @@
     const body = document.getElementById('nnBody');
     if (!body) return;
     body.innerHTML = current.trim()
-      ? `<div id="nnView" class="mdBody" title="双击进入编辑">${mdToHTML(current)}</div>`
+      ? `<div id="nnView" class="mdBody" title="点一下正文，就在这一句上开始改">${mdToHTML(current)}</div>`
       : `<div id="nnView" class="nnEmpty">还没有笔记，点右上「编辑」开始记<br><span class="muted">支持 Markdown（标题/列表/代码/加粗）</span></div>`;
     const v = document.getElementById('nnView');
-    if (v) v.addEventListener('dblclick', showEdit);
+    /* 笔记栏里用**单击**：用户要的就是"点哪改哪"（教程正文那边用双击，
+       因为正文太长、单击容易误触；笔记就一段，单击更顺手）。链接除外，
+       否则点笔记里的链接会被编辑抢走。 */
+    if (v) v.addEventListener('click', ev => {
+      if (ev.target && ev.target.closest && ev.target.closest('a')) return;
+      showEdit(ev);
+    });
     const eb = document.getElementById('nnEditBtn');
     if (eb) { eb.hidden = false; }
     const sb = document.getElementById('nnSaveBtn');
