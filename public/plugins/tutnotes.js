@@ -320,24 +320,55 @@
     const t = String((n && n.text) || '').replace(/\s+/g, ' ').trim();
     return t.length > 80 ? t.slice(0, 80) + '…' : t;
   };
+  /* 右键菜单里的**默认样式**（高亮 / 下划线）：选过一次就记住，下次右键直接沿用。
+     颜色不记 —— 每次点颜色就是"这次用它"（用户要求）。 */
+  const STYLE_KEY = 'sierxing-tutnotes-style';
+  function getStyle() { try { return localStorage.getItem(STYLE_KEY) === 'underline' ? 'underline' : 'highlight'; } catch (e) { return 'highlight'; } }
+  function setStyle(s) { const v = s === 'underline' ? 'underline' : 'highlight'; try { localStorage.setItem(STYLE_KEY, v); } catch (e) {} return v; }
+  function paintStyle(el) {
+    const s = getStyle();
+    el.querySelectorAll('[data-tnstyle]').forEach(b => {
+      const on = b.getAttribute('data-tnstyle') === s;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  }
+  /* 菜单里的动作一律走它：**mousedown 里干活**（click 之前浏览器可能先把选区收掉），
+     click 只兜键盘（回车/空格在 button 上就是 click）；done 防重复触发。 */
+  function wire(b, fn) {
+    let done = false;
+    const run = () => { if (done) return; done = true; fn(); };
+    b.addEventListener('mousedown', ev => { ev.preventDefault(); ev.stopPropagation(); run(); });
+    b.addEventListener('click', ev => { ev.preventDefault(); ev.stopPropagation(); run(); });
+  }
+  const rowOf = (node, el) => {
+    try { const r = node && node.closest ? node.closest('.tnCtxRow') : null; return r ? Array.from(r.querySelectorAll('button')) : null; } catch (e) { return null; }
+  };
   /* 右键菜单：**复用应用既有的 .ctxMenu**（app.js 里 route()/点别处/Esc/滚动 都会把它收掉，
      这里只管建和定位，别再造一套关闭逻辑）。x/y 用鼠标坐标 —— 隐藏元素的 rect 全是 0，
-     用它定位菜单会跑到页面左上角。*/
+     用它定位菜单会跑到页面左上角。
+     两步交互（用户要求）：先选「样式」（高亮 / 下划线，记住），再点颜色 → 按当前样式划上。
+     原来"高亮一行 4 色 + 下划线一行 4 色"既重复又不直观，已合并成一行。 */
   function showCtx(x, y) {
     hideCtx();
     if (!pending) return;
-    const swatches = attr => COLORS.map(c =>
-      '<button class="tnSw tnSw-' + c.k + '" ' + attr + '="' + c.k + '" title="' + esc(c.name) + '"></button>').join('');
     const el = document.createElement('div');
     el.className = 'ctxMenu tnCtxMenu';
+    el.tabIndex = -1;
+    el.setAttribute('role', 'menu');
     el.innerHTML =
       '<div class="ctxTitle" title="' + esc(pending.text) + '">划线笔记｜' + esc(noteDisplay(pending)) + '</div>'
-      + '<div class="tnCtxRow"><span class="tnCtxLb">高亮</span>' + swatches('data-tnctx-hl') + '</div>'
-      + '<div class="tnCtxRow"><span class="tnCtxLb">下划线</span>' + swatches('data-tnctx-ul') + '</div>'
+      + '<div class="tnCtxRow tnCtxStyles"><span class="tnCtxLb">样式</span>'
+      + '<button type="button" class="tnSeg" data-tnstyle="highlight" role="menuitemradio">高亮</button>'
+      + '<button type="button" class="tnSeg" data-tnstyle="underline" role="menuitemradio">下划线</button>'
+      + '<span class="tnCtxHint">选好样式 → 点颜色即划上</span></div>'
+      + '<div class="tnCtxRow"><span class="tnCtxLb">颜色</span>'
+      + COLORS.map(c => '<button type="button" class="tnSw tnSw-' + c.k + '" data-tncolor="' + c.k + '" title="' + esc(c.name) + '"></button>').join('')
+      + '</div>'
       + '<div class="ctxSep"></div>'
-      + '<button data-tnctx="note">✎ 写批注</button>'
-      + '<button data-tnctx="copy">⧉ 复制</button>'
-      + '<button data-tnctx="cancel">✕ 取消</button>';
+      + '<button type="button" data-tnctx="note">✎ 写批注</button>'
+      + '<button type="button" data-tnctx="copy">⧉ 复制</button>'
+      + '<button type="button" data-tnctx="cancel">✕ 取消</button>';
     /* 先清掉别的右键菜单（同一时刻只留一个），再按 app.js openMoreMenu 的同一套夹取算法定位 */
     document.querySelectorAll('.ctxMenu').forEach(m => m.remove());
     document.body.appendChild(el);
@@ -347,15 +378,42 @@
     el.style.top = Math.max(8, Math.min(y, window.innerHeight - h - 8)) + 'px';
     el.style.visibility = '';
     ctxEl = el;
-    /* ⚠️ 菜单里的按钮用 mousedown 处理：click 之前浏览器可能先把选区清掉（右键后的左键点击），
-       在 mousedown 就把活干完最稳。 */
-    const act = (fn) => ev => { ev.preventDefault(); ev.stopPropagation(); hideCtx(); fn(); };
-    el.querySelectorAll('[data-tnctx-hl]').forEach(b => b.addEventListener('mousedown', act(() => create(b.getAttribute('data-tnctx-hl'), 'highlight', { keepSel: true }))));
-    el.querySelectorAll('[data-tnctx-ul]').forEach(b => b.addEventListener('mousedown', act(() => create(b.getAttribute('data-tnctx-ul'), 'underline', { keepSel: true }))));
+    paintStyle(el);
+    /* 样式按钮：只切默认样式、**不关菜单**（用户接着点颜色）；再右键时默认就是它 */
+    el.querySelectorAll('[data-tnstyle]').forEach(b => {
+      const pick = ev => { ev.preventDefault(); ev.stopPropagation(); setStyle(b.getAttribute('data-tnstyle')); paintStyle(el); };
+      b.addEventListener('mousedown', pick);
+      b.addEventListener('click', pick);
+    });
+    /* 颜色：按**当前**样式划上（面板不再分"高亮 4 色 / 下划线 4 色"两行） */
+    el.querySelectorAll('[data-tncolor]').forEach(b => wire(b, () => { hideCtx(); create(b.getAttribute('data-tncolor'), getStyle(), { keepSel: true }); }));
     const q = s => el.querySelector('[data-tnctx="' + s + '"]');
-    q('note').addEventListener('mousedown', act(() => create('yellow', 'highlight', { keepSel: true, card: true })));
-    q('copy').addEventListener('mousedown', act(copySel));
-    q('cancel').addEventListener('mousedown', act(() => {}));
+    wire(q('note'), () => { hideCtx(); create('yellow', getStyle(), { keepSel: true, card: true }); });
+    wire(q('copy'), () => { hideCtx(); copySel(); });
+    wire(q('cancel'), () => hideCtx());
+    /* 键盘：Esc 关菜单（app.js 的全局 Esc 也会收，这里管焦点在菜单里那一下），
+       ↑↓ 在全部按钮间移动、←→ 在本行内移动，回车/空格 = 触发（button 的 click 已被 wire 兜住） */
+    el.addEventListener('keydown', ev => {
+      const btns = Array.from(el.querySelectorAll('button'));
+      const step = (n, list) => {
+        const a = list || btns;
+        if (!a.length) return;
+        const j = a.indexOf(document.activeElement);
+        a[(((j < 0 ? 0 : j) + n) % a.length + a.length) % a.length].focus();
+      };
+      if (ev.key === 'ArrowDown') { ev.preventDefault(); step(1); }
+      else if (ev.key === 'ArrowUp') { ev.preventDefault(); step(-1); }
+      else if (ev.key === 'ArrowRight') { ev.preventDefault(); step(1, rowOf(document.activeElement, el)); }
+      else if (ev.key === 'ArrowLeft') { ev.preventDefault(); step(-1, rowOf(document.activeElement, el)); }
+      /* 回车 / 空格 = 按下当前按钮。自己显式触发一次：button 的"回车即激活"是浏览器默认动作，
+         在注入按键/某些输入法下并不保证发生（wire 里的 done 标志保证不会因此执行两次）。 */
+      else if (ev.key === 'Enter' || ev.key === ' ' || ev.key === 'Spacebar') {
+        const a = document.activeElement;
+        if (a && String(a.tagName).toUpperCase() === 'BUTTON' && el.contains(a)) { ev.preventDefault(); a.click(); }
+      }
+      else if (ev.key === 'Escape') { ev.preventDefault(); hideCtx(); }
+    });
+    try { el.focus({ preventScroll: true }); } catch (e) { try { el.focus(); } catch (e2) {} }
   }
   async function copySel() {
     const t = pending ? pending.text : '';
@@ -684,7 +742,7 @@
     refresh: () => { apply(R()); renderPanel(); },
     /* 调试：为何没读到选区 / 索引与笔记数量 / 高亮有没有画上 / 菜单是不是开着 */
     debug: () => ({
-      why: lastWhy, ft: ft.length, notes: notes.length, nodes: index.length, id: tid,
+      why: lastWhy, ft: ft.length, notes: notes.length, nodes: index.length, id: tid, style: getStyle(),
       marks: (() => { try { return R().querySelectorAll('mark.tnm').length; } catch (e) { return -1; } })(),
       bound: !!document.__tnBound, embedded, panel: !!panelEl, menu: !!ctxEl, pending: !!pending
     })
