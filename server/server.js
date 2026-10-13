@@ -4275,6 +4275,23 @@ async function generateTutorialByPlan({ goal, node, note, codeBlock, model, send
   return { text: txt, steps: stepsNow(), count: plan.length };
 }
 
+/* 教程默认标题 = 节点名 + 生成时间。
+   同一个节点可以生成多份（改意见重跑、换个篇幅再生成），以前标题就是节点名，
+   几份完全同名，用户分不清哪份是哪份（2026-10-13 报的）。
+   时间取到分钟就够短、够区分；同一分钟内再生成则补秒，仍撞上加序号。
+   只影响 tutorials.title，不动节点标题、不动正文。 */
+function tutorialDefaultTitle(node, when) {
+  const d = when ? new Date(when) : new Date();
+  const p2 = n => String(n).padStart(2, '0');
+  const base = String((node && node.title) || '教程').trim().slice(0, 80) || '教程';
+  const hm = p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes());
+  const mk = suffix => (base + '（' + hm + suffix + '）').slice(0, 120);
+  const taken = t => !!db.prepare('SELECT id FROM tutorials WHERE node_id = ? AND title = ?').get(node ? node.id : 0, t);
+  let title = mk('');
+  if (taken(title)) title = mk(':' + p2(d.getSeconds()));
+  for (let i = 2; taken(title); i++) title = mk(':' + p2(d.getSeconds()) + ' #' + i);
+  return title;
+}
 function streamTutorial(req, res, node, format, note, codeFiles, withFolders, folderFiles) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   const model = currentModel();
@@ -4381,7 +4398,7 @@ function streamTutorial(req, res, node, format, note, codeFiles, withFolders, fo
         }
       }
       const t = nowISO();
-      const title = String(node.title).trim().slice(0, 120);
+      const title = tutorialDefaultTitle(node, t);
       /* 保存阶段也要报进度：写完全文到落库之间还有备份等动作，
          不报的话进度条会卡在 93% 好一会儿，看着像卡死了。 */
       send({
@@ -5431,6 +5448,21 @@ function structureLoss(before, after, feedback) {
     }
     backup();
     return sendJSON(res, 200, { ok: true, length: content.length });
+  }
+  /* 重命名教程：只改标题，不碰正文（正文走上面的 PUT /api/tutorials/:id）。
+     标题去首尾空格（含换行折成空格）、非空、最长 80 字，超长直接截断；
+     允许重名（用户自己愿意）。不记版本：版本存的是正文，改名不该占版本名额。 */
+  const tutRenameMatch = p.match(/^\/api\/tutorials\/(\d+)\/rename$/);
+  if (tutRenameMatch && method === 'POST') {
+    const tid = Number(tutRenameMatch[1]);
+    const tut = db.prepare('SELECT id, title, goal_id FROM tutorials WHERE id = ?').get(tid);
+    if (!tut) return sendJSON(res, 404, { error: '教程不存在' });
+    const body = await readBody(req);
+    const title = String(body.title == null ? '' : body.title).replace(/\s+/g, ' ').trim().slice(0, 80);
+    if (!title) return sendJSON(res, 400, { error: '标题不能为空' });
+    db.prepare('UPDATE tutorials SET title = ?, updated_at = ? WHERE id = ?').run(title, nowISO(), tid);
+    backup();
+    return sendJSON(res, 200, { ok: true, title, tutorial: db.prepare('SELECT * FROM tutorials WHERE id = ?').get(tid) });
   }
   /* ---- 教程版本：列表 / 取正文 / 恢复 ----
      每次 AI 修改、手动保存覆盖正文前都会先存一份（只留最近 10 版）。

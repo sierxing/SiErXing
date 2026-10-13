@@ -2694,6 +2694,62 @@ function openTutVersions(tid) {
   };
   paint();
 }
+/* 重命名教程标题：只改标题不动正文。用页面内小弹窗（复用 .bigDialog 的样式，收窄成一行输入），
+   不用 prompt() —— 项目里其它弹窗都是页面内的，外观才一致。
+   保存成功后标题要在三处立刻跟着变：工具条上的标题、state.goal.tutorials 缓存
+   （节点面板的教程列表读它）、以及渲染时那份教程对象（下载文件名读它）。 */
+function openTutRename(tid, tut) {
+  const old = document.getElementById('tutRenameDlg');
+  if (old) old.remove();
+  const span = document.getElementById('tutTitle');
+  const cached = ((state.goal && state.goal.tutorials) || []).find(x => Number(x.id) === Number(tid));
+  const cur = String((tut && tut.title) || (cached && cached.title) || (span ? span.textContent : '') || '').replace(/^📘\s*/, '');
+  const D = document.createElement('div');
+  D.className = 'bigDialog';
+  D.id = 'tutRenameDlg';
+  D.style.width = 'min(460px, 92vw)';
+  D.style.maxHeight = 'none';
+  D.innerHTML = `<div class="tdHead"><span class="bdTitle">✎ 重命名教程<div class="bdSub">只改标题，正文不动。最多 80 字，允许和别的教程重名。</div></span><div class="spacer" style="flex:1"></div><button class="btn tiny" data-rclose>✕</button></div>
+    <div class="tdBody">
+      <input id="tutRenameInput" type="text" maxlength="80" value="${esc(cur)}" style="width:100%; box-sizing:border-box; padding:9px 11px; font-size:14px; background:var(--bg); color:var(--text); border:1.5px solid var(--border); border-radius:10px;" />
+      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px;">
+        <button class="btn small" data-rclose>取消</button>
+        <button class="btn small primary" id="tutRenameSave">保存</button>
+      </div>
+    </div>`;
+  document.body.appendChild(D);
+  const input = D.querySelector('#tutRenameInput');
+  const close = () => D.remove();
+  D.querySelectorAll('[data-rclose]').forEach(b => b.addEventListener('click', close));
+  D.addEventListener('mousedown', ev => { if (ev.target === D) close(); });
+  const save = async () => {
+    const title = String(input.value || '').trim();
+    if (!title) { toast('标题不能为空'); input.focus(); return; }
+    try {
+      const r = await api('/api/tutorials/' + tid + '/rename', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title })
+      });
+      const nt = String((r && r.title) || title);
+      if (tut) tut.title = nt;
+      if (cached) cached.title = nt;
+      if (span) span.textContent = '📘 ' + nt;
+      try { if (r && r.tutorial) state.tutUpdatedAt = r.tutorial.updated_at || state.tutUpdatedAt; } catch (e) {}
+      close();
+      toast('已重命名为「' + nt.slice(0, 30) + '」');
+    } catch (e) { toast(e.message); }
+  };
+  D.querySelector('#tutRenameSave').addEventListener('click', save);
+  input.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter') { ev.preventDefault(); save(); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); close(); }
+  });
+  document.addEventListener('keydown', function onKey(ev) {
+    if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
+  });
+  input.focus();
+  try { input.select(); } catch (e) {}
+}
 /* ===== AI 助手（右侧侧边栏） ===== */
 function opChipHTML(o) {
   const t = String(o.title || '').slice(0, 40);
@@ -5274,9 +5330,10 @@ async function renderTutorialPage(tid) {
       ${(goalCompOn(goal, 'workspace') && window.Workspace) ? `<button class="btn small primary" data-tbtn id="tutCodeBtn" title="为当前节点建好代码目录并用 VSCode 打开，边看教程边写代码（子目录嵌在父目录下，无需手动管理）">💻 写代码</button>` : ''}
       ${(goalCompOn(goal, 'workspace') && window.Workspace) ? `<button class="btn small" data-tbtn id="tutPackBtn" title="把整个目标的代码目录一键打包成 zip 下载">📦 打包</button>` : ''}
       <button class="btn small" data-tbtn id="tutManualBtn" title="直接手动编辑并保存。也可以直接在正文里点某一段：会进编辑并定位到那一句（Markdown 教程）">✎ 手动编辑</button>
+      <button class="btn small" data-tbtn id="tutRenameBtn" title="给这份教程改个名（只改标题，正文不动）。同一个任务生成的多份教程全靠标题区分">✎ 重命名</button>
       <button class="btn small primary" id="tutSaveBtn" hidden>💾 保存</button>
       <button class="btn small" id="tutCancelBtn" hidden>取消</button>
-      <span class="mapTitle">📘 ${esc(t.title)}</span>
+      <span class="mapTitle" id="tutTitle">📘 ${esc(t.title)}</span>
       <span class="chip gray">${isHtml ? 'HTML' : 'Markdown'}</span>
       <span class="chip gray">约 ${sizeK}k 字</span>
       <div class="spacer"></div>
@@ -5350,6 +5407,8 @@ async function renderTutorialPage(tid) {
   if (window.Workspace && goalCompOn(goal, 'workspace')) {
     try { window.Workspace.bindTutorial(tid, node, goal); } catch (e) {}
   }
+  const tutRenameBtn = document.getElementById('tutRenameBtn');
+  if (tutRenameBtn) tutRenameBtn.addEventListener('click', () => openTutRename(tid, t));
   document.getElementById('tutDl').addEventListener('click', () => {
     const blob = new Blob([t.content], { type: isHtml ? 'text/html;charset=utf-8' : 'text/markdown;charset=utf-8' });
     const a = document.createElement('a');
