@@ -245,13 +245,8 @@ module.exports = {
       const job = tasks.begin({ type: 'jdfile', title: '读懂代码库 · ' + name, note: root, goalId: g.id, message: 'AI 正在读这个代码库，整理成学习路径能用的摘要' });
       let txt = '';
       try {
-        const t0 = Date.now();
-        const iv = setInterval(() => {
-          const sec = Math.round((Date.now() - t0) / 1000);
-          job.progress(Math.min(93, Math.round(100 * (1 - Math.exp(-sec / 18)))), 'AI 正在读这个代码库（已等 ' + sec + ' 秒）');
-        }, 1500);
-        try { txt = await aiText(buildStudyDigestPrompt(root, proj.files, proj.all, g.title), currentModel(), 300000, null, job.signal); }
-        finally { clearInterval(iv); }
+        /* 进度交给统一模型按时间平滑（前端标"估算"）—— 原来这里自己手搓了一份 exp 曲线 */
+        txt = await aiText(buildStudyDigestPrompt(root, proj.files, proj.all, g.title), currentModel(), 300000, null, job.signal);
         job.done(txt);
       } catch (e) { job.fail(e); throw e; }
 
@@ -484,8 +479,18 @@ function imageToText(data) {
 }
 function streamJDImage(req, res, goal, dataUrl, note, reuseSourceId) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
-  const tk = (typeof tasks !== 'undefined' && tasks) ? tasks.begin({ type: 'image', title: '识别图片：' + String(goal.title || '').slice(0, 20), goalId: goal.id, nodeId: 0, note: note || '' }) : null;
-  const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} if (tk && obj && obj.status) tk.progress(undefined, obj.status); };
+  const tk = (typeof tasks !== 'undefined' && tasks) ? tasks.begin({
+    type: 'image', title: '识别图片：' + String(goal.title || '').slice(0, 20), goalId: goal.id, nodeId: 0, note: note || '',
+    phases: ['读取图片', 'AI 识别', '写入资料库']
+  }) : null;
+  /* send 统一转发进度：带 prog 的走阶段推进，只带 status 的退化成"只换文案"
+     （阶段内由统一模型按时间平滑，前端标"估算"）—— 跟 collect / clean 是同一套约定。 */
+  const send = obj => {
+    try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {}
+    if (!tk || !obj) return;
+    if (obj.prog) tk.phase(obj.prog.phase, obj.status, { frac: obj.prog.frac });
+    else if (obj.status) tk.progress(undefined, obj.status);
+  };
   /* 取消判据同样是 task 的 signal：识别请求要带 signal，写库前要再查一次。 */
   const sig = tk ? tk.signal : null;
   const checkStop = () => { if (sig && sig.aborted) { const e = new Error('已停止'); e.cancelled = true; throw e; } };
@@ -504,7 +509,7 @@ function streamJDImage(req, res, goal, dataUrl, note, reuseSourceId) {
       fname = `jd-${goal.id}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
       const fpath = path.join(UPLOAD_DIR, fname);
       fs.writeFileSync(fpath, buf);
-      send({ status: '图片已收到，AI 正在识别并提炼信息…', file: fname });
+      send({ status: '图片已收到，AI 正在识别并提炼信息…', file: fname, prog: { phase: 1 } });
       const model = currentVisionModel();
       let txt = await aiTextFiles(buildImagePrompt(note), model, [fpath], 300000, sig);
       let data = extractJSON(txt);
@@ -533,6 +538,7 @@ function streamJDImage(req, res, goal, dataUrl, note, reuseSourceId) {
         notice = '结构化提炼没成功，已按图片原文导入资料库（可重试或换一张更清晰的截图）';
       }
       checkStop();   /* 取消后不许再写资料源/jd_images */
+      send({ status: '正在写入资料库…', prog: { phase: 2 } });
       const t = nowISO();
       const type = String(data.type || '').trim() || '资料';
         const from = data.source || data.company || '';
@@ -593,14 +599,14 @@ async function ingestEbookBuffer(goal, buf, filename, note, onStatus, reuseSourc
   const fname = safeEbookName(goal.id, filename);
   fs.writeFileSync(path.join(UPLOAD_DIR, fname), buf);
   const warnTxt = (parsed.warnings && parsed.warnings.length) ? '（' + parsed.warnings.join('；') + '）' : '';
-  if (onStatus) onStatus(`解析成功：约 ${parsed.text.length} 字${warnTxt}，AI 正在提炼…`);
+  if (onStatus) onStatus(`解析成功：约 ${parsed.text.length} 字${warnTxt}，AI 正在提炼…`, 1);
   const model = currentModel();
   let txt = await aiText(buildEbookPrompt(parsed, filename, note), model, 300000);
   let data = extractJSON(txt);
   let notice = (parsed.warnings && parsed.warnings.length) ? parsed.warnings.join('；') : '';
   if (!hasExtract(data)) {
     console.log('[jdfile] 电子书提炼失败，原始输出前 500 字:', String(txt || '').slice(0, 500).replace(/\n/g, ' '));
-    if (onStatus) onStatus('第一次没解析成功，正在重新整理…');
+    if (onStatus) onStatus('第一次没解析成功，正在重新整理…', 1);
     try {
       txt = await aiText(buildEbookPrompt(parsed, filename, note) + '\n\n【重要】上一次的输出不是合法 JSON。请严格只输出一个 JSON 对象：不要解释文字、不要前后缀、不要多个对象，字符串内不要出现未转义的换行。', model, 300000);
       data = extractJSON(txt);
@@ -630,20 +636,29 @@ async function ingestEbookBuffer(goal, buf, filename, note, onStatus, reuseSourc
     author: parsed.author || '', file: fname,
     origin: origin || ''
   };
-  const content = imageToText(data);
+  /* 正文清洗：电子书/PDF 提出来的文字常带页眉页脚、页码、版权页、网站水印，
+     先过一遍通用清洗（只删不写），再入库（见 server/text-clean.js）。 */
+  let content = imageToText(data);
+  let cleanDrop = 0;
+  try {
+    const tc2 = require('../text-clean');
+    const wasLen = content.length;
+    const r2 = tc2.cleanLines(content, { minChars: 80 });
+    if (r2 && r2.text && r2.text.replace(/\s+/g, '').length >= 80) { content = r2.text; cleanDrop = Math.max(0, wasLen - content.length); }
+  } catch (e) {}
   const snippet = String(data.summary || '').slice(0, 300);
   let sourceId = 0;
   if (reuseSourceId) {
     const old = db.prepare('SELECT id FROM sources WHERE id = ? AND goal_id = ?').get(reuseSourceId, goal.id);
     if (old) {
-      db.prepare('UPDATE sources SET title=?, site=?, kind=?, snippet=?, content=?, created_at=? WHERE id=?')
-        .run(title, '用户提供的电子书', kindName, snippet, content, t, old.id);
+      db.prepare('UPDATE sources SET title=?, site=?, kind=?, snippet=?, content=?, cleaned=?, clean_removed=?, created_at=? WHERE id=?')
+        .run(title, '用户提供的电子书', kindName, snippet, content, 1, cleanDrop, t, old.id);
       sourceId = old.id;
     }
   }
   if (!sourceId) {
-    const sr = db.prepare('INSERT INTO sources (goal_id,title,url,site,kind,snippet,content,published_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
-      .run(goal.id, title, '', '用户提供的电子书', kindName, snippet, content, '', t);
+    const sr = db.prepare('INSERT INTO sources (goal_id,title,url,site,kind,snippet,content,published_at,created_at,cleaned,clean_removed) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+      .run(goal.id, title, '', '用户提供的电子书', kindName, snippet, content, '', t, 1, cleanDrop);
     sourceId = Number(sr.lastInsertRowid);
   }
   db.prepare('INSERT INTO jd_images (goal_id,file,mime,size,title,extracted,status,error,source_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
@@ -654,14 +669,24 @@ async function ingestEbookBuffer(goal, buf, filename, note, onStatus, reuseSourc
 }
 function streamEbook(req, res, goal, buf, filename, note, reuseSourceId) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
-  const tk = (typeof tasks !== 'undefined' && tasks) ? tasks.begin({ type: 'image', title: '提炼电子书：' + String(filename || '').slice(0, 20), goalId: goal.id, nodeId: 0, note: note || '' }) : null;
-  const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} if (tk && obj && obj.status) tk.progress(undefined, obj.status); };
+  const tk = (typeof tasks !== 'undefined' && tasks) ? tasks.begin({
+    type: 'image', title: '提炼电子书：' + String(filename || '').slice(0, 20), goalId: goal.id, nodeId: 0, note: note || '',
+    phases: ['解析文件', 'AI 提炼', '整理入库']
+  }) : null;
+  /* 跟识别图片同一套：带 prog 的走阶段推进；ingestEbookBuffer 的 onStatus 第二参是阶段提示 */
+  const send = obj => {
+    try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {}
+    if (!tk || !obj) return;
+    if (obj.prog) tk.phase(obj.prog.phase, obj.status, { frac: obj.prog.frac });
+    else if (obj.status) tk.progress(undefined, obj.status);
+  };
   (async () => {
     let info = null;
     try {
-      send({ status: '正在本地解析电子书…' });
+      send({ status: '正在本地解析电子书…', prog: { phase: 0 } });
       info = await ingestEbookBuffer(goal, buf, filename, note,
-        st => send({ status: st }), reuseSourceId, '');
+        (txt, phase) => send({ status: txt, prog: phase == null ? null : { phase } }), reuseSourceId, '');
+      send({ status: '正在整理入库…', prog: { phase: 2 } });
       rag.autoIndex(goal.id);
       const jr = db.prepare('SELECT id FROM jd_images WHERE goal_id = ? AND file = ?').get(goal.id, info.file);
       send({ done: true, notice: info.notice, jd: { id: jr ? jr.id : 0, file: info.file, title: info.title, source_id: info.sourceId }, extracted: info.extracted, goal: getGoal(goal.id), sources: sourcesOf(goal.id) });

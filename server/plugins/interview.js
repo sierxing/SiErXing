@@ -65,18 +65,16 @@ function bind(ctx) {
 }
 /* 统一的 AI 任务包装：给任务中心一条可看进度、可重试的记录 */
 function aiJob({ type, title, note, goalId, nodeId, message, run, retry }) {
+  /* 进度**不在这里手搓时间曲线了**。原来这段 `1 - exp(-秒/18)` 在 interview / quests /
+     restate / jdfile / explain 里各抄了一份、常数还各不相同（有的封 93%、有的 95%）。
+     现在统一归 `server/task-progress.js`：它会给一条按时间平滑、且在完成前封顶的条
+     （前端会标"估算"，不冒充真实数字）。任务自己只在关键节点用
+     `job.count() / job.phase()` 把"估算"换成真实进度。 */
   const job = tasks.begin({ type: type || 'interview', title, note, goalId, nodeId, message, retry });
-  const t0 = Date.now();
-  job.progress(4, message);
-  const iv = setInterval(() => {
-    const sec = Math.round((Date.now() - t0) / 1000);
-    const p = Math.min(93, Math.round(100 * (1 - Math.exp(-sec / 18))));
-    job.progress(Math.max(4, p), message + '（已等 ' + sec + ' 秒）');
-  }, 1500);
   return Promise.resolve()
     .then(() => run(job.signal))
-    .then(v => { clearInterval(iv); job.progress(100, '完成'); job.done(v); return v; })
-    .catch(e => { clearInterval(iv); job.fail(e); throw e; });
+    .then(v => { job.done(v); return v; })     // done() 会把条收到 100%，不用先手动报一次
+    .catch(e => { job.fail(e); throw e; });
 }
 /* 从模型回复里抠第一个 JSON 对象（前后带话/带围栏都认） */
 function firstJSON(text) {

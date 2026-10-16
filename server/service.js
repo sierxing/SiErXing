@@ -15,6 +15,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+/* 开机自启是 systemd 用户服务：这个进程不在桌面会话里，喊浏览器/文件管理器前要补显示环境 */
+const { guiEnv } = require('./gui-env');
 
 const APP_LABEL = '思而行';
 const UNIT_NAME = 'sierxing.service';
@@ -424,7 +426,7 @@ module.exports = function createService({ appDir, port, log = () => {} }) {
     const cmd = platform === 'win32' ? 'cmd' : (platform === 'darwin' ? 'open' : 'xdg-open');
     const args = platform === 'win32' ? ['/c', 'start', '', url] : [url];
     try {
-      const child = spawn(cmd, args, { detached: true, stdio: 'ignore' });
+      const child = spawn(cmd, args, { detached: true, stdio: 'ignore', env: guiEnv() });
       child.unref();
       return { ok: true };
     } catch (e) { return { ok: false, error: e.message }; }

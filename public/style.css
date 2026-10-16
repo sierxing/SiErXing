@@ -101,6 +101,10 @@ header.top{background:var(--card); border-bottom:1px solid var(--border);}
 }
 .chip.gray{background:var(--soft); color:var(--muted); border-color:transparent;}
 .chip.ok{background:var(--ok-soft); color:var(--ok); border-color:transparent;}
+/* AI 判读标签（资料库里"这条资料相关度几分"） */
+.chip.ai{background:var(--accent-soft); color:var(--accent); border-color:var(--accent-border);}
+.libAiRow{display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin:2px 0 6px;}
+.libAiSum{font-size:12px; color:var(--muted);}
 .chip.warn{background:rgba(217,119,6,.1); color:var(--warn); border-color:transparent;}
 .chip.danger{background:rgba(224,36,36,.09); color:var(--danger); border-color:transparent;}
 
@@ -307,6 +311,13 @@ body:has(.cmpPage) .wrap{max-width:1460px;}
 .bigDialog .tdBody{flex:1 1 auto; min-height:0; overflow-y:auto; overscroll-behavior:contain; padding:16px 20px;}
 .bigDialog .bdTitle{line-height:1.4;}
 .bigDialog .bdSub{font-size:12px; font-weight:400; color:var(--muted); margin-top:2px;}
+/* 搜集设置里的「把关」一行：严格度 / 候选上限 / 单站上限 / 全文开关 */
+.csGateRow{display:flex; gap:12px; flex-wrap:wrap; align-items:flex-start; padding:8px 10px; border:1px solid var(--border); border-radius:var(--r-sm); background:var(--soft);}
+.csGateLbl{display:flex; flex-direction:column; gap:4px; font-size:12.5px; color:var(--muted);}
+.csGateLbl select,.csGateLbl input[type=number]{font-family:inherit; font-size:12.5px; padding:5px 8px; border:1px solid var(--border); border-radius:8px; background:var(--card); color:var(--text);}
+.csGateLbl input[type=number]{width:74px;}
+.csGateWide{flex:1 1 100%; gap:6px;}
+.csGateWide input[type=checkbox]{margin-right:6px;}
 .csSec{background:var(--bg); border:1px solid var(--border); border-radius:12px; padding:14px 16px; margin-bottom:14px;}
 .csSec:last-of-type{margin-bottom:0;}
 .csSecHead{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:10px;}
@@ -787,6 +798,113 @@ body.mapMode{overflow:hidden;}
 .ctxMenu button.danger:hover{background:rgba(224,36,36,.08); color:var(--danger);}
 .ctxMenu .ctxSep{height:1px; background:var(--border); margin:4px 6px;}
 
+/* ---- 节点右键菜单（精简版：重命名 / 删除 / AI 功能 ▸）----
+   为什么单独一套类名而不是改 .ctxMenu 的通用规则：.ctxMenu 还被 ⋯ 菜单、
+   划线笔记、组件入口共用，动它的 button 布局等于全站菜单一起改（踩过）。 */
+.ctxMenuSlim{
+  width:220px; padding:6px; gap:1px;
+  animation:ctxIn .12s ease;
+}
+.ctxMenuSlim button{
+  display:flex; align-items:flex-start; gap:8px; width:100%; text-align:left;
+  border:none; background:none; color:var(--text); padding:7px 9px;
+  border-radius:8px; font-size:13px; cursor:pointer; font-family:inherit; transition:.12s;
+}
+.ctxMenuSlim button:hover{background:var(--accent-soft); color:var(--accent);}
+.ctxMenuSlim button.danger:hover{background:rgba(224,36,36,.08); color:var(--danger);}
+.ctxMenuSlim .ci{flex:none; width:17px; text-align:center; line-height:1.35;}
+.ctxMenuSlim .cl{flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; line-height:1.35;}
+.ctxMenuSlim .cl em{font-style:normal; font-size:11px; color:var(--muted); opacity:.9;}
+.ctxMenuSlim button:hover .cl em{color:inherit; opacity:.75;}
+.ctxMenuSlim .ctxCare{margin-left:auto; color:var(--muted); font-size:11px; line-height:1.35;}
+/* ---- 居中弹窗（节点选择器用；原来是「✨ AI 功能」弹窗，现在 AI 对话统一在右侧助手）---- */
+.naMask{
+  position:fixed; inset:0; z-index:320; background:rgba(20,18,28,.34);
+  display:flex; align-items:center; justify-content:center; animation:ctxIn .12s ease;
+}
+.naDlg{
+  width:min(620px, 94vw); max-height:82vh; display:flex; flex-direction:column;
+  background:var(--card); border:1px solid var(--border); border-radius:16px;
+  box-shadow:var(--shadow-lg); overflow:hidden;
+}
+.naHead{display:flex; align-items:center; gap:8px; padding:12px 14px; border-bottom:1px solid var(--border);}
+.naTitle{font-weight:600; font-size:14px;}
+.naSub{font-size:12.5px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:46%;}
+.naHead .spacer{flex:1;}
+.naMode{
+  font-size:11.5px; padding:2px 8px; border-radius:999px; cursor:pointer; user-select:none;
+  border:1px solid var(--border); color:var(--muted);
+}
+.naMode:hover{border-color:var(--accent); color:var(--accent);}
+.naX{border:none; background:none; font-size:18px; line-height:1; color:var(--muted); cursor:pointer; padding:2px 6px; border-radius:7px;}
+.naX:hover{color:var(--danger); background:rgba(224,36,36,.08);}
+
+/* ---- AI 助手：顶部「聊的是：🎯 节点 ✕」那一排 ---- */
+.adNodes{
+  display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin:0 12px 6px;
+  padding:6px 8px; border:1px solid var(--border); border-radius:10px;
+  background:var(--accent-soft); font-size:12px;
+}
+.adNodes[hidden]{display:none;}
+.adNodesLb{color:var(--muted); flex:none;}
+.adNodeChip{
+  display:inline-flex; align-items:center; gap:5px; max-width:100%;
+  padding:2px 4px 2px 8px; border-radius:999px; border:1px solid var(--border); background:var(--card);
+}
+.adNodeChip i{font-style:normal; font-size:10px; color:var(--accent); border:1px solid currentColor; border-radius:999px; padding:0 4px;}
+.adNodeX{
+  cursor:pointer; color:var(--muted); font-weight:400; padding:0 4px; border-radius:999px; font-size:11px;
+}
+.adNodeX:hover{color:var(--danger); background:rgba(224,36,36,.1);}
+/* （原「＋ 添加节点」长在"聊的是"那条里，没附件时整条是隐的、找不到入口；
+   现在它是功能栏里常驻的「＋ 节点」，样式走 .adToolBtn，这里不再需要单独一套） */
+
+/* ---- 功能栏的「✨ AI 功能」+ 它的弹层 ---- */
+.adFnPop{
+  position:absolute; bottom:calc(100% + 6px); left:8px; width:290px; z-index:40;
+  background:var(--card); border:1px solid var(--border); border-radius:12px;
+  box-shadow:var(--shadow-lg); padding:6px; max-height:56vh; overflow-y:auto;
+}
+.adFnPop[hidden]{display:none;}
+.adFnT{font-size:11.5px; color:var(--muted); padding:6px 8px 4px;}
+.adFnT b{color:var(--text);}
+.adFnIt{
+  display:flex; align-items:flex-start; gap:8px; width:100%; text-align:left; cursor:pointer;
+  border:none; background:none; color:var(--text); font-family:inherit; font-size:13px;
+  padding:7px 9px; border-radius:8px;
+}
+.adFnIt:hover{background:var(--accent-soft); color:var(--accent);}
+.adFnIt .ci{flex:none; width:17px; text-align:center;}
+.adFnIt .cl{flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; line-height:1.35;}
+.adFnIt .cl em{font-style:normal; font-size:11px; color:var(--muted);}
+/* （原「提意见调整划分」的就地输入框已去掉：它已从 AI 功能清单里移除，
+   按意见重划仍在节点详情面板里；日常小改直接用下面的输入框跟 AI 说） */
+
+/* ---- 节点选择器（＋ 添加节点）---- */
+.npkDlg{width:min(560px, 94vw);}
+.npkSearch{padding:10px 14px 6px;}
+.npkSearch input{
+  width:100%; padding:8px 11px; font-family:inherit; font-size:13px;
+  border:1px solid var(--border); border-radius:9px; background:var(--bg); color:var(--text);
+}
+.npkSearch input:focus{outline:none; border-color:var(--accent);}
+.npkList{flex:1; overflow-y:auto; padding:4px 8px 10px; min-height:180px;}
+.npkRow{
+  display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:8px; cursor:pointer;
+}
+.npkRow:hover{background:var(--accent-soft);}
+.npkRow input{flex:none;}
+.npkTitle{flex:1; min-width:0; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.npkLv{flex:none; font-size:11px; color:var(--muted);}
+.npkKids{
+  flex:none; font-family:inherit; font-size:10.5px; cursor:pointer; padding:2px 7px; border-radius:999px;
+  border:1px dashed var(--border); background:none; color:var(--muted);
+}
+.npkKids.on{border-style:solid; border-color:var(--accent); color:var(--accent); background:var(--accent-soft);}
+.npkFoot{display:flex; align-items:center; gap:8px; padding:10px 14px; border-top:1px solid var(--border);}
+.npkFoot .spacer{flex:1;}
+.npkHint{font-size:11.5px; color:var(--muted);}
+
 /* ============ 拆分进度面板 ============ */
 .expandPanel{
   display:flex; align-items:center; gap:10px; background:var(--card);
@@ -1098,11 +1216,52 @@ h3.mdH{font-size:17px;} h4.mdH,h5.mdH,h6.mdH{font-size:15px;}
 .mdBody a:hover{text-decoration:underline;}
 .mdBody img{max-width:100%; border-radius:9px;}
 .mdBody del{opacity:.65;}
+/* ===== 模型在 Markdown 里写的少量内联 HTML 的样式（见 app.js 的 mdTags） =====
+   这些标签以前会被转义成文字，现在按"强调"渲染。这里只管观感，不管放行（放行在 app.js）。 */
+.mdBody mark{background:rgba(255,214,64,.42); color:inherit; border-radius:4px; padding:0 3px;}
+.mdBody kbd{
+  display:inline-block; min-width:18px; text-align:center; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:11.6px; line-height:1.5; padding:1px 6px; margin:0 1px; border-radius:6px;
+  background:var(--soft); border:1px solid var(--border); border-bottom-width:2px; color:var(--text);
+}
+.mdBody small{font-size:12.4px; color:var(--muted);}
+.mdBody sub,.mdBody sup{font-size:11px;}
+/* 折叠答案：<details><summary>参考答案</summary>…</details>（颜色/字重写在标签的 style 上，这里不用管） */
+.mdBody details.mdDetails{
+  margin:10px 0; border:1px solid var(--border); border-radius:10px; background:var(--soft); overflow:hidden;
+}
+.mdBody details.mdDetails > summary{
+  cursor:pointer; list-style:none; padding:8px 12px; font-size:13px; font-weight:650; color:var(--accent);
+  background:var(--accent-soft); border-bottom:1px solid var(--border); user-select:none;
+}
+.mdBody details.mdDetails > summary::-webkit-details-marker{display:none;}
+.mdBody details.mdDetails > summary::before{content:'▸ '; font-size:11px; display:inline-block; transition:transform .15s;}
+.mdBody details.mdDetails[open] > summary::before{content:'▾ ';}
+.mdBody details.mdDetails > summary:hover{filter:brightness(1.04);}
+.mdBody details.mdDetails:not([open]) > summary{border-bottom:none;}
+/* 折叠块里的正文：左右留白，且别再套一层底色 */
+.mdBody details.mdDetails > :not(summary){margin-left:12px; margin-right:12px;}
+.mdBody details.mdDetails > :last-child{margin-bottom:10px;}
 
 /* ============ 对话：变更可视化 ============ */
 .chOps{margin-top:9px; padding:9px 11px; border-radius:10px; background:rgba(46,204,113,.07); border:1px solid rgba(46,204,113,.28);}
 .chOpsHead{display:flex; align-items:center; gap:6px; font-size:12.5px; font-weight:700; color:var(--ok);}
 .chOpsHead .spacer{flex:1;}
+/* 「等你确认改动范围」卡片：AI 想动结构时先让用户核对范围（点一下才开跑） */
+.chPend{margin-top:9px; padding:10px 12px; border-radius:10px; background:rgba(230,160,40,.10); border:1px solid rgba(230,160,40,.45);}
+.chPendHead{font-size:12.5px; font-weight:700; color:#c8861a;}
+.chPendScope{margin:5px 0 8px; font-size:12.5px; color:var(--text); line-height:1.7;}
+.chPendSub{color:var(--muted); font-size:12px;}
+.chPendRow{display:flex; align-items:center; gap:9px; flex-wrap:wrap;}
+.chPendOk{border-color:var(--accent); color:#fff; background:var(--accent);}
+.chPendOk:hover{filter:brightness(1.06);}
+.chPendOk:disabled{opacity:.6; cursor:default;}
+/* 「✏️ 范围不对」：次要按钮，不跟主按钮抢注意力 */
+.chPendNo{color:var(--muted);}
+.chPendNo:hover{color:var(--text);}
+.chPendNo.on{border-color:var(--accent); color:var(--accent);}
+/* 点过「范围不对」之后的一行引导：举例用**用户自己教程里的小节名**，不写死无关的例子 */
+.chPendTip{margin-top:7px; font-size:11.5px; color:var(--muted); line-height:1.65;}
 .chDiffBtn{border:1px solid var(--accent-border); background:var(--card); color:var(--accent); font-size:11.5px; font-weight:600; padding:3px 9px; border-radius:8px; cursor:pointer; font-family:inherit;}
 .chDiffBtn:hover{background:var(--accent-soft);}
 .chOpList{margin-top:7px; display:flex; flex-direction:column; gap:4px;}
@@ -1127,6 +1286,26 @@ h3.mdH{font-size:17px;} h4.mdH,h5.mdH,h6.mdH{font-size:15px;}
 .chDiffCols .diffRow .mtHours{font-size:10.5px;}
 .chPrep{font-size:11.5px; color:var(--accent); margin-top:7px; display:flex; align-items:center; gap:6px;}
 .chPrep:before{content:''; width:7px; height:7px; border-radius:50%; background:var(--accent); animation:chBlink 1s ease-in-out infinite;}
+
+/* ============ 对话：「它做了什么」（本轮看了什么上下文、调了哪些工具） ============ */
+/* 默认收起：正文才是主角；点标题展开。流式期间那份默认展开（那会儿它就是"正在做什么"）。 */
+.chTrace{margin-bottom:8px; border:1px solid var(--border); border-radius:10px; background:var(--soft); overflow:hidden;}
+.chTrace.live{border-color:var(--accent-border);}
+.chTraceHead{display:flex; align-items:center; gap:6px; width:100%; padding:6px 9px; border:none; background:transparent; color:var(--text); font-family:inherit; font-size:12.3px; line-height:1.5; text-align:left; cursor:pointer;}
+.chTraceHead:hover{background:var(--accent-soft);}
+.chTraceHead:focus-visible{outline:2px solid var(--accent); outline-offset:-2px;}
+.chTraceIco{flex:none; font-size:12.5px;}
+.chTraceTitle{flex:none; font-weight:700;}
+.chTrace.live .chTraceTitle:after{content:''; display:inline-block; width:6px; height:6px; margin-left:5px; border-radius:50%; background:var(--accent); animation:chBlink 1s ease-in-out infinite;}
+.chTraceSum{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:11.5px;}
+.chTraceCare{flex:none; color:var(--muted); font-size:11px;}
+.chTraceBody{padding:3px 9px 8px; border-top:1px dashed var(--border); display:flex; flex-direction:column; gap:3px;}
+.chStep{display:flex; align-items:baseline; gap:6px; font-size:12.2px; line-height:1.55;}
+.chStepIco{flex:none; font-size:11.5px; opacity:.85;}
+.chStepText{flex:none; max-width:64%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.chStepNote{flex:1; min-width:0; color:var(--muted); font-size:11.4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.chStep.ctx .chStepText{color:var(--muted); font-weight:600;}
+.chStep.bad .chStepText{color:#c0392b;}
 
 /* ============ 对话侧边栏 ============ */
 .aiFab{
@@ -2063,7 +2242,10 @@ body{padding-left:78px;}
 .taskCaret{font-size:10px; color:var(--muted);}
 .taskList{
   margin-bottom:8px; background:var(--card); border:1px solid var(--border); border-radius:12px;
-  box-shadow:0 12px 34px rgba(20,18,40,.2); padding:8px; max-height:52vh; overflow:auto;
+  /* 面板从底部往上长，所以高度要留出药丸那一行 + 页脚，否则最后几个阶段点
+     和"正在思考"那行会被屏幕下沿切掉（实测就切了）。 */
+  box-shadow:0 12px 34px rgba(20,18,40,.2); padding:8px;
+  max-height:min(60vh, calc(100vh - 190px)); overflow:auto; overscroll-behavior:contain;
 }
 .taskItem{display:flex; gap:8px; align-items:flex-start; padding:7px 8px; border-radius:9px;}
 .taskItem.running{background:var(--accent-soft);}
@@ -2074,6 +2256,17 @@ body{padding-left:78px;}
 .taskMsg{font-size:11.5px; color:var(--muted); margin-top:2px; line-height:1.5;}
 /* 「可能卡住了」：任务几分钟没有任何进展时给一句人话 + 该怎么做（停止/重试） */
 .taskStall{font-size:11.5px; color:#c2410c; background:#fff7ed; border:1px solid #fed7aa; border-radius:6px; padding:3px 6px; margin-top:4px; line-height:1.5;}
+/* 子任务折叠（一条讲解会并行派好几个模块）：默认收起，点一下展开看每个模块的进度 */
+.taskKids{display:inline-flex; align-items:center; gap:5px; margin-top:4px; padding:2px 8px; font-size:11px; font-family:inherit;
+  color:var(--muted); background:var(--soft); border:1px solid var(--border); border-radius:999px; cursor:pointer;}
+.taskKids:hover{color:var(--text); border-color:var(--accent-border);}
+.taskKidList{margin-top:4px; border-left:2px solid var(--border); padding-left:8px; display:flex; flex-direction:column; gap:3px;}
+.taskKid{display:flex; align-items:center; gap:6px; font-size:11px; color:var(--muted); min-width:0;}
+.taskKid.done{color:var(--text);}
+.taskKid.failed{color:#c2410c;}
+.taskKidDots{flex:none; width:12px; text-align:center;}
+.taskKidT{flex:0 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:52%;}
+.taskKidM{flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; opacity:.75;}
 :root[data-theme="dark"] .taskStall{color:#fdba74; background:rgba(194,65,12,.14); border-color:rgba(253,186,116,.35);}
 .taskPill.stalled{border-color:#fdba74; background:#fff7ed; color:#c2410c;}
 :root[data-theme="dark"] .taskPill.stalled{background:rgba(194,65,12,.16); color:#fdba74;}
@@ -2082,6 +2275,14 @@ body{padding-left:78px;}
 .taskProgWrap{margin-top:6px;}
 .taskProgNum{display:flex; justify-content:space-between; gap:8px; font-size:11px; color:var(--muted); margin-bottom:3px; font-variant-numeric:tabular-nums;}
 .taskProgNum > span:first-child{color:var(--accent); font-weight:700;}
+/* "估算"标：百分比是按时间平滑出来的，不是事实 —— 必须让用户一眼看出来，
+   不然"看着 90% 其实还早"（真实反馈）。 */
+.taskEst{
+  display:inline-block; margin-left:5px; padding:0 4px; border-radius:4px;
+  font-size:9.5px; font-weight:600; letter-spacing:.02em; vertical-align:1px;
+  color:var(--muted); background:var(--soft); border:1px solid color-mix(in srgb, var(--muted) 25%, transparent);
+}
+.taskQueued{color:var(--muted); font-weight:600;}
 .taskProg i{display:block; height:100%; background:var(--accent); transition:width .45s ease; border-radius:3px;}
 /* 流动高光：百分比不动的时候条也在动，看着就不像卡死 */
 .taskProg i::after{
@@ -2126,6 +2327,9 @@ body{padding-left:78px;}
 .btn.tiny.retry{border-color:var(--accent); color:var(--accent);}
 .btn.tiny.retry:hover{background:var(--accent-soft);}
 .btn.tiny.retry:disabled{opacity:.6; cursor:default;}
+/* 「🔓 允许改结构再跑」：不是普通重试（那个会原样再失败一次），所以给它实心强调 */
+.btn.tiny.retry.allowStruct{background:var(--accent); color:#fff; border-color:var(--accent); margin-left:4px;}
+.btn.tiny.retry.allowStruct:hover{filter:brightness(1.06); background:var(--accent);}
 
 /* 节点正在被 AI 处理：呼吸光环 + 文案 */
 .mtnode.aiBusy, .mttask.aiBusy{
@@ -2570,6 +2774,8 @@ input,textarea{caret-color:var(--accent);}
 }
 .adToolBtn:hover, .adToolBtn.open{border-color:var(--accent-border); background:var(--accent-soft);}
 .adToolBtn .adCare{font-size:10px; color:var(--muted); margin-left:-2px;}
+/* 「✨ AI 功能」按钮上的节点名（小字，太长了就省略） */
+.adToolBtn em{font-style:normal; font-size:11px; color:var(--muted); max-width:90px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
 .adModeIco{font-size:12.5px;}
 
 /* 菜单向上弹（它就在输入框上方，向下会盖住输入区），左右贴齐按钮 */
@@ -2686,11 +2892,32 @@ input,textarea{caret-color:var(--accent);}
 .aitGrpBody{padding:2px 12px 7px; border-top:1px solid var(--border);}
 .aitRowWrap{border-bottom:1px solid var(--border);}
 .aitRowWrap:last-child{border-bottom:0;}
-.aitRow{display:flex; align-items:center; gap:10px; padding:8px 2px; border-radius:8px; cursor:pointer;}
+/* 历史记录一行 = 网格而不是 flex：状态 / 时间 / 原因按钮各占固定列宽，
+   于是**所有行的这三列都在同一条竖线上**，一眼能竖着扫下来。
+   以前是 flex + 内容自适应宽度，"失败"两个字比"完成"宽一点，
+   整列就跟着歪，几十行看下来非常难受。 */
+.aitRow{
+  display:grid; align-items:center; gap:10px; padding:8px 2px; border-radius:8px; cursor:pointer;
+  grid-template-columns:18px minmax(0,1fr) 64px 138px 62px;
+}
 .aitRow:hover{background:var(--soft);}
 .aitRowIcon{font-size:13.5px;}
-.aitRowTitle{flex:1; min-width:0; font-size:12.8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
-.aitRowMeta{font-size:11.5px; color:var(--muted); white-space:nowrap; font-variant-numeric:tabular-nums;}
+/* 列的抬头（状态/时间），只在每组上面出现一次，告诉用户每列是什么 */
+.aitRowHead{
+  display:grid; align-items:center; gap:10px; padding:2px 2px 4px;
+  grid-template-columns:18px minmax(0,1fr) 64px 138px 62px;
+  font-size:10.5px; color:var(--muted); letter-spacing:.4px;
+}
+/* 抬头用和数据行完全一样的网格列，于是天然对齐 */
+.aitRowHead span:nth-child(3){padding-left:0;}
+.aitRowHead span:nth-child(4){text-align:right;}
+.aitRowTitle{min-width:0; font-size:12.8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.aitRowMeta{font-size:11.5px; color:var(--muted); white-space:nowrap; font-variant-numeric:tabular-nums; text-align:right;}
+/* 状态列左对齐成一条竖线；字号统一，避免"失败"比"完成"宽出半格 */
+.aitRow > .aitSt{text-align:left; display:block;}
+/* 原因按钮永远占住那一格（没错误就隐形），否则有错误的行会把时间列挤歪 */
+.aitRow > .aitRowErrBtn{visibility:hidden;}
+.aitRow.hasErr > .aitRowErrBtn{visibility:visible;}
 .aitErrBox{
   font-size:12px; line-height:1.6; color:var(--danger); margin:0 0 9px; padding:8px 11px;
   border-radius:9px; background:color-mix(in srgb, var(--danger) 7%, transparent);
@@ -3104,3 +3331,14 @@ body.tutResizing *{cursor:col-resize !important;}
 /* 写批注 / 复制 / 取消：跟菜单里其它项同一套（padding 与选中态都对齐，别一边花哨一边光秃秃） */
 .ctxMenu.tnCtxMenu > button{padding:7px 10px;}
 .ctxMenu.tnCtxMenu > button:focus-visible{outline:2px solid var(--accent); outline-offset:-2px;}
+/* 清洗资料：悬浮进度框（SSE 边清洗边报进度；不弹整页遮罩，用户可以看着数字涨） */
+.libCleanMask{position:fixed; inset:0; background:rgba(10,12,20,.28); display:flex; align-items:center; justify-content:center; z-index:90;}
+.libCleanBox{position:relative; background:var(--card); border:1px solid var(--border); border-radius:var(--r-lg); box-shadow:var(--shadow-lg); padding:18px 20px; width:min(460px, 92vw);}
+.libCleanX{position:absolute; top:8px; right:10px; border:none; background:none; color:var(--muted); font-size:20px; line-height:1; cursor:pointer; padding:2px 6px; border-radius:8px; font-family:inherit;}
+.libCleanX:hover{background:var(--soft); color:var(--text);}
+.libCleanBtns{display:flex; gap:9px;}
+.libCleanT{font-size:14.5px; font-weight:700; margin-bottom:8px;}
+.libCleanS{font-size:13px; color:var(--text); line-height:1.6; min-height:20px;}
+.libCleanWarn{font-size:11.5px; color:var(--muted); line-height:1.6; margin:10px 0 12px;}
+.libCleanBig{font-size:19px; font-weight:700; color:var(--accent); letter-spacing:.2px;}
+.libCleanSub{font-size:12.5px; color:var(--text); margin-top:7px; min-height:16px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}

@@ -29,28 +29,20 @@ function bind(ctx) {
 /* 把一次 AI 调用挂到左下角「AI 任务」上 —— 提炼/判定可能要等十几秒到半分钟，
    只让按钮变灰用户完全不知道系统在干什么，挂到任务栏里才有"确实在工作"的实感，
    还能随时点「停止」。
-   单次 AI 调用拿不到真实的子进度，所以进度条按**已耗时渐近逼近**（封顶 93%，永不假装完成），
-   消息始终如实说明在做什么、已等多久；只有真正拿到并处理完结果才 100%。 */
+   单次 AI 调用拿不到真实的子进度，所以进度条交给统一模型（server/task-progress.js）：
+   它按**已耗时渐近逼近**（永不假装完成），前端会把它标成"估算"并如实说明在做什么、已等多久；
+   只有真正拿到并处理完结果才 100%。 */
 function aiJob({ title, note, goalId, nodeId, message, run }) {
   const job = tasks.begin({ type: 'restate', title, note, goalId, nodeId, message });
-  const t0 = Date.now();
-  job.progress(4, message);
-  const iv = setInterval(() => {
-    const sec = Math.round((Date.now() - t0) / 1000);
-    const p = Math.min(93, Math.round(100 * (1 - Math.exp(-sec / 18))));
-    job.progress(Math.max(4, p), message + '（已等 ' + sec + ' 秒）');
-  }, 1500);
   return Promise.resolve()
     .then(() => run(job.signal))
     .then(v => {
-      clearInterval(iv);
-      job.progress(98, 'AI 已返回，正在校验结果…');
+      /* 只换文案不动百分比：交给时间曲线继续爬，比冻在 98% 更像"还在跑" */
+      job.progress(undefined, 'AI 已返回，正在校验结果…');
       job.done(v);
-      job.progress(100, '完成');
       return v;
     })
     .catch(e => {
-      clearInterval(iv);
       job.fail(e);
       throw e;
     });

@@ -920,6 +920,75 @@ function opencodeArgs(c, opts, withAgent) {
 function isAgentError(msg) {
   return /agent/i.test(String(msg || '')) && /(not found|不存在|unknown|无效|invalid)/i.test(String(msg || ''));
 }
+
+/* ---------------- 工具调用 →「它做了什么」里的一步 ----------------
+ * opencode 的 --format json 事件里，tool_use 带着完整的 input / output。
+ * 但 output 可能是整份文件（几万字），直接塞进 SSE 会把一轮对话撑到几百 KB，
+ * 落库更是存一份文件副本。这里只挑「说明它在干什么」的字段并各自截断，
+ * 措辞（说人话）交给前端 —— 文案只在一处维护。
+ */
+const STEP_INPUT_KEYS = ['path', 'filePath', 'pattern', 'query', 'command', 'url', 'description', 'prompt', 'glob', 'include', 'workdir'];
+/** 路径缩成「相对应用目录」：绝对路径（/home/xxx/…/public/app.js）对用户没有信息量，还占掉一整行。
+    路径正好等于应用目录时返回 '.'（前端显示成「应用目录」），否则会变成空串、看着像没读到东西。 */
+function stepShortPath(p) {
+  const s = String(p || '');
+  const base = String((ctx && ctx.appDir) || '');
+  let v = s;
+  if (base && (s === base || s.startsWith(base + '/') || s.startsWith(base + path.sep))) {
+    v = s.slice(base.length).replace(/^[\\/]/, '');
+  }
+  if (!v) return s ? '.' : '';
+  return v.length > 80 ? '…' + v.slice(-79) : v;
+}
+function toolStepFromPart(part) {
+  const p = part || {};
+  const st = (p.state && typeof p.state === 'object') ? p.state : {};
+  const raw = (st.input && typeof st.input === 'object') ? st.input : {};
+  const input = {};
+  for (const k of STEP_INPUT_KEYS) {
+    if (raw[k] == null) continue;
+    if (Array.isArray(raw[k])) { input[k] = raw[k].slice(0, 6).map(x => String(x).slice(0, 80)); continue; }
+    input[k] = String(raw[k]).slice(0, 300);
+  }
+  /* 写入类工具：正文一个字都不留（几百字白占地方），只留长度 —— 用户想知道的是"动了多大" */
+  if (raw.content != null) input.chars = String(raw.content).length;
+  if (raw.oldString != null) input.oldChars = String(raw.oldString).length;
+  if (raw.newString != null) input.newChars = String(raw.newString).length;
+  if (input.path) input.path = stepShortPath(input.path);
+  if (input.filePath) input.filePath = stepShortPath(input.filePath);
+  if (input.workdir) input.workdir = stepShortPath(input.workdir);
+  const step = {
+    kind: 'tool',
+    tool: String(p.tool || '').slice(0, 40),
+    status: String(st.status || '').slice(0, 20),
+    input
+  };
+  const rawOut = String(st.output == null ? '' : st.output);
+  const outLines = rawOut.split('\n').map(x => x.trim()).filter(Boolean);
+  if (outLines.length) {
+    step.out = outLines.join(' ').slice(0, 200);
+    /* read 也能读目录（opencode 会把里面的条目列出来）——
+       这不是"读了一个文件"，前端要能说成"看了目录里有什么"。 */
+    if (step.tool === 'read' && /^Read directory/.test(rawOut)) {
+      step.dir = true;
+      const em = rawOut.match(/entries \d+-(\d+)/);
+      if (em) step.n = Number(em[1]);
+    }
+    /* 可数的信息单独留一个 n：前端说人话要用（"找到 11 个文件""8 处命中"），
+       光靠折叠成一行的 out 数不出来。 */
+    if (!step.dir && (step.tool === 'glob' || step.tool === 'list')) step.n = outLines.length;
+    const fm = rawOut.match(/^Found (\d+) match/);
+    if (fm) step.n = Number(fm[1]);
+    const lm = rawOut.match(/lines (\d+)-(\d+)/);
+    if (step.tool === 'read' && !step.dir && lm) step.n = Math.max(0, Number(lm[2]) - Number(lm[1]) + 1);
+    if (step.tool === 'shell') step.first = outLines[0].slice(0, 140);
+  }
+  const tm = (st.time && typeof st.time === 'object') ? st.time : {};
+  if (tm.start && tm.end) step.ms = Math.max(0, Number(tm.end) - Number(tm.start));
+  const title = String(st.title || '').replace(/\s+/g, ' ').trim();
+  if (title && title !== step.tool) step.title = title.slice(0, 120);
+  return step;
+}
 async function opencodeText(c, opts) {
   const { prompt, model, images, timeoutMs, onEvent, signal } = opts;
     if (signal && signal.aborted) { const err = new Error('已停止'); err.cancelled = true; throw err; }
@@ -943,7 +1012,9 @@ async function opencodeText(c, opts) {
           if (d.type === 'text' && d.part && d.part.text) { text += d.part.text; onEvent({ text: d.part.text }); }
           else if (d.type === 'reasoning' && d.part && d.part.text) onEvent({ thinking: String(d.part.text).replace(/\s+/g, ' ').slice(-60) });
           else if (d.type === 'step_start') onEvent({ thinking: '正在分析…' });
-          else if (d.type === 'tool_use' && d.part) onEvent({ thinking: '正在使用工具：' + (d.part.tool || '') });
+          /* 工具调用：以前只报一句"正在使用工具：read"（连它读了哪个文件都不知道）。
+             现在把整条工具事件整理成一步发给上层，界面上就能说成人话。 */
+          else if (d.type === 'tool_use' && d.part) onEvent({ step: toolStepFromPart(d.part) });
         }
       });
       let errBuf = '';

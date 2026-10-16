@@ -30,7 +30,7 @@ module.exports = function initTutPlan(B) {
   const PLAN_MIN = 4, PLAN_MAX = 7;
 
   /* ---------- 1) 外层：规划大纲 ---------- */
-  function buildPlanPrompt(goal, node, note, codeBlock) {
+  function buildPlanPrompt(goal, node, note, codeBlock, budget) {
     const levelName = { 0: '阶段', 1: '小目标', 2: '任务', 3: '子任务', 4: '步骤', 5: '步骤' }[node.level] || '任务';
     const lines = [];
     lines.push('你是资深技术教程架构师。给下面这个任务**规划一份学习教程的大纲**，这一步只出计划、不写正文。');
@@ -63,8 +63,15 @@ module.exports = function initTutPlan(B) {
 
     lines.push('');
     lines.push('【节点划分规则】');
-    lines.push('- 上面 7 项是**下限**，可以按知识点密度适当合并同类项（' + PLAN_MIN + '~' + PLAN_MAX + ' 节为宜）；');
+    const lo = (budget && budget.sections ? Math.max(4, budget.sections - 1) : PLAN_MIN);
+    const hi = (budget && budget.sections ? Math.min(PLAN_MAX, budget.sections + 1) : PLAN_MAX);
+    lines.push('- 上面 7 项是**下限**，可以按知识点密度适当合并同类项（本次定 ' + lo + '~' + hi + ' 节）；');
     lines.push('  ⚠️ 节数直接决定用户等待时间（每节要生成一次），**宁少勿多**：能合并的合，不要为了看起来全而拆细；');
+    if (budget && budget.target) {
+      lines.push('  ⚠️ 整篇篇幅目标约 ' + budget.target + ' 字（这是给一个' + (budget.hours ? budget.hours + ' 小时' : '') + '的任务写的，'
+        + '写长了用户看不完）：每节约 ' + budget.perSection + ' 字，**不要超**。'
+        + '宁可讲透、不要灌水 —— 不要为凑篇幅重复解释、不要堆无关背景。');
+    }
     lines.push('- 一节只讲一件事，标题要具体（不要"概述""介绍"这种空标题）；');
     lines.push('- 涉及流程 / 调用链 / 状态流转 / 时序先后 / 数据结构 / 并发交错 / 多方案对比的节，标 viz，');
     lines.push('  并在 vizIdea 里用一句话说清**画什么、怎么交互**');
@@ -100,7 +107,7 @@ module.exports = function initTutPlan(B) {
   }
 
   /* ---------- 2) 内层：逐节生成 ---------- */
-  function buildSectionPrompt(sec, idx, total, plan, prevTail, tutorialTitle, codeBlock, neighbors) {
+  function buildSectionPrompt(sec, idx, total, plan, prevTail, tutorialTitle, codeBlock, neighbors, budget) {
     const lines = [];
     lines.push('你是耐心、严谨的技术导师。现在写一篇学习教程里的**其中一节**，只写这一节，不要写别的章节，也不要写全文的总结。');
     lines.push('');
@@ -133,7 +140,10 @@ module.exports = function initTutPlan(B) {
     }
     lines.push('【写作要求】');
     lines.push('1. 第一个字符就是二级标题「## ' + sec.title + '」，**不要**再写一级标题，也不要写总结段。');
-    lines.push('2. 只写这一节，篇幅控制在 ' + (idx === 0 ? '600~1200' : '900~2200') + ' 字之间，写完就停。');
+    const per = (budget && budget.perSection) ? budget.perSection : 0;
+    lines.push('2. 只写这一节，篇幅控制在 ' + (per
+      ? Math.round(per * 0.6) + '~' + Math.round(per * 1.25) + ' 字（整篇预算 ' + (budget.target || '') + ' 字，写长了用户看不完）'
+      : (idx === 0 ? '600~1200' : '900~2200') + ' 字') + '，写完就停；不要为凑篇幅重复或灌水。');
     lines.push('3. 讲原理和思路，不要只给结论；对关键步骤解释原因，让用户能举一反三。');
     lines.push('4. 使用中文；专业术语首次出现时给出英文与解释。');
     lines.push('5. 内容具体可执行：真实命令、真实代码（用带语言标注的围栏代码块）。');
@@ -285,11 +295,105 @@ module.exports = function initTutPlan(B) {
     return '\n\n【⚠ 上一版这一节有问题】' + why + '。请重新写这一节，写完整。';
   }
 
+  /* 按二级标题把一篇 Markdown 切成节。补写内容要先切片，才能逐节判断"这节是不是已经有了"。 */
+  function splitSections(md) {
+    const lines = String(md || '').split('\n');
+    const out = []; let cur = null;
+    for (const l of lines) {
+      if (/^##[^#]/.test(l)) {
+        if (cur) out.push(cur);
+        cur = { title: l.replace(/^#+\s*/, '').trim(), lines: [l] };
+      } else if (cur) cur.lines.push(l);
+    }
+    if (cur) out.push(cur);
+    return out.map(s => ({ title: s.title, text: s.lines.join('\n') }));
+  }
+
+  /* 机械复核 AI 自检的结论：它说"这节缺/没写完"未必是真的。
+     真实翻过：正文里明明有《延伸学习》那一节（1 万字），自检却说缺失，
+     于是补写又插了一份，整篇多出一万字重复内容，还白花了 80 秒。
+     这里逐条用文本本身核对，只保留**确实有问题**的。 */
+  function verifyReviewClaims(txt, plan, review) {
+    const body = String(txt || '');
+    const secs = splitSections(body);
+    const hasViz = title => {
+      const s = secs.find(x => x.title === title) || secs.find(x => x.title.includes(title) || title.includes(x.title));
+      return !!s && /```\s*(?:viz|demo|htmlviz)/i.test(s.text);
+    };
+    const reallyMissing = [], reallyViz = [];
+    for (const t of [].concat(review ? review.missing : [], review ? review.unfinished : [])) {
+      if (!sectionPresent(body, t)) reallyMissing.push(t);
+      else {
+        /* 标题在、但可能真没写完：抽这一节自身的文本做单节体检 */
+        const s = secs.find(x => x.title === t) || secs.find(x => x.title.includes(t) || t.includes(x.title));
+        const why = s ? sectionTruncated(s.text) : '找不到对应章节';
+        if (why && !/几乎没有内容/.test(why)) reallyMissing.push(t + '（' + why + '）');
+      }
+    }
+    for (const t of (review ? review.vizMissing : [])) if (!hasViz(t)) reallyViz.push(t);
+    /* "viz 不是 HTML" 这类判断交给 AI（机械判断容易误伤），但对已经是 HTML 的不再重复报 */
+    const notHtml = (review ? review.vizNotHtml : []).filter(t => {
+      const s = secs.find(x => x.title === t) || secs.find(x => x.title.includes(t) || t.includes(x.title));
+      if (!s) return false;
+      const m = s.text.match(/```\s*(?:viz|demo|htmlviz)\s*\n([\s\S]*?)\n```/);
+      return m ? !/<[a-zA-Z][\w-]*[\s\S]*>/.test(m[1]) : false;
+    });
+    return {
+      missing: reallyMissing,
+      vizBad: reallyViz.concat(notHtml),
+      fenceOpen: !!(review && review.fenceOpen) && !!unclosedIn(body)
+    };
+  }
+  /* 全文最后一个没闭合的围栏（有才返回非空） */
+  function unclosedIn(txt) {
+    let open = null;
+    for (const line of String(txt || '').split('\n')) {
+      const m = line.match(/^\s*(`{3,}|~{3,})\s*([\w-]*)\s*$/);
+      if (!m) continue;
+      if (!open) { open = { mark: m[1][0], len: m[1].length }; continue; }
+      if (m[1][0] === open.mark && m[1].length >= open.len && !m[2]) open = null;
+    }
+    return open ? '有' : '';
+  }
+
+  /* 规范一节正文的标题层级：这一节只能有一个二级标题（就是它自己的标题），
+     节内再要分小结构一律降成三级。真实翻过：模型写「分步实践」时把
+     `## 何时使用` `## 步骤` `## 前置条件` 也写成了二级 —— 拼起来后
+     大纲从 7 节变成 13 节，还出现两个都叫「步骤」的章节。 */
+  function normalizeSectionBody(body, title) {
+    let s = String(body || '').trim();
+    if (!s) return '## ' + title + '\n\n（本节内容缺失）';
+    const lines = s.split('\n');
+    const head = '## ' + title;
+    /* 第一个标题行：**标题文字换成大纲里的那个** —— 模型常把它自己写的子标题
+       （"## 何时使用"）放在最前面当节标题，照抄的话整篇大纲就散了。
+       但它的原文也不能丢，降成三级标题留着。 */
+    const first = lines.findIndex(l => /^#{1,6}\s+\S/.test(l));
+    if (first < 0) {
+      /* 整段没有标题（模型直接开始写正文）：标题补到最前面 */
+      lines.unshift(head, '');
+    } else {
+      const raw = lines[first].replace(/^#+\s*/, '').trim();
+      const same = raw.replace(/[\s：:、，,。]/g, '') === String(title).replace(/[\s：:、，,。]/g, '');
+      /* 标题前面可能还有一段正文（模型爱先铺垫一句），它必须挪到标题下面，
+         否则会漂在大纲外面 —— 渲染出来就是"没有归属的一段话"。 */
+      const lead = lines.slice(0, first).filter(l => l.trim());
+      lines.splice(0, first + 1, head, '');            // 用节标题替换掉原来那一行
+      if (!same && raw) lines.splice(2, 0, '### ' + raw, '');   // 原第一标题降级保留
+      if (lead.length) lines.splice(2 + (same || !raw ? 0 : 2), 0, lead.join('\n'), '');
+      /* 其余二级标题一律降为三级 */
+      for (let i = 1; i < lines.length; i++) {
+        if (/^##[^#]/.test(lines[i])) lines[i] = '#' + lines[i];
+      }
+    }
+    return lines.join('\n').replace(/\n{3,}/g, '\n\n');
+  }
+
   return {
     PLAN_MIN, PLAN_MAX,
     buildPlanPrompt, parsePlan,
-    buildSectionPrompt, sectionTruncated, closeFences, retryHint,
-    buildReviewPrompt, parseReview, sectionPresent,
+    buildSectionPrompt, sectionTruncated, closeFences, retryHint, normalizeSectionBody,
+    buildReviewPrompt, parseReview, sectionPresent, splitSections, verifyReviewClaims,
     buildFillPrompt
   };
 };

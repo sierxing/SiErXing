@@ -33,7 +33,9 @@ const AI_MODES = [
 ];
 
 
-const state = { goals: [], goal: null, sources: [], planning: false, collecting: false, collectStatus: '', expanded: {}, filter: '', models: [], model: '', showNew: false, showEdit: false, mapScale: 1, mapTx: 40, mapTy: 40, _drag: null, _suppressClick: false };
+const state = { goals: [], goal: null, sources: [], planning: false, collecting: false, collectStatus: '', expanded: {}, filter: '', models: [], model: '', showNew: false, showEdit: false, mapScale: 1, mapTx: 40, mapTy: 40, _drag: null, _suppressClick: false, taskKidsOpen: {},
+  /* AI 助手：这条对话带着哪些节点（右键节点 → AI 功能 会把它加进来）、功能区选中的是哪个节点 */
+  aiNodes: [], aiFnPick: 0 };
 
 /* ============ 主题（白天/黑夜 + 亮暗各自的皮肤） ============ */
 function currentThemeEff() {
@@ -109,6 +111,8 @@ const SXI_PATHS = {
   book:    '<path d="M3 4.2h4.2A1.8 1.8 0 0 1 9 6v8a2 2 0 0 0-1.8-1.2H3z"/><path d="M13 4.2H8.8A1.8 1.8 0 0 0 7 6v8a2 2 0 0 1 1.8-1.2H13z"/>',
   target:  '<circle cx="8" cy="8" r="5.2"/><circle cx="8" cy="8" r="1.9"/>',
   pin:     '<path d="M8 13.5s4.6-4.4 4.6-7.4A4.6 4.6 0 0 0 3.4 6.1c0 3 4.6 7.4 4.6 7.4z"/><circle cx="8" cy="6" r="1.6"/>',
+  sweep:   '<path d="M3 12.8h10M6.6 10.4 4.6 3.6h6.8l-2 6.8"/><path d="M5.6 12.8v1.6M8 12.8v1.6M10.4 12.8v1.6"/>',
+  refresh: '<path d="M13.3 8a5.3 5.3 0 1 1-1.7-3.9"/><path d="M13.6 2.4v3.3h-3.3"/>',
   link:    '<path d="M6.6 9.4a2.6 2.6 0 0 0 3.9.3l2.1-2.1a2.6 2.6 0 1 0-3.7-3.7l-.7.7"/><path d="M9.4 6.6a2.6 2.6 0 0 0-3.9-.3L3.4 8.4a2.6 2.6 0 1 0 3.7 3.7l.7-.7"/>',
   trash:   '<path d="M3.5 5h9M6.4 5V3.6h3.2V5M4.6 5l.5 9h5.8l.5-9"/>',
   play:    '<path d="M6 4.2 12 8l-6 3.8z"/>',
@@ -307,7 +311,10 @@ document.addEventListener('keydown', e => {
   }
 });
 document.addEventListener('contextmenu', e => {
-  const el = e.target.closest('[data-node-id]');
+  /* e.target 可能是 document（事件被派发到文档上时 .closest 不存在），
+     所以这里必须判断能不能调 —— 不然一次异常就把右键菜单整个吞掉（真实踩到过）。 */
+  const t = e.target;
+  const el = t && typeof t.closest === 'function' ? t.closest('[data-node-id]') : null;
   if (!el || !state.goal) return;
   const r = parseRoute();
   if (r.view !== 'goal' && r.view !== 'map') return;
@@ -1394,7 +1401,17 @@ const TASK_META = {
   digest: { icon: '🧠', label: '信息提炼' },
   collect: { icon: '🔍', label: '收集资料' },
   image: { icon: '📷', label: '识别图片' },
-  restate: { icon: '🧠', label: '用自己的话' }
+  restate: { icon: '🧠', label: '用自己的话' },
+  explain: { icon: '🔍', label: '看懂代码' },
+  clean: { icon: '🧹', label: '清洗资料' },
+  rag: { icon: '🔍', label: '检索索引' },
+  refetch: { icon: '🔄', label: '补抓正文' },
+  /* 下面几个原先没登记，卡片上只能显示成"🤖 任务 · interview"这种黑话 */
+  interview: { icon: '🎤', label: '模拟面试' },
+  jdfile: { icon: '📚', label: '读懂代码库' },
+  quests: { icon: '✅', label: '生成今日任务' },
+  bench: { icon: '📊', label: 'RAG 评测' },
+  coach: { icon: '🎓', label: '带练' }
 };
 function taskActive(t) { return t && (t.status === 'running' || t.status === 'queued'); }
 /* 多久没进展就在卡片上标"可能卡住了"。90 秒：比正常一次 AI 调用（几十秒）宽，
@@ -1416,18 +1433,42 @@ function taskBarEnsure() {
   }
   return el;
 }
-/* 进行中任务的进度条：百分比 + 阶段点 + 实时思考。
-   为什么要"动效"而不是一根静态的条：AI 任务一次要跑好几分钟，中间有很长
-   时间是"在写、但没换阶段"，静态条看着像卡死。所以：
-     · 条本身带流动高光，即使百分比不动也在动；
-     · 底部再垫一条不确定态的走马灯条，只在没有真实百分比时显示；
-     · 阶段点标出走到哪一步，已完成的打勾、当前的转圈；
-     · 模型此刻在写什么/想什么，实时打在下面一行。
-   进度只在 taskPoll 拉回来时更新（默认 1.5s 一次），动画交给 CSS，不占主线程。 */
+/* 进行中任务的进度条：**所有 AI 任务长一个样** —— 百分比 + 条 + 阶段点 + 实时思考 + 用时。
+ *
+ * 数据全部来自服务端那套统一模型（`server/task-progress.js`，经 /api/tasks 的 pub() 出来）：
+ *   · pct / pctSource —— 百分比从哪来。**`time` 是"按时间估算"，必须标出来**：
+ *     它是平滑用的，不是事实，冒充真实数字会骗到用户（真实反馈："看着 90% 其实还早"）。
+ *   · phaseIndex / phaseCount / phaseLabel —— 第几步、这一步叫什么。
+ *   · steps —— 每个阶段的点：已完成的打勾、当前的转圈。
+ *   · thinking —— 模型此刻在写/在想什么，只在 running 时有意义。
+ *   · elapsedMs / idleMs —— 已用多久、多久没动静（后端算好，免去前后端时钟不同步）。
+ *
+ * 为什么要"动效"而不是一根静态的条：AI 任务一次要跑好几分钟，中间有很长
+ * 时间是"在写、但没换阶段"，静态条看着像卡死。所以：
+ *   · 条本身带流动高光，即使百分比不动也在动；
+ *   · 底部再垫一条不确定态的走马灯条，只在**连估算都给不出**时显示；
+ *   · 阶段点标出走到哪一步，已完成的打勾、当前的转圈；
+ *   · 模型此刻在写什么/想什么，实时打在下面一行。
+ * 进度只在 taskPoll 拉回来时更新（默认 1.5s 一次），动画交给 CSS，不占主线程。 */
 function taskProgressHTML(t) {
+  if (t.status === 'queued') {
+    /* 排队的卡片也要给同一块位置：只写一行小字，卡片高度和跑起来的那些对得上 */
+    return '<div class="taskProgWrap"><div class="taskProgNum"><span class="taskQueued">排队中 · 等前面腾出并发位</span></div>'
+      + '<div class="taskProg indet"><i style="width:100%"></i></div></div>';
+  }
   const pct = Math.max(0, Math.min(100, Number(t.progress) || 0));
   const steps = Array.isArray(t.steps) ? t.steps : null;
+  const src = String(t.pctSource || '');
+  /* 估算来的百分比不冒充真实：写成"≈ 62%"并挂一个小"估算"标 */
+  const est = src === 'time';
   const hasPct = pct > 0;
+  const pctText = hasPct ? (est ? '≈ ' + pct + '%' : pct + '%') : '进行中';
+  /* 第几步（≤6 个阶段时下面已经把每个阶段摆出来了，这里只在阶段名有信息时补一句） */
+  const pc = Number(t.phaseCount) || 0;
+  const pi = Number(t.phaseIndex) || 0;
+  const phaseBit = (pc > 1)
+    ? `第 ${Math.min(pi + 1, pc)}/${pc} 步${t.phaseLabel ? ' · ' + esc(t.phaseLabel) : ''}`
+    : (t.phaseLabel ? esc(t.phaseLabel) : '');
   /* 阶段点：超过 6 个就折叠成「3/9」这种计数，否则一行放不下 */
   let stepsHTML = '';
   if (steps && steps.length) {
@@ -1448,8 +1489,8 @@ function taskProgressHTML(t) {
   const eta = String(t.eta || '').trim();
   return `<div class="taskProgWrap">
     <div class="taskProgNum">
-      <span>${hasPct ? pct + '%' : '进行中'}${eta ? ` · <span class="taskEta">${esc(eta)}</span>` : ''}</span>
-      ${t.startedAt ? `<span class="taskElapsed" data-since="${t.startedAt}"></span>` : ''}
+      <span>${pctText}${est ? '<span class="taskEst" title="这条任务的进度没法精确知道（只有一次 AI 调用），百分比按已用时间平滑估算">估算</span>' : ''}${eta ? ` · <span class="taskEta">${esc(eta)}</span>` : ''}</span>
+      <span>${phaseBit}${phaseBit && t.startedAt ? ' · ' : ''}${t.startedAt ? `<span class="taskElapsed" data-since="${t.startedAt}"></span>` : ''}</span>
     </div>
     <div class="taskProg${hasPct ? '' : ' indet'}"><i style="width:${hasPct ? pct : 100}%"></i></div>
     ${stepsHTML}
@@ -1458,28 +1499,48 @@ function taskProgressHTML(t) {
 }
 function taskBarRender() {
   const all = state.tasks || [];
-  const active = all.filter(taskActive);
-  const recent = all.filter(t => !taskActive(t)).slice(-3);
+  /* 子任务（parentId）折叠进主任务里显示：一条讲解会并行派好几个模块，
+     全平铺出来任务栏会被撑爆（用户原话）。折叠时只显示"▸ N 个模块"。 */
+  const kidsOf = new Map();
+  for (const t of all) {
+    if (!t.parentId) continue;
+    const k = Number(t.parentId);
+    if (!kidsOf.has(k)) kidsOf.set(k, []);
+    kidsOf.get(k).push(t);
+  }
+  const roots = all.filter(t => !t.parentId);
+  const active = roots.filter(taskActive);
+  const recent = roots.filter(t => !taskActive(t)).slice(-3);
   const el = taskBarEnsure();
   if (!active.length && !recent.length) { el.hidden = true; el.innerHTML = ''; return; }
   el.hidden = false;
   const open = state.taskOpen;
   /* 卡住的任务必须在不展开列表时也能看见 —— 否则用户以为"还在跑"，其实早没动静了。 */
   const stalled = active.filter(t => (t.idleMs || 0) > TASK_STALL_HINT_MS);
-  el.innerHTML = `<button class="taskPill ${active.length ? 'busy' : ''}${stalled.length ? ' stalled' : ''}" id="taskPill">
+  el.innerHTML = `<button class="taskPill ${active.length ? 'busy' : ''}${stalled.length ? 'stalled' : ''}" id="taskPill">
       ${active.length ? `<span class="spinner" style="width:12px;height:12px;border-width:2px;"></span> ${stalled.length ? stalled.length + ' 个任务可能卡住了' : active.length + ' 个 AI 任务进行中'}` : `🤖 AI 任务（${recent.length}）`}
       <span class="taskCaret">${open ? '▾' : '▸'}</span>
     </button>
     ${open ? `<div class="taskList">
-      ${all.length ? all.slice(-8).map(t => {
+      ${roots.length ? roots.slice(-8).map(t => {
         const m = TASK_META[t.type] || { icon: '🤖', label: t.type };
+        const kids = kidsOf.get(Number(t.id)) || [];
+        const kidsOpen = !!state.taskKidsOpen[t.id];
+        const kDone = kids.filter(x => x.status === 'done').length;
+        const kFail = kids.filter(x => x.status === 'failed').length;
         return `<div class="taskItem ${t.status}">
           <span class="taskIcon">${m.icon}</span>
           <div class="taskMain">
             <div class="taskTitle">${esc(t.title || m.label)}</div>
             <div class="taskMsg">${esc(t.message || '')}${t.nodeId ? ' · 节点 #' + t.nodeId : ''}${t.note ? ' · 备注：' + esc(String(t.note).slice(0, 40)) : ''}</div>
             ${t.status === 'failed' && t.error && t.error.length > 46 ? `<div class="taskErr" data-task-err="${t.id}" title="点开看完整原因">${esc(String(t.error).slice(0, 46))}… <span class="taskErrMore">看原因</span></div>` : ''}
-            ${t.status === 'running' ? taskProgressHTML(t) : ''}
+            ${taskActive(t) ? taskProgressHTML(t) : ''}
+            ${kids.length ? `<button type="button" class="taskKids" data-task-kids="${t.id}">${kidsOpen ? '▾' : '▸'} ${kids.length} 个模块 · 已完成 ${kDone}${kFail ? ' · 失败 ' + kFail : ''}</button>
+              ${kidsOpen ? `<div class="taskKidList">${kids.map(k => `<div class="taskKid ${k.status}">
+                <span class="taskKidDots">${k.status === 'done' ? '✓' : k.status === 'failed' ? '✗' : k.status === 'running' ? '<span class="spinner" style="width:10px;height:10px;border-width:2px;"></span>' : '—'}</span>
+                <span class="taskKidT">${esc(k.title || '')}</span>
+                <span class="taskKidM">${esc(String(k.message || '').slice(0, 36))}</span>
+              </div>`).join('')}</div>` : ''}` : ''}
             ${t.status === 'running' && (t.idleMs || 0) > TASK_STALL_HINT_MS
               ? `<div class="taskStall">⚠️ 可能卡住了：${taskIdleText(t.idleMs)}没有任何进展${t.canRetry ? ' —— 点「停止」结束它，再点「🔄 重试」原样重跑' : ' —— 点「停止」结束它，然后重新发起这一条'}</div>`
               : ''}
@@ -1490,12 +1551,25 @@ function taskBarRender() {
           ${!taskActive(t) && t.canRetry
             ? `<button class="btn tiny retry" data-task-retry="${t.id}" ${t.retrying ? 'disabled' : ''} title="${t.status === 'done' ? '再跑一次同样的任务' : '失败后一键重跑：入参照旧，不用重新打一遍那段话'}">${t.retrying ? '提交中…' : '🔄 重试'}</button>`
             : ''}
+          ${!taskActive(t) && t.status === 'failed' && t.canAllowRestructure
+            ? `<button class="btn tiny retry allowStruct" data-task-restruct="${t.id}" ${t.retrying ? 'disabled' : ''} title="这次失败是 AI 改了你想保留的章节（或把某一段删得太狠）。点这里用同一份意见再跑一次，并放行结构改动">${t.retrying ? '提交中…' : '🔓 允许改结构再跑'}</button>`
+            : ''}
         </div>`;
       }).join('') : '<div class="muted" style="font-size:12px;padding:6px;">暂无任务</div>'}
       ${recent.length ? `<button class="btn tiny" id="taskClear" style="margin:6px 0 2px;">清除已完成</button>` : ''}
     </div>` : ''}`;
   const pill = el.querySelector('#taskPill');
   if (pill) pill.addEventListener('click', () => { state.taskOpen = !state.taskOpen; taskBarRender(); });
+  /* ⚠️ 「已用时」的秒级时钟要在这里就启动：任务栏有好几条渲染路径
+     （轮询 taskPoll、点开/收起、子任务折叠、取消后重绘），只在轮询里启一次的话，
+     别的路径画出来的卡片会**没有计时**（实测：手动渲染时那一行是空的）。 */
+  taskElapsedTick();
+  /* 子任务折叠 / 展开（默认收起：模块多的时候一次全展开会刷屏） */
+  el.querySelectorAll('[data-task-kids]').forEach(b => b.addEventListener('click', () => {
+    const id = b.getAttribute('data-task-kids');
+    state.taskKidsOpen[id] = !state.taskKidsOpen[id];
+    taskBarRender();
+  }));
   el.querySelectorAll('[data-task-cancel]').forEach(b => b.addEventListener('click', async () => {
     try { await api('/api/tasks/' + b.getAttribute('data-task-cancel') + '/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); toast('已请求停止'); await taskPoll(); } catch (e) { toast(e.message); }
   }));
@@ -1521,6 +1595,19 @@ function taskBarRender() {
       const r = await api('/api/tasks/' + id + '/retry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       if (r && r.ok === false) { toast('⚠️ ' + (r.error || '重试失败')); }
       else toast('🔄 已重新提交（原样的入参），进度见左下角任务中心');
+    } catch (e) { toast(e.message); }
+    state.taskOpen = true;
+    await taskPoll();
+  }));
+  /* 「🔓 允许改结构再跑」：结构守卫拦下的失败，原样重试是注定再失败一次
+     （同一份入参、同一个判据）。这条走的是同一份入参 + 放行结构改动。 */
+  el.querySelectorAll('[data-task-restruct]').forEach(b => b.addEventListener('click', async () => {
+    const id = b.getAttribute('data-task-restruct');
+    b.disabled = true; b.textContent = '提交中…';
+    try {
+      const r = await api('/api/tasks/' + id + '/retry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ allow_restructure: true }) });
+      if (r && r.ok === false) { toast('⚠️ ' + (r.error || '重试失败')); }
+      else toast('🔓 已放行结构改动，正在用同一份意见重跑');
     } catch (e) { toast(e.message); }
     state.taskOpen = true;
     await taskPoll();
@@ -1561,8 +1648,8 @@ async function refreshTutorialIfUpdated(tid, finished) {
     toast('❌ 教程更新失败：' + String((failed[0] && failed[0].error) || '未知错误').slice(0, 140));
     return { refreshed: false };
   }
-  if (document.getElementById('tutEditor')) {
-    toast('✅ AI 已生成新版教程（你正在手动编辑，已保留你的草稿：取消编辑后即看新版）');
+  if (document.getElementById('tutEditor') || mdInlineActive()) {
+    toast('✅ AI 已生成新版教程（你正在编辑，已保留你的草稿：取消编辑后即看新版）');
     return { refreshed: false };
   }
   const serverUpdated = (detail.tutorial && detail.tutorial.updated_at) || '';
@@ -1622,9 +1709,8 @@ async function taskPoll() {
     }
     state.tasks = list;
   } catch (e) { return; }
-  taskBarRender();
+  taskBarRender();     // 内部已经会启动「已用时」的秒级时钟，不必再单独调一次
   taskMarkNodes();
-  taskElapsedTick();
 }
 /* 「已用时」每秒跳一格：进度本身 2 秒才拉一次，但秒数自己会走，
    肉眼就能确认"它还活着"。只改文本节点，不重绘整个任务列表。 */
@@ -1635,7 +1721,7 @@ function taskElapsedTick() {
       const since = Number(el.getAttribute('data-since')) || 0;
       if (!since) return;
       const s = Math.max(0, Math.round((Date.now() - since) / 1000));
-      el.textContent = s < 60 ? s + ' 秒' : Math.floor(s / 60) + ' 分 ' + String(s % 60).padStart(2, '0') + ' 秒';
+      el.textContent = '已用 ' + (s < 60 ? s + ' 秒' : Math.floor(s / 60) + ' 分 ' + String(s % 60).padStart(2, '0') + ' 秒');
     });
   };
   paint();
@@ -2059,6 +2145,7 @@ async function tutManualEnter(anchorEl) {
   if (tutEditing) return;
   const rr = parseRoute();
   if (rr.view !== 'tutorial') return;
+  if (mdInlineActive()) mdInlineClose(true);   // 整篇编辑优先：先收掉就地编辑框
   const tut = ((state.goal && state.goal.tutorials) || []).find(x => Number(x.id) === Number(rr.id));
   const contentEl = document.getElementById('tutFrame') || tutRoot();
   tutEditing = true;
@@ -2986,6 +3073,118 @@ function openTutRename(tid, tut) {
   try { input.select(); } catch (e) {}
 }
 /* ===== AI 助手（右侧侧边栏） ===== */
+/* ═══════════「它做了什么」：本轮看了什么上下文、调了哪些工具 ═══════════
+   目的：让用户知道 AI 在回答 / 动手之前到底干了什么（而不是只看到一句"正在思考"）。
+   三条规矩：
+   ① 说人话 —— 界面上不出现 read / glob 这类工具名，也不出现一长串绝对路径；
+   ② 默认收起 —— 正文才是主角，过程想看再点开；只有流式期间默认展开（那会儿它就是"正在做什么"）；
+   ③ 只报事实 —— 步骤全部来自服务端真实事件，没有的步骤一条都不显示（不编）。 */
+function chShortPath(p) {
+  const s = String(p || '').replace(/\\/g, '/');
+  if (s === '.') return '应用目录';   /* 服务端把"应用自己的目录"缩成了 '.' */
+  const parts = s.split('/').filter(Boolean);
+  if (parts.length <= 2) return s;
+  return '…/' + parts.slice(-2).join('/');
+}
+function chShortUrl(u) {
+  const s = String(u || '');
+  try { const x = new URL(s); return x.host + (x.pathname.length > 1 ? x.pathname.slice(0, 40) : ''); } catch (e) { return s.slice(0, 50); }
+}
+/* 一步 → 一句人话。返回 {ico, text, note} */
+function chStepSay(s) {
+  const inp = s.input || {};
+  const tool = String(s.tool || '');
+  const p = chShortPath(inp.path || inp.filePath || '');
+  const cnt = (unit) => (s.n != null ? s.n + unit : '');
+  switch (tool) {
+    case 'read':
+      if (s.dir) return { ico: '📂', text: '看了目录里有什么' + (p ? '：' + p : ''), note: cnt(' 项') };
+      return { ico: '📖', text: p ? '读了 ' + p : '读了一个文件', note: cnt(' 行') };
+    case 'list': return { ico: '📂', text: '看了目录' + (p ? ' ' + p : ''), note: cnt(' 项') };
+    case 'glob': return { ico: '🔍', text: '找文件' + (inp.pattern ? '「' + inp.pattern + '」' : ''), note: cnt(' 个') };
+    case 'grep': return { ico: '🔎', text: '搜了' + (inp.pattern ? '「' + inp.pattern + '」' : '代码'), note: cnt(' 处') };
+    case 'shell': return { ico: '⌨️', text: '跑了命令', note: String(inp.command || '').slice(0, 70) };
+    case 'edit': return { ico: '✏️', text: p ? '改了 ' + p : '改了一处内容', note: (inp.oldChars != null ? inp.oldChars + ' 字 → ' + (inp.newChars || 0) + ' 字' : '') };
+    case 'write': return { ico: '📝', text: p ? '写了 ' + p : '写了一个文件', note: (inp.chars != null ? inp.chars + ' 字' : '') };
+    case 'webfetch': return { ico: '🌐', text: '打开了网页', note: chShortUrl(inp.url) };
+    case 'websearch': return { ico: '🌐', text: '搜了网络', note: String(inp.query || '').slice(0, 50) };
+    case 'task': return { ico: '🧩', text: '派了个子任务', note: String(inp.description || inp.prompt || '').slice(0, 60) };
+    case 'todowrite': return { ico: '📋', text: '更新了待办清单', note: '' };
+    default: return { ico: '🛠', text: tool ? '用了「' + tool + '」' : '用了一次工具', note: String(inp.command || inp.pattern || inp.query || '').slice(0, 60) };
+  }
+}
+/* 收起时那一行摘要：一眼看出"它主要干了什么" */
+function chTraceSummary(steps) {
+  let ctx = 0, files = 0, dirs = 0, search = 0, cmds = 0, edits = 0, other = 0;
+  for (const s of (steps || [])) {
+    if (s.kind === 'ctx') { ctx++; continue; }
+    const t = String(s.tool || '');
+    if (t === 'read' && s.dir) dirs++;
+    else if (t === 'read' || t === 'list') files++;
+    else if (t === 'glob' || t === 'grep') search++;
+    else if (t === 'shell') cmds++;
+    else if (t === 'edit' || t === 'write') edits++;
+    else other++;
+  }
+  const bits = [];
+  if (ctx) bits.push('看了 ' + ctx + ' 处上下文');
+  if (files) bits.push('读了 ' + files + ' 个文件');
+  if (dirs) bits.push('翻了 ' + dirs + ' 个目录');
+  if (search) bits.push('查了 ' + search + ' 次');
+  if (cmds) bits.push('跑了 ' + cmds + ' 条命令');
+  if (edits) bits.push('动了 ' + edits + ' 个文件');
+  if (other) bits.push('用了 ' + other + ' 次工具');
+  return bits.join(' · ');
+}
+function chStepsHTML(steps) {
+  return (steps || []).map(s => {
+    if (s.kind === 'ctx') {
+      const note = String(s.detail || '').slice(0, 60);
+      return `<div class="chStep ctx"><span class="chStepIco">📎</span><span class="chStepText">${esc(s.label || '上下文')}</span>${note ? `<span class="chStepNote">${esc(note)}</span>` : ''}</div>`;
+    }
+    const say = chStepSay(s);
+    const bad = s.status && s.status !== 'completed' && s.status !== 'ok';
+    const note = String(say.note || '').slice(0, 70);
+    const tip = [say.text, note].filter(Boolean).join(' · ');
+    return `<div class="chStep${bad ? ' bad' : ''}"${tip ? ` title="${esc(tip)}"` : ''}><span class="chStepIco">${say.ico}</span><span class="chStepText">${esc(say.text)}</span>${note ? `<span class="chStepNote">${esc(note)}</span>` : ''}</div>`;
+  }).join('');
+}
+/* open=展开 / live=流式中的那一份（措辞与是否展开都不同） */
+function chTraceHTML(steps, open, live, mid) {
+  const list = steps || [];
+  if (!list.length) return '';
+  const sum = chTraceSummary(list);
+  return `<div class="chTrace${live ? ' live' : ''}" data-mid="${Number(mid) || 0}">
+    <button type="button" class="chTraceHead" aria-expanded="${open ? 'true' : 'false'}">
+      <span class="chTraceIco">🧭</span>
+      <span class="chTraceTitle">${live ? '它正在做什么' : '它做了什么'}</span>
+      <span class="chTraceSum">${esc(sum)}</span>
+      <span class="chTraceCare">${open ? '▴' : '▾'}</span>
+    </button>
+    <div class="chTraceBody"${open ? '' : ' hidden'}>${chStepsHTML(list)}</div>
+  </div>`;
+}
+/* 展开状态：流式那一份记在 state.aiTraceLiveOpen（默认展开）；
+   已落库的消息按消息 id 记 —— 否则每次重绘（换模型、来新消息）都会把它收回去。 */
+function chTraceIsOpen(mid) {
+  const id = Number(mid) || 0;
+  return !!(id && state.aiTraceOpenIds && state.aiTraceOpenIds.has(id));
+}
+function chTraceToggle(head) {
+  const box = head && head.closest ? head.closest('.chTrace') : null;
+  const body = box && box.querySelector('.chTraceBody');
+  if (!body) return;
+  const open = !!body.hidden;
+  body.hidden = !open;
+  head.setAttribute('aria-expanded', open ? 'true' : 'false');
+  const care = head.querySelector('.chTraceCare');
+  if (care) care.textContent = open ? '▴' : '▾';
+  if (box.classList.contains('live')) { state.aiTraceLiveOpen = open; return; }
+  const id = Number(box.getAttribute('data-mid') || 0);
+  if (!id) return;
+  state.aiTraceOpenIds = state.aiTraceOpenIds || new Set();
+  if (open) state.aiTraceOpenIds.add(id); else state.aiTraceOpenIds.delete(id);
+}
 function opChipHTML(o) {
   const t = String(o.title || '').slice(0, 40);
   if (o.op === 'add') return `<div class="chOp opAdd"><span class="opTag">新增</span><span class="opTitle">${esc(t)}</span></div>`;
@@ -2999,20 +3198,59 @@ function opChipHTML(o) {
   if (o.op === 'start') return `<div class="chOp opAdd"><span class="opTag">启动</span><span class="opTitle">${esc(t)}</span></div>`;
   return `<div class="chOp opEdit"><span class="opTag">修改</span><span class="opTitle">${esc(t)}</span></div>`;
 }
+/* 「等你确认改动范围」卡片（服务端判定这次要动结构、用户还没授权时发的）。
+   AI 替用户转述需求时范围写宽了，用户是看不见的 —— 把范围摊在这里让他一眼核对，
+   点一下才开跑（用户原话："Agent 有必要跟用户核对一下改动范围再动手"）。
+   ⚠️ 范围一律用**小节标题**说（"从「A」到「B」之前" + 段内几节 + 哪几节不动）。
+   只说"第 13~26 节"用户看不出是什么（真实反馈）。 */
+function pendingEditHTML(p) {
+  const v = p.view || {};
+  const inS = (v.inSample || []).map(x => '「' + esc(String(x)) + '」').join('');
+  const keepS = (v.keepSample || []).map(x => '「' + esc(String(x)) + '」').join('');
+  const nIn = Number(v.inCount || (Number(v.sections || 0) - Number(v.fromIdx || 0)) || 0);
+  const nKeep = Number(v.keepCount || v.fromIdx || 0);
+  let scope;
+  if (v.mode === 'range') {
+    scope = `从「${esc(String(v.fromTitle || v.from || ''))}」开始`
+      + (v.toTitle ? `，到「${esc(String(v.toTitle))}」之前` : '，一直到全篇最后');
+    scope += `<br><span class="chPendSub">这一段里的小节（共 ${nIn} 节）：${inS || '—'}${nIn > (v.inSample || []).length ? ` 等 ${nIn} 节` : ''}</span>`;
+    scope += `<br><span class="chPendSub">保持不动（共 ${nKeep} 节）：${keepS || '—'}${nKeep > (v.keepSample || []).length ? ` 等 ${nKeep} 节` : ''}</span>`;
+  } else {
+    scope = `整篇重排（共 ${Number(v.sections || 0)} 节，章节可能被合并或改名）`;
+  }
+  return `<div class="chPend" data-pend-tut="${esc(String(p.tutorial_id || ''))}">
+    <div class="chPendHead">📐 等你确认改动范围</div>
+    <div class="chPendScope">${scope}</div>
+    <div class="chPendRow">
+      <button class="btn tiny chPendOk" data-pend-ok="${esc(String(p.tutorial_id || ''))}">✅ 就按这个范围改</button>
+      <button class="btn tiny chPendNo" data-pend-no="${esc(String(p.tutorial_id || ''))}" title="点一下，到下面的输入框里把「要改哪几节」说清楚">✏️ 范围不对</button>
+    </div>
+    <div class="chPendTip" hidden></div>
+  </div>`;
+}
 function chatBubbleHTML(m, goalId) {
   const isUser = m.role === 'user';
   let ops = [];
   try { ops = JSON.parse(m.ops || '[]'); } catch (e) {}
-  const opsLine = (!isUser && ops.length)
+  let trace = [];
+  try { trace = JSON.parse(m.trace || '[]'); } catch (e) {}
+  const pend = ops.find(o => o && o.op === 'pending_edit');
+  if (pend) { (state.pendingEdits || (state.pendingEdits = {}))[String(pend.tutorial_id)] = pend; }
+  /* 「它做了什么」放在正文**上方**：它是这段回复的来路（看了什么、调了什么），
+     和流式期间的展示位置一致，收尾时不会跳一下。 */
+  const traceLine = (!isUser && trace.length) ? chTraceHTML(trace, chTraceIsOpen(m.id), false, m.id) : '';
+  const opsLine = pend ? pendingEditHTML(pend)
+    : (!isUser && ops.length
     ? `<div class="chOps">
         <div class="chOpsHead">✏️ 本次修改了 ${ops.length} 处<span class="spacer"></span>${m.version_id ? `<button class="chDiffBtn" data-vid="${m.version_id}">查看变更详情 ▾</button>` : ''}</div>
         <div class="chOpList">${ops.slice(0, 12).map(opChipHTML).join('')}${ops.length > 12 ? `<div class="chOp"><span class="opTag">等</span><span class="opTitle">共 ${ops.length} 处</span></div>` : ''}</div>
         ${m.version_id ? `<div class="chDiffBox" data-vid="${m.version_id}" hidden></div>` : ''}
       </div>`
-    : '';
+    : '');
   return `<div class="chMsg ${isUser ? 'chUser' : 'chAI'}">
     <div class="chAvatar">${isUser ? '我' : 'AI'}</div>
     <div class="chBody">
+      ${traceLine}
       <div class="chText mdBody">${isUser ? esc(m.content).replace(/\n/g, '<br>') : mdToHTML(m.content)}</div>
       ${opsLine}
       <div class="chTime">${esc(fmtDate(m.created_at))}</div>
@@ -3036,6 +3274,7 @@ function chatStreamHTML() {
   return `<div class="chMsg chAI chStreaming">
     <div class="chAvatar">AI</div>
     <div class="chBody">
+      ${chTraceHTML(st.steps || [], state.aiTraceLiveOpen !== false, true, 0)}
       ${think}
       <div class="chText mdBody">${vis ? mdToHTML(vis) : '<span class="muted" style="font-size:12.5px;">正在准备回复…</span>'}</div>
       ${preparing ? '<div class="chPrep">正在整理要执行的修改…</div>' : ''}
@@ -3043,11 +3282,35 @@ function chatStreamHTML() {
   </div>`;
 }
 function chatRenderStream() {
-  const el = document.querySelector('.chStreaming');
+  /* ⚠️ 消息列表现在有两处宿主：AI 助手侧边栏的 #adMsgs，和节点「✨ AI 功能」弹窗里的 #naMsgs。
+     所以这里一律走 aiHostEl() 取当前宿主 —— 写死 adMsgs 的话，弹窗里发消息时
+     流式正文会画到侧边栏上去（看不见，还以为没在跑）。 */
+  const host = aiHostEl();
+  const el = host ? host.querySelector('.chStreaming') : null;
   const st = state.aiStream;
   if (!el) { if (st) aiRenderMsgs(); return; }
   if (!st) return;
   const secs = Math.floor((Date.now() - st.t0) / 1000);
+  /* ⓪「它做了什么」：步骤变多了才重建这一块（SSE 里工具步骤来得不频繁，
+      重建成本远低于正文；正文那套节流逻辑照旧）。 */
+  const steps = st.steps || [];
+  let tbody = el.querySelector('.chTraceBody');
+  if (!tbody && steps.length) {
+    /* 第一组步骤（"看了什么上下文"）是**发送后立刻**到的，那时这块还不存在
+       —— 渲染流式气泡时 steps 还是空的，chTraceHTML 返回空串。
+       所以在这里把它补到正文上方（位置与收尾后一致，不会跳）。 */
+    const body = el.querySelector('.chBody');
+    if (body) {
+      body.insertAdjacentHTML('afterbegin', chTraceHTML(steps, state.aiTraceLiveOpen !== false, true, 0));
+      tbody = el.querySelector('.chTraceBody');
+    }
+  }
+  if (tbody && tbody.__n !== steps.length) {
+    tbody.__n = steps.length;
+    tbody.innerHTML = chStepsHTML(steps);
+    const sum = el.querySelector('.chTraceSum');
+    if (sum) sum.textContent = chTraceSummary(steps);
+  }
   /* ① 思考文字：只动 textContent（最便宜），且**内容没变就不写**。
      以前每个事件都无条件赋值，浏览器要为此重算这一段的布局。 */
   const think = el.querySelector('.chThink');
@@ -3077,7 +3340,7 @@ function chatRenderStream() {
   /* ③ 自动滚动：先读后写，且**只在用户本来贴着底部时**才滚。
      原来无条件 scrollTop=scrollHeight，每个增量都强制一次同步布局；
      而且用户想往上翻时会被一直拽回底部。 */
-  const box = document.getElementById('adMsgs');
+  const box = aiHostEl();
   if (box) {
     const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
     if (stick) box.scrollTop = box.scrollHeight;
@@ -3161,6 +3424,7 @@ function aiEnsureDOM() {
     </div>
     <div class="adMsgs" id="adMsgs"></div>
     <div class="adResizeY" id="adResizeY" title="上下拖动调整输入框高度（双击复位）"></div>
+    <div class="adNodes" id="adNodes" hidden></div>
     <div class="adTools" id="adTools">
       <button class="adToolBtn" id="adModeBtn" aria-haspopup="true" aria-expanded="false" title="选择执行模式">
         <span class="adModeIco" id="adModeIco">💬</span><span id="adModeLabel">ASK</span><span class="adCare">▾</span>
@@ -3175,6 +3439,9 @@ function aiEnsureDOM() {
         <div class="adModePopN">ASK 里 AI 改不了任何东西；要让它动手就切 Agent。</div>
       </div>
       <!-- 📝 提示词 等插件工具按钮会追加到这里（见 plugins/aiprompts.js） -->
+      <button class="adToolBtn" id="adNodeAdd" title="把一个或多个节点加进这次对话（可连子节点一起加）">＋ 节点</button>
+      <button class="adToolBtn" id="adFnBtn" hidden>✨ AI 功能<span class="adCare">▾</span></button>
+      <div class="adFnPop" id="adFnPop" hidden role="menu"></div>
     </div>
     <div class="adInput">
       <textarea id="adText" rows="1" placeholder="可以让它：改路线图 / 把这段资料存进资料库 / 提炼全部资料 / 再收集些资料 / 加一条约束 / 改目标现状与时间（Enter 发送）"></textarea>
@@ -3182,6 +3449,7 @@ function aiEnsureDOM() {
     </div>
     <div class="adResizeX" id="adResizeX" title="左右拖动调整侧边栏宽度（双击复位）"></div>`;
   document.body.appendChild(d);
+  aiPaintNodes();   /* 侧边栏是懒创建的：此刻若这条对话已经带着节点，那排 🎯 标签要跟着画出来 */
   d.querySelector('#adClose').addEventListener('click', () => aiToggle(false));
   d.querySelector('#adNew').addEventListener('click', aiNewSession);
   d.querySelector('#adRename').addEventListener('click', aiRenameSession);
@@ -3191,6 +3459,27 @@ function aiEnsureDOM() {
     const pop = document.getElementById('adModePop');
     aiModePopOpen(!!(pop && pop.hidden));
   });
+  /* 功能栏里的「＋ 节点」：**常驻**工具栏（用户要求）——
+     以前它长在"聊的是：🎯…"那条里、没附件时整条是隐的，于是目标级对话里根本找不到入口。 */
+  d.querySelector('#adNodeAdd').addEventListener('click', ev => {
+    ev.stopPropagation();
+    showNodePicker(state.aiNodes, list2 => aiApplyPicker(list2));
+  });
+  /* 功能栏里的「✨ AI 功能」：点开=针对某个附件节点能干什么 */
+  d.querySelector('#adFnBtn').addEventListener('click', ev => {
+    ev.stopPropagation();
+    const pop = document.getElementById('adFnPop');
+    if (!pop) return;
+    if (pop.hidden) { aiPaintFnPop(); pop.hidden = false; }
+    else pop.hidden = true;
+  });
+  document.addEventListener('click', ev => {
+    const pop = document.getElementById('adFnPop');
+    if (!pop || pop.hidden) return;
+    const t = ev.target;
+    if (t && t.closest && (t.closest('#adFnPop') || t.closest('#adFnBtn'))) return;
+    pop.hidden = true;
+  }, true);
   d.querySelector('#adModePop').addEventListener('click', ev => {
     const it = ev.target.closest && ev.target.closest('[data-aimode]');
     if (!it) return;
@@ -3216,9 +3505,44 @@ function aiEnsureDOM() {
     if (state.aiBusy) { if (state.aiAbort) { state.aiAbort.abort(); toast('正在停止…'); } }
     else aiSend();
   });
-  d.querySelector('#adMsgs').addEventListener('click', e => {
+  d.querySelector('#adMsgs').addEventListener('click', async e => {
+    const ok = e.target.closest('[data-pend-ok]');
+    if (ok) {
+      const tid = ok.getAttribute('data-pend-ok');
+      const pend = (state.pendingEdits || {})[tid];
+      if (!pend || !pend.feedback) { toast('这条待确认的改动找不到了，请重新说一次要改什么'); return; }
+      ok.disabled = true; ok.textContent = '已确认，正在开跑…';
+      await submitTutorialEdit(Number(tid), pend.feedback, { confirmed: true });
+      delete state.pendingEdits[tid];
+      return;
+    }
+    /* 「✏️ 范围不对」：不猜用户想改哪儿（猜错就是白跑三分钟还可能删错章节），
+       只把他领到输入框前，让他自己说。
+       ⚠️ 举例一律用**他自己教程里的小节名** —— 写死一个"只改「HTTP + SSE 版」"
+       这种跟他内容毫无关系的例子，用户只会觉得莫名其妙（真实反馈："HTTP 是啥"）。 */
+    const no = e.target.closest('[data-pend-no]');
+    if (no) {
+      const tid = no.getAttribute('data-pend-no');
+      const pend = (state.pendingEdits || {})[tid] || {};
+      const v = pend.view || {};
+      const sample = (v.inSample || []).filter(Boolean);
+      const eg = sample[0] || v.fromTitle || '';
+      const card = no.closest('.chPend');
+      const tip = card ? card.querySelector('.chPendTip') : null;
+      if (tip) {
+        tip.hidden = false;
+        tip.textContent = eg
+          ? ('✏️ 在下面的输入框里写清楚要改哪几节，发给我就行。比如：只改「' + eg + '」这一节，其余一个字别动。')
+          : '✏️ 在下面的输入框里写清楚要改哪几节（直接写小节标题也行），发给我就行。';
+      }
+      no.classList.add('on');
+      aiFocusInput();
+      return;
+    }
     const b = e.target.closest('.chDiffBtn');
     if (b) toggleChatDiff(b);
+    const h = e.target.closest('.chTraceHead');
+    if (h) chTraceToggle(h);
   });
 }
 function aiToggle(open) {
@@ -3291,10 +3615,318 @@ function aiFocusInput() {
   const ta = document.getElementById('adText');
   if (ta) setTimeout(() => ta.focus(), 60);
 }
+/* ===== 对话里的「节点附件」 =====
+   （2026-10-15 用户定调）两件事：
+     ① 每个节点的 AI 对话要**独立**：右键节点 → ✨ AI 功能 = 打开/新建"这个节点自己的对话"
+        （chat_sessions.node_id）。以前所有对话都挂在目标上，于是打开 SKILL 节点看到的是
+        MCP 那轮对话的内容 —— 用户实测反馈。
+     ② 入口统一到右侧 AI 助手：把节点"带进"对话（可能不止一个），功能区里再选要干什么。
+   附件跟着对话落库（chat_sessions.nodes），刷新、换设备都还在。
+   服务端会再校验一遍 id 归属，前端编的 id 进不了提示词。 */
+function aiNodesParse(raw) {
+  try {
+    const a = typeof raw === 'string' ? JSON.parse(raw || '[]') : raw;
+    return Array.isArray(a) ? a.filter(x => x && Number(x.id)).map(x => ({ id: Number(x.id), withKids: !!x.withKids })) : [];
+  } catch (e) { return []; }
+}
+function aiNodeOf(id) { return ((state.goal && state.goal.nodes) || []).find(v => Number(v.id) === Number(id)) || null; }
+function aiNodeLabel(a) {
+  const n = aiNodeOf(a.id);
+  return String((n && n.title) || a.title || ('#' + a.id));
+}
+function aiSessionObj() { return (state.aiSessions || []).find(x => Number(x.id) === Number(state.aiSessionId)) || null; }
+/* 把附件写回会话（刷新/换设备还在）。失败只提示一次，不打断聊天。 */
+let _aiNodesSaving = false;
+async function aiNodesPersist() {
+  const sid = state.aiSessionId;
+  if (!sid || _aiNodesSaving) return;
+  _aiNodesSaving = true;
+  try {
+    const r = await api('/api/chat-sessions/' + sid, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nodes: state.aiNodes || [] }) });
+    const s = aiSessionObj();
+    if (s && r && r.session) s.nodes = r.session.nodes;
+  } catch (e) {
+    if (state._aiNodesWarned !== e.message) { state._aiNodesWarned = e.message; toast('节点附件没能存下来：' + e.message); }
+  }
+  _aiNodesSaving = false;
+}
+function aiAttachNode(id, withKids) {
+  const n = aiNodeOf(id);
+  if (!n) return toast('这个节点还没加载好，稍后再试');
+  const list = state.aiNodes || [];
+  const hit = list.find(a => Number(a.id) === Number(id));
+  if (hit) {
+    if (withKids != null) hit.withKids = !!withKids;
+    aiPaintNodes(); aiNodesPersist();
+    return;
+  }
+  list.push({ id: Number(id), withKids: !!withKids, title: String(n.title || '') });
+  state.aiNodes = list;
+  aiPaintNodes(); aiNodesPersist();
+}
+function aiDetachNode(id) {
+  state.aiNodes = (state.aiNodes || []).filter(a => Number(a.id) !== Number(id));
+  aiPaintNodes(); aiNodesPersist();
+}
+/* 顶部那条「聊的是：🎯 节点 ✕」——只负责显示"带着谁"，加/减入口在功能栏与标签上的 ✕ */
+function aiPaintNodes() {
+  const box = document.getElementById('adNodes');
+  if (!box) return;
+  const list = state.aiNodes || [];
+  box.hidden = !list.length;
+  if (!list.length) { box.innerHTML = ''; }
+  else {
+    /* 带得多的时候收起一部分：一排 20 个标签会把抽屉顶掉，只显示前 6 个 + 「+N」 */
+    const show = list.slice(0, 6), rest = list.slice(6);
+    box.innerHTML = '<span class="adNodesLb">聊的是：</span>' + show.map(a => {
+      const t = aiNodeLabel(a);
+      return '<span class="adNodeChip" data-node="' + a.id + '" title="' + esc(t) + (a.withKids ? '（含子节点）' : '') + '">🎯 ' + esc(t.slice(0, 18))
+        + (a.withKids ? '<i>+子</i>' : '') + '<b class="adNodeX" data-nodedel="' + a.id + '" title="不聊这个节点了">✕</b></span>';
+    }).join('') + (rest.length ? '<span class="adNodeChip more" title="' + esc(rest.map(a => aiNodeLabel(a)).join('、').slice(0, 300)) + '">+' + rest.length + ' 个</span>' : '');
+    box.querySelectorAll('[data-nodedel]').forEach(b => b.addEventListener('click', e => {
+      e.stopPropagation();
+      aiDetachNode(Number(b.getAttribute('data-nodedel')));
+      aiPaintFnBtn();
+    }));
+  }
+  /* 功能栏那个「＋ 节点」跟着显示带几个（没带就只写 ＋ 节点） */
+  const add = document.getElementById('adNodeAdd');
+  if (add) {
+    add.innerHTML = '＋ 节点' + (list.length ? '<em>' + list.length + ' 个</em>' : '');
+    add.title = list.length
+      ? '这次对话带着 ' + list.length + ' 个节点（点开可以增删，父节点可选连子节点一起）'
+      : '把一个或多个节点加进这次对话（可连子节点一起加）';
+  }
+}
+/* 选择器回调：把勾选结果落到附件上（工具栏的「＋ 节点」用） */
+function aiApplyPicker(list2) {
+  state.aiNodes = (list2 || []).map(a => ({ id: Number(a.id), withKids: !!a.withKids, title: aiNodeLabel(a) }));
+  aiPaintNodes(); aiNodesPersist(); aiPaintFnBtn();
+  toast(state.aiNodes.length ? '这次对话带着 ' + state.aiNodes.length + ' 个节点' : '已清空节点（AI 会按整个目标理解）');
+}
+/* 右键节点 → ✨ AI 功能：打开**这个节点自己的对话**（没有就新建一条）。
+   为什么要独立会话：同一个目标里不同节点的事混在一起，用户根本分不清 AI 在说哪一段。 */
+async function aiOpenNodeChat(id) {
+  const n = aiNodeOf(id);
+  if (!n) return toast('这个节点还没加载好，稍后再试');
+  const gid = Number(n.goal_id || (state.goal && state.goal.id) || 0);
+  if (!gid) return;
+  aiToggle(true);
+  try {
+    await ensureAIConfigured();
+    if (state.aiGoalId !== gid) { state.aiGoalId = gid; state.aiSessionId = 0; state.aiMsgs = []; await aiLoadModels(); await aiLoadSessions(gid); }
+    else if (!state.aiSessions) await aiLoadSessions(gid);
+    let s = (state.aiSessions || []).find(x => Number(x.node_id) === Number(id));
+    if (!s) {
+      const r = await api('/api/goals/' + gid + '/chat-sessions', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ node_id: id, nodes: [{ id, withKids: false }], model: state.aiModel || '' })
+      });
+      s = r.session;
+      state.aiSessions = [s].concat(state.aiSessions || []);
+    }
+    state.aiSessionId = s.id;
+    const fromSess = aiNodesParse(s.nodes);
+    state.aiNodes = fromSess.some(a => Number(a.id) === Number(id))
+      ? fromSess
+      : [{ id: Number(id), withKids: false, title: String(n.title || '') }].concat(fromSess);
+    await aiLoadMsgs();
+    if (state.aiMode !== 'agent') { aiModeSet('agent'); toast('已切到 Agent 模式：不然 AI 只能聊、动不了手'); }
+    aiPaintNodes(); aiPaintFnBtn(); aiRender(); aiFocusInput();
+    if (fromSess.length) toast('已回到「' + String(n.title || '').slice(0, 20) + '」的对话（带着 ' + state.aiNodes.length + ' 个节点）');
+    else toast('已打开「' + String(n.title || '').slice(0, 20) + '」的对话');
+  } catch (e) { toast('打开对话失败：' + e.message); }
+}
+/* ===== 功能栏里的「✨ AI 功能」 =====
+   有节点附件时才出现；点开是"针对哪个节点 + 这个节点能干什么"。
+   这里放的是**一次性重活**（拆分/写教程/批量），日常小改直接在输入框里说就行。 */
+function aiFnTargetNode() {
+  const list = state.aiNodes || [];
+  if (!list.length) return 0;
+  const pick = Number(state.aiFnPick || 0);
+  if (pick && list.some(a => Number(a.id) === pick)) return pick;
+  /* 默认瞄准"这条对话自己的节点"（右键进来的那个），而不是附件里的第一个 ——
+     附件是用户自己加的，顺序不代表重点；这条对话的主语才是。 */
+  const own = Number((aiSessionObj() || {}).node_id || 0);
+  if (own && list.some(a => Number(a.id) === own)) return own;
+  return Number(list[0].id);
+}
+function aiPaintFnBtn() {
+  const b = document.getElementById('adFnBtn');
+  if (!b) return;
+  const list = state.aiNodes || [];
+  b.hidden = !list.length;
+  const id = aiFnTargetNode();
+  const t = id ? aiNodeLabel({ id }) : '';
+  b.innerHTML = '✨ AI 功能<span class="adCare">▾</span>' + (t ? '<em>' + esc(t.slice(0, 10)) + '</em>' : '');
+  const pop = document.getElementById('adFnPop');
+  if (pop && !pop.hidden) aiPaintFnPop();
+}
+function aiPaintFnPop() {
+  const pop = document.getElementById('adFnPop');
+  if (!pop) return;
+  const list = state.aiNodes || [];
+  if (!list.length) { pop.hidden = true; return; }
+  const id = aiFnTargetNode();
+  const n = aiNodeOf(id);
+  if (!n) { pop.hidden = true; return; }
+  const kids = db2Kids(id);
+  const multi = list.length > 1;
+  /* 这里只放"一次性重活"的四项（用户点名的四个）：
+       📘 生成学习教程 / 📗 为全部子节点生成教程 / ✨ AI 深度拆分 / 📚 资料与提炼汇总。
+     别的动作一律走对话 —— 日常小改直接在输入框里说，比"选功能"更省事，
+     也避免同一个能力有两个入口、以后改一处忘一处。
+     （按意见重划、逐个拆分、看教程 这三条已从这里去掉；按意见重划仍在节点详情面板里。） */
+  pop.innerHTML = '<div class="adFnT">针对：' + (multi
+      ? '<select id="adFnPick" class="adSelect">' + list.map(a => '<option value="' + a.id + '"' + (Number(a.id) === Number(id) ? ' selected' : '') + '>' + esc(aiNodeLabel(a).slice(0, 26)) + '</option>').join('') + '</select>'
+      : '<b>' + esc(aiNodeLabel({ id }).slice(0, 26)) + '</b>')
+    + '</div>'
+    + '<button class="adFnIt" data-fnact="tut"><span class="ci">📘</span><span class="cl">生成学习教程<em>掌握这个任务</em></span></button>'
+    + (kids.length ? '<button class="adFnIt" data-fnact="tutkids"><span class="ci">📗</span><span class="cl">为全部子节点生成教程<em>' + kids.length + ' 个，并行</em></span></button>' : '')
+    + '<button class="adFnIt" data-fnact="expand"><span class="ci">✨</span><span class="cl">AI 深度拆分<em>先搜集资料，再细化出子任务</em></span></button>'
+    + '<button class="adFnIt" data-fnact="sources"><span class="ci">📚</span><span class="cl">资料与提炼汇总<em>本节点挂了 ' + safeParse(n.sources, []).length + ' 条</em></span></button>';
+  const pick = document.getElementById('adFnPick');
+  if (pick) pick.addEventListener('change', e => { state.aiFnPick = Number(e.target.value); aiPaintFnPop(); aiPaintFnBtn(); });
+  pop.querySelectorAll('[data-fnact]').forEach(b => b.addEventListener('click', async () => {
+    const act = b.getAttribute('data-fnact');
+    pop.hidden = true;
+    if (act === 'expand') return startExpand(id);
+    if (act === 'tut') return showTutorialDialog(id);
+    if (act === 'sources') return showNodePanel(id, rerenderCurrent);
+    if (act === 'tutkids') {
+      const kidList = db2Kids(id);
+      if (!kidList.length) return toast('这个节点还没有子节点');
+      if (!confirm('为全部 ' + kidList.length + ' 个子节点生成教程？\n\n会并行处理（最多 3 个同时），可在左下角任务中心看进度，切页面也不影响。')) return;
+      for (const k of kidList) {
+        try { await fetch('/api/nodes/' + k.id + '/tutorial', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ format: 'md', note: '按父节点「' + String(n.title).slice(0, 30) + '」的学习要求，为这个子节点写一份完整、可执行的教程' }) }); } catch (e) {}
+      }
+      return toast('已提交 ' + kidList.length + ' 个教程任务（见左下角任务中心）');
+    }
+  }));
+}
+/* ===== 节点选择器（＋ 添加节点）=====
+   一个目标动辄上百个节点，所以：可搜索、按层级缩进、勾父节点时能选"连子节点一起"。
+   返回 [{id, withKids}]。 */
+const PICK_MAX = 40;   /* 一次最多带进对话的节点数（和服务端 sanitizeChatNodes 的上限保持一致） */
+function showNodePicker(selected, onOk) {
+  const nodes = (state.goal && state.goal.nodes) || [];
+  if (!nodes.length) return toast('这个目标还没有节点');
+  const byParent = {};
+  for (const n of nodes) { const k = n.parent_id || 0; (byParent[k] = byParent[k] || []).push(n); }
+  /* 选中集合就是"要带进对话的节点 id"。以前这里只存一个 withKids 标记 ——
+     于是点了「+ 子节点 6」，6 个子节点在界面上仍然是没勾的（用户实测提了这一点），
+     看着像没生效。现在「+ 子节点」= 把它和它下面所有后代**真的勾上**，
+     勾了什么就带什么，界面和结果一致。
+     老数据里带 withKids 的附件：打开时自动展开成"它 + 它的后代"。 */
+  const sel = {};
+  const descendantsOf = id => {
+    const out = [];
+    const walk = x => { for (const k of (byParent[x] || [])) { out.push(Number(k.id)); walk(Number(k.id)); } };
+    walk(Number(id));
+    return out;
+  };
+  for (const a of (selected || [])) {
+    const id = Number(a.id);
+    if (!id) continue;
+    sel[id] = true;
+    if (a.withKids) for (const k of descendantsOf(id)) sel[k] = true;
+  }
+  const old = document.getElementById('npkMask'); if (old) old.remove();
+  const mask = document.createElement('div');
+  mask.id = 'npkMask'; mask.className = 'naMask';
+  const rowHTML = (n, depth) => {
+    const kids = byParent[n.id] || [];
+    const on = !!sel[Number(n.id)];
+    const kidsAllOn = kids.length > 0 && descendantsOf(n.id).every(k => sel[k]);
+    return '<label class="npkRow" data-id="' + n.id + '" style="padding-left:' + (10 + Math.min(depth, 5) * 16) + 'px">'
+      + '<input type="checkbox" data-npk="' + n.id + '"' + (on ? ' checked' : '') + '>'
+      + '<span class="npkTitle">' + esc(String(n.title || '').slice(0, 40)) + '</span>'
+      + '<span class="npkLv">' + (LEVEL_NAME[n.level] || '节点') + (n.hours ? ' · ' + esc(n.hours) : '') + '</span>'
+      + (kids.length ? '<button class="npkKids' + (kidsAllOn ? ' on' : '') + '" data-npkids="' + n.id + '" title="把它下面全部 ' + descendantsOf(n.id).length + ' 个节点都勾上／取消">+ 子节点 ' + kids.length + '</button>' : '')
+      + '</label>' + kids.map(k => rowHTML(k, depth + 1)).join('');
+  };
+  mask.innerHTML = '<div class="naDlg npkDlg">'
+    + '<div class="naHead"><span class="naTitle">＋ 添加节点到对话</span><span class="naSub" id="npkCount"></span><span class="spacer"></span><button class="naX" id="npkX">×</button></div>'
+    + '<div class="npkSearch"><input id="npkQ" placeholder="搜节点标题…"></div>'
+    + '<div class="npkList" id="npkList">' + (byParent[0] || []).map(n => rowHTML(n, 0)).join('') + '</div>'
+    + '<div class="npkFoot"><span class="npkHint">勾父节点后可以再点「+ 子节点」把它的子节点一起加进来</span>'
+    + '<span class="spacer"></span><button class="btn small" id="npkNo">取消</button><button class="btn small primary" id="npkOk">加进对话</button></div>'
+    + '</div>';
+  document.body.appendChild(mask);
+  /* 每个「+ 子节点」按钮的状态 = 它下面所有后代**是否都已勾上**。
+     这样手动一个个勾子节点，按钮也会自己亮起来；反之取消一个，它就熄灭 —— 界面对得上真实选择。 */
+  const syncKidBtns = () => {
+    mask.querySelectorAll('[data-npkids]').forEach(b => {
+      const id = Number(b.getAttribute('data-npkids'));
+      const kids = byParent[id] || [];
+      b.classList.toggle('on', kids.length > 0 && descendantsOf(id).every(k => sel[k]));
+    });
+  };
+  const paintCount = () => {
+    const k = Object.keys(sel).length;
+    document.getElementById('npkCount').textContent = k ? ('已选 ' + k + ' 个' + (k > PICK_MAX ? '（最多 ' + PICK_MAX + ' 个）' : '')) : '';
+    document.getElementById('npkOk').disabled = false;
+  };
+  paintCount();
+  const close = () => { mask.remove(); document.removeEventListener('keydown', escH, true); };
+  const escH = e => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', escH, true);
+  document.getElementById('npkX').addEventListener('click', close);
+  document.getElementById('npkNo').addEventListener('click', close);
+  mask.addEventListener('click', e => { if (e.target === mask) close(); });
+  mask.addEventListener('click', e => {
+    const kb = e.target.closest && e.target.closest('[data-npkids]');
+    if (!kb) return;
+    e.preventDefault(); e.stopPropagation();
+    const nid = Number(kb.getAttribute('data-npkids'));
+    const group = [nid].concat(descendantsOf(nid));
+    const all = group.every(id => sel[id]);
+    /* 全勾着 → 一键取消这一组（含它自己）；否则 → 全勾上 */
+    for (const id of group) {
+      if (all) delete sel[id]; else sel[id] = true;
+      const cb = mask.querySelector('[data-npk="' + id + '"]');
+      if (cb) cb.checked = !all;
+    }
+    syncKidBtns();
+    paintCount();
+  });
+  mask.addEventListener('change', e => {
+    const cb = e.target.closest && e.target.closest('[data-npk]');
+    if (!cb) return;
+    const nid = Number(cb.getAttribute('data-npk'));
+    if (cb.checked) sel[nid] = true; else delete sel[nid];
+    syncKidBtns();   /* 勾/取消一个子节点，父节点那个「+ 子节点」的亮灭跟着变 */
+    paintCount();
+  });
+  const q = document.getElementById('npkQ');
+  if (q) q.addEventListener('input', () => {
+    const kw = q.value.trim().toLowerCase();
+    mask.querySelectorAll('.npkRow').forEach(r => {
+      const hit = !kw || r.querySelector('.npkTitle').textContent.toLowerCase().includes(kw);
+      r.style.display = hit ? '' : 'none';
+    });
+  });
+  document.getElementById('npkOk').addEventListener('click', () => {
+    let out = Object.keys(sel).map(k => ({ id: Number(k), withKids: false }));
+    /* 顺序按树里的自然顺序，别按勾选顺序 —— 否则提示词里节点顺序随机 */
+    out.sort((a, b) => nodes.findIndex(x => Number(x.id) === a.id) - nodes.findIndex(x => Number(x.id) === b.id));
+    if (out.length > PICK_MAX) {
+      toast('一次最多带 ' + PICK_MAX + ' 个节点，先加了前 ' + PICK_MAX + ' 个（剩下的可以再点「＋ 节点」补）');
+      out = out.slice(0, PICK_MAX);
+    }
+    close();
+    onOk(out);
+  });
+}
 /* 侧边栏绑定到某目标的会话（目标页 / 导图页 / 教程页共用；同目标不重复加载） */
 async function aiBindGoal(gid) {
   if (!gid) return;
-  if (state.aiGoalId !== gid) { state.aiGoalId = gid; state.aiSessionId = 0; state.aiMsgs = []; await aiLoadModels(); await aiLoadSessions(gid); }
+  if (state.aiGoalId !== gid) {
+    state.aiGoalId = gid; state.aiSessionId = 0; state.aiMsgs = [];
+    /* 换目标：附件与页面都跟着清（不然"聊的是节点"会指到上一个目标的节点上） */
+    state.aiNodes = []; state.aiFnPick = 0;
+    await aiLoadModels(); await aiLoadSessions(gid);
+  }
   else aiRender();
 }
 async function aiLoadSessions(goalId) {
@@ -3315,20 +3947,26 @@ async function aiLoadSessions(goalId) {
   } catch (e) { toast('对话加载失败：' + e.message); }
 }
 async function aiLoadMsgs() {
-  if (!state.aiSessionId) { state.aiMsgs = []; aiRender(); return; }
+  if (!state.aiSessionId) { state.aiMsgs = []; state.aiNodes = []; aiRender(); aiPaintNodes(); aiPaintFnBtn(); return; }
   try {
     const r = await api('/api/chat-sessions/' + state.aiSessionId + '/messages');
     state.aiMsgs = r.messages || [];
     state.aiModel = r.session.model || state.aiModel || '';
-  } catch (e) { state.aiMsgs = []; }
-  aiRender();
+    /* 这条对话带着哪些节点：以服务端存的为准（右键节点进来、或上次＋添加节点加的都在里面） */
+    state.aiNodes = aiNodesParse(r.session.nodes);
+  } catch (e) { state.aiMsgs = []; state.aiNodes = []; }
+  aiRender(); aiPaintNodes(); aiPaintFnBtn();
 }
 async function aiSwitchSession(sid) {
   if (state.aiBusy) return toast('AI 正在回复，请稍候');
   state.aiSessionId = sid;
   const s = (state.aiSessions || []).find(x => x.id === sid);
   state.aiModel = (s && s.model) || '';
+  /* 附件跟着会话走：切到哪条对话，就显示那条对话带着哪些节点（服务端存着的） */
+  state.aiNodes = aiNodesParse(s && s.nodes);
+  state.aiFnPick = 0;
   await aiLoadMsgs();
+  aiPaintNodes(); aiPaintFnBtn();
   aiFocusInput();
 }
 async function aiNewSession() {
@@ -3340,9 +3978,11 @@ async function aiNewSession() {
     state.aiSessions = [r.session].concat(state.aiSessions || []);
     state.aiSessionId = r.session.id;
     state.aiMsgs = [];
-    aiRender();
+    state.aiNodes = [];          /* 新对话默认不带节点；要聊哪个节点点「＋添加节点」或右键节点 → AI 功能 */
+    state.aiFnPick = 0;
+    aiRender(); aiPaintNodes(); aiPaintFnBtn();
     aiFocusInput();
-    toast('已新建对话');
+    toast('已新建对话（目标级，不带特定节点）');
   } catch (e) { toast(e.message); }
 }
 async function aiRenameSession() {
@@ -3404,8 +4044,14 @@ async function aiLoadModels() {
     state.aiDefaultModel = r.default || '';
   } catch (e) { state.aiModels = []; state.aiModelLabels = null; state.aiPoolLoaded = false; }
 }
+/* 消息列表的宿主：默认是 AI 助手侧边栏；节点「✨ AI 功能」弹窗打开时切到它自己的列表。
+   这样同一套流式渲染/气泡/「它做了什么」都不用复制一份。 */
+function aiHostEl() {
+  const id = state.aiHostId || 'adMsgs';
+  return document.getElementById(id) || document.getElementById('adMsgs');
+}
 function aiRenderMsgs() {
-  const box = document.getElementById('adMsgs');
+  const box = aiHostEl();
   if (!box) return;
   const msgs = state.aiMsgs || [];
   if (!msgs.length && !state.aiStream) {
@@ -3432,8 +4078,16 @@ function aiRender() {
   const modelSel = document.getElementById('adModel');
   if (sess) {
     const list = state.aiSessions || [];
+    /* 节点对话带 🎯 前缀 + 节点名 —— 一个目标下会有很多条对话，
+       不标出来就分不清"哪条是哪个节点的"（这正是用户最开始抱怨的那件事）。 */
+    const label = s => {
+      const nid = Number(s.node_id || 0);
+      const t = String(s.title || '新对话');
+      const kid = nid ? '🎯 ' : '';
+      return kid + t + (s.msg_count ? '（' + s.msg_count + '）' : '');
+    };
     sess.innerHTML = list.length
-      ? list.map(s => `<option value="${s.id}" ${s.id === state.aiSessionId ? 'selected' : ''}>${esc((s.title || '新对话') + (s.msg_count ? '（' + s.msg_count + '）' : ''))}</option>`).join('')
+      ? list.map(s => `<option value="${s.id}" ${s.id === state.aiSessionId ? 'selected' : ''}>${esc(label(s))}</option>`).join('')
       : '<option value="">（还没有对话）</option>';
   }
   if (modelSel) {
@@ -3519,22 +4173,37 @@ function aiRenderMode() {
 /* 把一条修改意见交给教程修改任务。两条来源共用：
    ① Agent 模式下 AI 判断出「用户要改教程」→ ops 里的 tutorial_edit
    ② 之后别的入口要重跑 */
-async function submitTutorialEdit(tid, feedback) {
+async function submitTutorialEdit(tid, feedback, opts) {
   const id = Number(tid || 0), fb = String(feedback || '').trim();
   if (!id || !fb) { toast('修改意见为空，没有提交'); return; }
+  const o = opts || {};
   try {
-    await api('/api/tutorials/' + id + '/edit', {
+    const r = await api('/api/tutorials/' + id + '/edit', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       /* quiet：这句话与 AI 的回复已经记在对话里了，让服务端别再插一份
-         「【教程修改 · …】」和那条固定回执，否则对话变成一叠重复。 */
-      body: JSON.stringify({ feedback: fb, session_id: state.aiSessionId || 0, quiet: true })
+         「【教程修改 · …】」和那条固定回执，否则对话变成一叠重复。
+         confirmed：用户已经看过范围并点了"就按这个范围改"。 */
+      body: JSON.stringify({ feedback: fb, session_id: state.aiSessionId || 0, quiet: true, confirmed: !!o.confirmed })
     });
-    await aiLoadMsgs();          // 把服务端刚落库的"已受理"回执读出来
+    await aiLoadMsgs();          // 把服务端刚落库的"已受理"回执（或"核对范围"那一问）读出来
+    /* 服务端认为这次要动结构、而用户还没授权 → 它不会跑，先回来问一句。
+       卡片就在上面那条消息里（📐 等你确认改动范围），这里只要说清楚"没开始跑"。 */
+    if (r && r.pending) { toast('📐 这次要改结构：先看一眼范围，确认后我再动手'); taskPoll(); return; }
     toast('🤖 已提交教程修改任务（完成后会自动刷新，结果也会写回对话）');
     taskPoll();
   } catch (e) { toast('提交失败：' + e.message); }
 }
 async function aiSend() {
+  const ta = document.getElementById('adText');
+  const msg = (ta && ta.value || '').trim();
+  if (!msg) return;
+  await aiSendText(msg, { ta, hostId: 'adMsgs', nodeIds: (state.aiNodes || []).map(a => ({ id: a.id, withKids: !!a.withKids })) });
+}
+/* 真正发消息的唯一实现：AI 助手侧边栏与节点「✨ AI 功能」弹窗共用。
+   opts = { ta: 发完要清空的输入框, hostId: 消息列表画在哪个容器, nodeId: 钉住的节点 } */
+async function aiSendText(msg, opts) {
+  const o = opts || {};
+  const ta = o.ta || null;
   if (state.aiBusy) return;
   // 教程页：消息作为修改意见，交给后台任务重写教程（记录记入当前会话，刷新也不丢；完成后自动刷新渲染）
   /* ⚠️ 这里以前是「只要在教程页，任何消息都当修改意见发出去」—— 用户只是想问一句，
@@ -3550,29 +4219,31 @@ async function aiSend() {
     if (state.aiGoalId !== gidT) { state.aiGoalId = gidT; state.aiSessionId = 0; state.aiMsgs = []; await aiLoadModels(); await aiLoadSessions(gidT); }
   }
   if (!(await ensureAIConfigured())) return;
-  const ta = document.getElementById('adText');
-  const msg = (ta && ta.value || '').trim();
   if (!msg) return;
   const gid = state.aiGoalId || (state.goal && state.goal.id) || state.tutGoalId || 0;
   if (!gid) return toast('请先进入一个目标');
+  /* 钉住的节点：随消息发给服务端（它会把这些节点和它们的子节点清单写进提示词，并落库到会话上）。
+     指到别的目标去的一律作废，免得改错地方。 */
+  const rawNodes = Array.isArray(o.nodeIds) ? o.nodeIds : [];
+  const focusNodes = rawNodes.filter(a => a && Number(a.id)).slice(0, 40).map(a => ({ id: Number(a.id), withKids: !!a.withKids }));
   if (!state.aiSessionId) {
     if (onTut) { toast('对话初始化失败，请刷新后重试'); return; }
     await aiNewSession();
   }
-  ta.value = '';
-  state.aiDraft = '';
-  ta.style.height = 'auto';
+  /* 消息列表宿主：在弹窗里发的消息就画在弹窗里（渲染那几处都按 state.aiHostId 找容器） */
+  state.aiHostId = o.hostId || 'adMsgs';
+  if (ta) { ta.value = ''; state.aiDraft = ''; ta.style.height = 'auto'; }
   state.aiMsgs = state.aiMsgs || [];
   state.aiMsgs.push({ id: 0, role: 'user', content: msg, ops: '[]', created_at: new Date().toISOString() });
   state.aiBusy = true;
   state.aiAbort = new AbortController();
-  state.aiStream = { text: '', thinking: '正在理解你的要求…', t0: Date.now() };
+  state.aiStream = { text: '', thinking: '正在理解你的要求…', steps: [], t0: Date.now() };
   aiUpdateSendBtn();
   aiRenderMsgs();
   if (state.aiTick) clearInterval(state.aiTick);
   state.aiTick = setInterval(() => { if (state.aiStream) chatRenderStream(); }, 1000);
   try {
-    const resp = await fetch('/api/chat-sessions/' + state.aiSessionId + '/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: msg, mode: state.aiMode === 'ask' ? 'ask' : 'agent', tutorial_id: onTut ? Number(rrTut.id) : 0 }), signal: state.aiAbort.signal });
+    const resp = await fetch('/api/chat-sessions/' + state.aiSessionId + '/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: msg, mode: state.aiMode === 'ask' ? 'ask' : 'agent', tutorial_id: onTut ? Number(rrTut.id) : 0, node_ids: onTut ? [] : focusNodes }), signal: state.aiAbort.signal });
     if (!resp.ok || !resp.body) throw new Error('无法连接对话服务');
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
@@ -3593,6 +4264,7 @@ async function aiSend() {
           if (s) s.title = d.sessionTitle;
         }
         /* 走节流版：这些回调每秒可能触发 30~80 次 */
+        if (d.step && state.aiStream) { (state.aiStream.steps = state.aiStream.steps || []).push(d.step); chatRenderStreamSoon(); }
         if (d.thinking && state.aiStream) { state.aiStream.thinking = d.thinking; chatRenderStreamSoon(); }
         if (d.text && state.aiStream) { state.aiStream.text += d.text; state.aiStream.thinking = ''; chatRenderStreamSoon(); }
         if (d.status && state.aiStream) { state.aiStream.thinking = d.status; chatRenderStreamSoon(); }
@@ -3600,7 +4272,14 @@ async function aiSend() {
         if (d.done) {
           finished = true;
           state.goal = d.goal;
-          state.aiMsgs.push({ id: d.id, role: 'assistant', content: d.reply, ops: JSON.stringify(d.applied || []), version_id: d.versionId || 0, created_at: new Date().toISOString() });
+          /* 「它做了什么」随这条回复一起存（服务端也已落库，刷新后还在）。
+             流式期间用户手动点开过 → 收尾时保持展开；没动过就收起来（正文才是主角）。 */
+          const steps = Array.isArray(d.trace) ? d.trace : ((state.aiStream && state.aiStream.steps) || []);
+          if (state.aiTraceLiveOpen === true && d.id) {
+            state.aiTraceOpenIds = state.aiTraceOpenIds || new Set();
+            state.aiTraceOpenIds.add(Number(d.id));
+          }
+          state.aiMsgs.push({ id: d.id, role: 'assistant', content: d.reply, ops: JSON.stringify(d.applied || []), version_id: d.versionId || 0, trace: JSON.stringify(steps), created_at: new Date().toISOString() });
           if (d.applied && d.applied.length) {
             const starts = d.applied.filter(x => x && x.op === 'start');
             const others = d.applied.filter(x => x && x.op !== 'start');
@@ -3976,10 +4655,13 @@ function calloutOf(seg) {
   return null;
 }
 /* 把 HTML 切成**顶层块**。不能拿正则偷懒（`<ul>` 里有嵌套 `<ul>`，
-   惰性匹配会在内层 `</ul>` 就停住，把列表腰斩），所以按同名标签计数配对。 */
+   惰性匹配会在内层 `</ul>` 就停住，把列表腰斩），所以按同名标签计数配对。
+   ⚠️ details 必须算顶层块：不认它的话，切块会从它**内部**的 `<p>`/`<table>` 处切开 ——
+   开头那段（`<details …><summary>答案</summary>`）在「**标签** + 内容」成卡片时会被塞进卡片行，
+   后面的内容却留在外面，折叠块的框就裂成两半（实测过这种情况的中间态）。 */
 function tutSplitBlocks(html) {
   const out = [];
-  const OPEN = /^<(h[1-6]|p|ul|ol|pre|table|blockquote|div|hr|figure)\b/i;
+  const OPEN = /^<(h[1-6]|p|ul|ol|pre|table|blockquote|div|details|hr|figure)\b/i;
   let i = 0, guard = 0;
   while (i < html.length && guard++ < 20000) {
     const m = OPEN.exec(html.slice(i));
@@ -4190,12 +4872,85 @@ window.addEventListener('message', e => {
     break;
   }
 });
+/* ===== Markdown 里的一小撮内联 HTML =====
+   模型写 Markdown 教程时爱夹一点 HTML：标红加粗的 <span style="color:#dc2626;font-weight:700">、
+   折叠答案 <details><summary>、表格里换行 <br>。以前这些一律被转义成文字，
+   正文里就躺着 `&lt;span style=…&gt;` —— 用户的原话：「我想让教程的样式更丰富，
+   结果把 span 都显示出来了」。这里放行一组"只影响观感、不带任何能力"的标签。
+   ⚠️ 三条底线：
+    ① 只认白名单里的标签名。正文里那些**不是 HTML** 的尖括号（`<PHONE>` 占位符、
+       `<doc id>`、`<stdin>`、`<Object>`）必须继续按纯文本显示，绝不能顺手渲染成空标签；
+    ② span 只认 style，且只保留颜色/字重/下划线这类排版属性。值里出现 url() / expression /
+       javascript: / var() / 引号尖括号一律丢弃 —— 不许把外部资源或脚本引进来；
+    ③ 常见「要点红 / 警告黄 / 成功绿」换成主题变量，深色模式下也看得清（写死 #dc2626
+       在暗色背景上会发闷）。
+   与 tutnotes 划线笔记的关系：这里只**加元素**、不改字符，正文文本逐字不变，
+   所以笔记的绝对偏移依旧成立。 */
+const MD_TAGS = {
+  span: 1, b: 1, strong: 1, i: 1, em: 1, u: 1, s: 1, del: 1, ins: 1, mark: 1, code: 1,
+  kbd: 1, samp: 1, var: 1, small: 1, big: 1, sub: 1, sup: 1, br: 1, wbr: 1,
+  abbr: 1, cite: 1, q: 1, time: 1, dfn: 1, nobr: 1
+};
+const MD_STYLE_OK = /^(?:color|background|background-color|background-clip|font|font-weight|font-style|font-size|font-family|line-height|letter-spacing|text-decoration|text-decoration-color|text-decoration-line|text-align|text-transform|text-shadow|border|border-bottom|border-left|border-color|border-radius|border-width|border-style|padding|padding-left|padding-right|margin|opacity|vertical-align|white-space)$/;
+/* 常见色 → 主题变量（只作用于 color；background 照原样，背景色在两种模式下都还行） */
+const MD_COLOR_MAP = [
+  [/^#(?:dc2626|d32f2f|cc0000|c0392b|e74c3c|ff0000|f00|b91c1c|c62828|d93025|e53935|f44336)$/i, 'var(--danger, #dc2626)'],
+  [/^#(?:c9701f|c8861a|e6a700|f59e0b|f0ad4e|ff9800|ed6c02|b45309|d97706)$/i, 'var(--warn, #c8861a)'],
+  [/^#(?:16a34a|22c55e|2e7d32|0f9d58|43a047|388e3c|198754|00a854)$/i, 'var(--ok, #16a34a)']
+];
+function mdUnescHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+}
+function mdSafeStyle(raw) {
+  const out = [];
+  for (const part of mdUnescHtml(raw).split(';')) {
+    const i = part.indexOf(':');
+    if (i < 0) continue;
+    const k = part.slice(0, i).trim().toLowerCase();
+    let v = part.slice(i + 1).trim();
+    if (!k || !v || !MD_STYLE_OK.test(k)) continue;
+    if (/[<>"'`\\]|url\s*\(|expression|javascript:|@import|!important|var\s*\(/i.test(v)) continue;
+    if (k === 'color') {
+      for (const [re, to] of MD_COLOR_MAP) if (re.test(v)) { v = to; break; }
+    }
+    out.push(k + ':' + v);
+    if (out.length >= 8) break;
+  }
+  return out.join(';');
+}
+/* 把「已经被 mdEscape 转义的」白名单标签还原成真 HTML，其余原样留着（继续当纯文本显示） */
+function mdTags(s) {
+  return String(s == null ? '' : s).replace(/&lt;(\/?)([a-zA-Z][\w-]*)((?:\s[^<>]*?)?)(\/?)&gt;/g, (m, close, name, attrs, slash) => {
+    const tag = String(name).toLowerCase();
+    if (!MD_TAGS[tag]) return m;
+    if (close) return '</' + tag + '>';
+    if (slash || tag === 'br' || tag === 'wbr') return '<' + tag + '>';
+    if (attrs) {
+      const sm = String(attrs).match(/\bstyle\s*=\s*(?:&quot;([\s\S]*?)&quot;|&#39;([\s\S]*?)&#39;|([^\s&]+))/i);
+      if (sm) {
+        const st = mdSafeStyle(sm[1] != null ? sm[1] : (sm[2] != null ? sm[2] : sm[3]));
+        if (st) return '<' + tag + ' style="' + st + '">';
+      }
+    }
+    return '<' + tag + '>';
+  });
+}
 function mdInline(s) {
-  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+  /* 行内代码先摘成占位符：里面的内容一个规则都不许碰
+     （`<span>` 这种要原样显示成文字，不能被下面的标签还原吃掉） */
+  const codes = [];
+  s = String(s == null ? '' : s).replace(/`([^`]+)`/g, (m, txt) => {
+    codes.push(txt);
+    return '\u0000C' + (codes.length - 1) + '\u0000';
+  });
+  s = mdTags(s);
   s = s.replace(/~~([^~]+?)~~/g, '<del>$1</del>');
   s = s.replace(/\*\*([^*]+?)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/\*([^*]+?)\*/g, '<em>$1</em>');
   s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  s = s.replace(/\u0000C(\d+)\u0000/g, (m, i) => '<code>' + codes[Number(i)] + '</code>');
   return s;
 }
 /* 把与文字挤在一行的 ``` 围栏拆到独立行（题面/粘贴内容里常见）
@@ -4318,8 +5073,11 @@ function mdToHTML(text, opts) {
     return p.map(x => x.trim());
   };
   const isSep = s => /^[\s|:|-]+$/.test(s) && /-+/.test(s) && s.includes('|');
+  /* `<details>` / `</details>` 也算块边界：模型写折叠答案时经常紧贴在上一段/列表后面
+     （中间不空行），不隔开的话它会被并进上一段，折叠块就散架了。 */
   const isBlock = l => /^\s*(#{1,6})\s/.test(l) || /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(l) || /^\s*```/.test(l)
-    || /^\s*>\s?/.test(l) || /^\s*[-*+]\s+/.test(l) || /^\s*\d+[.)]\s+/.test(l);
+    || /^\s*>\s?/.test(l) || /^\s*[-*+]\s+/.test(l) || /^\s*\d+[.)]\s+/.test(l)
+    || /^\s*<\/?details[\s>]/i.test(l);
   while (i < lines.length) {
     const line = lines[i];
     if (!line.trim()) { i++; continue; }
@@ -4390,6 +5148,34 @@ function mdToHTML(text, opts) {
         + mdToHTML(buf.join('\n'), srcOn ? { srcLines: true, lineBase: bqBase } : undefined)
         + '</blockquote>';
       continue;
+    }
+    /* <details>/<summary> 折叠块：模型写「参考答案 / 答案」时爱用（线上好几篇教程都有）。
+       以前这十几行按纯文本显示，用户看到的是 `<details>`、`<summary>` 字样。
+       规则：行首 `<details>`（可带 open）且**能找到配对的 `</details>`** 才按折叠块渲染；
+       找不到收尾就照旧当普通段落 —— 绝不能把后面整篇吞进一个没关上的块里。
+       嵌套的 details 用深度计数配对；里面的正文照常走 Markdown（表格/代码/加粗都在）。 */
+    const dtOpen = line.match(/^\s*<details(\s[^<>]*)?>\s*$/i);
+    if (dtOpen) {
+      let j = i + 1, depth = 0, close = -1;
+      while (j < lines.length) {
+        if (/^\s*<details[\s>]/i.test(lines[j])) depth++;
+        else if (/^\s*<\/details\s*>\s*$/i.test(lines[j])) { if (!depth) { close = j; break; } depth--; }
+        j++;
+      }
+      if (close > i) {
+        const inner = lines.slice(i + 1, close);
+        while (inner.length && !inner[0].trim()) inner.shift();
+        let summary = '', hasSummary = false;
+        const sm0 = inner.length ? inner[0].match(/^\s*<summary[^<>]*>([\s\S]*?)(?:<\/summary\s*>)?\s*$/i) : null;
+        if (sm0) { summary = sm0[1]; hasSummary = true; inner.shift(); }
+        const dtBase = lineBase + ((lmap && lmap[i + 1] != null) ? lmap[i + 1] : i + 1);
+        html += '<details class="mdDetails"' + (/\bopen\b/i.test(dtOpen[1] || '') ? ' open' : '') + srcAttr2(i, close + 1) + '>'
+          + (hasSummary ? '<summary>' + mdInline(mdEscape(summary.trim())) + '</summary>' : '')
+          + mdToHTML(inner.join('\n'), srcOn ? { srcLines: true, lineBase: dtBase } : undefined)
+          + '</details>';
+        i = close + 1;
+        continue;
+      }
     }
     if (line.includes('|') && lines[i + 1] && isSep(lines[i + 1])) {
       const hLine = i;
@@ -5537,6 +6323,7 @@ function tutViewInit() {
   });
 }
 async function renderTutorialPage(tid, keepPos) {
+  if (mdInlineActive()) mdInlineClose(false);   // 换了页/重画整页：就地编辑框随之作废
   /* 同一个教程的**整页重画**（🕘 历史版本恢复、AI 改版、任务轮询）：先记下当前锚点，
      渲染完再对回去。否则正文被整段换掉时文档先变短，浏览器把滚动夹回顶部 ——
      用户看到的就是"位置又跳了"（实测 14061 → 0）。锚点 = 块行号 + 视口内偏移。
@@ -5575,6 +6362,7 @@ async function renderTutorialPage(tid, keepPos) {
       ${((goalCompOn(goal, 'notes') || goalCompOn(goal, 'tutnotes')) && window.NodeNotes) ? `<button class="btn small" data-tbtn id="tutNoteBtn" title="展开 / 收起右侧笔记栏（🗒 Markdown 笔记 / 📌 划线笔记 两个页签）">🗒 笔记</button>` : ''}
       ${(goalCompOn(goal, 'tutbookmark') && window.TutBookmark) ? `<button class="btn small" data-tbtn id="tutBmBtn" title="随时标记阅读位置（不用翻到底部）">🔖 标签</button>` : ''}
       ${goalCompOn(goal, 'restate') ? `<button class="btn small" data-tbtn id="tutRestateBtn" title="循序渐进把知识点变成你自己的话：先搞懂前因后果，AI 一次只追问最关键的一个缺口、给方向不给答案">🧠 用自己的话</button>` : ''}
+      ${goalCompOn(goal, 'explain') ? `<button class="btn small" data-tbtn id="tutExplainBtn" title="这段代码没看懂？贴进来让 AI 逐行讲明白：左边是代码、右边是讲解，点哪一行就看哪一行，哪行没看懂就在哪行下面追问">🔍 看懂代码</button>` : ''}
       ${goalCompOn(goal, 'quiz') ? `<button class="btn small" data-tbtn id="tutQuizBtn" title="按这篇教程逐点考察掌握情况（一次一题，答错可追问）">📝 测验</button>` : ''}
       ${(goalCompOn(goal, 'workspace') && window.Workspace) ? `<button class="btn small primary" data-tbtn id="tutCodeBtn" title="为当前节点建好代码目录并用 VSCode 打开，边看教程边写代码（子目录嵌在父目录下，无需手动管理）">💻 写代码</button>` : ''}
       ${(goalCompOn(goal, 'workspace') && window.Workspace) ? `<button class="btn small" data-tbtn id="tutPackBtn" title="把整个目标的代码目录一键打包成 zip 下载">📦 打包</button>` : ''}
@@ -5650,6 +6438,10 @@ async function renderTutorialPage(tid, keepPos) {
   if (goalCompOn(goal, 'quiz')) {
     const tq = document.getElementById('tutQuizBtn');
     if (tq) tq.addEventListener('click', () => { location.hash = '#/t/' + tid + '/quiz'; });
+  }
+  if (goalCompOn(goal, 'explain')) {
+    const te = document.getElementById('tutExplainBtn');
+    if (te) te.addEventListener('click', () => { location.hash = '#/t/' + tid + '/explain'; });
   }
   applyBarOverflow('tut');
 
@@ -5844,10 +6636,27 @@ async function delNode(id) {
     toast('已删除');
   } catch (e) { toast(e.message); }
 }
+/* 旧版「✨ AI 功能」弹窗（2026-10-15 晚删掉）
+   ---------------------------------------------------------------------------
+   它把聊天装进了一个只认当前节点的窗口，但**历史还是整个目标的会话** ——
+   于是打开 SKILL 节点，看到的是 MCP 节点那轮对话的内容（用户实测）。
+   而且入口重复：弹窗一个、侧边栏一个。
+   现在统一到侧边栏：右键节点 → ✨ AI 功能 = 打开/新建**这个节点自己的对话**
+   （见 aiOpenNodeChat / chat_sessions.node_id），要加别的节点就在助手顶上点「＋添加节点」。 */
 /* 取某个节点的直接子节点 */
 function db2Kids(id) {
   return ((state.goal && state.goal.nodes) || []).filter(x => Number(x.parent_id) === Number(id));
 }
+/* 节点右键菜单（2026-10-15 重做）
+   ---------------------------------------------------------------------------
+   以前这里平铺 10~14 个按钮（拆分/提意见/教程/看教程/资料汇总/三个状态标记/编辑/删除），
+   用户的原话是"一堆按键"，而且**最想干的那件事（跟 AI 说一句怎么改）根本不在菜单里**。
+   现在只留三样：重命名 / 删除 / ✨ AI 功能（悬浮展开二级菜单）。
+   · 二级菜单上半段 = 这个节点真正能用的 AI 动作（按"这次会不会花钱/花多少"排：对话最轻）；
+   · 二级菜单下半段 = AI 的产出（教程、资料汇总），它们不是动作，所以分隔线隔开；
+   · 三个状态标记不再进菜单 —— 节点详情面板里本来就有那三个按钮（data-np-status）。
+   ⚠️ 按钮一律走 data-act + 下面的 bind()：二级菜单里的按钮是 div 的后代，
+     querySelector 照样找得到，所以动作绑定一行都不用改。 */
 function showCtxMenu(x, y, id) {
   const n = state.goal.nodes.find(v => v.id === id);
   if (!n) return;
@@ -5858,72 +6667,31 @@ function showCtxMenu(x, y, id) {
   const kids = db2Kids(id);   // 批量操作子节点用（之前漏了这行，导致右键菜单报错打不开）
   const div = document.createElement('div');
   div.id = 'ctxMenu';
-  div.className = 'ctxMenu';
-  const W = 268, H = 420;
-  div.style.left = Math.min(x, window.innerWidth - W - 8) + 'px';
-  div.style.top = Math.min(y, window.innerHeight - H - 8) + 'px';
+  div.className = 'ctxMenu ctxMenuSlim';
   div.innerHTML = `
     <div class="ctxTitle" title="${esc(n.title)}">${LEVEL_NAME[n.level] || '节点'}｜${esc(n.title.slice(0, 20))}${n.title.length > 20 ? '…' : ''}</div>
-    <button data-act="expand">✨ AI 深度拆分（搜集资料后细化）</button>
-    <button data-act="discuss">💬 提意见调整划分（和 AI 讨论）</button>
-    <button data-act="tut">📘 生成学习教程（掌握这个任务）</button>
-    ${kids.length ? `<button data-act="tutkids">📚 为全部子节点生成教程（${kids.length} 个，并行）</button>` : ''}
-    ${kids.length ? `<button data-act="expandkids">✨ 逐个拆分全部子节点（${kids.length} 个，并行）</button>` : ''}
-    ${tuts.length ? `<button data-act="tutview">📖 查看教程（${tuts.length}）</button>` : ''}
-    <button data-act="sources">📚 资料与提炼汇总（${srcs.length}）</button>
+    <button data-act="edit"><span class="ci">✎</span><span class="cl">重命名</span></button>
+    <button data-act="del" class="danger"><span class="ci">✕</span><span class="cl">删除</span></button>
     <div class="ctxSep"></div>
-    <button data-act="doing">▶ 标记进行中</button>
-    <button data-act="done">✓ 标记已完成</button>
-    <button data-act="todo">○ 标记未开始</button>
-    <div class="ctxSep"></div>
-    <button data-act="edit">✎ 编辑</button>
-    <button data-act="del" class="danger">× 删除</button>`;
+    <button data-act="aifn"><span class="ci">✨</span><span class="cl">AI 功能<em>打开这个节点自己的对话（在右侧 AI 助手里）</em></span></button>`;
   document.body.appendChild(div);
+  const W = 250;
+  div.style.left = Math.max(8, Math.min(x, window.innerWidth - W - 8)) + 'px';
+  div.style.top = Math.max(8, Math.min(y, window.innerHeight - (div.offsetHeight || 160) - 8)) + 'px';
   const close = () => div.remove();
   const bind = (act, fn) => {
     const b = div.querySelector(`[data-act="${act}"]`);
     if (b) b.addEventListener('click', e => { e.stopPropagation(); e.preventDefault(); close(); fn(); });
   };
-  bind('expand', () => startExpand(id));
-  bind('tut', () => showTutorialDialog(id));
-  bind('tutkids', async () => {
-    const list = db2Kids(id);
-    if (!list.length) return toast('这个节点还没有子节点');
-    if (!confirm('为全部 ' + list.length + ' 个子节点生成教程？\n\n会并行处理（最多 3 个同时），可在左下角任务中心看进度，切页面也不影响。')) return;
-    for (const k of list) {
-      try {
-        await fetch('/api/nodes/' + k.id + '/tutorial', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ format: 'md', note: '按父节点「' + String(n.title).slice(0, 30) + '」的学习要求，为这个子节点写一份完整、可执行的教程' })
-        });
-      } catch (e) {}
-    }
-    toast('已提交 ' + list.length + ' 个教程任务（见左下角任务中心）');
-  });
-  bind('expandkids', async () => {
-    const list = db2Kids(id);
-    if (!list.length) return toast('这个节点还没有子节点');
-    if (!confirm('逐个拆分全部 ' + list.length + ' 个子节点？\n\n会并行处理（最多 3 个同时），可在左下角任务中心查看进度。')) return;
-    for (const k of list) {
-      try {
-        await fetch('/api/nodes/' + k.id + '/expand', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ feedback: '' }) });
-      } catch (e) {}
-    }
-    toast('已提交 ' + list.length + ' 个拆分任务（见左下角任务中心）');
-  });
-  bind('tutview', () => {
-    const list = tutorialsOfNode(id);
-    if (list.length === 1) go('#/t/' + list[0].id);
-    else showNodePanel(id, rerenderCurrent);
-  });
-  bind('sources', () => showNodePanel(id, rerenderCurrent));
-  bind('discuss', () => {
-    showNodePanel(id, rerenderCurrent);
-    setTimeout(() => { const ta = document.getElementById('npFeedback'); if (ta) { ta.focus(); ta.scrollIntoView({ block: 'center' }); } }, 80);
-  });
+  bind('aifn', () => aiOpenNodeChat(id));
+  /* ⚠️ 拆分 / 教程 / 批量那几条绑定**故意不在这里**了：
+     菜单只剩三样，那些动作搬到了 AI 助手功能栏的「✨ AI 功能」里（见 aiPaintFnPop）。
+     同一个动作只留一处实现，以后改一处就够，不会再出现"菜单里的和助手里的行为不一致"。 */
   bind('doing', () => setNodeStatus(id, 'doing'));
   bind('done', () => setNodeStatus(id, 'done'));
   bind('todo', () => setNodeStatus(id, 'todo'));
+  /* 上面三条状态绑定：菜单里已经没有这三个按钮（状态改到节点详情面板），
+     bind() 找不到按钮就什么都不做，留着是为了别的入口挂同一个菜单时不至于失效。 */
   bind('edit', () => editNode(id));
   bind('del', () => delNode(id));
 }
@@ -6734,7 +7502,16 @@ async function startCollect(id) {
           const el = document.getElementById('spStatus');
           if (el) el.textContent = d.status;
         }
-        if (d.done) { done = true; state.sources = d.sources || []; toast('信息源收集完成：' + d.count + ' 条' + (d.ebooks ? '；' + d.ebooks : '') + (d.blocked ? '（百度限流，本次用备用搜索，可稍后重新收集以获取更多）' : '')); }
+        if (d.done) {
+          done = true; state.sources = d.sources || [];
+          const st = d.stats || null;
+          const fun = st
+            ? '（搜到 ' + st.searched + ' 条 → 进审 ' + st.toReview + ' 条 → 入库 ' + st.saved + ' 条'
+              + (st.aiDrop ? '，AI 判为不合格 ' + st.aiDrop + ' 条' : '')
+              + (st.fullGot ? '，补抓全文 ' + st.fullGot + ' 条' : '') + '）'
+            : '';
+          toast('信息源收集完成：' + d.count + ' 条' + fun + (d.ebooks ? '；' + d.ebooks : '') + (d.blocked ? '（百度限流，本次用备用搜索，可稍后重新收集以获取更多）' : ''));
+        }
         if (d.error) { done = true; toast(d.error); }
       }
     }
@@ -6765,12 +7542,22 @@ function collectPlanSummary() {
 }
 async function ensureCollectSetup(id, editOnly) {
   let plan = null, pref = null;
+  let csGate = { review: true, min: 3, cap: 220, perSite: 12, full: true, fullMax: 60000 };
   try {
-    const [a, b] = await Promise.all([
+    const [a, b, cfg] = await Promise.all([
       api('/api/goals/' + id + '/collect-plan').catch(() => ({})),
-      api('/api/goals/' + id + '/ebooks/pref').catch(() => ({}))
+      api('/api/goals/' + id + '/ebooks/pref').catch(() => ({})),
+      api('/api/settings').catch(() => ({}))
     ]);
     plan = a.plan || null; pref = b.pref || null;
+    csGate = {
+      review: String(cfg.collect_review == null ? '1' : cfg.collect_review) !== '0',
+      min: Number(cfg.collect_min_score == null ? 3 : cfg.collect_min_score) || 3,
+      cap: Number(cfg.collect_candidates || 220) || 220,
+      perSite: Number(cfg.collect_per_site || 12) || 12,
+      full: String(cfg.collect_full == null ? '1' : cfg.collect_full) !== '0',
+      fullMax: Number(cfg.collect_full_max || 60000) || 60000
+    };
   } catch (e) { return true; }
   if (!editOnly && plan && plan.asked && pref && pref.asked) return true;
   toast('AI 正在按目标制定搜集方案…');
@@ -6809,6 +7596,30 @@ function showCollectSetupDialog(gid, opts) {
           <button class="btn tiny" id="csAll">全选</button><button class="btn tiny" id="csNone">全不选</button></div>
         <div class="csQList" id="csQList"></div>
         <textarea id="csCustom" rows="2" placeholder="自己加搜集方向（每行一条）：例如&#10;央行货币政策解读"></textarea>
+      </div>
+      <div class="csSec">
+        <div class="csSecHead"><span class="csSecT">🛡 把关（决定什么能进资料库）</span><span class="csSecD">搜回来的一批候选先交给 AI 逐条判读：相关度、有没有实质内容、是不是营销水文</span></div>
+        <div class="csGateRow">
+          <label class="csGateLbl">严格度
+            <select id="csMinScore" class="sxi-sel">
+              <option value="4"${csGate.min >= 4 ? ' selected' : ''}>严格 · 只收相关度 4~5 的</option>
+              <option value="3"${csGate.min === 3 ? ' selected' : ''}>标准 · 收 3 分以上（推荐）</option>
+              <option value="2"${csGate.min === 2 ? ' selected' : ''}>宽松 · 相关就收（2 分以上）</option>
+              <option value="0"${csGate.review ? '' : ' selected'}>关闭 AI 把关（回到"搜到就收"）</option>
+            </select>
+          </label>
+          <label class="csGateLbl">候选上限
+            <input id="csCandCap" type="number" min="40" max="600" step="20" value="${csGate.cap}"> 条
+          </label>
+          <label class="csGateLbl">单站上限
+            <input id="csPerSite" type="number" min="2" max="40" step="1" value="${csGate.perSite}"> 条
+          </label>
+          <label class="csGateLbl csGateWide">
+            <span><input type="checkbox" id="csFull" ${csGate.full ? 'checked' : ''}> 高质量资料被截断时，把**全文**抓回来再入库</span>
+            <span class="muted" style="font-size:11.5px;">单条上限 <input id="csFullMax" type="number" min="4000" max="300000" step="2000" value="${csGate.fullMax}" style="width:88px"> 字（默认 6 万，够放下一份长报告）</span>
+          </label>
+        </div>
+        <div class="csSecD" style="margin-top:4px;">把关是花 AI 的：每 ${18} 条一次调用，一次搜集通常多 3~8 次；这些设置存本机，下次沿用。</div>
       </div>
       <div class="csSec">
         <div class="csSecHead"><span class="csSecT">📚 电子书</span><span class="csSecD">公版老经典自动下载入库，有版权书进待找书单</span></div>
@@ -6884,6 +7695,19 @@ function showCollectSetupDialog(gid, opts) {
       btn.disabled = true; btn.textContent = '保存中…';
       try {
         await api('/api/goals/' + gid + '/collect-plan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queries: qs.concat(custom) }) });
+        /* 把关设置（存本机、全局沿用） */
+        try {
+          const ms = m.querySelector('#csMinScore');
+          const minV = Number(ms && ms.value);
+          await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+            collect_review: minV > 0 ? '1' : '0',
+            collect_min_score: String(minV > 0 ? minV : 3),
+            collect_candidates: String(Math.max(40, Number((m.querySelector('#csCandCap') || {}).value) || 220)),
+            collect_per_site: String(Math.max(2, Number((m.querySelector('#csPerSite') || {}).value) || 12)),
+            collect_full_max: String(Math.max(4000, Number((m.querySelector('#csFullMax') || {}).value) || 60000)),
+            collect_full: (m.querySelector('#csFull') || {}).checked ? '1' : '0'
+          }) });
+        } catch (e) {}
         if (want != null) {
           await api('/api/goals/' + gid + '/ebooks/pref', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ want, books: picked.concat(ecustom) }) });
         }
@@ -8146,10 +8970,19 @@ async function renderLibraryPage() {
   const byKind = {};
   for (const x of sources) (byKind[x.kind || '其它'] = byKind[x.kind || '其它'] || []).push(x);
   const goalOptions = (state.goals || []).map(x => `<option value="${x.id}" ${Number(x.id) === Number(g.id) ? 'selected' : ''}>${esc(x.title)}</option>`).join('');
+  /* 一条资料。AI 判读结果（相关度/主题/一句话摘要）直接摆在标题下面 ——
+     用户要一眼看出"这条是什么、值不值得点开"，而不是先看一堆标题再自己猜。 */
   const srcCard = (x, withBody) => {
     const full = String(x.content || x.snippet || '（无正文）');
+    const sc = Number(x.quality_score || 0);
+    const cleanChip = Number(x.clean_removed) > 0
+      ? `<span class="chip gray" title="抓取时混进来的导航/推荐/页脚等垃圾文字已去掉这么多">🧹 洗掉 ${Number(x.clean_removed) >= 1000 ? (Number(x.clean_removed) / 1000).toFixed(1) + 'k' : x.clean_removed} 字</span>`
+      : '';
+    const aiChips = (sc > 0 || x.topic || x.ai_summary)
+      ? `<div class="libAiRow">${sc > 0 ? `<span class="chip ai">AI ${sc}/5</span>` : ''}${x.topic ? `<span class="chip gray">${esc(x.topic)}</span>` : ''}${Number(x.content_full) === 1 ? '<span class="chip ok">全文</span>' : ''}${cleanChip}${x.ai_summary ? `<span class="libAiSum">${esc(x.ai_summary)}</span>` : ''}</div>`
+      : '';
     return `<details class="libSrc"><summary><span class="chip gray">${esc(x.kind || '资料')}</span> ${esc(x.title)} <span class="muted" style="font-size:11px;">· ${full.length} 字</span></summary>
-      <div class="libSrcBody">${x.url ? `<div class="libSrcMeta">来源：<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.site || x.url)}</a></div>` : `<div class="libSrcMeta">来源：${esc(x.site || '—')}</div>`}
+      <div class="libSrcBody">${aiChips}${x.url ? `<div class="libSrcMeta">来源：<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.site || x.url)}</a></div>` : `<div class="libSrcMeta">来源：${esc(x.site || '—')}</div>`}
       <div class="mdBody libFullText" style="margin-top:6px;">${mdToHTML(full)}</div></div></details>`;
   };
   /* 页头：标题 + 统计（独立指标块，不再糊成一串字）+ 一组图标按钮 */
@@ -8165,6 +8998,8 @@ async function renderLibraryPage() {
       <select id="libGoal" class="libGoalSel sxi-sel">${goalOptions}</select>
       <button class="btn small" id="libRagBuild" title="把资料切片（配了向量模型则一并向量化）：规划/对话时按问题检索最相关片段">${sxi('spark')}检索索引</button>
       <button class="btn small" id="libDigest">${sxi('spark')}${digests.length ? '重新提炼' : '信息提炼'}</button>
+      <button class="btn small" id="libClean" title="把抓网页时混进来的导航/推荐位/页脚/公众号引导这类垃圾文字从正文里去掉（原文会备份，可反复跑）">${sxi('sweep')}清洗资料</button>
+      <button class="btn small" id="libRefetch" title="把「只有标题和搜索摘要、正文是空的」资料重抓一遍（全部目标）：换招重试抓到的写回正文，仍抓不到的直接删掉。实测一半以上的空壳只是当初抓失败、现在能抓回来">${sxi('refresh')}补抓正文</button>
       <label class="btn small">${sxi('up')}导入资料<input type="file" id="libImport" accept=".json,application/json" hidden></label>
       <a class="btn small" href="/api/goals/${g.id}/library/export" download>${sxi('down')}导出 MD</a>
     </div>
@@ -8241,6 +9076,174 @@ async function renderLibraryPage() {
   })();
   const ld = document.getElementById('libDigest');
   if (ld) ld.addEventListener('click', async () => { await startDigest(g.id); renderLibraryPage(); });
+  const lc = document.getElementById('libClean');
+  if (lc) lc.addEventListener('click', async () => {
+    let hasAI = !!(state.aiStatus && state.aiStatus.configured);
+    if (!hasAI) { try { const st2 = await api('/api/ai/status'); hasAI = !!st2.configured; state.aiStatus = st2; } catch (e) {} }
+    const useAI = hasAI ? confirm('清洗资料：去掉抓网页时混进来的导航/推荐位/页脚/公众号引导等垃圾文字。\n\n点「确定」= 本地清洗 + **AI 再删一遍**（更干净，会花几次调用）\n点「取消」= 只做本地清洗（免费、很快）') : false;
+    /* ⚠️ 这个弹窗**必须能关掉**，而且**关掉 ≠ 停止**：
+       停止统一归左下角「AI 任务」（那里本来就能停任何任务），弹窗只负责"看得见进度"。
+       进度要能回答"已经清洗了多少篇"——只说"正在清洗"等于没说（真实反馈）。 */
+    const ov = document.createElement('div');
+    ov.className = 'libCleanMask';
+    ov.innerHTML = `<div class="libCleanBox">
+      <button class="libCleanX" id="lcX" title="关掉这个框（清洗在后台继续，左下角「AI 任务」可看进度或停止）">×</button>
+      <div class="libCleanT">🧹 正在清洗资料</div>
+      <div class="libCleanBig" id="lcBig">已清洗 0 篇</div>
+      <div class="taskProg" style="margin-top:8px;"><i id="lcBar" style="width:0%"></i></div>
+      <div class="libCleanSub" id="lcNow"></div>
+      <div class="libCleanS" id="lcStatus">准备中…</div>
+      <div class="libCleanWarn">原文会备份在库里，随时可以对照或重跑；清洗不会改写内容，只删掉与正文无关的站点文字。<br>
+      <b>关掉这个框不会停</b>：清洗在后台继续跑，要停请到左下角「AI 任务」里点停止。</div>
+      <div class="libCleanBtns">
+        <button class="btn primary" id="lcBg">关掉，后台继续</button>
+      </div></div>`;
+    document.body.appendChild(ov);
+    let closed = false;
+    const closeBox = () => { if (closed) return; closed = true; ov.remove(); };
+    const paint = d => {
+      const big = document.getElementById('lcBig'), bar = document.getElementById('lcBar');
+      const now = document.getElementById('lcNow'), st = document.getElementById('lcStatus');
+      if (!big) return;
+      if (d.total != null) big.textContent = '已清洗 ' + (d.done || 0) + ' / ' + d.total + ' 篇' + (d.pct ? '（' + d.pct + '%）' : '');
+      if (bar && d.pct != null) bar.style.width = d.pct + '%';
+      if (now) now.textContent = d.title ? '正在处理：《' + d.title + '》' : '';
+      if (st) {
+        const bits = [];
+        if (d.removed) bits.push('已去掉 ' + (d.removed >= 1000 ? (d.removed / 1000).toFixed(1) + 'k' : d.removed) + ' 字');
+        if (d.ai && d.aiCalls) bits.push('AI 调用 ' + d.aiCalls + ' 次');
+        st.textContent = bits.join(' · ') || (d.status || '');
+      }
+    };
+    document.getElementById('lcX').addEventListener('click', closeBox);
+    document.getElementById('lcBg').addEventListener('click', () => { closeBox(); toast('清洗在后台继续，左下角「AI 任务」可看进度或停止'); });
+    document.addEventListener('keydown', function escClose(ev) {
+      if (ev.key === 'Escape') { closeBox(); document.removeEventListener('keydown', escClose); }
+    });
+    try {
+      /* 不带 signal：这个框只负责「看得见进度」，关掉它不该掐断后台任务（停止归左下角 AI 任务）。
+         ⚠️ 之前这里残留了 signal: ac.signal，而 ac 已经删掉了 —— 一进来就 ReferenceError，
+         被 catch 吞掉后立刻 closeBox()，表现成「点了按钮什么都没发生」（实测踩到）。 */
+      const resp = await fetch('/api/goals/' + g.id + '/sources/clean', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ai: useAI }) });
+      const reader = resp.body.getReader(); const dec = new TextDecoder();
+      let buf2 = '', doneMsg = null;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf2 += dec.decode(value, { stream: true });
+        const parts = buf2.split('\n\n'); buf2 = parts.pop();
+        for (const p2 of parts) {
+          const line = p2.split('\n').find(l => l.startsWith('data: '));
+          if (!line) continue;
+          let d = null; try { d = JSON.parse(line.slice(6)); } catch (e) { continue; }
+          if (d.taskId) state.lastCleanTaskId = d.taskId;
+          paint(d);
+          if (d.status && d.total == null && !d.finish) { const el = document.getElementById('lcStatus'); if (el) el.textContent = d.status; }
+          if (d.finish) doneMsg = d;
+          if (d.error) doneMsg = { error: d.error };
+        }
+      }
+      closeBox();
+      if (doneMsg && doneMsg.error) { toast('清洗失败：' + doneMsg.error); return; }
+      if (doneMsg) {
+        toast('🧹 清洗完成：洗了 ' + doneMsg.cleaned + ' 条，共去掉 ' + Math.round((doneMsg.removed || 0) / 1000) + 'k 字'
+          + (doneMsg.ai ? '（AI 调用 ' + doneMsg.aiCalls + ' 次' + (doneMsg.aiLeft ? '，还有 ' + doneMsg.aiLeft + ' 条没轮到 AI，可再跑一次' : '') + '）' : '')
+          + (doneMsg.costMs ? ' · 用时 ' + Math.round(doneMsg.costMs / 1000) + ' 秒' : ''));
+        state.sources = []; state.sourcesLoaded = 0;
+        try { await loadGoal(g.id); } catch (e) {}
+      }
+    } catch (e) {
+      closeBox();
+      if (!(e && e.name === 'AbortError')) toast('清洗中断：' + e.message + '（任务可能还在后台跑，左下角可看）');
+      else toast('已离开进度框（清洗若还在跑，左下角「AI 任务」可停止）');
+    }
+  });
+  /* 补抓正文：空壳资料的救回/清退。
+     跟「清洗资料」最大的区别是**它会删数据**（换招重试仍抓不到的直接删），所以：
+     ① 先弹 confirm 把"会删"讲清楚；② 进度框里如实报"抓回几条 / 删掉几条"。 */
+  const lrf = document.getElementById('libRefetch');
+  if (lrf) lrf.addEventListener('click', async () => {
+    const ok = confirm('补抓正文：把「只有标题和搜索摘要、正文是空的」资料重新抓一遍。\n\n'
+      + '· 抓到的 → 正文写回资料库（顺手补上发布时间）\n'
+      + '· 换成浏览器请求头 / 手机 UA 重试仍抓不到的 → 直接从资料库删掉\n'
+      + '  （这类多半要登录态，例如知乎、BOSS 直聘）\n\n'
+      + '范围：全部目标的资料。库里有自动备份，可以回滚。\n\n确定开始？');
+    if (!ok) return;
+    /* 弹窗只负责"看得见进度"，停止统一归左下角「AI 任务」（关掉弹窗 ≠ 停止，跟清洗那套一致）。 */
+    const ov = document.createElement('div');
+    ov.className = 'libCleanMask';
+    ov.innerHTML = `<div class="libCleanBox">
+      <button class="libCleanX" id="lrfX" title="关掉这个框（补抓在后台继续，左下角「AI 任务」可看进度或停止）">×</button>
+      <div class="libCleanT">🔄 正在补抓正文</div>
+      <div class="libCleanBig" id="lrfBig">已补抓 0 条</div>
+      <div class="taskProg" style="margin-top:8px;"><i id="lrfBar" style="width:0%"></i></div>
+      <div class="libCleanSub" id="lrfNow"></div>
+      <div class="libCleanS" id="lrfStatus">准备中…</div>
+      <div class="libCleanWarn">抓不到的会直接删掉，所以进度里把「抓回」和「删掉」分开记。<br>
+      <b>关掉这个框不会停</b>：补抓在后台继续跑，要停请到左下角「AI 任务」里点停止。</div>
+      <div class="libCleanBtns">
+        <button class="btn primary" id="lrfBg">关掉，后台继续</button>
+      </div></div>`;
+    document.body.appendChild(ov);
+    let closed = false;
+    const closeBox = () => { if (closed) return; closed = true; ov.remove(); };
+    const paint = d => {
+      const big = document.getElementById('lrfBig'), bar = document.getElementById('lrfBar');
+      const now = document.getElementById('lrfNow'), st = document.getElementById('lrfStatus');
+      if (!big) return;
+      if (d.total != null) big.textContent = '已补抓 ' + (d.done || 0) + ' / ' + d.total + ' 条' + (d.pct ? '（' + d.pct + '%）' : '');
+      if (bar && d.pct != null) bar.style.width = d.pct + '%';
+      if (now) now.textContent = d.title ? '正在处理：《' + d.title + '》' + (d.site ? '（' + d.site + '）' : '') : '';
+      if (st) {
+        const bits = [];
+        if (d.got) bits.push('抓回 ' + d.got + ' 条');
+        if (d.dropped) bits.push('删掉 ' + d.dropped + ' 条');
+        if (d.chars) bits.push('+' + Math.round(d.chars / 1000) + 'k 字');
+        st.textContent = bits.join(' · ') || (d.status || '');
+      }
+    };
+    document.getElementById('lrfX').addEventListener('click', closeBox);
+    document.getElementById('lrfBg').addEventListener('click', () => { closeBox(); toast('补抓在后台继续，左下角「AI 任务」可看进度或停止'); });
+    document.addEventListener('keydown', function escClose2(ev) {
+      if (ev.key === 'Escape') { closeBox(); document.removeEventListener('keydown', escClose2); }
+    });
+    try {
+      const resp = await fetch('/api/sources/refetch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+      const reader = resp.body.getReader(); const dec = new TextDecoder();
+      let buf2 = '', doneMsg = null;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf2 += dec.decode(value, { stream: true });
+        const parts = buf2.split('\n\n'); buf2 = parts.pop();
+        for (const p2 of parts) {
+          const line = p2.split('\n').find(l => l.startsWith('data: '));
+          if (!line) continue;
+          let d = null; try { d = JSON.parse(line.slice(6)); } catch (e) { continue; }
+          paint(d);
+          if (d.status && d.total == null && !d.finish) { const el = document.getElementById('lrfStatus'); if (el) el.textContent = d.status; }
+          if (d.finish) doneMsg = d;
+          if (d.error) doneMsg = { error: d.error };
+        }
+      }
+      closeBox();
+      if (doneMsg && doneMsg.error) { toast('补抓失败：' + doneMsg.error); return; }
+      if (doneMsg) {
+        toast('🔄 补抓完成：抓回 ' + (doneMsg.got || 0) + ' 条正文（+' + Math.round((doneMsg.chars || 0) / 1000) + 'k 字）'
+          + '，删掉抓不到的 ' + (doneMsg.dropped || 0) + ' 条'
+          + (doneMsg.costMs ? ' · 用时 ' + Math.round(doneMsg.costMs / 1000) + ' 秒' : ''));
+        /* 补抓是跨目标的：目标列表与当前目标的资料都要重新拉 */
+        state.sources = []; state.sourcesLoaded = 0;
+        try { state.goals = (await api('/api/goals')).goals || []; } catch (e) {}
+        try { await loadGoal(g.id); } catch (e) {}
+        renderLibraryPage();
+      }
+    } catch (e) {
+      closeBox();
+      if (!(e && e.name === 'AbortError')) toast('补抓中断：' + e.message + '（任务可能还在后台跑，左下角可看）');
+      else toast('已离开进度框（补抓若还在跑，左下角「AI 任务」可停止）');
+    }
+  });
   const li = document.getElementById('libImport');
   if (li) li.addEventListener('change', async () => {
     const file = (li.files || [])[0]; li.value = '';
@@ -10735,7 +11738,14 @@ const AITASK_ST = {
   failed: { text: '✗ 失败', cls: 'failed' },
   cancelled: { text: '已停止', cls: 'cancelled' }
 };
-const AIT_PAGE = 20;                 // 一组一次拉多少条
+/* 一组一次拉多少条。用户可调：20 条一屏对"翻历史找某次失败"来说太短，
+   每页都点一次「再看 20 条」很烦；给个选择器直接 50/100 一屏看完。
+   上限跟服务端一致（100），别让前端发出会被截断的值。 */
+const AIT_PAGE_OPTS = [10, 20, 50, 100];
+const aitPageSize = () => {
+  const v = Number(aitS().pageSize) || 0;
+  return AIT_PAGE_OPTS.includes(v) ? v : 20;
+};
 let aiTasksTimer = null;
 function aiTasksStopPoll() { if (aiTasksTimer) { clearInterval(aiTasksTimer); aiTasksTimer = null; } }
 function aitTypeMeta(type) { return TASK_META[type] || { icon: '🤖', label: String(type || '任务') }; }
@@ -10760,6 +11770,7 @@ function aitS() {
     /* preset: '' | today | 7 | 30 | custom；fromDate/toDate 是本地日历上的起止日
        （给 <input type=date> 用），from/to 是按本地日边界换算好的 UTC 时刻（给服务端用）。 */
     filter: { goal: 0, status: '', q: '', preset: '', from: '', to: '', fromDate: '', toDate: '' },
+    pageSize: 20,
     open: {}, rows: {}
   };
   return state.ait;
@@ -10869,12 +11880,25 @@ function aitShortDate(s) {
   const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
   return m ? (Number(m[2]) + '月' + Number(m[3]) + '日') : String(s || '');
 }
+/* 自定义范围的起止可能在同一天内，只显示"几天"会看不出区别 ——
+   带上时分。跨天时也照样显示，反正就是一行字。 */
+function aitShortDT(s) {
+  const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  if (!m) return aitShortDate(s) || String(s || '');
+  const hm = m[4] + ':' + m[5];
+  const today = new Date();
+  const sameDay = Number(m[1]) === today.getFullYear() && Number(m[2]) === today.getMonth() + 1 && Number(m[3]) === today.getDate();
+  return (sameDay ? '今天' : (Number(m[2]) + '月' + Number(m[3]) + '日')) + ' ' + hm;
+}
 function aitTimeLabel() {
   const f = aitS().filter;
   if (f.preset === 'today') return '今天';
+  if (f.preset === '1h') return '最近 1 小时';
+  if (f.preset === '6h') return '最近 6 小时';
+  if (f.preset === '24h') return '最近 24 小时';
   if (f.preset === '7') return '最近 7 天';
   if (f.preset === '30') return '最近 30 天';
-  if (f.preset === 'custom' && f.fromDate && f.toDate) return aitShortDate(f.fromDate) + ' – ' + aitShortDate(f.toDate);
+  if (f.preset === 'custom' && f.fromDT && f.toDT) return aitShortDT(f.fromDT) + ' – ' + aitShortDT(f.toDT);
   return '全部时间';
 }
 function aitTimeOn() { return !!(aitS().filter.from || aitS().filter.to); }
@@ -10884,25 +11908,61 @@ function aitDayISO(base, addDays) {
   const d = new Date(base.getFullYear(), base.getMonth(), base.getDate() + (addDays || 0), 0, 0, 0, 0);
   return d.toISOString();
 }
+/* 最近 N 小时：按**当前时刻**往前推，而不是按自然日边界 ——
+   "最近 1 小时"如果被对齐到整点，用户 18:20 想看的是 17:20 起，
+   对齐成 18:00 就漏了 20 分钟，这正是他要找的那段。 */
+function aitHoursISO(hours) {
+  const now = new Date();
+  return new Date(now.getTime() - hours * 3600 * 1000).toISOString();
+}
 function aitApplyPreset(preset) {
   const f = aitS().filter, today = new Date();
-  f.preset = preset; f.fromDate = ''; f.toDate = '';
+  f.preset = preset; f.fromDate = ''; f.toDate = ''; f.fromDT = ''; f.toDT = '';
   if (preset === 'today') { f.from = aitDayISO(today, 0); f.to = aitDayISO(today, 1); }
+  else if (preset === '1h') { f.from = aitHoursISO(1); f.to = ''; }
+  else if (preset === '6h') { f.from = aitHoursISO(6); f.to = ''; }
+  else if (preset === '24h') { f.from = aitHoursISO(24); f.to = ''; }
   else if (preset === '7') { f.from = aitDayISO(today, -6); f.to = aitDayISO(today, 1); }
   else if (preset === '30') { f.from = aitDayISO(today, -29); f.to = aitDayISO(today, 1); }
   else { f.from = ''; f.to = ''; }
 }
+/* 自定义范围：**精确到分钟**。
+   datetime-local 给的是 "2026-10-12T17:22"（本地时间，没有时区），
+   直接 new Date(...) 是按本地解释的 —— 这正是我们要的，再转成 UTC 发给服务端。
+   结束时刻按**那一分钟的末尾**算（含这一分钟），否则用户选 17:22 收不到 17:22 那条。 */
 function aitApplyCustom() {
   const f = aitS().filter;
-  const a = String((document.getElementById('aitFrom') || {}).value || '');
-  const b = String((document.getElementById('aitTo') || {}).value || '');
-  if (!a || !b) { toast('起止日期都要选上（也可以直接点上面的快捷档）'); return false; }
-  if (a > b) { toast('开始日期不能晚于结束日期'); return false; }
-  f.preset = 'custom'; f.fromDate = a; f.toDate = b;
-  f.from = new Date(a + 'T00:00:00').toISOString();
-  const e = new Date(b + 'T00:00:00'); e.setDate(e.getDate() + 1);
-  f.to = e.toISOString();
+  const a = String((document.getElementById('aitFrom') || {}).value || '').trim();
+  const b = String((document.getElementById('aitTo') || {}).value || '').trim();
+  if (!a || !b) { toast('起止时间都要填（也可以直接点上面的快捷档）'); return false; }
+  const ta = new Date(a).getTime(), tb = new Date(b).getTime();
+  if (!ta || !tb) { toast('时间格式不对，请用"年-月-日 时:分"'); return false; }
+  if (ta > tb) { toast('开始时间不能晚于结束时间'); return false; }
+  f.preset = 'custom'; f.fromDT = a; f.toDT = b; f.fromDate = ''; f.toDate = '';
+  f.from = new Date(ta).toISOString();
+  /* +59.999 秒：把用户选的那一分钟整个含进去 */
+  f.to = new Date(tb + 59_999).toISOString();
   return true;
+}
+/* 自定义范围里的四个小快捷按钮：填值用的，点了不关弹层也不提交 ——
+   用户往往要先"从现在往前 1 小时"再手改个分钟，直接提交会打断他。 */
+function aitLocalDT(d) {
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+    + 'T' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+function bindAitFillBtns(pop) {
+  pop.querySelectorAll('[data-ait-fill]').forEach(b => b.addEventListener('click', e => {
+    e.preventDefault(); e.stopPropagation();
+    const kind = b.getAttribute('data-ait-fill');
+    const A = pop.querySelector('#aitFrom'), B = pop.querySelector('#aitTo');
+    if (!A || !B) return;
+    const now = new Date();
+    if (kind === 'clear') { A.value = ''; B.value = ''; }
+    else if (kind === 'now') { B.value = aitLocalDT(now); }
+    else if (kind === 'today') { A.value = aitLocalDT(new Date(now.getFullYear(), now.getMonth(), now.getDate())); B.value = aitLocalDT(now); }
+    else if (kind === '1h') { A.value = aitLocalDT(new Date(now.getTime() - 3600e3)); B.value = aitLocalDT(now); }
+  }));
 }
 /* 筛选条里那三个按钮的文案（改动筛选后只更新文案，不重画整条 —— 重画会把
    搜索框里正在输入的内容和焦点一起弄丢） */
@@ -10943,20 +12003,35 @@ function sxiPopShow(btn, kind) {
       + opt('status:failed', '✗ 失败', f.status === 'failed')
       + opt('status:cancelled', '已停止', f.status === 'cancelled');
   } else {
+    /* 时间范围：短窗口的快捷档 + 能精确到分钟的自定义。
+       为什么要时分级：任务记录本身就显示到"今天 17:22 · 5 分 55 秒"，
+       用户看到"18:02 那次失败了"想直接定位那一段，只给"今天/最近7天"
+       这种按天切的范围根本圈不出来。 */
     d.innerHTML = '<div class="sxiPopT">时间范围</div>'
       + `<button class="sxiOpt ${!aitTimeOn() ? 'on' : ''}" data-ait-time="all">全部时间</button>`
       + `<button class="sxiOpt ${f.preset === 'today' ? 'on' : ''}" data-ait-time="today">今天</button>`
+      + `<button class="sxiOpt ${f.preset === '1h' ? 'on' : ''}" data-ait-time="1h">最近 1 小时</button>`
+      + `<button class="sxiOpt ${f.preset === '6h' ? 'on' : ''}" data-ait-time="6h">最近 6 小时</button>`
+      + `<button class="sxiOpt ${f.preset === '24h' ? 'on' : ''}" data-ait-time="24h">最近 24 小时</button>`
       + `<button class="sxiOpt ${f.preset === '7' ? 'on' : ''}" data-ait-time="7">最近 7 天</button>`
       + `<button class="sxiOpt ${f.preset === '30' ? 'on' : ''}" data-ait-time="30">最近 30 天</button>`
-      + '<div class="sxiPopSep"></div><div class="sxiPopT">自定义（精确到某几天）</div>'
-      + `<div class="sxiRange">
-           <input type="date" id="aitFrom" value="${esc(f.fromDate || '')}" aria-label="开始日期">
-           <span class="sxiRangeSep">—</span>
-           <input type="date" id="aitTo" value="${esc(f.toDate || '')}" aria-label="结束日期">
-           <button class="btn small primary" id="sxiRangeGo">应用</button>
+      + '<div class="sxiPopSep"></div><div class="sxiPopT">自定义范围</div>'
+      + `<div class="sxiDT">
+           <label class="sxiDTRow"><span class="sxiDTLb">从</span>
+             <input type="datetime-local" step="60" id="aitFrom" value="${esc(f.fromDT || '')}"></label>
+           <label class="sxiDTRow"><span class="sxiDTLb">到</span>
+             <input type="datetime-local" step="60" id="aitTo" value="${esc(f.toDT || '')}"></label>
+           <div class="sxiDTQuick">
+             <button type="button" class="sxiDTq" data-ait-fill="now">此刻</button>
+             <button type="button" class="sxiDTq" data-ait-fill="today">今天 0 点</button>
+             <button type="button" class="sxiDTq" data-ait-fill="1h">1 小时前</button>
+             <button type="button" class="sxiDTq" data-ait-fill="clear">清空</button>
+           </div>
+           <button class="btn small primary sxiDTGo" id="sxiRangeGo">应用这个范围</button>
          </div>`;
   }
   document.body.appendChild(d);
+  if (kind === 'time') bindAitFillBtns(d);
   const r = btn.getBoundingClientRect();
   d.style.top = (r.bottom + 6) + 'px';
   d.style.left = Math.max(8, Math.min(r.left, window.innerWidth - d.offsetWidth - 8)) + 'px';
@@ -10983,7 +12058,6 @@ async function aitAfterFilterChange() {
 function aitRunningCard(t) {
   const m = aitTypeMeta(t.type);
   const st = AITASK_ST[t.status] || AITASK_ST.running;
-  const queued = t.status === 'queued';
   return `<div class="aitRun ${st.cls}">
     <div class="aitRunHd">
       <span class="aitRunIco">${m.icon}</span>
@@ -10991,7 +12065,7 @@ function aitRunningCard(t) {
       <span class="aitSt ${st.cls}">${st.text}</span>
     </div>
     <div class="aitRunSub">${esc(t.goalTitle || '（无目标）')}${t.nodeId ? ' · 节点 #' + t.nodeId : ''}</div>
-    ${queued ? '<div class="aitRunSub muted">排在队列里，等前面两个任务腾出并发位</div>' : taskProgressHTML(t)}
+    ${taskProgressHTML(t)}
     <div class="aitRunFoot"><button class="btn tiny" data-ait-cancel="${t.id}">停止</button></div>
   </div>`;
 }
@@ -11029,16 +12103,25 @@ function aitGrpHTML(g) {
 function aitHistRowHTML(r) {
   const m = aitTypeMeta(r.type);
   const st = AITASK_ST[r.status] || { text: r.status, cls: 'done' };
+  /* 顺序固定为：标题 | 状态 | 时间 | 原因。三列宽度写死在 CSS 的网格里，
+     所以有无错误、状态是"完成"还是"失败"，竖着看都是齐的。
+     原因按钮**永远占位**（没错误时隐形），否则有错误的行会把时间列挤歪。 */
   return `<div class="aitRowWrap">
-    <div class="aitRow" data-ait-go="${r.goalId || 0}" title="点一下去这个目标">
+    <div class="aitRow${r.error ? ' hasErr' : ''}" data-ait-go="${r.goalId || 0}" title="点一下去这个目标">
       <span class="aitRowIcon">${m.icon}</span>
       <span class="aitRowTitle">${esc(r.title || m.label)}</span>
       <span class="aitSt ${st.cls}">${st.text}</span>
       <span class="aitRowMeta">${aitWhen(r.createdAt)}${r.costMs ? ' · ' + aitDur(r.costMs) : ''}</span>
-      ${r.error ? '<button class="btn tiny" data-ait-err="1">看原因</button>' : ''}
+      <button class="btn tiny aitRowErrBtn" data-ait-err="1"${r.error ? '' : ' tabindex="-1" aria-hidden="true"'}>看原因</button>
     </div>
     ${r.error ? `<div class="aitErrBox" hidden>${esc(r.error)}</div>` : ''}
   </div>`;
+}
+/* 每组的列抬头：让"那三列分别是什么"一眼可辨。
+   直接按**和数据行同一套网格列**摆，不再套一层子 grid ——
+   套一层的话外层列宽和内层对不齐，"时间"会飘到右边去（实测过）。 */
+function aitRowHeadHTML() {
+  return `<div class="aitRowHead"><span></span><span></span><span>状态</span><span>时间</span><span>原因</span></div>`;
 }
 /* 某一组已经加载出来的记录 + 「再看 N 条」 */
 function aitRowsHTML(goalId) {
@@ -11046,9 +12129,9 @@ function aitRowsHTML(goalId) {
   if (!box) return '<div class="aitNone">正在读取…</div>';
   if (!box.rows.length) return '<div class="aitNone">这个目标下没有符合条件的记录。</div>';
   const rest = box.total - box.rows.length;
-  return box.rows.map(aitHistRowHTML).join('')
+  return aitRowHeadHTML() + box.rows.map(aitHistRowHTML).join('')
     + (rest > 0 || box.hasMore
-      ? `<div class="aitMore"><button class="btn tiny" data-ait-more="${goalId}">${box.loading ? '读取中…' : '再看 ' + Math.min(AIT_PAGE, Math.max(0, rest)) + ' 条'}${rest > 0 ? '（还有 ' + rest + ' 条）' : ''}</button></div>`
+      ? `<div class="aitMore"><button class="btn tiny" data-ait-more="${goalId}">${box.loading ? '读取中…' : '再看 ' + Math.min(aitPageSize(), Math.max(0, rest)) + ' 条'}${rest > 0 ? '（还有 ' + rest + ' 条）' : ''}</button></div>`
       : '');
 }
 function aitPaintRun(data) {
@@ -11089,7 +12172,7 @@ async function aitLoadRows(goalId, more) {
   cur.loading = true; st.rows[goalId] = cur;
   if (more) { const box = document.querySelector('[data-ait-grpbox="' + goalId + '"] .aitGrpBody'); if (box) box.innerHTML = aitRowsHTML(goalId); }
   try {
-    const r = await api('/api/ai-tasks/history' + aitQuery({ goal: goalId, limit: AIT_PAGE, offset: more ? cur.rows.length : 0 }));
+    const r = await api('/api/ai-tasks/history' + aitQuery({ goal: goalId, limit: aitPageSize(), offset: more ? cur.rows.length : 0 }));
     cur.rows = more ? cur.rows.concat(r.rows || []) : (r.rows || []);
     cur.total = r.total || 0;
     cur.hasMore = !!r.hasMore;
@@ -11148,6 +12231,10 @@ async function renderAiTasksPage() {
         <button class="aitFbtn" data-ait-open="status"><span class="aitFLabel">${esc(aitStatusLabel())}</span><span class="aitFCaret">▾</span></button>
         <button class="aitFbtn" data-ait-open="time"><span class="aitFLabel">${esc(aitTimeLabel())}</span><span class="aitFCaret">▾</span></button>
         <span class="spacer"></span>
+        <label class="aitPerPage" title="每个目标一次显示多少条（展开后按这个数量拉取）">每页
+          <select id="aitPerPage" class="sxi-sel">${AIT_PAGE_OPTS.map(n =>
+            `<option value="${n}"${aitPageSize() === n ? ' selected' : ''}>${n}</option>`).join('')}</select>
+        </label>
         <button class="btn tiny" id="aitToggleAll">展开全部</button>
       </div>
     </div>
@@ -11209,6 +12296,16 @@ function bindAiTasks() {
       }
     }, true);
   }
+  /* 每页条数：改了就重拉所有已经展开的组（否则旧的 20 条还挂在界面上，
+     用户以为"选了 100 却没变"）。收起状态的组不动，等展开时自然会用新页长。 */
+  const perPage = document.getElementById('aitPerPage');
+  if (perPage) perPage.addEventListener('change', async () => {
+    aitS().pageSize = Number(perPage.value) || 20;
+    const opened = Object.keys(aitS().open).filter(k => aitS().open[k]);
+    for (const k of opened) { aitS().rows[k] = null; await aitLoadRows(Number(k), false); }
+    aitPaintHist();
+    toast('每页显示 ' + aitPageSize() + ' 条');
+  });
   const all = document.getElementById('aitToggleAll');
   if (all) all.addEventListener('click', async () => {
     const data = state.aitData || {};
@@ -11344,6 +12441,8 @@ function pluginGoButtonsBind() {
   SiErXing.provide({
     app, api, esc, toast, go, state, mdToHTML, fmtDate, safeParse, parseRoute,
     rerender: rerenderCurrent, loadGoal, ensureGoal, aiToggle, mdPickOffset,
+    /* 语法高亮给组件用（「看懂代码」左侧代码面板要自己上色，直接复用宿主这套） */
+    hlCode, hlGuessLang,
     mdPickTarget, mdSrcRange, editKeysBind,
     mdInlineEdit: { open: mdInlineOpen, close: mdInlineClose, active: mdInlineActive, value: mdInlineValue, range: mdSrcRange, slice: mdSliceLines, splice: mdSpliceLines },
     mount: () => { if (BOOTED) pluginGoButtonsBind(); },
@@ -11355,6 +12454,8 @@ function pluginGoButtonsBind() {
   SiErXing.provide({
     app, api, esc, toast, go, state, mdToHTML, fmtDate, safeParse, parseRoute,
     rerender: rerenderCurrent, loadGoal, ensureGoal, aiToggle, mdPickOffset,
+    /* 语法高亮给组件用（「看懂代码」左侧代码面板要自己上色，直接复用宿主这套） */
+    hlCode, hlGuessLang,
     mdPickTarget, mdSrcRange, editKeysBind,
     mdInlineEdit: { open: mdInlineOpen, close: mdInlineClose, active: mdInlineActive, value: mdInlineValue, range: mdSrcRange, slice: mdSliceLines, splice: mdSpliceLines },
     mount: () => { if (BOOTED) { route(); } },

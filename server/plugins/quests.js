@@ -39,16 +39,11 @@ function bind(ctx) {
   ({ getGoal, aiText, currentModel, tasks } = ctx);
 }
 function aiJob({ title, note, goalId, nodeId, message, run }) {
+  /* 进度交给统一模型（server/task-progress.js），不再手搓时间曲线 —— 见 interview.js 顶部说明 */
   const job = tasks.begin({ type: 'quests', title, note, goalId, nodeId, message });
-  const t0 = Date.now();
-  job.progress(4, message);
-  const iv = setInterval(() => {
-    const sec = Math.round((Date.now() - t0) / 1000);
-    job.progress(Math.min(93, Math.round(100 * (1 - Math.exp(-sec / 18)))), message + '（已等 ' + sec + ' 秒）');
-  }, 1500);
   return Promise.resolve().then(() => run(job.signal))
-    .then(v => { clearInterval(iv); job.progress(100, '完成'); job.done(v); return v; })
-    .catch(e => { clearInterval(iv); job.fail(e); throw e; });
+    .then(v => { job.done(v); return v; })
+    .catch(e => { job.fail(e); throw e; });
 }
 function firstJSON(text) {
   const s = String(text || '');

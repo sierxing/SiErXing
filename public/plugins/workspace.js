@@ -23,7 +23,7 @@
     if (btn) { btn.disabled = true; btn.textContent = '⏳ 打开中…'; }
     try {
       const r = await api('/api/nodes/' + nodeId + '/workspace/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-      toast('已在 VSCode 打开：' + (r.path || ''));
+      toast(r.warn || ('已在 VSCode 打开：' + (r.path || '')));
       refreshHint(nodeId);
     } catch (e) {
       toast(e.message);

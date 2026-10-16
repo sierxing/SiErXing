@@ -240,10 +240,10 @@ module.exports = {
         const chunks = sampleChunks(gid, Math.max(n, 6));
         if (!chunks.length) throw new Error('这个目标还没有可用的资料片段，先去「信息源」导入资料并建立检索索引');
         const model = currentModel();
-        const job = tasks.begin({ type: 'bench', title: '生成评测题：' + String(g.title || '').slice(0, 20), goalId: gid, message: '正在出题…' });
+        const job = tasks.begin({ type: 'bench', title: '生成评测题：' + String(g.title || '').slice(0, 20), goalId: gid, message: '正在出题…', phases: ['依据资料出题', '写入题库'] });
         (async () => {
           try {
-            job.progress(10, '正在依据资料出题…');
+            job.phase(0, '正在依据资料出题…');
             const txt = await aiText(genPrompt(chunks, n), model, 300000);
             const data = jparse(txt);
             const qs = (data && Array.isArray(data.questions)) ? data.questions : [];
@@ -287,7 +287,7 @@ module.exports = {
         const info = db.prepare('INSERT INTO bench_runs (goal_id,status,total,done,model,created_at) VALUES (?,?,?,?,?,?)')
           .run(gid, 'running', rows.length, 0, String(model || ''), t0);
         const runId = Number(info.lastInsertRowid);
-        const job = tasks.begin({ type: 'bench', title: 'RAG 评测：' + String(g.title || '').slice(0, 20), goalId: gid, message: '正在评测…' });
+        const job = tasks.begin({ type: 'bench', title: 'RAG 评测：' + String(g.title || '').slice(0, 20), goalId: gid, message: '正在评测…', phases: ['逐题评测', '汇总打分'] });
 
         (async () => {
           const per = { rag: [], norag: [] };
@@ -299,7 +299,7 @@ module.exports = {
             for (const q of rows) {
               if (job.signal && job.signal.aborted) throw Object.assign(new Error('已停止'), { cancelled: true });
               const points = safeParse(q.points) || [];
-              job.progress(Math.round(done / rows.length * 100), `第 ${done + 1}/${rows.length} 题：${String(q.q).slice(0, 24)}…`);
+              job.count(done, rows.length, `第 ${done + 1}/${rows.length} 题：${String(q.q).slice(0, 24)}…`);
 
               /* 两臂：唯一差别是给不给资料 */
               let material = '';

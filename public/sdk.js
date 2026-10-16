@@ -29,6 +29,7 @@
  *   go(hash)   —— 切换路由
  *   state      —— 全局状态（含 state.goal / state.sources）
  *   mdToHTML(md) —— Markdown 渲染
+ *   hlCode(code, lang) / hlGuessLang(code) —— 语法高亮（返回带 <span class="tk-xx"> 的 HTML）/ 猜语言
  *   fmtDate(s) —— 时间格式化
  *   safeParse(s, dflt) —— 安全 JSON 解析
  *   parseRoute() —— 解析当前 hash
@@ -98,6 +99,9 @@ window.SiErXing = (function () {
      （笔记栏的"点哪改哪"就靠它）。和 app.js 里画悬停描边用的是同一套判断，
      组件不必自己再猜一遍文本位置。 */
   const HOST_KEYS = ['app', 'api', 'esc', 'toast', 'go', 'state', 'mdToHTML', 'fmtDate', 'safeParse', 'parseRoute', 'rerender', 'loadGoal', 'ensureGoal', 'aiToggle', 'mdPickOffset',
+    /* 语法高亮（hlCode 返回带 <span class="tk-xx"> 的 HTML / hlGuessLang 猜语言）：
+       组件要自己渲染代码面板时别再写第二套高亮器，直接用宿主这套 —— 配色跟着主题走。 */
+    'hlCode', 'hlGuessLang',
     /* 「就地编辑单块」共用能力（教程正文 / 笔记栏）：范围切片 + 编辑框生命周期 + 快捷键 */
     'mdPickTarget', 'mdSrcRange', 'mdInlineEdit', 'editKeysBind'];
   function bridge() {

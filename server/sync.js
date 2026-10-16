@@ -34,6 +34,8 @@ const SYNC_TABLES = [
   'review_cards', 'problem_mind', 'mind_sessions', 'recall_tests', 'pitfall_cards',
   'quiz_outlines', 'quiz_sessions', 'quiz_records',
   'restate_points', 'restate_arc', 'restate_rounds', 'restate_turns', 'restate_coach',
+  /* 看懂代码：贴进来的代码 + 逐行讲解 + 每一行下面的追问，都是用户自己的东西，跟着同步走 */
+  'explain_sessions', 'explain_turns',
   /* 模拟面试：JD / 项目摘要 / 问答与总评都是用户自己的东西，跟着同步走 */
   'interview_sessions', 'interview_turns',
   /* 今日任务：每天排的任务栏（按天存，跨设备看到同一份安排） */
@@ -55,7 +57,10 @@ const SYNC_OMIT_COLUMNS = { problems: ['statement', 'statement_at', 'snapshots']
 // （本机 Ollama、代理、各自的 key）；③ 曾出现两台设备互相覆盖对方 AI 设置的故障。
 // AI 配置请在每台设备上单独设置（30 秒），应用偏好（组件/分类/刷题）照常同步。
 const SYNC_SETTINGS = [
-  'components', 'component_categories', 'component_category_map', 'practice_lang', 'practice_daily'
+  'components', 'component_categories', 'component_category_map', 'practice_lang', 'practice_daily',
+  /* 「看懂代码」的讲解风格示例：是用户自己贴/上传的一段文字（不是密钥、跟设备无关），
+     跟着同步走 —— 换台设备还是他自己喜欢的那个讲解风格。 */
+  'explain_style_sample'
 ];
 
 module.exports = function createSync(ctx) {

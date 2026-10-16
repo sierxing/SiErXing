@@ -1,0 +1,194 @@
+/* 思而行 · 组件样式：看懂代码（左边代码，右边讲解）
+   ------------------------------------------------------------------
+   界面只服务一件事：**哪一行没看懂，就点哪一行**。
+   所以左边固定是代码（每行可点、讲过的有标记），右边只画"当前这一行"的讲解与追问。 */
+
+.exPage{max-width:1240px;}
+.exIntro{margin:4px 0 12px; padding:10px 13px; border-radius:var(--r); background:var(--accent-soft); border:1px solid var(--accent-border); font-size:13px; line-height:1.75; color:var(--text);}
+.exIntro p{margin:0;}
+.exSec{margin:14px 0;}
+.exSecT{font-size:12.5px; font-weight:700; color:var(--muted); margin-bottom:7px; letter-spacing:.02em;}
+.exInput{width:100%; box-sizing:border-box; border:1px solid var(--border); border-radius:var(--r-sm); padding:9px 11px; font-size:13.5px; font-family:inherit; background:var(--card); color:var(--text);}
+.exInput:focus{outline:none; border-color:var(--accent-border); box-shadow:0 0 0 3px var(--accent-soft);}
+.exCodeIn{min-height:200px; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12.8px; line-height:1.7; resize:vertical;}
+.exHint{font-size:11.5px; color:var(--muted); margin-top:5px;}
+.exStart{margin:18px 0 6px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;}
+
+/* 讲解风格示例（贴文本 / 上传文件） */
+.exStyleIn{min-height:120px; font-size:13px; line-height:1.75; resize:vertical;}
+.exStyleRow{display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px;}
+.exFileBtn{position:relative; overflow:hidden; cursor:pointer; display:inline-flex; align-items:center;}
+.exMask{position:fixed; inset:0; background:rgba(20,18,40,.42); z-index:180; display:flex; align-items:center; justify-content:center; padding:20px;}
+.exDialog{background:var(--card); border:1px solid var(--border); border-radius:var(--r); box-shadow:0 20px 60px rgba(20,18,40,.35); width:min(720px, 96vw); max-height:88vh; overflow:auto;}
+.exDlgHead{display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 14px; border-bottom:1px solid var(--border); font-weight:700; font-size:13.5px;}
+.exDlgBody{padding:12px 14px 16px;}
+
+/* 讲解记录列表 */
+.exList{display:flex; flex-direction:column; gap:8px; margin-top:14px;}
+.exItemWrap{display:flex; gap:8px; align-items:stretch;}
+.exItemWrap > .btn{align-self:center; flex:none;}
+.exItemWrap .exItem{flex:1 1 auto; min-width:0;}
+.exItem{display:flex; gap:11px; align-items:flex-start; text-align:left; padding:11px 13px; border-radius:var(--r); border:1px solid var(--border); background:var(--card); cursor:pointer; font-family:inherit; color:var(--text);}
+.exItem:hover{border-color:var(--accent-border); background:var(--accent-soft);}
+.exItemIco{font-size:17px; line-height:1.2;}
+.exItemBody{display:flex; flex-direction:column; gap:3px; min-width:0;}
+.exItemMeta{font-size:11.5px; color:var(--muted);}
+.exItemNote{font-size:12px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%;}
+
+/* 顶部：进度 + 状态 */
+.exBar{display:flex; align-items:center; gap:10px; margin:6px 0 12px; flex-wrap:wrap;}
+.exBar .spacer{flex:1;}
+.exProg{width:170px; height:7px; border-radius:99px; background:var(--soft); overflow:hidden; border:1px solid var(--border);}
+.exProg i{display:block; height:100%; width:0; background:linear-gradient(90deg,var(--accent),var(--accent-2)); transition:width .4s ease;}
+.exProgTxt{font-size:12px; color:var(--muted);}
+.exStat{font-size:12px; color:var(--muted); display:inline-flex; align-items:center; gap:6px;}
+
+/* 左右两栏：左 = 代码，右 = 这一行的讲解。
+   宽度三层可调：① **最外两条边**（代码栏左边框 / 对话栏右边框）拖**整体宽度**（--exW）；
+   ② 中间的边界（左栏右边缘 / 分隔条 / 右栏左边缘）拖**左右比例**（--exSide）；
+   ③ 底部横条拖**高度**（--exH）。整体宽度超过页面容器时左右对称溢出（和教程正文宽度同一套算法）。 */
+.exWrap{--exSide:44%; --exH:min(74vh,820px); --exW:1240px;
+  width:min(var(--exW), calc(100vw - 110px));
+  margin-left:calc((100% - min(var(--exW), calc(100vw - 110px))) / 2);
+  margin-right:0;
+  display:flex; gap:0; align-items:stretch; height:var(--exH); min-height:280px;}
+/* 抓最外两条边时的反馈：光标 + 那一条边亮起 */
+.exWrap.exHotL{cursor:col-resize; box-shadow:-3px 0 0 0 var(--accent);}
+.exWrap.exHotR{cursor:col-resize; box-shadow:3px 0 0 0 var(--accent);}
+.exWrap.exHotL *, .exWrap.exHotR *{cursor:col-resize !important;}
+/* 靠近左右边界（左栏右边缘 / 分隔条 / 右栏左边缘）时光标与发光反馈 */
+.exWrap.exHot{cursor:col-resize;}
+.exWrap.exHot *{cursor:col-resize !important;}
+.exSide{flex:0 0 var(--exSide); min-width:240px; max-width:82%; display:flex; flex-direction:column; border:1px solid var(--border); border-radius:var(--r); background:var(--card); overflow:hidden; box-shadow:var(--shadow-sm);}
+/* 拖宽度的分隔条：默认是一条细线，hover / 拖动时点亮 */
+.exSplit{flex:0 0 14px; position:relative; cursor:col-resize; touch-action:none;}
+.exSplit::before{content:''; position:absolute; left:6px; top:10px; bottom:10px; width:2px; border-radius:2px; background:var(--border); transition:background .15s ease, box-shadow .15s ease;}
+.exSplit:hover::before{background:var(--accent); box-shadow:0 0 0 3px var(--accent-soft);}
+.exWrap.exHot .exSplit::before{background:var(--accent); box-shadow:0 0 0 3px var(--accent-soft);}
+/* 底部的横条：上下拖高度。中间那个小握把让它一眼看就是能拖的 */
+.exSplitH{height:16px; margin-top:2px; display:flex; align-items:center; justify-content:center; cursor:row-resize; position:relative;}
+.exSplitH::before{content:''; position:absolute; left:0; right:0; top:7px; height:2px; border-radius:2px; background:var(--border); transition:background .15s ease, box-shadow .15s ease;}
+.exSplitH i{position:relative; width:56px; height:5px; border-radius:4px; background:var(--card); border:1px solid var(--border); transition:border-color .15s ease, background .15s ease;}
+.exSplitH:hover::before, .exWrap.exHotV ~ .exSplitH::before{background:var(--accent); box-shadow:0 0 0 3px var(--accent-soft);}
+.exSplitH:hover i, .exWrap.exHotV ~ .exSplitH i{border-color:var(--accent); background:var(--accent-soft);}
+.exWrap.exHotV{cursor:row-resize;}
+.exWrap.exHotV *{cursor:row-resize !important;}
+body.exResizing{cursor:col-resize !important; user-select:none;}
+body.exResizing *{cursor:col-resize !important;}
+body.exResizingV{cursor:row-resize !important; user-select:none;}
+body.exResizingV *{cursor:row-resize !important;}
+.exSideHead{display:flex; align-items:center; gap:8px; padding:8px 11px; border-bottom:1px solid var(--border); font-size:12px; color:var(--muted); background:var(--soft);}
+.exSideHead .spacer{flex:1;}
+.exSideNote{overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:52%;}
+.exSideCnt{font-size:11.5px;}
+.exCode{position:relative; flex:1 1 auto; overflow:auto; padding:6px 0 14px; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12.8px; line-height:1.72; tab-size:4;}
+.exLine{display:flex; align-items:flex-start; padding:0 10px 0 0; border-left:3px solid transparent; cursor:pointer; color:var(--text);}
+.exLine:hover{background:var(--soft);}
+.exNo{flex:none; width:44px; padding:1px 10px 0 0; text-align:right; color:var(--muted); font-size:11px; user-select:none; opacity:.8;}
+.exSrc{flex:1 1 auto; white-space:pre-wrap; overflow-wrap:anywhere; padding-left:2px;}
+.exLine.exCmt .exSrc{color:var(--muted);}
+.exLine.exDone{border-left-color:var(--ok);}
+.exLine.exDone .exNo{color:var(--ok); opacity:1;}
+.exLine.exAsk::after{content:''; flex:none; width:6px; height:6px; border-radius:50%; background:var(--accent); align-self:center; margin-left:6px;}
+.exLine.exRng{background:var(--soft);}
+/* 语法高亮：token 配色沿用全局那套变量（style.css 里 .mdBody code .tk-* 的同款颜色） */
+.exCode .tk-cm{color:var(--tk-cm); font-style:italic;}
+.exCode .tk-st{color:var(--tk-st);}
+.exCode .tk-nu{color:var(--tk-nu);}
+.exCode .tk-kw{color:var(--tk-kw); font-weight:600;}
+.exCode .tk-bi{color:var(--tk-bi);}
+.exCode .tk-va{color:var(--tk-va);}
+.exCode .tk-pp{color:var(--tk-pp);}
+.exCode .tk-at{color:var(--tk-at);}
+.exSnippet .tk-cm{color:var(--tk-cm); font-style:italic;}
+.exSnippet .tk-st{color:var(--tk-st);}
+.exSnippet .tk-nu{color:var(--tk-nu);}
+.exSnippet .tk-kw{color:var(--tk-kw); font-weight:600;}
+.exSnippet .tk-bi{color:var(--tk-bi);}
+.exSnippet .tk-va{color:var(--tk-va);}
+.exSnippet .tk-pp{color:var(--tk-pp);}
+.exSnippet .tk-at{color:var(--tk-at);}
+/* 模块分界：AI 划的讲解模块从这一行开始（虚线隔开，一眼看出"这一块是讲一个意思的"） */
+.exLine.exModStart{margin-top:5px; border-top:1px dashed var(--border); padding-top:3px;}
+.exLine.exOn{background:var(--accent-soft); border-left-color:var(--accent);}
+.exLine.exOn .exNo{color:var(--accent); opacity:1;}
+.exLine.exOv{background:var(--soft);}
+.exLine.exOv .exSrc{font-weight:600;}
+
+.exMain{flex:1 1 auto; min-width:0; display:flex; flex-direction:column; border:1px solid var(--border); border-radius:var(--r); background:var(--card); overflow:hidden; box-shadow:var(--shadow-sm);}
+.exThreadHead{padding:9px 12px; border-bottom:1px solid var(--border); background:var(--soft); display:flex; flex-direction:column; gap:6px;}
+.exThTitle{font-size:12.5px; font-weight:700; color:var(--accent);}
+.exPendingTag{color:var(--muted); font-weight:400;}
+.exSnippet{margin:0; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12.4px; line-height:1.6; white-space:pre-wrap; overflow-wrap:anywhere; background:var(--code-bg); border:1px solid var(--code-border); border-radius:var(--r-sm); padding:6px 9px; max-height:120px; overflow:auto;}
+.exMsgs{flex:1 1 auto; overflow:auto; padding:13px 15px; display:flex; flex-direction:column; gap:14px;}
+.exMsg{display:flex; flex-direction:column; gap:6px;}
+.exMsg.me{align-items:flex-end;}
+.exMe{max-width:84%; background:var(--accent); color:#fff; border-radius:12px 12px 3px 12px; padding:7px 11px; font-size:13px; line-height:1.6; white-space:pre-wrap; word-break:break-word;}
+.exAiHead{font-size:12px; font-weight:700; color:var(--accent);}
+.exAiBody{font-size:13.6px; line-height:1.8; color:var(--text);}
+.exAiBody pre{background:var(--code-bg); border:1px solid var(--code-border); border-radius:var(--r-sm); padding:10px 12px; overflow:auto; font-size:12.6px; line-height:1.65;}
+.exAiBody code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+.exEmpty{color:var(--muted); font-size:13px; line-height:1.9;}
+.exEmpty .btn{margin-top:6px;}
+
+/* ============ 教程页里的代码块：编号徽标 + 右键入口 ============
+   ⚠️ 徽标是**空 span**：编号与提示全靠 CSS 生成（::before + attr()）。
+   为什么不能有文字节点：tutnotes 的划线笔记按"正文文本节点的绝对偏移"定位，
+   正文里多一个文本节点，所有高亮就会整体错位。 */
+.mdBody pre.exTutPre{position:relative;}
+.mdBody pre.exTutPre[data-lang]:before{display:none;}      /* 原语言角标由下面的编号徽标接管 */
+.mdBody pre.exTutPre > .exTutNo{position:absolute; top:6px; right:10px; z-index:3; cursor:pointer;
+  user-select:none; -webkit-user-select:none; white-space:nowrap;
+  font-size:10px; line-height:17px; letter-spacing:.4px; color:var(--muted);
+  background:var(--card); border:1px solid var(--border); border-radius:5px; padding:0 6px; opacity:.95;
+  transition:background .15s ease, border-color .15s ease, color .15s ease;}
+.mdBody pre.exTutPre > .exTutNo::before{content:'#' attr(data-exno) ' ' attr(data-exlang); font-weight:700; color:var(--accent);}
+.mdBody pre.exTutPre > .exTutNo::after{content:' · 🔍 讲明白'; display:none; font-weight:400; color:var(--text);}
+.mdBody pre.exTutPre:hover > .exTutNo::after{display:inline;}
+.mdBody pre.exTutPre:hover > .exTutNo{opacity:1; background:var(--accent-soft); border-color:var(--accent-border);}
+.exSecTip{font-weight:400; color:var(--muted); margin-left:8px;}
+
+/* 看懂代码的右键菜单（复用 .ctxMenu 的外壳） */
+.exCtxMenu .ctxTitle{max-width:320px;}
+.exCtxMenu button{display:block; width:100%; text-align:left;}
+
+/* ============ 前置知识（开讲前先过一遍） ============ */
+.exPre{flex:none; border-bottom:1px solid var(--border); background:var(--soft);}
+.exPreHead{display:flex; gap:8px; align-items:center; padding:9px 12px; font-size:12.5px; color:var(--muted);}
+.exPreCard{padding:10px 12px;}
+.exPreTitle{font-size:13px; font-weight:700; color:var(--accent); margin-bottom:4px;}
+.exPreHint{font-size:11.5px; color:var(--muted); line-height:1.6; margin-bottom:8px;}
+.exPreList{display:flex; flex-direction:column; gap:6px;}
+.exPreList.open{max-height:38vh; overflow:auto; padding-right:2px;}
+.exPreItem{display:flex; gap:8px; align-items:flex-start; padding:7px 9px; border:1px solid var(--border); border-radius:var(--r-sm); background:var(--card); font-size:12.5px;}
+.exPreItem.unk{border-color:var(--accent-border); background:var(--accent-soft);}
+.exPreItem.lesson{align-items:flex-start;}
+.exPreSeg{flex:none; font-size:11.5px; font-family:inherit; padding:3px 8px; border-radius:999px; border:1px solid var(--border); background:var(--soft); color:var(--muted); cursor:pointer;}
+.exPreSeg.on{border-color:var(--accent); background:var(--accent); color:#fff; font-weight:600;}
+.exPreBody{flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:2px;}
+.exPreWhy{font-size:11.5px; color:var(--muted);}
+.exPreMark{flex:none;}
+.exPreLesson{margin-top:6px; padding-top:6px; border-top:1px dashed var(--border); font-size:12.5px; line-height:1.75; color:var(--text);}
+.exPreLesson pre{background:var(--code-bg); border:1px solid var(--code-border); border-radius:var(--r-sm); padding:8px 10px; overflow:auto; font-size:12px;}
+.exPreFoot{display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:10px;}
+.exPreBar{display:flex; gap:8px; align-items:center; padding:7px 12px; font-size:12px;}
+.exPreToggle{border:none; background:none; font-family:inherit; font-size:12.5px; font-weight:600; color:var(--text); cursor:pointer; padding:0;}
+.exPreSum{font-size:11.5px; color:var(--muted);}
+.exPreWait{padding:10px 12px; font-size:12.5px; color:var(--muted); line-height:1.7;}
+
+/* 追问区：永远摆在当前这一行的讲解下面 */
+.exAsk{border-top:1px solid var(--border); background:var(--accent-soft); padding:10px 12px;}
+.exQuick{display:flex; gap:7px; flex-wrap:wrap;}
+.exQuick .btn.small{font-size:12px;}
+.exInputRow{display:flex; gap:9px; align-items:flex-end; margin-top:9px;}
+.exTa{flex:1 1 auto; min-height:44px; max-height:150px; resize:vertical; background:var(--card);}
+.exBusyWrap{display:flex; gap:9px; align-items:center; font-size:13px; color:var(--text); flex-wrap:wrap;}
+
+@media (max-width: 980px){
+  .exWrap{flex-direction:column; height:auto;}
+  .exSide{flex:1 1 auto; width:100%; max-width:none; box-sizing:border-box;}
+  .exSplit{display:none;}
+  .exSplitH{display:none;}
+  .exCode{max-height:42vh;}
+  .exMsgs{max-height:56vh;}
+}

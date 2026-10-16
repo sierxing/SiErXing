@@ -234,7 +234,7 @@ async function embedPending(job, goalId) {
       upd.run(encodeVec(vecs[i]), vecs[i].length, cfg.model, rows[i].id);
     }
     done += Math.min(rows.length, vecs.length);
-    if (job) job.progress(Math.round(done / total * 100), `已向量化 ${done}/${total} 段`);
+    if (job) job.count(done, total, `已向量化 ${done}/${total} 段`);
   }
   return { chunks: done, model: cfg.model };
 }
@@ -252,9 +252,12 @@ function buildIndex(goalId) {
     title: '建立检索索引：' + String(g.title).slice(0, 24),
     goalId,
     message: '正在整理资料库…',
+    /* 两段：切块（本地、快）+ 向量化（要一条条调 API，慢）。分开摆用户才知道卡在哪一段 */
+    phases: ['切分资料', '向量化'],
     run: async job => {
-      job.progress(2, '正在切分资料…');
+      job.phase(0, '正在切分资料…');
       ensureChunks(goalId);
+      job.phase(1);
       return await embedPending(job, goalId);
     }
   });

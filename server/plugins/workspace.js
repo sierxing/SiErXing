@@ -8,6 +8,7 @@
  * 学完可一键打包整个目标的代码目录（零依赖自带 zip 打包，各平台可解压）。
  */
 const { execFile, spawn } = require('node:child_process');
+const { guiEnv, hasDisplay } = require('../gui-env.js');
 
 let db, sendJSON, nowISO, getGoal, DATA_DIR, APP_DIR, path, fs;
 function bind(ctx) {
@@ -327,14 +328,23 @@ module.exports = {
         }
         const bin = await wsFindCode();
         if (!bin) return sendJSON(res, 500, { error: '未检测到 VSCode（需要先安装，并在终端能运行 code --version），目录已建好：' + path.relative(wsRoot(), dir).split(path.sep).join('/') });
+        /* 补一份显示环境再 spawn：应用多半是「开机自启」起的（systemd 用户服务，
+           不在桌面会话里，没有 DISPLAY），不补的话 Electron 一启动就退出——
+           而 `code` 命令自己 fork 完就 exit 0，上层会误判成功、窗口永远不出现 */
+        const env = guiEnv();
         try {
-          const child = spawn(bin, [dir], { detached: true, stdio: 'ignore', shell: process.platform === 'win32' });
+          const child = spawn(bin, [dir], { detached: true, stdio: 'ignore', shell: process.platform === 'win32', env });
           child.unref();
           child.on('error', () => {});
         } catch (e) {
           return sendJSON(res, 500, { error: '启动 VSCode 失败：' + e.message });
         }
-        return sendJSON(res, 200, { ok: true, path: path.relative(wsRoot(), dir).split(path.sep).join('/') });
+        const rel = path.relative(wsRoot(), dir).split(path.sep).join('/');
+        return sendJSON(res, 200, {
+          ok: true,
+          path: rel,
+          warn: hasDisplay(env) ? '' : '没检测到桌面显示环境（应用可能正以「开机自启」的后台服务身份运行），VSCode 窗口可能不会出现；目录已建好：' + rel
+        });
       }
     },
     {

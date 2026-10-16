@@ -18,6 +18,9 @@ Thumbs.db
 .build/
 dist/
 
+# 架构图技能的生成产物（中间 JSON + 单文件 HTML，本机留档即可，不进版本库）
+.archify/
+
 public/_boot.html
 
 # 本地部署清单（只放本机，不提交）

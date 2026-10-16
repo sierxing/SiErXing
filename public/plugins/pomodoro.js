@@ -14,7 +14,12 @@
   const LS = 'sierxing-pomodoro';
   const DAY = () => { const d = new Date(); return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate(); };
 
-  const DEF = { focusMin: 25, breakMin: 5, phase: 'focus', running: false, deadline: 0, remaining: 25 * 60000, collapsed: false, right: 18, bottom: 18, doneToday: 0, dayStamp: DAY(), sound: true, notify: true, bindNodeId: 0, bindTitle: '', bindGoalId: 0, auto: true, idleMin: 0, restKeys: ['bilibili'] };
+  /* awayBreak / awayRemain：这一轮休息是**切出去休息**自动起的，以及切出前专注还剩多久。
+   ⚠️ 必须持久化。awayMode 只是运行时变量，一旦刷新就没了 —— 新页面看到
+   "phase=break + running"，会把它当成用户自己开的休息轮次接着倒数：
+   用户回来刷个新，番茄钟就在那儿"自动开始休息计时"（线上报的 bug）。
+   有了这两个标记，无论刷新几次，回到教程页都能把专注原样接回来。 */
+  const DEF = { focusMin: 25, breakMin: 5, phase: 'focus', running: false, deadline: 0, remaining: 25 * 60000, collapsed: false, right: 18, bottom: 18, doneToday: 0, dayStamp: DAY(), sound: true, notify: true, bindNodeId: 0, bindTitle: '', bindGoalId: 0, auto: true, idleMin: 0, restKeys: ['bilibili'], awayBreak: false, awayRemain: 0 };
 
   function load() {
     let s = {};
@@ -109,6 +114,20 @@
     if (origTitle != null) { try { document.title = origTitle; } catch (e) {} origTitle = null; }
   }
 
+  /* 页面正在卸载（刷新 / 站内跳转 / 关标签 / 跳外链）。
+     ⚠️ 卸载时浏览器也会发 visibilitychange→hidden，但那**不是"切出应用"** ——
+        人还在这个页面上，只是页面自己要换了。把它当真会导致：
+        刷新一下就被记成"去休息了"，新页面接着跑休息计时（线上报的 bug）。
+        用 sessionStorage 留痕：卸载标记跟着标签页走，新开的标签不会有。 */
+  let unloading = false;
+  let resumeChecked = false;
+  const UNLOAD_KEY = LS + '-unloading';
+  function markUnloading() {
+    unloading = true;
+    try { sessionStorage.setItem(UNLOAD_KEY, String(Date.now())); } catch (e) {}
+  }
+  try { window.addEventListener('pagehide', markUnloading); window.addEventListener('beforeunload', markUnloading); } catch (e) {}
+
   /* ---------------- 计时核心 ---------------- */
   let finished = false;   // 本轮是否已结算（防重复触发）
   let autoPaused = false; // 系统自动暂停的（切出教程/久无滚动）：滚动回来可自动继续
@@ -131,6 +150,7 @@
     runRoute = location.hash || '#/';
     markActive();   // 手动点开始也算一次露面，给一个完整周期的宽限
     awayMode = false; awaySaved = null; awayInfoModal = false; awayStartAt = 0;
+    S.awayBreak = false; S.awayRemain = 0;
     researching = false; researchAt = 0; researchWin = '';
     closeModal();
     stopFlash();
@@ -142,6 +162,7 @@
     S.running = false;
     S.deadline = 0;
     awayMode = false; awaySaved = null; awayStartAt = 0;   // 手动接管：切屏休息模式一并结束
+    S.awayBreak = false; S.awayRemain = 0;
     researching = false; researchAt = 0; researchWin = '';
     save(); render();
     flushStats();
@@ -171,6 +192,7 @@
     autoPaused = false; pauseReason = '';
     runRoute = null;
     awayMode = false; awaySaved = null; awayInfoModal = false; awayStartAt = 0;
+    S.awayBreak = false; S.awayRemain = 0;
     researching = false; researchAt = 0; researchWin = '';
     closeModal();
     stopFlash();
@@ -197,6 +219,7 @@
     if (finished) return;
     finished = true;
     awayMode = false; awayInfoModal = false; awayStartAt = 0;
+    S.awayBreak = false; S.awayRemain = 0;
     researching = false; researchAt = 0; researchWin = '';
     const was = S.phase;
     S.running = false;
@@ -615,8 +638,8 @@
         save();
       }
       // 应用内跳回教程页（visibility 没变化）：切屏休息同样恢复专注
-      if (awayMode && S.running && S.phase === 'break' && onTutorialRoute()) restoreFocus();
-      if (el('pomoRoot')) render();
+      if (shouldResumeAway()) restoreFocus();
+      else if (el('pomoRoot')) render();
     } catch (e) {}
   });
   /* 在教程页开始专注时顺手绑定当前节点（手动点开始也一样），统计才跟得上 */
@@ -775,6 +798,7 @@
    * 用序号防止「问的功夫里已经切回来了」还傻乎乎转休息。 */
   let awaySeq = 0;
   async function decideAwayOnHide() {
+    if (unloading) return;          // 页面自己在换（刷新/跳转），不是切出应用
     if (!S.auto || awayMode) return;
     if (!enabled()) return;
     const keys = S.restKeys || [];
@@ -782,6 +806,7 @@
     const seq = ++awaySeq;
     lastAwayCheck = Date.now();     // 刚判过一次，轮询先让 2.5s
     const v = await fetchActiveWindow(1500);
+    if (unloading) return;                                // 等结果的功夫页面开始卸载了
     if (seq !== awaySeq) return;                          // 已经切回来了
     if (document.visibilityState !== 'hidden') return;    // 同上
     if (v.ok && winMatches(v, keys)) { convertToAwayRest(); return; }
@@ -799,6 +824,7 @@
   /* 切出应用（标签不可见，如去刷视频）：专注转休息一直记，回来自动恢复专注。
    * 注意：只要标签藏起来就转，不要求计时是在教程页开始的——看不见页面就不算在学。 */
   function convertToAwayRest() {
+    if (unloading) return;          // 同上：卸载瞬间的 hidden 不算切走
     if (!S.auto || awayMode) return;
     if (!enabled()) return;
     if (S.running) {
@@ -812,6 +838,9 @@
     }
     awayMode = true;
     awayStartAt = Date.now();
+    /* 落两个持久化标记：这一轮是"切出休息"，以及切出前专注还剩多久 */
+    S.awayBreak = true;
+    S.awayRemain = awaySaved && awaySaved.remaining > 0 ? awaySaved.remaining : phaseLen('focus');
     S.phase = 'break';
     if (!(S.remaining > 0 && S.remaining < phaseLen('break'))) S.remaining = phaseLen('break');
     S.deadline = Date.now() + S.remaining;
@@ -845,12 +874,22 @@
     if (awayMode && S.phase === 'break') { awayCheckpoint(); return; }
     complete();
   }
+  /* 该不该把「切出休息」接回专注。
+     ⚠️ 条件是 `awayMode || S.awayBreak` —— awayMode 是运行时变量，刷新就没了；
+     S.awayBreak 是持久化的标记。只用 awayMode 判断的话，
+     "切出去休息 → 刷新 → 回教程页"这条路上永远恢复不了专注，
+     用户看到的就是"刷新后番茄钟自己在休息"。 */
+  function shouldResumeAway() {
+    return !!(awayMode || S.awayBreak) && S.running && S.phase === 'break' && onTutorialRoute();
+  }
   function restoreFocus() {
-    if (!awayMode) return;
+    const savedR = awaySaved && awaySaved.remaining > 0 ? awaySaved.remaining
+      : (S.awayRemain > 0 ? S.awayRemain : phaseLen('focus'));
     awayMode = false; awayInfoModal = false; awayStartAt = 0;
     researching = false; researchAt = 0; researchWin = '';
-    const r = awaySaved && awaySaved.remaining > 0 ? awaySaved.remaining : phaseLen('focus');
+    const r = savedR;
     awaySaved = null;
+    S.awayBreak = false; S.awayRemain = 0;
     S.phase = 'focus';
     S.remaining = r;
     S.deadline = Date.now() + r;
@@ -875,7 +914,7 @@
         // 回来先追一次结算（后台节流可能延迟了到点判定）
         if (S.running && remainMs() <= 0) { checkFinish(); return; }
         if (onTutorialRoute()) markActive();   // 露面了就给一个完整周期的宽限，别落地秒停
-        if (awayMode && S.running && S.phase === 'break' && onTutorialRoute()) restoreFocus();
+        if (shouldResumeAway()) restoreFocus();
         else try { render(); } catch (e2) {}
       }
     } catch (e) {}
@@ -887,6 +926,14 @@
       if (!enabled()) { unmount(); return; }
       if (!el('pomoRoot')) mount();
       if (S.dayStamp !== DAY()) { S.dayStamp = DAY(); S.doneToday = 0; save(); }
+      /* 刷新/重新打开后补一次恢复：awayMode 已经随旧文档消失，
+         只能靠持久化的 awayBreak 判断"这一轮休息是切出去时自动起的"。
+         人在教程页就说明回来了，把专注原样接回来（和切回来时的行为一致）。 */
+      if (!resumeChecked) {
+        resumeChecked = true;
+        try { sessionStorage.removeItem(UNLOAD_KEY); } catch (e2) {}
+        if (shouldResumeAway()) restoreFocus();
+      }
       awayPoll();      // 切出去之后持续重判（同一浏览器窗口内换标签页不再有 visibilitychange）
       autoWatch();
       if (S.running && remainMs() <= 0) checkFinish();

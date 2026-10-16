@@ -23,9 +23,29 @@ const { readCodeFiles, buildCodeBlock, listCodeFiles } = require('./code-read');
 const nodeFolders = require('./node-folders');
 const codeStore = require('./code-store');
 const rag = require('./rag');
+/* 拉起 GUI 程序（VSCode / 浏览器）前补一份显示环境：开机自启起的实例不在桌面会话里 */
+const { guiEnv } = require('./gui-env');
 /* 教程分节生成（规划 / 逐节 / 自检）。提示词块在下面才定义，
    所以这里先占位，等函数都声明完再初始化（见文件末尾 tutPlanInit）。 */
 let tutPlan = null;
+/* 教程局部修改（补丁）：判断改动规模 + 解析/套用补丁，纯文本处理 */
+const tutPatch = require('./tut-patch');
+/* 改教程的结构守卫：判断这次改动是不是把不该动的章节改掉了（纯文本处理） */
+const tutGuard = require('./tut-guard');
+/* 长教程的「分节改写」：只把要改的那一段切块发过去、改完拼回整篇（纯文本处理） */
+const tutSeg = require('./tut-seg');
+/* 信息源「AI 把关」：搜回来的一批候选逐条判读（相关度/实质/营销/主题/摘要），只让高质量的进库 */
+const collectScreen = require('./collect-screen');
+/* 正文清洗：抓下来的网页里混着的导航/推荐/页脚/公众号引导等垃圾文字（本地规则 + 可选 AI 只删不改） */
+const textClean = require('./text-clean');
+/* 结构改动"挂起等用户点头"的记录：goalId:tutorialId → { feedback, at }。
+   ⚠️ 必须放模块级：写到请求处理函数里会每次请求都新建一个，挂起状态当场就丢
+   （真实踩到：① 先问用户要不要改结构 ② 用户回"可以" 又变成"先问"，永远点不动）。 */
+const PENDING_EDIT = new Map();
+/* 用户表示"同意"的开头词（"可以""就这样改""确认"…）——用来认自然语言确认 */
+const CONFIRM_WORDS = /^(可以|好的|好|行|嗯|对|是|可以了|就这么改|就这样改|就这样|按这个来|没问题|同意|确认|确定|开跑|开始|动手|改吧|继续|OK)/i;
+/* 复杂度判断：决定每个 AI 功能该花多大力气（纯启发式，不花 AI 调用） */
+const effort = require('./ai-effort');
 
 const APP_DIR = path.resolve(__dirname, '..');
 /* 前端资源版本戳：启动时对 public 下的 js/css 求哈希，发版后浏览器必取新文件。
@@ -529,9 +549,32 @@ function pluginCtx() {
   if (!cols.includes('artifact')) db.exec("ALTER TABLE nodes ADD COLUMN artifact TEXT NOT NULL DEFAULT '';");
   if (!cols.includes('acceptance')) db.exec("ALTER TABLE nodes ADD COLUMN acceptance TEXT NOT NULL DEFAULT '';");
   if (!cols.includes('hours')) db.exec("ALTER TABLE nodes ADD COLUMN hours TEXT NOT NULL DEFAULT '';");
+  /* 对话绑定节点（2026-10-15）：一个节点的对话要跟别的节点分开。
+     以前所有对话都挂在目标上，右键 SKILL 节点打开的是 MCP 节点那轮对话的内容（用户实测）。
+     node_id = 这条对话属于哪个节点（0 = 目标级对话）；
+     nodes = 这条对话"带上了哪些节点"的附件清单 JSON：[{id, withKids}]。
+     两列都落库而不是只放前端内存 —— 否则切设备/刷新后"这个对话在聊哪些节点"就丢了。 */
+  {
+    const scols = db.prepare('PRAGMA table_info(chat_sessions)').all().map(c => c.name);
+    if (!scols.includes('node_id')) db.exec('ALTER TABLE chat_sessions ADD COLUMN node_id INTEGER NOT NULL DEFAULT 0;');
+    if (!scols.includes('nodes')) db.exec("ALTER TABLE chat_sessions ADD COLUMN nodes TEXT NOT NULL DEFAULT '[]';");
+  }
   const scols = db.prepare('PRAGMA table_info(sources)').all().map(c => c.name);
-  if (!scols.includes('quality')) db.exec('ALTER TABLE sources ADD COLUMN quality INTEGER NOT NULL DEFAULT 0;');   // 1=优质信息源
+  if (!scols.includes('quality')) db.exec('ALTER TABLE sources ADD COLUMN quality INTEGER NOT NULL DEFAULT 0;');   // 1=优质信息源（**人工**标★）
   if (!scols.includes('published_at')) db.exec("ALTER TABLE sources ADD COLUMN published_at TEXT NOT NULL DEFAULT '';");
+  /* 「AI 把关」的判读结果（见 server/collect-screen.js）：
+     quality_score = 相关度 0~5，ai_summary = 一句话摘要，topic = 主题标签，
+     review = 判读原文（JSON，便于回看"为什么收它"），content_full = 正文是否已抓全文。 */
+  if (!scols.includes('quality_score')) db.exec('ALTER TABLE sources ADD COLUMN quality_score INTEGER NOT NULL DEFAULT 0;');
+  if (!scols.includes('ai_summary')) db.exec("ALTER TABLE sources ADD COLUMN ai_summary TEXT NOT NULL DEFAULT '';");
+  if (!scols.includes('topic')) db.exec("ALTER TABLE sources ADD COLUMN topic TEXT NOT NULL DEFAULT '';");
+  if (!scols.includes('review')) db.exec("ALTER TABLE sources ADD COLUMN review TEXT NOT NULL DEFAULT '';");
+  if (!scols.includes('content_full')) db.exec('ALTER TABLE sources ADD COLUMN content_full INTEGER NOT NULL DEFAULT 0;');
+  /* 清洗（server/text-clean.js）：content_raw = 清洗前的原文（清洗任务首次执行时备份，
+     便于对照与重跑）；cleaned = 是否已清洗；clean_removed = 洗掉了多少字。 */
+  if (!scols.includes('content_raw')) db.exec("ALTER TABLE sources ADD COLUMN content_raw TEXT NOT NULL DEFAULT '';");
+  if (!scols.includes('cleaned')) db.exec('ALTER TABLE sources ADD COLUMN cleaned INTEGER NOT NULL DEFAULT 0;');
+  if (!scols.includes('clean_removed')) db.exec('ALTER TABLE sources ADD COLUMN clean_removed INTEGER NOT NULL DEFAULT 0;');
   const gcols = db.prepare('PRAGMA table_info(goals)').all().map(c => c.name);
   if (!gcols.includes('clarify')) db.exec("ALTER TABLE goals ADD COLUMN clarify TEXT NOT NULL DEFAULT '';");
   if (!gcols.includes('clarify_answers')) db.exec("ALTER TABLE goals ADD COLUMN clarify_answers TEXT NOT NULL DEFAULT '';");
@@ -554,6 +597,8 @@ function pluginCtx() {
   if (!vcols.includes('manual')) db.exec("ALTER TABLE goal_versions ADD COLUMN manual INTEGER NOT NULL DEFAULT 0;");
   if (!vcols.includes('starred')) db.exec("ALTER TABLE goal_versions ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;");
   const ccols = db.prepare('PRAGMA table_info(chats)').all().map(c => c.name);
+  /* 本轮「它做了什么」（看了什么上下文、调了哪些工具）—— JSON 数组，见 streamChat */
+  if (!ccols.includes('trace')) db.exec("ALTER TABLE chats ADD COLUMN trace TEXT NOT NULL DEFAULT '[]';");
   if (!ccols.includes('session_id')) {
     db.exec("ALTER TABLE chats ADD COLUMN session_id INTEGER NOT NULL DEFAULT 0;");
     for (const row of db.prepare('SELECT DISTINCT goal_id FROM chats WHERE session_id = 0').all()) {
@@ -788,7 +833,7 @@ function searchKeyword(title) {
 }
 async function bingSearch(query, count, days) {
   try {
-    let url = 'https://cn.bing.com/search?q=' + encodeURIComponent(query) + '&setlang=zh-CN&count=' + (count || 20);
+    let url = (process.env.SX_SEARCH_BING || 'https://cn.bing.com/search') + '?q=' + encodeURIComponent(query) + '&setlang=zh-CN&count=' + (count || 20);
     if (days) url += '&qft=+filterui:age-lt' + Math.round(days * 1440);
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 15000);
@@ -836,7 +881,7 @@ function parseBlockDate(block) {
 }
 async function baiduSearch(query, count, days) {
   try {
-    let url = 'https://www.baidu.com/s?wd=' + encodeURIComponent(query) + '&rn=' + (count || 30);
+    let url = (process.env.SX_SEARCH_BAIDU || 'https://www.baidu.com/s') + '?wd=' + encodeURIComponent(query) + '&rn=' + (count || 30);
     if (days) {
       const now = Math.floor(Date.now() / 1000);
       url += `&gpc=stf%3D${now - days * 86400}%2C${now}%7Cstftype%3D2`;
@@ -911,23 +956,100 @@ function extractPublishDate(html, text) {
   }
   return 0;
 }
-async function fetchPage(url, maxLen) {
+/* 抓取重试的"换招"顺序。网页抓不到正文无非三类原因：
+   ① **偶发**（限流 / 超时 / 网络抖）—— 缓一下重来就好。这是大头：实测随机抽 24 条
+      历史"正文为空"的资料重抓，14 条（58%）当场就抓回来了，全是 CSDN / 51CTO / 公众号；
+   ② 嫌请求不像浏览器（缺 Referer/Accept 这类头）—— 补全就好；
+   ③ 要登录态（知乎 403、BOSS 直聘跳 security 页、php.cn 登录墙）—— 换招也没用，
+      重试到次数就如实报失败，别在这上面死磕（死磕 = 一次采集多卡十几分钟）。
+   手机 UA 放最后一档：不少站点给手机端放行（实测 B 站换手机 UA 正文更全）。 */
+const UA_MOBILE = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
+const FETCH_MODES = ['plain', 'browser', 'mobile'];
+
+/** 抓一次（不重试）。返回 { text, why, permanent }：permanent = 再试也没用（404 / 不是网页 / 太大）。 */
+async function fetchOnce(url, maxLen, o, mode) {
+  const byteCap = Number(o.bytes) || 800 * 1024;
+  const waitMs = Number(o.timeoutMs) || 9000;
+  const headers = { 'User-Agent': mode === 'mobile' ? UA_MOBILE : UA, 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' };
+  if (mode !== 'plain') {
+    headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
+    headers['Upgrade-Insecure-Requests'] = '1';
+    headers['Cache-Control'] = 'no-cache';
+    try { headers['Referer'] = new URL(url).origin + '/'; } catch (e) {}
+  }
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), waitMs);
   try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 9000);
-    const res = await fetch(url, { headers: { 'User-Agent': UA, 'Accept-Language': 'zh-CN,zh;q=0.9' }, signal: ctrl.signal, redirect: 'follow' });
-    clearTimeout(t);
+    const res = await fetch(url, { headers, signal: ctrl.signal, redirect: 'follow' });
     const finalUrl = res.url || url;
-    if (!res.ok) return { text: '', url: finalUrl };
+    if (!res.ok) return { text: '', url: finalUrl, why: 'HTTP ' + res.status, permanent: res.status === 404 || res.status === 410 };
     const ct = res.headers.get('content-type') || '';
-    if (!/text\/html|text\/plain/i.test(ct)) return { text: '', url: finalUrl };
+    if (!/text\/html|text\/plain/i.test(ct)) return { text: '', url: finalUrl, why: '不是网页（' + ct.slice(0, 30) + '）', permanent: true };
     const buf = Buffer.from(await res.arrayBuffer());
-    if (!buf.length || buf.length > 800 * 1024) return { text: '', url: finalUrl };
+    if (!buf.length) return { text: '', url: finalUrl, why: '空响应', permanent: false };
+    if (buf.length > byteCap) return { text: '', url: finalUrl, why: '页面太大(' + Math.round(buf.length / 1024) + 'KB)', permanent: true };
     const html = decodeHtml(buf);
-    const text = htmlToText(html);
-    if (text.length < 80) return { text: '', url: finalUrl, date: 0 };
-    return { text: text.slice(0, maxLen || 3000), url: finalUrl, date: extractPublishDate(html, text) };
-  } catch (e) { return { text: '', url: url }; }
+    /* 清洗：挑主内容容器 + 逐行去掉导航/推荐位/页脚/公众号引导这类垃圾（见 server/text-clean.js）。
+       以前这里是"把标签全删掉"，于是每条资料里都混着一堆站点废话，还会被切成检索片段。 */
+    const cleaned = textClean.extractText(html);
+    const text = cleaned.text || '';
+    /* 反爬挑战页：抓到的"正文"其实是混淆脚本（见 text-clean.looksLikeChallenge）。
+       当成"没抓到"报失败，绝不能把一段混淆代码当资料喂给 AI。 */
+    if (text && textClean.looksLikeChallenge(text)) return { text: '', url: finalUrl, why: '反爬挑战页（正文是混淆脚本）', permanent: false };
+    if (text.length < 80) return { text: '', url: finalUrl, why: '正文只剩 ' + text.length + ' 字', permanent: false };
+    const keep = text.slice(0, maxLen || 3000);
+    return {
+      text: keep, url: finalUrl, date: extractPublishDate(html, text),
+      truncated: keep.length < text.length, total: text.length, cleanDrop: cleaned.dropped || 0
+    };
+  } catch (e) {
+    return { text: '', url, why: e.name === 'AbortError' ? '超时' : (e.message || e.name), permanent: false };
+  } finally { clearTimeout(t); }
+}
+
+/* 镜像路线：某些站点在这台机器上直连不通，但内容其实有替代入口。
+   目前只有 GitHub —— 实测这里 github.com **完全不可达**、raw.githubusercontent.com 会挂到超时，
+   而 jsdelivr 是通的（它本来就是 GitHub 的 CDN，按 用户名/仓库@分支/路径 取文件，
+   实测那篇 README 拿回来 14073 字）。仓库首页（目录）转不了，退而求其次试 README。
+   ⚠️ 只做"多给一条路"，**绝不改写原地址** —— 换一台能上 GitHub 的电脑时原路照样优先走。 */
+function mirrorUrls(url) {
+  const out = [];
+  try {
+    const u = new URL(url);
+    if (u.hostname.replace(/^www\./, '') !== 'github.com') return out;
+    const m = u.pathname.match(/^\/([^/]+)\/([^/]+)\/(?:blob|raw)\/([^/]+)\/(.+)$/);
+    if (m) { out.push('https://cdn.jsdelivr.net/gh/' + m[1] + '/' + m[2] + '@' + m[3] + '/' + m[4]); return out; }
+    const r = u.pathname.match(/^\/([^/]+)\/([^/]+)\/?$/);
+    if (r) {
+      out.push('https://cdn.jsdelivr.net/gh/' + r[1] + '/' + r[2] + '@main/README.md');
+      out.push('https://cdn.jsdelivr.net/gh/' + r[1] + '/' + r[2] + '@master/README.md');
+    }
+  } catch (e) {}
+  return out;
+}
+
+/* 抓网页正文（带"换招重试"）。maxLen = 保留多少字；opts.bytes = 允许下载多少字节（全文模式给更大的上限）。
+   opts.retry=false 关掉重试；opts.attempts 指定最多试几档（默认 2 档：直连 → 补全浏览器头）；
+   opts.mirrors=false 关掉镜像兜底。
+   返回 truncated = 正文比 maxLen 长（「AI 把关」据此决定要不要回来抓全文）；why = 全部失败时的最后一档原因。 */
+async function fetchPage(url, maxLen, opts) {
+  const o = opts || {};
+  const tries = o.retry === false ? 1 : Math.max(1, Math.min(FETCH_MODES.length, Number(o.attempts) || 2));
+  const plan = [];
+  for (let i = 0; i < tries; i++) plan.push({ u: url, m: FETCH_MODES[i] });
+  if (o.retry !== false && o.mirrors !== false) for (const m of mirrorUrls(url)) plan.push({ u: m, m: 'plain' });
+  let last = { text: '', url, why: '' };
+  let skipUrl = '';
+  for (let i = 0; i < plan.length; i++) {
+    if (plan[i].u === skipUrl) continue;
+    if (i) await new Promise(r => setTimeout(r, 600 + i * 400)); // 限流多半是瞬时的，缓一下再上
+    const r = await fetchOnce(plan[i].u, maxLen, o, plan[i].m);
+    if (r.text) return r;
+    last = r;
+    /* 404 这类是"这条链接本身就不存在"：只跳过同一个地址剩下的档，别把后面的镜像一起掐掉 */
+    if (r.permanent) skipUrl = plan[i].u;
+  }
+  return last;
 }
 const AD_KEYWORDS = /包就业|保就业|保offer|付费内推|培训贷|报名咨询|免费试听|免费领取|领取资料|加微信|扫码|课程咨询|就业班|脱产班|学费|限时优惠|名额有限|点击咨询|在线咨询|试听课|零基础培训|IT培训|程序员培训|培训机构|名师授课|就业保障|简历代写|项目代做|毕设辅导|职业培训|招生简章|关注公众号|公众号回复|资料包|加群|私信我/;
 const AD_SITE_RE = /itheima|itcast|qianfeng|tarena|kaikeba|lagouedu|mkbk|hqyj|zhonggong|offcn|huatu|tedu|bjsxt|bawei|xuexiniu|yuanrenxue|itxuexi|kuangstudy|imooc\.com\/course|ke\.qq\.com\/course|douyin\.com|jianli\.com|wondercv|diyifanwen|51test|zhan\.com/i;
@@ -935,19 +1057,14 @@ const AD_SITE_RE = /itheima|itcast|qianfeng|tarena|kaikeba|lagouedu|mkbk|hqyj|zh
 const MARKETING_RE = /死磕|offer拿到手软|就够了|必知必会|最全|1000道|附答案|标准答案|满分|大白话|话术模板|速成|秘籍|宝典|保姆级|手把手|一文搞定|万字长文|全流程拆解|实战演练|超实用|亲测这套|揭秘|爆肝|小册|干货合集|收藏这一篇|看完这篇|建议收藏/;
 // 真人经验特征
 const REAL_EXP_RE = /面经|凉经|一面|二面|三面|四面|hr面|HR面|笔试|复盘|上岸|oc了|OC了|offer|秋招|春招|日常实习|暑期实习|面试经历|求职经历|个人向|记录|经历分享/;
+/* 本地这一层只挡"一眼就是广告"的：培训/招聘站黑名单 + 明确广告词。
+   ⚠️ 原来还按 kind 判"面经必须是真人分享、营销词+合集一律丢"——那是求职模板时代的规则，
+   现在**质量判断交给 AI 把关**（见 collect-screen.js）：本地挡太多 = 好文章连被 AI 看见的机会都没有
+   （用户定的调子："先大量检索，然后 AI 审查"）。 */
 function isAdSource(host, kind, title, snippet, content) {
   if (AD_SITE_RE.test(String(host || ''))) return true;
-  const t = String(title || '');
-  const text = t + ' ' + String(snippet || '') + ' ' + String(content || '').slice(0, 1000);
-  if (AD_KEYWORDS.test(text)) return true;
-  if (kind === '面经' || kind === '经验') {
-    // 经验贴必须是真人分享：标题含真人特征且不含营销词
-    if (!(REAL_EXP_RE.test(t) && !MARKETING_RE.test(t))) return true;
-  } else if (MARKETING_RE.test(t) && /题|总结|合集|攻略/.test(t)) {
-    // 其他类里的纯营销资料贴也排除
-    return true;
-  }
-  return false;
+  const text = String(title || '') + ' ' + String(snippet || '') + ' ' + String(content || '').slice(0, 1000);
+  return AD_KEYWORDS.test(text);
 }
 const collectQueries = title => {
   const k = searchKeyword(title);
@@ -1276,11 +1393,55 @@ const nodeQueries = title => {
     { kind: '资源', q: `${k} 推荐资料 工具`, days: 365 }
   ];
 };
+/* 与目标无关的招考/考证类词（"搜 AI 产品经理却回来软考考点汇总"就是靠它挡掉）。
+   目标本身就是考这些的话（用户目标里出现了同样的词）就不挡 —— 别把考研目标自己的资料筛没。 */
+const OFFTOPIC_WORDS = ['软考', '公考', '公务员', '考研', '四六级', '教师资格', '期末复习', '自考', '成人高考', '一级建造师', '注册会计师', '护士资格', '驾照', '事业编', '考研复试'];
+function buildOffTopicRe(goal) {
+  const g = String((goal && goal.title) || '') + ' ' + String((goal && goal.profile) || '').slice(0, 120);
+  const bad = OFFTOPIC_WORDS.filter(w => !g.includes(w));
+  return bad.length ? new RegExp(bad.join('|')) : null;
+}
+/* 公开报告/论文的常见可信域名（PDF 直下全文时用） */
+const DOC_TRUST_RE = /\.(gov|edu)(\.|$)|arxiv\.org|ssrn\.com|who\.int|imf\.org|worldbank\.org|oecd\.org|nber\.org|nature\.com|sciencedirect|springer|ieee\.org|acm\.org|cnki\.net|wanfangdata/i;
+
+/* 一批候选交给 AI 判读（相关性/实质内容/营销水文/主题/一句话摘要/要不要抓全文）。
+   判读失败不影响主流程：日志记一笔，这批按"未审"处理（阈值照旧 → 默认不收）。 */
+async function screenCandidates(goal, cands, onProgress, signal, checkStop) {
+  const out = new Map();
+  if (!cands.length) return out;
+  const bs = collectScreen.batches(cands, collectScreen.MAX_ITEMS_PER_CALL);
+  for (let bi = 0; bi < bs.length; bi++) {
+    checkStop();
+    onProgress({ status: `AI 正在把关这批资料：第 ${bi + 1}/${bs.length} 批（每批最多 ${collectScreen.MAX_ITEMS_PER_CALL} 条，判相关度/实质内容/是否水文）…`, prog: { phase: 2, frac: (bi + 1) / Math.max(1, bs.length) } });
+    try {
+      const raw = await aiText(collectScreen.buildScreenPrompt(goal.title, bs[bi], { batch: { no: bi + 1, total: bs.length } }),
+        currentModel(), 240000, null, signal, '资料把关');
+      const m = collectScreen.parseVerdicts(raw, bs[bi]);
+      for (const [k, v] of m) out.set(k, v);
+      if (!m.size) console.log('[collect] 这一批判读没解析出结果（按未审处理）');
+    } catch (e) {
+      if (e && (e.cancelled || e.name === 'AbortError')) throw e;
+      console.log('[collect] 判读失败（这批按未审处理）:', e.message);
+    }
+  }
+  return out;
+}
+
+/* 搜集信息源。
+   流程（用户定调："先大量检索，然后 AI 审查这批信息源内容质量如何；
+   字数限制太死板了，应该由 AI 判读，高质量的被截断了就把全部内容导入"）：
+     ① 广撒网：每条 query 的结果全收进来（不再按类型配额先到先得 —— 那等于让内容农场先占满）
+     ② 候选池：按站点优先级排序 + 单站上限 + 总量上限（只做"别让一家刷屏"，不做质量判断）
+     ③ 抓探测正文（3,500 字）+ 本地硬闸门（正文太短 / 标题跑题 / 广告 / 超期）
+     ④ **AI 判读**：每批 ≤18 条，判 相关度 0~5 / 有没有实质内容 / 是不是营销水文 / 主题 / 一句话摘要 / 要不要抓全文
+     ⑤ 达标的入库；**达标且正文被截断的，回来把全文抓一遍再入库**（单条上限 + 整次预算封顶）
+   返回 stats 供前端如实汇报（搜到多少 → 抓了多少 → 合格多少 → 补全文多少）。 */
 async function collectSources(goal, queries, onProgress, signal) {
   const seen = new Set();
   const all = [];
   let doneQ = 0, blocked = false;
   const checkStop = () => { if (signal && signal.aborted) { const e = new Error('已停止'); e.cancelled = true; throw e; } };
+  /* ① 广撒网 */
   for (const item of queries) {
     checkStop();
     await new Promise(r => setTimeout(r, 1100 + Math.random() * 1200));
@@ -1292,46 +1453,44 @@ async function collectSources(goal, queries, onProgress, signal) {
     }
     for (const r of rs) {
       if (!r.url || seen.has(r.url)) continue;
-      let pathname = '';
-      try { pathname = new URL(r.url).pathname; } catch (e) { continue; }
+      try { new URL(r.url); } catch (e) { continue; }
       const host = siteOf(r.url);
       if (!host) continue;
       if (/(^|\.)(baidu|google|bing)\.com$/.test(host)) continue;
       seen.add(r.url);
-      all.push({ ...r, host, site: siteLabel(host), kind: item.kind, days: item.days });
+      all.push({ ...r, host, site: siteLabel(host), kind: item.kind, q: item.q, days: item.days });
     }
     doneQ++;
-    onProgress({ status: `搜索 ${doneQ}/${queries.length}：${item.q.slice(0, 26)}（已发现 ${all.length} 条）` });
+    onProgress({ status: `搜索 ${doneQ}/${queries.length}：${item.q.slice(0, 26)}（候选池 ${all.length} 条）`, prog: { phase: 0, frac: doneQ / Math.max(1, queries.length) } });
   }
+  /* ② 候选池：站点优先级 + 单站上限 + 总量上限 */
+  const CAP = Math.max(40, Number(getSetting('collect_candidates', '220')) || 220);
+  const MAX_PER_SITE = Math.max(4, Number(getSetting('collect_per_site', '12')) || 12);
   const PRIORITY = ['nowcoder.com', 'zhipin.com', 'zhihu.com', 'juejin.cn', 'github.com', 'csdn.net', 'lagou.com', 'liepin.com', 'shixiseng.com', '51job.com'];
   const prio = h => { const i = PRIORITY.findIndex(d => h.endsWith(d)); return i < 0 ? 99 : i; };
-  // 已知类别沿用配额；AI 新定的类别默认每类 14 条、总量不超 160（老求职模板行为不变）
-  const KIND_QUOTA = { 'JD': 32, '面经': 26, '学习路线': 26, '技能': 16, '项目': 16, '资源': 12, '经验': 16 };
-  const quotaOf = k => KIND_QUOTA[k] || 14;
+  const sorted = all.slice().sort((a, b) => prio(a.host) - prio(b.host));
   const picked = [];
-  let totalPicked = 0;
-  for (const kind of [...new Set(all.map(s => s.kind))]) {
-    const arr = all.filter(s => s.kind === kind).sort((a, b) => prio(a.host) - prio(b.host));
-    const siteCount = {};
-    let taken = 0;
-    for (const s of arr) {
-      if (totalPicked >= 160) break;
-      siteCount[s.site] = (siteCount[s.site] || 0) + 1;
-      if (siteCount[s.site] > 8) continue; // 同类内单站点最多 8 条，保证多样性
-      picked.push(s);
-      taken++;
-      totalPicked++;
-      if (taken >= quotaOf(kind)) break;
-    }
-    if (totalPicked >= 160) break;
+  const siteCount = {};
+  for (const s2 of sorted) {
+    if (picked.length >= CAP) break;
+    siteCount[s2.site] = (siteCount[s2.site] || 0) + 1;
+    if (siteCount[s2.site] > MAX_PER_SITE) continue;
+    picked.push(s2);
   }
-  // 累积式采集：保留已有来源，仅追加新来源（按 URL 去重），并清理超期数据
+  /* 把关设置 */
+  const review = (getSetting('collect_review', '1') || '1') !== '0';
+  const minScore = Math.max(0, Math.min(5, Number(getSetting('collect_min_score', '3')) || 3));
+  const FULL_MAX = Math.max(4000, Number(getSetting('collect_full_max', '60000')) || 60000);
+  const FULL_BUDGET = Math.max(0, Number(getSetting('collect_full_budget', '1600000')) || 1600000);
+  const wantFull = (getSetting('collect_full', '1') || '1') !== '0';
+  const offTopicRe = buildOffTopicRe(goal);
+  /* ③ 抓探测正文 + 本地硬闸门 */
   const existingUrls = new Set(db.prepare('SELECT url FROM sources WHERE goal_id = ?').all(goal.id).map(r => r.url));
   const seenFinal = new Set();
+  const cands = [];
   const now = Date.now();
-  let fetched = 0, saved = 0, ads = 0, skipped = 0, pdfSaved = 0;
-  const MAX_PDF = 4;   // 每次搜集最多全文入库 4 个 PDF（公开报告/论文/讲义），控制耗时
-  // 已入库的报告/书籍标题（归一化前缀）：同一文档换个 URL 不重复下
+  let fetched = 0, hardDrop = 0, ads = 0, skipped = 0, pdfSaved = 0;
+  const MAX_PDF = 4;
   let haveDocTitles = [];
   try {
     haveDocTitles = db.prepare("SELECT title FROM sources WHERE goal_id = ? AND kind IN ('书籍','报告')").all(goal.id)
@@ -1339,47 +1498,109 @@ async function collectSources(goal, queries, onProgress, signal) {
   } catch (e) {}
   const docSeen = t => { const k = String(t || '').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '').slice(0, 16); return k && haveDocTitles.some(h => h.includes(k) || k.includes(h)); };
   const docMark = t => { const k = String(t || '').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '').slice(0, 16); if (k) haveDocTitles.push(k); };
-  await mapLimit(picked, 4, async s => {
+  /* 同一家站点"连着抓不到正文"就不再试它了。
+     为什么：知乎（HTTP 403）、BOSS 直聘（跳 security 页）这类要登录态的站，
+     候选池里可能有十来条，抓一条废一条，而每条现在还要走最多三档重试 —— 白等好几分钟。
+     这里的阈值取"连续 4 条"，够保守：内容站偶尔抖一两条不会误伤，只有整片抓不到才收手。
+     只做**本轮内**的学习，不落库、不影响下次 —— 哪天站点放开或我们换了抓法，
+     下一轮自然会重新尝试，不需要用户去某个设置里解封。 */
+  const hostFails = new Map();
+  const DEAD_AFTER = 4;
+  let deadSkip = 0;
+  await mapLimit(picked, 4, async s2 => {
     checkStop();
     fetched++;
-    if (fetched % 8 === 0) onProgress({ status: `抓取正文 ${fetched}/${picked.length}（新增 ${saved} 条，排除广告 ${ads} 条，跳过已有 ${skipped} 条）` });
-    if (existingUrls.has(s.url)) { skipped++; return; }
-    // PDF 直下全文入库：公开报告 / 工作论文 / 讲义（合法公开的才下得到，付费墙/盗版站会直接失败跳过）
-    if (/\.pdf($|[?#])/i.test(s.url) && pdfSaved < MAX_PDF && !docSeen(s.title)) {
+    if (fetched % 8 === 0) onProgress({ status: `抓取正文 ${fetched}/${picked.length}（待审 ${cands.length}，已排除 ${hardDrop + ads}${deadSkip ? '，跳过抓不到的站 ' + deadSkip : ''}）`, prog: { phase: 1, frac: fetched / Math.max(1, picked.length) } });
+    if (existingUrls.has(s2.url)) { skipped++; return; }
+    if ((hostFails.get(s2.host) || 0) >= DEAD_AFTER) { deadSkip++; return; }
+    /* PDF 直下全文入库：只认"可信域名"或"标题与本目标有关"的公开报告/论文，别乱下文件 */
+    if (/\.pdf($|[?#])/i.test(s2.url) && pdfSaved < MAX_PDF && !docSeen(s2.title)) {
+      const trust = DOC_TRUST_RE.test(s2.host || '');
+      if (!trust) { skipped++; return; }
       try {
-        const buf = await gFetch(s.url, 25000, false);
+        const buf = await gFetch(s2.url, 25000, false);
         if (buf && buf.length > 500 && buf.length <= 12 * 1024 * 1024) {
-          const base = (() => { try { return decodeURIComponent(s.url.split('?')[0].split('/').pop() || ''); } catch (e) { return ''; } })();
-          const fname = (base && /\.pdf$/i.test(base) ? base : (String(s.title || 'report').replace(/[\\/:*?"<>|]/g, '').slice(0, 40) + '.pdf'));
+          const base = (() => { try { return decodeURIComponent(s2.url.split('?')[0].split('/').pop() || ''); } catch (e) { return ''; } })();
+          const fname = (base && /\.pdf$/i.test(base) ? base : (String(s2.title || 'report').replace(/[\\/:*?"<>|]/g, '').slice(0, 40) + '.pdf'));
           const info = await require('./plugins/jdfile.js').ingestEbookBuffer(
             { id: goal.id }, buf, fname, '搜集时发现的公开 PDF 全文',
             st => onProgress({ status: `📄 ${st}` }), 0,
-            '公开 PDF（' + siteLabel(siteOf(s.url) || '') + '）', '报告', { rejectGarbled: true });
-          seenFinal.add(s.url);
-          docMark(info.title); docMark(s.title);
-          saved++; pdfSaved++;
-          onProgress({ status: `📄 PDF 全文已入库：《${String(s.title).slice(0, 30)}》` });
+            '公开 PDF（' + siteLabel(siteOf(s2.url) || '') + '）', '报告', { rejectGarbled: true });
+          seenFinal.add(s2.url);
+          docMark(info.title); docMark(s2.title);
+          pdfSaved++;
+          onProgress({ status: `📄 PDF 全文已入库：《${String(s2.title).slice(0, 30)}》` });
           return;
         }
-      } catch (e) { console.log('[collect] PDF 入库失败，回退普通抓取:', s.url.slice(0, 80), e.message); }
+      } catch (e) { console.log('[collect] PDF 入库失败，回退普通抓取:', s2.url.slice(0, 80), e.message); }
     }
-    const page = await fetchPage(s.url, 3500);
-    if (!page.text && /\.pdf($|[?#])/i.test(s.url)) { skipped++; return; }   // PDF 解析失败就不存空条目
-    const finalUrl = page.url || s.url;
-    const host = siteOf(finalUrl) || s.host;
+    const page = await fetchPage(s2.url, 3500);
+    const finalUrl = page.url || s2.url;
+    const host = siteOf(finalUrl) || s2.host;
     if (seenFinal.has(finalUrl) || existingUrls.has(finalUrl)) { skipped++; return; }
     seenFinal.add(finalUrl);
-    if (isAdSource(host, s.kind, s.title, s.snippet, page.text)) { ads++; return; }
-    const pub = page.date || s.date || 0;
-    const limitDays = s.kind === 'JD' ? 60 : 365;
+    if (isAdSource(host, s2.kind, s2.title, s2.snippet, page.text)) { ads++; return; }
+    const pub = page.date || s2.date || 0;
+    const limitDays = s2.kind === 'JD' ? 60 : 365;
     if (pub && now - pub > limitDays * 86400e3) return;
-    db.prepare('INSERT INTO sources (goal_id,title,url,site,kind,snippet,content,published_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
-      .run(goal.id, String(s.title).slice(0, 200), finalUrl.slice(0, 500), siteLabel(host).slice(0, 50), s.kind,
-        String(s.snippet || '').slice(0, 600), page.text.slice(0, 3500),
-        pub ? new Date(pub).toISOString().slice(0, 10) : '', nowISO());
-    saved++;
+    const cand = {
+      i: cands.length + 1, query: s2.q || '', kind: s2.kind, url: finalUrl, host, site: siteLabel(host),
+      title: String(s2.title || '').slice(0, 200), snippet: String(s2.snippet || '').slice(0, 600),
+      text: page.text || '', truncated: !!page.truncated, date: pub
+    };
+    const hard = collectScreen.hardGate(cand, { offTopicRe });
+    if (hard && !hard.keep) {
+      hardDrop++;
+      /* 只有"连正文都拿不到"才算这家站抓不到；跑题/广告是**这条**的问题，不该连坐整站。 */
+      if (/^no-body/.test(String(hard.reason))) hostFails.set(s2.host, (hostFails.get(s2.host) || 0) + 1);
+      return;
+    }
+    hostFails.set(s2.host, 0);   // 这家能抓到正文 —— 前面抖过几次也不再计数
+    cands.push(cand);
   });
-  // 清理超期的旧来源
+  onProgress({ status: `抓取完成：待审 ${cands.length} 条（已排除：广告 ${ads} · 正文太少/跑题 ${hardDrop}${deadSkip ? ' · 跳过抓不到的站 ' + deadSkip : ''} · 已存在 ${skipped}）`, prog: { phase: 2, frac: 0 } });
+  /* ④ AI 判读 */
+  const verdicts = review ? await screenCandidates(goal, cands, onProgress, signal, checkStop) : new Map();
+  /* ⑤ 入库 + 高价值截断的补全文 */
+  let saved = 0, aiDrop = 0, fullGot = 0, fullChars = 0, fullFail = 0;
+  onProgress({ status: '开始整理入库…', prog: { phase: 3, frac: 0 } });
+  for (const c of cands) {
+    checkStop();
+    /* 入库这一段的进度也报出来：一条一条写库 + 回抓全文，末尾往往还要跑好一会儿 */
+    if (cands.length > 3 && (saved + aiDrop) % 10 === 0) {
+      onProgress({ status: `整理入库 ${saved + aiDrop}/${cands.length}（已入库 ${saved}）`, prog: { phase: 3, frac: (saved + aiDrop) / cands.length } });
+    }
+    const v = verdicts.get(c.i) || null;
+    if (review) {
+      const g2 = collectScreen.gate(v, { minScore });
+      if (!g2.keep) { aiDrop++; continue; }
+    }
+    let content = c.text, isFull = 0;
+    if (review && wantFull && collectScreen.needFullText(v, c, { minFullScore: 4 })) {
+      if (fullChars >= FULL_BUDGET) { /* 预算用完：保留探测正文，不再抓 */ }
+      else {
+        try {
+          onProgress({ status: `📄 这条质量高（${v ? v.score : '?'}/5），正在把全文抓回来：《${c.title.slice(0, 24)}》` });
+          const fp = await fetchPage(c.url, FULL_MAX, { bytes: 2 * 1024 * 1024, timeoutMs: 15000, attempts: 3 });
+          if (fp.text && fp.text.length > String(content || '').length) {
+            content = fp.text; isFull = 1; fullGot++; fullChars += fp.text.length;
+          } else fullFail++;
+        } catch (e) { fullFail++; console.log('[collect] 全文抓取失败，保留探测正文:', e.message); }
+      }
+    }
+    let snip = c.snippet;
+    try { snip = textClean.cleanLines(String(c.snippet || ''), { minChars: 20 }).text || c.snippet; } catch (e) {}
+    db.prepare(`INSERT INTO sources (goal_id,title,url,site,kind,snippet,content,published_at,created_at,quality_score,ai_summary,topic,review,content_full,cleaned)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(goal.id, c.title, c.url.slice(0, 500), c.site.slice(0, 50), c.kind,
+        String(snip || '').slice(0, 600), String(content || '').slice(0, FULL_MAX + 4000),
+        c.date ? new Date(c.date).toISOString().slice(0, 10) : '', nowISO(),
+        v ? v.score : 0, v ? v.summary : '', v ? v.topic : '', v ? JSON.stringify(v) : '', isFull, 1);
+    saved++;
+  }
+  const stats = { searched: all.length, candidates: picked.length, toReview: cands.length, saved, aiDrop, hardDrop, ads, skipped, deadSkip, fullGot, fullFail, pdf: pdfSaved, review, minScore };
+  onProgress({ status: `把关完成：入库 ${saved} 条（AI 判为不合格 ${aiDrop} 条${fullGot ? ' · 补抓全文 ' + fullGot + ' 条' : ''}）` });
+  /* 清理超期的旧来源 */
   let cleaned = 0;
   for (const r of db.prepare('SELECT id, kind, published_at FROM sources WHERE goal_id = ?').all(goal.id)) {
     if (!r.published_at) continue;
@@ -1390,7 +1611,7 @@ async function collectSources(goal, queries, onProgress, signal) {
   }
   if (cleaned) onProgress({ status: `已清理 ${cleaned} 条超期来源` });
   backup();
-  return { saved, blocked };
+  return { saved, blocked, stats };
 }
 /* 清洗抓取到的正文：去掉成片空行与多余空格（网络资料常带大量空白，直接截取会浪费额度） */
 function cleanText(raw) {
@@ -1668,7 +1889,12 @@ function chatSourcesBlock(goal) {
   const isOwn = s => s.site === '用户提供的图片' || s.site === '用户提供的电子书' || s.site === '导入的资料' || s.site === '导入的代码库' || s.site === '待找书单';
   const own = all.filter(isOwn);
   const net = all.filter(s => !isOwn(s));
-  const line = s => '- ' + (Number(s.quality) === 1 ? '★' : '') + '[' + s.site + '｜' + s.kind + '] ' + s.title
+  /* 每条带上 AI 判读（相关度 / 主题 / 一句话摘要）——模型据此判断"这条要不要展开读"，
+     用户也从清单里一眼看出资料库里都有什么（以前只有标题，标题党看不出来）。 */
+  const line = s => '- ' + (Number(s.quality) === 1 ? '★' : '')
+    + (Number(s.quality_score) ? '[AI ' + s.quality_score + '/5]' : '')
+    + '[' + s.site + '｜' + s.kind + (s.topic ? '｜' + s.topic : '') + '] ' + s.title
+    + (s.ai_summary ? ' —— ' + String(s.ai_summary).slice(0, 80) : '')
     + (String(s.url || '').startsWith('/') ? '（本机路径：' + s.url + '）' : '');
   const lines = ['', `【资料库清单（共 ${all.length} 条：自己提供 ${own.length} / 网络检索 ${net.length}）】`];
   for (const s of own.slice(0, 40)) lines.push(line(s));
@@ -1683,7 +1909,7 @@ function chatSourcesBlock(goal) {
 }
 /* 对话助理的代码上下文：已导入代码库的完整文件清单 + 与本次问题最相关的文件内容。
    旧版导入只存了摘要、没有快照 —— 这里现场补存一次（目录还在的话），老用户不必重新导入。 */
-function codeContextBlock(goal, message) {
+function codeContextBlock(goal, message, stats) {
   const repos = db.prepare("SELECT id, url, title FROM sources WHERE goal_id = ? AND site = '导入的代码库'").all(goal.id);
   let rows = db.prepare('SELECT path, root, content, truncated FROM code_repo_files WHERE goal_id = ?').all(goal.id);
   if (!rows.length && repos.length) {
@@ -1692,6 +1918,7 @@ function codeContextBlock(goal, message) {
     }
     rows = db.prepare('SELECT path, root, content, truncated FROM code_repo_files WHERE goal_id = ?').all(goal.id);
   }
+  if (stats) { stats.repos = repos.length; stats.files = rows.length; }
   if (!rows.length && !repos.length) return '';
   const lines = ['', '【已导入的代码库】'];
   if (!rows.length) {
@@ -1711,6 +1938,7 @@ function codeContextBlock(goal, message) {
      否则"下一步做什么"这类与代码无关的话也会拖进 4 万字无关源码，
      每次对话凭空多 27k tokens（线上表现为"发消息特别慢"）。 */
   const picked = codeStore.pickCodeContext(rows, message, { requireHits: true });
+  if (stats) stats.picked = picked.length;
   if (picked.length) {
     lines.push('');
     lines.push('【与本次问题最相关的源码（按你这句话里的关键词挑选，已脱敏；超长文件给的是命中处附近的片段）】');
@@ -2266,7 +2494,12 @@ function nodeTutorialBlock(node) {
 async function buildExpandPrompt(goal, node, sources, folderCode) {
   const levelName = { 0: '阶段', 1: '小目标', 2: '任务', 3: '子任务', 4: '步骤', 5: '步骤' }[node.level] || '节点';
   const lines = [];
-  lines.push('你是资深职业路径规划师。请把下面这个节点拆成更细、可直接执行的任务（5-8 个，**最多 10 个**）。');
+  /* 展开也要分档：层级越细的节点，子任务越少、依据条数越少。
+     原来不分层级一律"5-8 个 × 每个 3-5 条依据"，一个"步骤"级节点也要
+     吐出一大篇 JSON（实测单次调用 40~90 秒）。细节点不需要那么多。 */
+  const ex = effort.expandEffort(node);
+  lines.push('你是资深职业路径规划师。请把下面这个节点拆成更细、可直接执行的任务'
+    + (ex.batch ? '（' + (ex.batch - 2) + '-' + ex.batch + ' 个）' : '（5-8 个，**最多 10 个**）') + '。');
   lines.push('');
   lines.push(goalHeader(goal));
   lines.push(goalQaBlock(goal));
@@ -2290,20 +2523,52 @@ async function buildExpandPrompt(goal, node, sources, folderCode) {
   lines.push(askBlock(node.ask_round || 0, '该节点的拆分'));
   lines.push('');
   lines.push('【要求】');
-  lines.push('1. 只围绕该节点主题展开，生成 5-8 个子任务（最多 10 个），颗粒度比现有任务更细（每个 2-6 小时可完成）。任务数量不要多，用户压力要小。');
+  lines.push('1. 只围绕该节点主题展开，生成 ' + (ex.batch ? (ex.batch - 2) + '-' + ex.batch + ' 个子任务' : '5-8 个子任务（最多 10 个）')
+    + '，颗粒度比现有任务更细（每个 2-6 小时可完成）。任务数量不要多，用户压力要小。'
+    + (ex.batch ? '（该节点层级较细，本来就该是几个小步骤，不要硬凑数量）' : ''));
   lines.push('2. 每个子任务必须给出：');
   lines.push('   - title：动词开头、具体可执行');
   lines.push('   - detail：怎么做，60-120 字，写清步骤/方法/用到的资源');
   lines.push('   - artifact：产出物（具体文件/仓库/笔记/作品）');
   lines.push('   - acceptance：验收标准（可自检）');
   lines.push('   - hours：预计投入小时数（如「3h」）');
-  lines.push('   - sources：**3-5 条依据**（name 写实际来源（站点+标题要点），note 写清这条资料支撑了什么要求/结论）');
+  lines.push('   - sources：' + (ex.batch ? '**2-3 条依据**（细步骤不必每条都凑满 5 条）' : '**3-5 条依据**')
+    + '（name 写实际来源（站点+标题要点），note 写清这条资料支撑了什么要求/结论）');
   lines.push('3. 优先依据上面检索到的真实资料；如果资料不足，依据公开公认做法并标注「待核实」。');
   lines.push('4. 只输出一个 JSON 对象（不要其他文字或代码块标记）：');
   lines.push('{"tasks":[{"title":"","detail":"","artifact":"","acceptance":"","hours":"","sources":[{"name":"","note":""}]}]}');
   lines.push('5. 若按「关键机制」需要先提问，则只输出 {"questions":[...]}，不要输出 tasks。');
   lines.push('6. 如果上面给了挂载文件夹的源码节选：拆分必须沿代码的真实模块/目录结构走（每个子任务对应到具体的包、文件或组件），不要拍脑袋编阶段；detail 里点出要读哪几个文件。');
   return lines.join('\n');
+}
+/* ===== Markdown 教程的「少量内联 HTML」规范 =====
+   渲染端（public/app.js 的 mdTags / mdDetails）只放行这几个标签 —— 提示词必须跟渲染能力
+   对齐：**说了能写却没渲染**，用户看到的是一堆裸标签；**没说能写**，模型就自己发明
+   （2026-10-15 真实反馈：教程里到处是 <span style="color:#dc2626;font-weight:700">）。
+   生成、整篇改写、分节改写三处共用这一份。 */
+function richMdSpecLines() {
+  const lines = [];
+  lines.push('');
+  lines.push('【强调与折叠：可以用一点点内联 HTML（只有下面这几样会被渲染）】');
+  lines.push('· 标重点（最要命的那种）用红色加粗：'
+    + '`<span style="color:#dc2626;font-weight:700">空结果不设分支，模型会直接编答案</span>`；');
+  lines.push('  颜色只认这三种：#dc2626（红·坑/危险）、#c9701f（黄·注意）、#16a34a（绿·正确做法），'
+    + '可以再加 `font-weight:700` 或 `text-decoration:underline`。'
+    + '**每节最多 3 处** —— 满屏红字等于没有重点；');
+  lines.push('· 折叠答案（练习/自测的参考答案）写成：');
+  lines.push('<details>');
+  lines.push('<summary>参考答案</summary>');
+  lines.push('');
+  lines.push('（这里正常写 Markdown：文字、列表、代码块都行）');
+  lines.push('');
+  lines.push('</details>');
+  lines.push('  即 `<details>` 与 `</details>` 各占一行，`<summary>` 写标题，三段之间不要夹别的内容；');
+  lines.push('· 表格单元格里要换行用 `<br>`；行内小强调也可以用 `<mark>高亮</mark>`、`<kbd>Ctrl+S</kbd>`；');
+  lines.push('· **除这几样以外，一个 HTML 标签都不要写**：div / table / a / img / style / script / ul 之类一律不要 ——'
+    + ' 表格用 Markdown 语法、链接用 `[文字](网址)`，图示用下面的 ```viz 可视化块；');
+  lines.push('· 正文里讲别的语言时出现的 `<tag>`、`<Object>`、`<stdin>` 这类，务必用反引号包起来'
+    + '（`<stdin>`），否则会被当成真的标签。');
+  return lines;
 }
 /* 按用户意见修改已有教程 */
 /* ===== Markdown 教程的「可视化块」规范 =====
@@ -2354,6 +2619,85 @@ function vizSpecLines() {
   lines.push('· 视觉上做干净：留白、对齐、配色克制，别用满屏艳色；深浅色都要能看清');
   return lines;
 }
+/* 「只改这一处」的补丁提示词。
+   为什么要它：全文重写模式下，改一句话也要把整篇教程重新输出一遍
+   （实测 7 万字的教程要 4 轮续写、190~355 秒）。补丁模式只让它回
+   「原文片段 → 改后片段」，输出量从 7 万字降到几十字，秒级完成。 */
+function buildTutorialPatchPrompt(tut, feedback, excerpt, whole, codeBlock) {
+  const lines = [];
+  lines.push('你是耐心、严谨的技术导师。用户对**已生成的教程**提了一处修改意见。');
+  lines.push('');
+  lines.push('⚠️ **不要重写整篇教程**，只输出需要改动的那个片段。');
+  lines.push('整篇有几万字，逐字重发既慢、又容易把没提到的段落改坏。');
+  lines.push('');
+  lines.push('【教程主题】' + String(tut.title || ''));
+  lines.push('');
+  lines.push('【用户的修改意见（必须满足）】' + String(feedback || '').slice(0, 1500));
+  lines.push('');
+  lines.push(whole ? '【教程正文】' : '【教程正文（只给了相关章节；补丁只会套用到这些范围内）】');
+  lines.push(excerpt);
+  if (codeBlock) { lines.push(''); lines.push(codeBlock); }
+  lines.push('');
+  lines.push('【输出格式】只输出补丁，格式必须**一字不差**地照下面来：');
+  lines.push('<<<<<<< SEARCH');
+  lines.push('（要改的原文，必须和上面正文**逐字一致**，包括标点、空格、换行位置）');
+  lines.push('=======');
+  lines.push('（改完之后的样子）');
+  lines.push('>>>>>>> REPLACE');
+  lines.push('');
+  lines.push('【规则】');
+  lines.push('1. SEARCH 里只放**最小必要片段**：3~15 行，能唯一定位到就行；**绝不要**贴整节或整篇。');
+  lines.push('2. 一处改动一个补丁；有多处就写多个补丁，按从上到下的顺序。');
+  lines.push('3. SEARCH 必须在正文里**唯一**；如果那句话出现多次，多带一行上下文。');
+  lines.push('4. 没提到的内容**一个字都不要输出**：不要复述目录、不要写总结、不要输出没改的段落。');
+  lines.push('5. 补丁之外不要有任何解释文字、不要用 ``` 包起来。');
+  lines.push('6. 改 ```viz 可视化块里的 HTML/样式时同样适用：只贴要改的那几行。');
+  lines.push('7. 如果这份意见其实是**整篇重做**（重排结构、每节都要动），就不要硬写补丁，只回一行：NEED_FULL_REWRITE');
+  return lines.join('\n');
+}
+/* 数一份教程里的 ```viz 块，并给每个块算个"长相指纹"（长度 + 开头特征），
+   用来判断"这个块还在不在、还是不是原来那个"。改教程时 AI 把可视化整段删掉、
+   或者悄悄换成一段文字，只看总长度是发现不了的 —— 那正是用户肉眼会发现的损失。 */
+function vizBlocks(txt) {
+  const out = [];
+  const re = /```(?:viz|demo|htmlviz)\n([\s\S]*?)\n```/g;
+  let m;
+  while ((m = re.exec(String(txt || '')))) {
+    const b = m[1];
+    out.push({ len: b.length, head: b.replace(/\s+/g, ' ').slice(0, 40), isHtml: /<[a-zA-Z][\w-]*[\s\S]*>/.test(b) });
+  }
+  return out;
+}
+/* 原教程里的可视化块，改完还在不在、还是不是原来那个。
+   ⚠️ 之前这版在 `a.length <= b.length` 时直接返回 null —— 于是"删掉一个旧的、
+   另写一个新的"这种最典型的丢失（实测：把我那张 HTML 流程图换成了一张字符画，
+   块数不变，守卫全绿）根本不会被发现。数不变不代表没丢，要逐块对指纹。 */
+function vizLoss(before, after) {
+  const a = vizBlocks(before), b = vizBlocks(after);
+  if (!a.length) return null;
+  const match = x => b.some(y => y.isHtml === x.isHtml && Math.abs(y.len - x.len) < Math.max(300, x.len * 0.25));
+  const gone = a.filter(x => !match(x));
+  if (!gone.length) return null;
+  const hadHtml = a.filter(x => x.isHtml).length, nowHtml = b.filter(x => x.isHtml).length;
+  /* ⚠️ 只要「总块数」和「HTML 演示数」都没减少，就不算丢失 —— 那只是**重写**。
+     实测误报（2026-10-12）：用户要求"把 ReAct 那段做成 HTML 可视化"，AI 从 6 块做到 8 块
+     （净增 2 块），同时重写了原有的一块 → 指纹对不上 → 判成"丢失"，把用户正想要的结果拒了。
+     真正要拦的是这两种，它们都会让计数**下降**：
+       · 整块被删掉
+       · HTML 演示被降级成一段文字或字符画（块数可能不变，但 HTML 数会掉） */
+  if (b.length >= a.length && nowHtml >= hadHtml) {
+    console.log('[tutorial] 可视化块被重写（块 ' + a.length + '→' + b.length + '，其中 HTML ' + hadHtml + '→' + nowHtml + '），不算丢失：'
+      + gone.map(x => x.head).join(' / '));
+    return null;
+  }
+  return { had: a.length, now: b.length, gone: gone.slice(0, 2).map(x => (x.isHtml ? 'HTML 演示「' : '非 HTML 内容「') + x.head + '」') };
+}
+/* 章节流失守卫（structureLoss）见 server/tut-guard.js ——
+   它比原来聪明的地方：能认出"用户点名要重写的那一段"（从「X」往后 / 第 7 节之后 /
+   整篇重写），只要求**范围外**的章节一节不少，范围内的重组放行。
+   原来那版对全篇逐字比对，用户明确要求重写后半本也会被判"改坏了结构"而拒收
+   （2026-10-14 线上：连续两次白写 3 分钟，见 tut-guard.js 顶部注释）。 */
+
 function buildTutorialEditPrompt(goal, node, tut, feedback, format, codeBlock) {
   const lines = [];
   lines.push('你是耐心、严谨的技术导师。用户对**已生成的教程**提出了修改意见，请按要求改好它。');
@@ -2371,6 +2715,19 @@ function buildTutorialEditPrompt(goal, node, tut, feedback, format, codeBlock) {
   lines.push('   ⚠️ 用户往往只针对某一段提意见（"这节太抽象"），**绝不能因此把整本教程重写**：');
   lines.push('   原有的每一个章节（分步实践、验收标准、面试追问、速查卡、延伸阅读、小结…）都要留着，');
   lines.push('   标题可以微调，但不许整节整节地消失。要改哪就只改哪。');
+  /* 意见里点明了重写范围时，把"哪一段可以动、哪一段必须原样保留"直接写进提示词 ——
+     否则模型一边想按意见重排、一边又怕删章节，最后交出个四不像，
+     而"范围外被动了"和"范围内没敢改"两边都会被守卫挡下来。 */
+  const sc = tutGuard.parseEditScope(feedback, tut.content || '');
+  if (sc.mode === 'range') {
+    lines.push('   ✅ **本次允许改动的范围**（用户已经点名）：从「' + sc.fromTitle + '」这一节开始，到全篇结束。');
+    lines.push('   这一段的章节结构可以按意见重排（合并、拆分、改标题、调顺序、重新编号都行）；');
+    lines.push('   但**这一节之前的 ' + sc.fromIdx + ' 个章节必须原样保留** —— 标题、顺序、内容一个字都不要动'
+      + '（范围外的章节少一个就会被系统拒收，这次修改就白做了）。');
+  } else if (sc.mode === 'all') {
+    lines.push('   ✅ **本次允许调整章节结构**：可以重排、合并、拆分、新增章节（用户已同意），');
+    lines.push('   但已经讲过的知识点、代码、可视化演示不能凭空消失。');
+  }
   lines.push('2. 保持原有格式与结构风格，篇幅可增可减，但要保证「能照着学会」；');
   lines.push('3. 直接输出修改后的完整教程正文（' + (format === 'md' ? 'Markdown' : 'HTML') + '），不要任何解释或前后缀。');
   lines.push('4. 范围顺手清理：如果正文里混入了与【教程主题】无关的其它章节的成段内容，且用户意见没有要求保留，可顺手删减；不要新增超出主题的新章节。');
@@ -2389,6 +2746,11 @@ function buildTutorialEditPrompt(goal, node, tut, feedback, format, codeBlock) {
     lines.push('');
     lines.push('（以下是可视化块的完整写法与规范，新增的块必须照着做）');
     for (const L of vizSpecLines()) lines.push(L);
+    lines.push('');
+    lines.push('7. **强调与折叠块的处理**：正文里已有的 `<span style="color:…">` 标红、`<details><summary>…</summary>` 折叠块'
+      + '（见下面的规范）**要留住**，别删、别把 HTML 转义成文字；'
+      + '如果用户意见是"看不清重点 / 样式太单一"，就按规范补上（每节最多 3 处标红）。');
+    for (const L of richMdSpecLines()) lines.push(L);
   }
   lines.push('');
   lines.push('【原教程正文】');
@@ -2407,10 +2769,59 @@ function fullTutorialForEdit(content) {
   const s = String(content || '');
   if (s.length <= TUT_EDIT_MAX) return s;
   throw new Error('这份教程有 ' + s.length + ' 字，超出一次交给 AI 修改的上限（' + TUT_EDIT_MAX + ' 字），已**没有改动**。'
-    + '请把修改意见拆小、分多次提，或先删掉教程里用不上的章节再改 —— '
-    + '绝不能只把前半截发给 AI 让它"改好"，那会把后半截整段删掉。');
+    + '把意见写得更具体一点 —— **点名到某一节**（写它的标题），系统就只把那一节发给 AI、其余正文逐字保留；也可以把意见拆小分多次提。'
+    + '（绝不能只把前半截发给 AI 让它"改好"，那会把后半截整段删掉。）');
 }
-function buildTutorialPrompt(goal, node, format, note, codeBlock) {
+/* 长教程走「分节改写」（见 server/tut-seg.js）：只有"点名了范围 / 允许整篇重排"的意见才走，
+   因为要切块就必须知道改哪几段；这种情况连 TUT_EDIT_MAX 也不受限制 —— 输出量只跟要改的那几节有关。 */
+const SEG_MIN = 28000;      // 正文超过这个长度才值得分段（短教程一次改完，少一次拼装）
+const SEG_CHUNK = 14000;    // 每块目标字数：撞单次输出上限前留足余量，也给续写留空间
+
+/** 分节改写：逐块问 AI「只改这一段」，再把各块拼回整篇。返回拼好的整篇正文。 */
+function buildSegmentPrompt(goal, node, tut, feedback, seg, info, codeBlock) {
+  const L = [];
+  L.push('你是耐心、严谨的技术导师。用户对一份**长教程**提了修改意见，现在按「分段重写」来改：');
+  L.push('整篇太长没法一次改完，所以我们一次只改其中一段，改完全部再拼回整篇。');
+  L.push('');
+  L.push(goalHeader(goal));
+  L.push(constraintsBlock(goal));
+  L.push('');
+  L.push('【教程主题】' + String(tut.title || (node && node.title) || ''));
+  L.push('【用户的修改意见（必须全部满足；这一段也要按它改）】' + String(feedback || '').slice(0, 1500));
+  L.push('');
+  L.push('【这次只改第 ' + info.no + '/' + info.total + ' 段】');
+  L.push('· 这一段的范围：从「' + seg.title + '」' + (seg.last && seg.last !== seg.title ? '到「' + seg.last + '」' : '') + '（这两节都含在内）'
+    + (seg.mid ? '（注意：这一段是某一大节里的**一部分**，不是完整小节）' : ''));
+  if (info.nextTitle) L.push('· 紧接着的下一节是「' + info.nextTitle + '」，**不在你这次的范围内**，一个字都不要碰、也不要输出。');
+  if (info.prevTail) {
+    L.push('· 上一段刚改完的结尾（衔接自然即可，别重复它的内容）：');
+    L.push('```text');
+    L.push(info.prevTail.slice(-600));
+    L.push('```');
+  }
+  L.push('');
+  L.push('【硬性要求】');
+  L.push('1. **只输出这一段改好后的正文**。不要输出别的段、不要重述目录、不要写"已修改/以下是"之类的话 ——');
+  L.push('   系统会把各段按顺序拼回整篇，你多输出别的段就会重复出现。');
+  L.push('2. 这一段内部允许按意见重排、合并、拆分、改标题；但**段首那一节的标题要保留**（除非意见明确要求改名）。');
+  L.push('3. 不要在本段末尾自行追加"小总结/下一步预告"这类内容，也不要新增超出本段主题的章节。');
+  L.push('4. 代码块、表格、可视化块必须完整闭合 —— 分段重写最容易犯的错就是这里少一个 ```。');
+  if (tut.format === 'md') {
+    L.push('5. 本段里原有的 ```viz 可视化块除意见明确要求外要原样留住（不要换成文字描述、不要换成字符画）。');
+    L.push('6. 标红强调（`<span style="color:#dc2626;font-weight:700">…</span>`）与 `<details><summary>参考答案</summary>…</details>`'
+      + '折叠块是本产品认得的格式，原样留住、别删也别转义；要补重点时照这个写法加（每节最多 3 处）。');
+    if (/可视化|viz|演示|图/.test(String(feedback || ''))) for (const x of vizSpecLines()) L.push(x);
+  }
+  if (codeBlock) { L.push(''); L.push(codeBlock); }
+  L.push('');
+  L.push('【这一段现在的正文（原样给你；改好后把整段返回，不要带下面这两行标记）】');
+  L.push('<<<SEGMENT_START>>>');
+  L.push(String(info.text || ''));
+  L.push('<<<SEGMENT_END>>>');
+  return L.join('\n');
+}
+
+function buildTutorialPrompt(goal, node, format, note, codeBlock, budget) {
   const levelName = { 0: '阶段', 1: '小目标', 2: '任务', 3: '子任务', 4: '步骤', 5: '步骤' }[node.level] || '任务';
   const lines = [];
   lines.push('你是耐心、严谨的技术导师。请为用户写一份「完整学习教程」，目标是让用户**真正掌握**这个任务背后的知识点与技能，而不是草草把任务做完。');
@@ -2443,6 +2854,21 @@ function buildTutorialPrompt(goal, node, format, note, codeBlock) {
   lines.push('7. 延伸学习：想更深入可以看什么（写清楚看什么、关注什么点）。');
   lines.push('');
   lines.push('【写作要求】');
+  /* 篇幅预算：不给上限时模型会一路灌水（实测一个 1 小时的任务写出 6~7 万字）。
+     写成"用户可以花多少时间读"比"多少字"更好执行 —— 模型对字数的感觉很不准。 */
+  if (budget && budget.target && format !== 'html') {
+    const mins = Math.max(5, Math.round(budget.target / 380));   // 中文阅读速度约 380 字/分钟
+    /* ⚠️ 只写"控制在 X 字"没用 —— 实测要求 7000 字，模型照样写 21000。
+       模型对字数的感知很不准，但对**结构数量**的遵守度高得多。
+       所以这里同时给出可数的约束：几节、每节几段。 */
+    const secs = Math.max(4, Math.round(budget.target / 1500));
+    const perSec = Math.round(budget.target / secs);
+    lines.push('- **篇幅与结构**：整篇控制在 ' + budget.target + ' 字左右（用户读一遍约 ' + mins + ' 分钟）。'
+      + '具体到结构：**二级标题不超过 ' + secs + ' 个，每个二级标题下面正文不超过 3 段、每段 3~5 句**。'
+      + '宁可一节只讲透一个点，也不要为凑满结构把每节都写长。');
+    lines.push('- 不要写"本节小结""总结一下"这类收尾段；不要重复解释同一个概念；不要堆砌与任务无关的背景。'
+      + '真正一图胜千言的地方交给你下面的可视化块，而不是继续加字。');
+  }
   lines.push('- 讲原理与思路，不要只给结论；对每个关键操作解释原因，让用户能举一反三。');
   lines.push('- 贴合用户现状与已确认的问答（基础、时间、偏好）；零基础就多解释、少跳跃。');
   lines.push('- 使用中文；专业术语首次出现时给出英文与解释。');
@@ -2458,6 +2884,7 @@ function buildTutorialPrompt(goal, node, format, note, codeBlock) {
     lines.push('【页内脚本约法三章】只许操作本页 DOM（翻页、折叠、动画、高亮）；禁止 fetch/XHR、localStorage、Cookie、top 跳转、新窗口弹窗。违反即不合格。');
   } else {
     lines.push('【输出格式】只输出 Markdown 正文（# 一级标题开始）。不要用 ``` 包裹整篇内容，不要输出任何额外说明文字。代码块、表格、清单、引用都要用标准 Markdown 语法。');
+    for (const L of richMdSpecLines()) lines.push(L);
     for (const L of vizSpecLines()) lines.push(L);
   }
   return lines.join('\n');
@@ -3240,6 +3667,70 @@ function chatTasksBlock(goal) {
   out.push('⚠️ 注意口径：**失败 / 已停止 = 库里的内容可能一个字都没动**；"已提交任务"不等于"改成功了"。');
   return out.join('\n');
 }
+/* ===== 对话里的"节点附件" =====
+   （2026-10-15）用户定调：每个节点的 AI 对话应该是独立的，而且右键节点 → AI 功能
+   应该把节点**加进右侧 AI 助手**，而不是另开一个只看得到当前节点的小窗。
+   于是有了这一组：对话带哪几个节点，跟对话一起落库；提示词里把范围钉死。 */
+function sanitizeChatNodes(list, gid) {
+  const out = [];
+  const seen = new Set();
+  for (const x of (Array.isArray(list) ? list : [])) {
+    if (out.length >= 40) break;          // 一次最多带 40 个（前端 PICK_MAX 同值）：
+                                          // 再多提示词会被清单撑爆，模型也会看花眼
+    const id = Number(x && typeof x === 'object' ? x.id : x);
+    if (!id || seen.has(id)) continue;
+    const n = db.prepare('SELECT id FROM nodes WHERE id = ? AND goal_id = ?').get(id, gid);
+    if (!n) continue;                     // 只能带本目标里的节点，客户端编的 id 一律丢掉
+    seen.add(id);
+    out.push({ id, withKids: !!(x && typeof x === 'object' && x.withKids) });
+  }
+  return out;
+}
+const LEVEL_WORD = { 0: '阶段', 1: '小目标', 2: '任务', 3: '子任务', 4: '步骤', 5: '步骤' };
+/* 整棵子树（只列 id 和标题，限量）—— withKids 的附件用它 */
+function subtreeBrief(rootId, max) {
+  const cap = max || 40;
+  const out = [];
+  const walk = id => {
+    if (out.length >= cap) return;
+    for (const k of db.prepare('SELECT id, title, parent_id FROM nodes WHERE parent_id = ? ORDER BY sort_order, id').all(id)) {
+      if (out.length >= cap) return;
+      out.push('#' + k.id + ' ' + String(k.title || '').slice(0, 24));
+      walk(k.id);
+    }
+  };
+  walk(rootId);
+  return out;
+}
+/* 提示词里的「用户在说哪几个节点」。和「用户当前打开的是教程」同构：
+   范围钉死了，模型才不会把改动落到别的分支上（这是用户最烦的"改错地方"）。 */
+function chatNodesBlock(list) {
+  const rows = [];
+  for (const a of (list || [])) {
+    const n = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(a && a.id));
+    if (n) rows.push({ n, withKids: !!(a && a.withKids) });
+  }
+  if (!rows.length) return null;
+  const lines = [];
+  lines.push('【用户正在这 ' + rows.length + ' 个节点上跟你说话】');
+  for (const r of rows) {
+    const n = r.n;
+    let head = '· #' + n.id + ' 「' + String(n.title || '').slice(0, 60) + '」（' + (LEVEL_WORD[n.level] || '节点')
+      + (n.hours ? ' · ' + n.hours : '') + (n.status === 'done' ? ' · 已完成' : n.status === 'doing' ? ' · 进行中' : '') + '）';
+    if (n.detail) head += '：' + String(n.detail).replace(/\s+/g, ' ').slice(0, 160);
+    lines.push(head);
+    const kids = db.prepare('SELECT id, title FROM nodes WHERE parent_id = ? ORDER BY sort_order, id').all(n.id);
+    if (kids.length) lines.push('   它现有的子节点：' + kids.map(k => '#' + k.id + ' ' + String(k.title || '').slice(0, 26)).join(' ｜ '));
+    if (r.withKids) {
+      const all = subtreeBrief(n.id);
+      if (all.length) lines.push('   用户要求连它下面的子节点一起纳入（' + all.length + ' 个，都会被一起改）：' + all.join(' ｜ '));
+    }
+  }
+  lines.push('用户这句话默认是在说上面这些节点：要改就用它们的 id；要给某个节点加子任务，parent_id 填它；别去动别的分支。'
+    + '若用户的要求听起来与它们明显无关，先在回复里问一句是不是说错了节点，不要擅自改别的。');
+  return { text: lines.join('\n'), ids: rows.map(r => '#' + r.n.id).join(' '), count: rows.length, first: rows[0].n };
+}
+
 async function buildChatPrompt(goal, message, sessionId, opts) {
   const o = opts || {};
   /* ASK 模式：只回答、不许改。这里是**服务端**的硬边界 —— 前端也会拦一道，
@@ -3249,14 +3740,20 @@ async function buildChatPrompt(goal, message, sessionId, opts) {
   const tutRow = tutId ? db.prepare('SELECT id,title,node_id,content,goal_id FROM tutorials WHERE id = ?').get(tutId) : null;
   const tut = (tutRow && Number(tutRow.goal_id) === Number(goal.id)) ? tutRow : null;
   const lines = [];
+  /* 「它做了什么」的第一组：这一轮到底带了哪些上下文进去。
+     ⚠️ 只记**真的带上了**的块（块为空就不记）—— 否则用户会看到一串"读了 XX"，
+     其实什么都没读到，等于把这块做成装饰。 */
+  const ctx = [];
+  const addCtx = (label, detail) => { ctx.push({ kind: 'ctx', label, detail: detail || '' }); };
     lines.push('你是用户的「目标助理」：不只可以改路线图，还能操作这个目标下的所有可操作信息——管理信息源（添加/删除）、触发信息提炼与信息源收集、修改目标信息（现状/时间/期限/参考资料）、添加规划约束。');
   lines.push('用户让你做这些事时，直接通过下面的 ops 执行，不要只说"你可以去某某页面点一下"。');
   lines.push('');
   lines.push(goalHeader(goal));
   lines.push(goalQaBlock(goal));
   lines.push(constraintsBlock(goal));
+  addCtx('目标信息、现状与约束', String(goal.title || '').slice(0, 30));
   const dgBlock = digestsBlock(goal);
-  if (dgBlock) lines.push(dgBlock);
+  if (dgBlock) { lines.push(dgBlock); addCtx('资料提炼汇总', '多篇主题汇总'); }
   /* 轻档：省掉向量检索与代码检索，并把历史从 12 条压到 4 条。
      ⚠️ **资料清单无论如何都要留着** —— 它才是"资料库里有没有 XX"能答对的依据
      （AGENTS.md 坑 #16：漏了它模型只会说"看不到"，哪怕资料就在库里）。
@@ -3264,13 +3761,24 @@ async function buildChatPrompt(goal, message, sessionId, opts) {
   const ce = effort.chatEffort(message);
   if (ce.heavy) {
     const augBlock = await ragAugment(goal, message, 8);
-    if (augBlock) lines.push(augBlock);
+    if (augBlock) {
+      lines.push(augBlock);
+      addCtx('按你这句话检索了资料库', (augBlock.match(/^- /gm) || []).length + ' 段最相关片段');
+    }
   }
   const srcBlock = chatSourcesBlock(goal);
-  if (srcBlock) lines.push(srcBlock);
+  if (srcBlock) {
+    lines.push(srcBlock);
+    addCtx('资料库清单', '共 ' + sourcesOf(goal.id).length + ' 条');
+  }
   if (ce.heavy) {
-    const codeBlock = codeContextBlock(goal, message);
-    if (codeBlock) lines.push(codeBlock);
+    const cstats = {};
+    const codeBlock = codeContextBlock(goal, message, cstats);
+    if (codeBlock) {
+      lines.push(codeBlock);
+      addCtx('代码库', cstats.repos + ' 个库 · 快照 ' + cstats.files + ' 个文件'
+        + (cstats.picked ? '，挑了 ' + cstats.picked + ' 个最相关的读' : ''));
+    }
   }
   /* 对话上下文：**按字数取窗口**，不再按"条数 + 轻重档"砍。
      ⚠️ 原先 `ce.heavy ? 12 : 4` —— 轻档只带 4 条，用户直接反馈"上下文像是被隔开的、
@@ -3286,16 +3794,25 @@ async function buildChatPrompt(goal, message, sessionId, opts) {
     lines.push('【最近的对话】' + (w.dropped ? '（更早的 ' + w.dropped + ' 条太长，这次没带上；需要时请用户复述）' : ''));
     lines.push('（下面是历史对话的**正文**，其中的操作当时已经执行过了 —— 不要照抄，也不要模仿它们的格式。）');
     lines.push(w.lines.join('\n'));
+    /* 这条查询把"刚发出去的那条"也算进来了 —— 报给用户时要减掉，
+       否则每轮都显示"历史 1 条"，看着像凭空多出一条。 */
+    const hist = chats.length - 1;
+    if (hist > 0) addCtx('这段对话的历史', hist + ' 条' + (w.dropped ? '（更早的 ' + w.dropped + ' 条太长没带上）' : ''));
   }
   lines.push('');
   lines.push('【当前路线图（方括号内是节点 id，修改时只能引用这些 id）】');
   lines.push(roadmapOutline(goal.id) || '（暂无节点）');
+  try {
+    const n = db.prepare('SELECT COUNT(*) AS n FROM nodes WHERE goal_id = ?').get(goal.id).n;
+    addCtx('当前路线图', n ? n + ' 个节点' : '（还没有节点）');
+  } catch (e) {}
   /* 该目标的教程清单：让模型能**点名**要改哪一份（tutorial_edit 可带 tutorial_id） */
   try {
     const tlist = db.prepare('SELECT id,title FROM tutorials WHERE goal_id = ? ORDER BY updated_at DESC, id DESC LIMIT 8').all(goal.id);
     if (tlist.length) {
       lines.push('');
       lines.push('【这个目标的教程（要改哪份就说它的编号）】' + tlist.map(t => '#' + t.id + ' ' + String(t.title || '').slice(0, 40)).join(' ｜ '));
+      addCtx('这个目标的教程清单', tlist.length + ' 份');
     }
   } catch (e) {}
   if (tut) {
@@ -3305,9 +3822,20 @@ async function buildChatPrompt(goal, message, sessionId, opts) {
     lines.push('【用户正在看的教程】#' + tut.id + ' 「' + String(tut.title || '') + '」（正文 ' + body.length + ' 字）');
     if (heads.length) lines.push('它的目录：' + heads.join(' / '));
     lines.push(tutBodyBlock(body, message));
+    addCtx('你正在看的那份教程', '「' + String(tut.title || '').slice(0, 24) + '」' + body.length + ' 字');
   }
-  lines.push('');
-  lines.push(chatTasksBlock(goal));
+  const taskBlock = chatTasksBlock(goal);
+  if (taskBlock) { lines.push(''); lines.push(taskBlock); addCtx('这个目标的 AI 任务记录', '用来判断"到底改了没有"'); }
+  /* 用户带上来的节点（右键节点 → AI 功能 / 助手里的 ＋添加节点）：
+     把"这句话是在说哪些节点"钉死。以前只钉一个，而且历史还是整个目标的，
+     于是打开 SKILL 节点看到的是 MCP 那轮对话（用户实测）。 */
+  const focusList = Array.isArray(o.nodes) ? o.nodes : (o.node && o.node.id ? [{ id: o.node.id, withKids: false }] : []);
+  const nb = chatNodesBlock(focusList);
+  if (nb) {
+    lines.push('');
+    lines.push(nb.text);
+    addCtx(nb.count > 1 ? '你在说的这几个节点' : '你在说的那个节点', nb.ids);
+  }
   lines.push('【用户的新消息】' + message);
   lines.push('');
   lines.push('【你的任务】');
@@ -3317,7 +3845,7 @@ async function buildChatPrompt(goal, message, sessionId, opts) {
     lines.push('2. 如果用户其实是要改东西（改路线图 / 改教程 / 存资料 / 加约束 / 改目标信息），就直说：把 AI 助手顶部的模式切成「Agent」，再说一次我就去做。不要假装已经做了。');
     lines.push('3. 回答要具体、可执行；引用资料时写明来源标题。默认 400 字以内，除非用户要求详细说明。');
     lines.push('4. 不要编造事实。看不到的信息就说看不到，并告诉用户怎么让你看到。');
-    return lines.join('\n');
+    return { prompt: lines.join('\n'), ctx };
   }
   lines.push('0. 不要使用任何工具（不要读取文件、不要执行命令、不要联网）；规划、资料库与代码库的全部信息都在本提示里，直接基于它作答。');
   lines.push('   用户问「资料库里有没有 / 能不能看到 XX（如某个代码库）」时，依据上面【资料库清单】【资料提炼汇总】【已导入的代码库】如实回答，不要说资料库是空的：每个代码库都存了完整文件快照（脱敏），并已按本次问题附上最相关文件的内容。要看别的文件时，请用户在消息里直接写文件路径或关键词（如「看 server/ai.js」），下一轮就会带上；你不能写文件、不能执行命令。');
@@ -3345,12 +3873,23 @@ async function buildChatPrompt(goal, message, sessionId, opts) {
   lines.push('   - {"op":"collect"}（用户要求「再收集一些资料 / 找找岗位信息」时使用：会启动信息源检索）');
   if (tut) {
     lines.push('   - {"op":"tutorial_edit","tutorial_id":<编号>,"feedback":"修改意见"}（用户要求改教程时用；tutorial_id 从上面【这个目标的教程】里挑，不填则用他当前打开的那份。feedback 写清改哪里、改成什么样，可以把用户原话整理得更明确。它会开一个后台任务重写整篇教程、耗时几分钟，所以用户只是在问问题时**不要**用它。想在正文里说明你已提交，就写"已把这条修改交给教程任务"。）');
+    lines.push('     ⚠️ feedback 的写法决定这次能不能改成功：');
+    lines.push('     · 要动**结构**（重写其中一整段、重新组织、合并章节、换主线、重新编号、推倒重来）时，');
+    lines.push('       必须在 feedback 开头写清范围 —— 范围明确就写"重写范围：从「<照抄那一节的标题>」开始，到「<下一节标题>」之前结束"；');
+    lines.push('       确确实实要整篇来才写"整篇重新组织"。');
+    lines.push('     · **不要随手加"允许重写结构"**：那是关掉"范围外的章节一个都不许少"这道保护的开关，');
+    lines.push('       只有用户明确要求整篇重写时才写；也不要写"不要写允许重写结构"这类否定说明，那是废话、只会让人困惑。');
+    lines.push('     · 只是改一小处（改某句措辞、某个表、某张图，或往某一节里补内容）就只写"只重写「X」这一节"，');
+    lines.push('       别去描述范围以外的事。');
+    lines.push('     · **拿不准要动到哪几节就别自己定**：先说清你想改的范围并问一句（"这次会重写 A~B 两节，其余不动，可以吗"），');
+    lines.push('       等用户点头再输出 tutorial_edit。系统另有一道闸：结构类改动会先把范围摊给用户核对，他确认了才会真跑；');
+    lines.push('       所以这种情况下别在正文里写"已提交任务"，写"范围已列好，你确认后就开始改"才准。');
   }
   lines.push('4. 修改要精准：用户说改哪个就改哪个，不要顺手大改；单次最多 20 个操作。');
   lines.push('5. 删除要谨慎：只有用户明确要求才删除；阶段（最外层节点）不要删除，除非用户明确要求。');
   lines.push('6. 新增任务必须带 detail（怎么做，60-120 字）与 hours；依据已确认的问答与用户现状。');
   lines.push('7. 不要编造 id；只输出 JSON，不要输出其他内容。');
-  return lines.join('\n');
+  return { prompt: lines.join('\n'), ctx };
 }
 /* 把节点放到父节点下的指定位置，并归一化这一组兄弟的 sort_order。
    定位支持 after / before（兄弟节点 id）或 index（0 起）；都不给就追加到末尾。
@@ -3469,10 +4008,18 @@ function applyChatOps(goalId, ops, opts) {
       } else if (kind === 'tutorial_edit') {
           /* 教程 id 只认**请求里带的那个**（用户当前正在看的那份），不信模型自己报的 id ——
              模型编一个 id 出来就会改错教程。 */
-          const tid = Number((chatOpts.tutorial && chatOpts.tutorial.id) || 0);
+          /* 要改哪一份教程，按这个优先级找：
+             ① 消息里点名的（op.tutorial_id，提示词里已把该目标的教程列出来给它挑）
+             ② 用户当前正打开的那份（前端带的 tutorial_id）
+             ③ 这个目标**最近改过**的那份 —— 用户说"当前教程"时通常就是它。
+             ⚠️ 原来只认 ②，于是从目标页说"修改当前教程"时 tid=0 → 直接跳过，
+             用户看到的是"Agent 说已交办、却什么都没发生"（连说了三次都这样）。 */
+          const cand = [Number(op.tutorial_id || 0), Number((chatOpts.tutorial && chatOpts.tutorial.id) || 0)];
+          let tr = null;
+          for (const t of cand) { if (t) { const r = db.prepare('SELECT id,title,goal_id FROM tutorials WHERE id = ?').get(t); if (r && Number(r.goal_id) === Number(goalId)) { tr = r; break; } } }
+          if (!tr) tr = db.prepare('SELECT id,title,goal_id FROM tutorials WHERE goal_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1').get(goalId) || null;
           const fb = String(op.feedback || op.text || '').trim().slice(0, 1500);
-          const tr = tid ? db.prepare('SELECT id,title,goal_id FROM tutorials WHERE id = ?').get(tid) : null;
-          if (!tr || Number(tr.goal_id) !== Number(goalId)) { errors.push('要改的教程不在当前目标里（请打开那份教程再说一次）'); continue; }
+          if (!tr) { errors.push('这个目标下还没有教程，改不了'); continue; }
           if (!fb) { errors.push('没说清要改什么'); continue; }
           applied.push({ op: 'start', action: 'tutorial_edit', tutorial_id: tr.id, feedback: fb, title: '修改教程：' + String(tr.title).slice(0, 30) });
         } else if (kind === 'status') {
@@ -3626,7 +4173,7 @@ const OPS_SPEC_LINES = [
   '{"op":"delete_source","title":"关键词"}',
   '{"op":"update_goal","fields":{"title":"","profile":"","weekly_hours":"","deadline":"","materials":""}}',
   '{"op":"digest"}   {"op":"collect"}',
-  '{"op":"tutorial_edit","tutorial_id":<编号>,"feedback":"修改意见（改哪里、改成什么样）"}'
+  '{"op":"tutorial_edit","tutorial_id":<编号>,"feedback":"修改意见（改哪里、改成什么样；要动结构就写清范围，别随手加「允许重写结构」）"}'
 ];
 async function recoverChatOps(goal, message, reply, o, model, sig) {
   const lines = [
@@ -3645,6 +4192,12 @@ async function recoverChatOps(goal, message, reply, o, model, sig) {
   } catch (e) {}
   const tutId = Number((o && o.tutorial && o.tutorial.id) || 0);
   if (tutId) lines.push('【用户当前打开的是教程】#' + tutId);
+  const fnode = (o && Array.isArray(o.nodes) && o.nodes.length) ? o.nodes[0] : null;
+  if (fnode) {
+    const fn = db.prepare('SELECT id, title FROM nodes WHERE id = ?').get(Number(fnode.id));
+    if (fn) lines.push('【用户是在这些节点上跟你说话的】' + (o.nodes || []).map(x => '#' + Number(x.id)).join(' ')
+      + '（第一个是「' + String(fn.title || '').slice(0, 40) + '」）—— 你要做的改动默认落在它们身上，别改错分支');
+  }
   lines.push('');
   lines.push('【可用的操作】');
   for (const l of OPS_SPEC_LINES) lines.push('   ' + l);
@@ -3675,6 +4228,22 @@ function streamChat(req, res, goal, message, session, opts) {
   const model = (session && session.model) ? session.model : currentModel();
   const sessionId = session ? session.id : 0;
   const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} };
+  /* 「它做了什么」：本轮看了什么上下文、调了哪些工具。
+     一边收集一边下发（用户要能看着它干），收尾时随这条回复一起落库（刷新后还在）。
+     两道上限：步数与总字节。带工具的代理会反复读文件，不设限 SSE、数据库、
+     多端同步的快照都会被撑爆（一条消息几百 KB）。 */
+  const trace = [];
+  const TRACE_MAX_STEPS = 300, TRACE_MAX_BYTES = 60000;
+  let traceBytes = 0;
+  const pushStep = s => {
+    if (!s || trace.length >= TRACE_MAX_STEPS) return;
+    let j = '';
+    try { j = JSON.stringify(s); } catch (e) { return; }
+    if (traceBytes + j.length > TRACE_MAX_BYTES) return;
+    traceBytes += j.length;
+    trace.push(s);
+    send({ step: s });
+  };
   (async () => {
     let fullText = '';
     try {
@@ -3686,14 +4255,19 @@ function streamChat(req, res, goal, message, session, opts) {
           send({ sessionTitle: autoTitle });
         }
       }
+      /* 先算提示词：它的副产物就是「这轮带了哪些上下文」——
+         在调 AI 之前先发出去，用户点发送后马上能看到"它正在看什么"。 */
+      const bp = await buildChatPrompt(goal, message, sessionId, o);
+      for (const s of (bp.ctx || [])) pushStep(s);
       send({ status: '正在理解你的要求…' });
       fullText = await ai.text({
-        prompt: await buildChatPrompt(goal, message, sessionId, o),
+        prompt: bp.prompt,
         model: model || currentModel(),
         timeoutMs: 420000,
         signal: sig,
         scene: '助手对话',
         onEvent: ev => {
+          if (ev.step) pushStep(ev.step);
           if (ev.text) send({ text: ev.text });
           else if (ev.thinking) send({ thinking: summarizeThinking(ev.thinking) });
         }
@@ -3732,14 +4306,27 @@ function streamChat(req, res, goal, message, session, opts) {
         else if (vid) db.prepare('UPDATE goal_versions SET summary = ? WHERE id = ?').run(reply.slice(0, 800), vid);
       }
       const t = nowISO();
-      const ins = db.prepare('INSERT INTO chats (goal_id, session_id, role, content, ops, version_id, created_at) VALUES (?,?,?,?,?,?,?)')
-        .run(goal.id, sessionId, 'assistant', reply, JSON.stringify(applied), vid, t);
+      const ins = db.prepare('INSERT INTO chats (goal_id, session_id, role, content, ops, version_id, trace, created_at) VALUES (?,?,?,?,?,?,?,?)')
+        .run(goal.id, sessionId, 'assistant', reply, JSON.stringify(applied), vid, JSON.stringify(trace), t);
       if (sessionId) db.prepare('UPDATE chat_sessions SET updated_at = ? WHERE id = ?').run(t, sessionId);
       backup();
-      send({ done: true, id: Number(ins.lastInsertRowid), reply, applied, errors, versionId: vid, goal: getGoal(goal.id) });
+      send({ done: true, id: Number(ins.lastInsertRowid), reply, applied, errors, versionId: vid, trace, goal: getGoal(goal.id) });
     } catch (e) {
       if (e && e.cancelled) send({ cancelled: true, status: '已停止（本轮未执行任何修改）' });
-      else send({ error: e.message });
+      else {
+        /* 失败也要在对话里留一条**看得见**的话。
+           以前这里只 send({error}) → 前端弹个 toast，几秒后就没了；
+           用户回头只看见自己那句孤零零的问题，以为"发出去没反应"（真实踩到过：
+           会话里钉的模型连接被删掉后，每轮都这样静默失败）。 */
+        const msg = String((e && e.message) || e);
+        try {
+          const ins = db.prepare('INSERT INTO chats (goal_id, session_id, role, content, ops, version_id, trace, created_at) VALUES (?,?,?,?,?,?,?,?)')
+            .run(goal.id, sessionId, 'assistant', '⚠️ 这次没能处理：' + msg + '\n\n（可以原样再发一次；要是每次这样，去「设置 → AI 接入方式」看看这条对话选的模型连接还在不在）', '[]', 0, JSON.stringify(trace), nowISO());
+          if (sessionId) db.prepare('UPDATE chat_sessions SET updated_at = ? WHERE id = ?').run(nowISO(), sessionId);
+          send({ error: msg });
+          send({ done: true, id: Number(ins.lastInsertRowid), reply: '⚠️ 这次没能处理：' + msg, applied: [], errors: [msg], versionId: 0, trace, goal: getGoal(goal.id) });
+        } catch (e2) { send({ error: msg }); }
+      }
     }
     res.end();
   })();
@@ -4097,7 +4684,7 @@ function expandRetry(node, feedback) {
 /* ===== 分节式教程生成：外层规划 → 内层逐节 → Reflection 定向补写 =====
    任何一步出问题（规划解析不出、大面积截断、Reflection 一直不合格）都返回空串，
    由调用方退回单次生成 —— 最坏情况和改造前一样，不会更差。 */
-async function generateTutorialByPlan({ goal, node, note, codeBlock, model, send, aiText, checkStop }) {
+async function generateTutorialByPlan({ goal, node, note, codeBlock, model, send, aiText, budget, checkStop }) {
   const TP = tutPlan;
   const title = String(node.title || '').trim().slice(0, 120);
   /* 步间取消检查。之前这里一个都没有：aiText 连 signal 都没往下传，于是点"停止"
@@ -4155,7 +4742,7 @@ async function generateTutorialByPlan({ goal, node, note, codeBlock, model, send
   stop();
   try {
     phase('plan', P.plan - 4, '正在规划教程大纲（先定要讲哪几节）…');
-    plan = TP.parsePlan(await aiText(TP.buildPlanPrompt(goal, node, note, codeBlock), onStream));
+    plan = TP.parsePlan(await aiText(TP.buildPlanPrompt(goal, node, note, codeBlock, budget), onStream));
   } catch (e) {
     /* ⚠️ 取消不能在这里被吞掉：以前吞掉后 return '' 会让调用方**退回单次生成**，
        等于用户点了停止，系统反而又起一次几分钟的全文生成，最后照样写库。 */
@@ -4199,7 +4786,7 @@ async function generateTutorialByPlan({ goal, node, note, codeBlock, model, send
     let body = '', why = '';
     for (let round = 1; round <= 2; round++) {
       stop();
-      let p = TP.buildSectionPrompt(sec, i + 1, plan.length, plan, prevTail, title, codeBlock, { prevSec, nextSec });
+      let p = TP.buildSectionPrompt(sec, i + 1, plan.length, plan, prevTail, title, codeBlock, { prevSec, nextSec }, budget);
       if (round > 1 && why) p += TP.retryHint(why);
       try {
         body = cleanTutorialText(await aiText(p, onStream), 'md');
@@ -4222,7 +4809,7 @@ async function generateTutorialByPlan({ goal, node, note, codeBlock, model, send
       body = TP.closeFences(body);
       badSet.add(i);
     }
-    parts[i] = body || ('## ' + sec.title + '\n\n（本节内容缺失）');
+    parts[i] = TP.normalizeSectionBody(body || '', sec.title);
     secMs.push(Date.now() - secT0);
     doneN++;
     const pct = pctOf(P.plan, P.write, doneN, plan.length);
@@ -4246,7 +4833,7 @@ async function generateTutorialByPlan({ goal, node, note, codeBlock, model, send
     }
   })()));
   stop();
-  let bad = badSet.size;   // let：Reflection 阶段会把 bad 归零（HEAD 里是 const，走到那儿必崩）
+  let bad = badSet.size;
   if (!parts.filter(Boolean).join('\n\n').length) return '';
   console.log('[tutorial] 逐节生成结束，总耗时 ' + Math.round((Date.now() - t0) / 1000) + 's / ' + plan.length + ' 节');
 
@@ -4256,7 +4843,7 @@ async function generateTutorialByPlan({ goal, node, note, codeBlock, model, send
   curKey = 'review';
   for (let pass = 1; pass <= 2; pass++) {
     stop();
-    const gaps = plan.filter(s => !TP.sectionPresent(txt, s.title));
+    const gaps = plan.filter(s => !TP.sectionPresent(txt, s.title)).map(s => s.title);
     let review = null;
     emit(P.write + (pass - 1) * 5, '正在自检教程完整性（Reflection 第 ' + pass + ' 轮）…', '第 ' + pass + ' 轮自检');
     try {
@@ -4265,12 +4852,10 @@ async function generateTutorialByPlan({ goal, node, note, codeBlock, model, send
       if (e && (e.cancelled || e.name === 'AbortError')) throw e;
       console.log('[tutorial] 自检抛错：', e.message);
     }
-    const miss = []
-      .concat(gaps.map(s => s.title))
-      .concat(review ? review.missing.concat(review.unfinished) : [])
-      .filter((v, i, a) => a.indexOf(v) === i);
-    const vizBad = review ? review.vizMissing.concat(review.vizNotHtml) : [];
-    const fenceBad = review && review.fenceOpen;
+    const claim = TP.verifyReviewClaims(txt, plan, review);
+    const miss = gaps.concat(claim.missing).filter((v, i, a) => a.indexOf(v) === i);
+    const vizBad = claim.vizBad;
+    const fenceBad = claim.fenceOpen;
     if (!miss.length && !vizBad.length && !fenceBad && !bad) {
       console.log('[tutorial] 自检通过（第 ' + pass + ' 轮）');
       break;
@@ -4292,7 +4877,27 @@ async function generateTutorialByPlan({ goal, node, note, codeBlock, model, send
       console.log('[tutorial] 补写抛错：', e.message);
     }
     if (!add || add.length < 150) { console.log('[tutorial] 补写没产出可用内容，停止'); break; }
-    txt = txt + '\n\n' + add;
+    /* 补写回来的是 Markdown 文本，可能一次写了好几节，其中有的其实已经有了。
+       两层过滤：
+       ① 正文里已经有的（按标题模糊匹配）→ 丢掉，否则整段重复
+          （真实翻过：正文里已有 1 万字的《延伸学习》，补写又插了一份）；
+       ② 我们没要的节 → **降级成三级标题**留在正文里，不让它占一个二级章节。
+          真实翻过：一次补写塞进「## 何时使用 / ## 一、等价物 / ## 先判断」等
+          八个计划外标题，二级章节从 7 个变成 15 个，整篇大纲被冲散。
+          内容不丢，但大纲必须还是计划的那几条。 */
+    const addSecs = TP.splitSections(add);
+    const wanted = t => want.some(w => TP.sectionPresent(t, w) || TP.sectionPresent(w, t));
+    const fresh = addSecs.filter(s => s.title && !TP.sectionPresent(txt, s.title) && wanted(s.title));
+    const demote = addSecs.filter(s => s.title && !TP.sectionPresent(txt, s.title) && !wanted(s.title));
+    const dropped = addSecs.length - fresh.length - demote.length;
+    if (dropped) console.log('[tutorial] 补写内容里有 ' + dropped + ' 节正文里已经有了，丢弃');
+    if (demote.length) console.log('[tutorial] 补写内容里有 ' + demote.length + ' 个计划外标题，降为三级标题保留内容：' + demote.map(s => s.title).join(' / '));
+    const demoted = demote.map(s => s.text.replace(/^##(?=[^#])/m, '###')).join('\n\n');
+    if (!fresh.length && !demoted) { console.log('[tutorial] 补写内容全都重复，停止'); break; }
+    const addText = [fresh.map(s => s.text).join('\n\n'), demoted].filter(Boolean).join('\n\n');
+    txt = txt + '\n\n' + addText;
+    console.log('[tutorial] 补写并入 ' + fresh.length + ' 节' + (demote.length ? '（另有 ' + demote.length + ' 个标题降级）' : '')
+      + (fresh.length ? '：' + fresh.map(s => s.title).join(' / ') : ''));
     bad = 0;
   }
   emit(P.review, '自检完成，共 ' + plan.length + ' 节', plan.length + ' 节全部到位');
@@ -4406,10 +5011,18 @@ function streamTutorial(req, res, node, format, note, codeFiles, withFolders, fo
       }
       /* ===== 生成：外层规划 → 内层逐节 → Reflection 体检 ===== */
       global.__tutScene = 'tutorial_gen';
+      /* ---------- 先判断这份教程该花多大力气 ----------
+         不分青红皂白就上「规划 → 7 节 → 自检」，代价是 3 分钟和 6 万字：
+         一个 1 小时的小任务根本不需要那么长，用户也看不完。
+         启发式只决定走哪条流程；判断偏了最多是慢一点/啰嗦一点，不会丢内容。 */
+      const bud = effort.tutorialEffort(node);
+      console.log('[tutorial] 复杂度判断：' + bud.mode + ' / 目标约 ' + bud.target + ' 字'
+        + (bud.mode === 'plan' ? ' / ' + bud.sections + ' 节（每节约 ' + bud.perSection + ' 字）' : '')
+        + ' ← ' + bud.why);
       let txt = '', planSteps = null;
-      if (format === 'md') {
+      if (format === 'md' && bud.mode === 'plan') {
         const byPlan = await generateTutorialByPlan({
-          goal, node, note, codeBlock, model,
+          goal, node, note, codeBlock, model, budget: bud,
           send, checkStop,
           aiText: (p, onEvent) => aiText(p, model, 600000, onEvent || null, signal, '教程生成')
         });
@@ -4420,8 +5033,9 @@ function streamTutorial(req, res, node, format, note, codeFiles, withFolders, fo
          分节生成失败时自动退回单次生成老路。 */
       checkStop();   /* 取消后绝不"退回单次生成"再起一次全文重写 */
       if (!txt) {
-        send({ status: `正在撰写「${String(node.title).slice(0, 18)}」的${format === 'html' ? ' HTML ' : ' Markdown '}教程（讲原理、分步实践、练习与自测，约需 1-3 分钟）…`, pct: 10 });
-        const prompt = buildTutorialPrompt(goal, node, format, note, codeBlock);
+        send({ status: `正在撰写「${String(node.title).slice(0, 18)}」的${format === 'html' ? ' HTML ' : ' Markdown '}教程`
+          + (bud.mode === 'single' ? `（这是一份${bud.hours ? bud.hours + ' 小时' : '篇幅不大'}的教程，约需 30~60 秒）…` : '（讲原理、分步实践、练习与自测，约需 1-3 分钟）…'), pct: 10 });
+        const prompt = buildTutorialPrompt(goal, node, format, note, codeBlock, bud);
         txt = cleanTutorialText(await aiText(prompt, model, 600000, null, signal, '教程生成'), format);
       }
       if (!txt || txt.length < 200) throw new Error('教程生成失败：AI 只写了 ' + (txt ? txt.length : 0) + ' 字就停了。原教程没动，可以点任务上的「🔄 重试」，或换个输出更长的模型再试');
@@ -4588,15 +5202,229 @@ async function handleAPI(req, res, u) {
     }
   }
 
+  /* 清洗已有资料：把"抓取时混进来的垃圾文字"从正文里去掉。
+     本地规则免费、即时；勾选 AI 时再让模型"只删不改"地过一遍（同一批资料只做一次，
+     原文备份进 content_raw，可反复对照/重跑）。 */
+  const cleanMatch = p.match(/^\/api\/goals\/(\d+)\/sources\/clean$/);
+  if (cleanMatch && method === 'POST') {
+    const id = Number(cleanMatch[1]);
+    const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(id);
+    if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+    const cbody = await readBody(req).catch(() => ({}));
+    const useAI = !(cbody && cbody.ai === false);
+    res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache' });
+    const tk = tasks.begin({ type: 'clean', title: '清洗资料：' + String(g.title || '').slice(0, 24), goalId: id, message: '准备清洗…' });
+    const csig = tk.signal;
+    const cSend = o => {
+      try { res.write(`data: ${JSON.stringify(o)}\n\n`); } catch (e) {}
+      /* 清洗是纯计数型：done/total 就是真实进度，交给统一模型按 count 算 —— 
+         以前是前端自己算好的 pct 再回传，等于同一件事算两遍。 */
+      if (!o) return;
+      if (o.total != null && o.done != null && o.total > 0) tk.count(o.done, o.total, o.status || undefined);
+      else if (o.status || o.pct != null) tk.progress(o.pct != null ? o.pct : undefined, o.status);
+    };
+    cSend({ taskId: tk.id, status: '准备清洗…', done: 0, total: 0, pct: 0 });
+    (async () => {
+      try {
+        const rows = db.prepare('SELECT * FROM sources WHERE goal_id = ? ORDER BY id').all(id);
+        const todo = rows.filter(r => String(r.content || '').replace(/\s+/g, '').length >= 120);
+        /* AI 那遍很慢（一条 10~30 秒）：单次运行设上限，跑完如实告诉你"还剩多少可以再跑一次"，
+           否则一次点下去要等一小时，用户只会觉得卡死了。 */
+        const aiMax = Math.max(0, Number(getSetting('clean_ai_max', '40')) || 40);
+        let done = 0, changed = 0, removed = 0, aiCalls = 0, skipped = 0, aiLeft = 0;
+        const t0 = Date.now();
+        const el = () => { const sec = Math.round((Date.now() - t0) / 1000); return sec < 60 ? sec + ' 秒' : Math.floor(sec / 60) + ' 分' + (sec % 60 ? ' ' + (sec % 60) + ' 秒' : ''); };
+        cSend({
+          status: '共 ' + rows.length + ' 条资料，其中 ' + todo.length + ' 条需要清洗' + (useAI ? '（AI 那遍本次最多处理 ' + aiMax + ' 条）' : '（只做本地清洗）'),
+          done: 0, total: todo.length, pct: 1
+        });
+        const upd = db.prepare('UPDATE sources SET content = ?, content_raw = ?, cleaned = 1, clean_removed = ? WHERE id = ?');
+        for (const r of todo) {
+          if (csig && csig.aborted) { const e = new Error('已停止'); e.cancelled = true; throw e; }
+          const raw = String(r.content_raw || r.content || '');
+          const before = raw.length;
+          let text = '';
+          try {
+            /* 已经是纯文本的（电子书/图片 OCR/上次洗过的）只做行级清洗；HTML 走完整提取 */
+            const looksHtml = /<\/(p|div|span|article|section|li|a)>|<br\s*\/?>/i.test(raw);
+            text = (looksHtml ? textClean.extractText(raw) : textClean.cleanLines(raw, { minChars: 60 })).text || '';
+          } catch (e) { text = raw; }
+          /* AI 再过一遍：只删不改，按块调用；任何一块不达标就保留那一块的本地清洗结果 */
+          let aiOut = '';
+          /* 短资料不值得花调用（本地清洗就够了）：400 字以上才让 AI 再过一遍 */
+          const aiAllowed = useAI && text.length >= 400 && aiCalls < aiMax;
+          if (useAI && text.length >= 400 && !aiAllowed) aiLeft++;
+          if (aiAllowed) {
+            const chunks = textClean.aiChunks(text);
+            const pieces = [];
+            for (const c of chunks) {
+              if (csig && csig.aborted) { const e = new Error('已停止'); e.cancelled = true; throw e; }
+              try {
+                aiCalls++;
+                const raw2 = await aiText(textClean.buildCleanPrompt(r.title, g.title, c), currentModel(), 180000, null, csig, '资料清洗');
+                const pr = textClean.parseCleanOutput(raw2, c);
+                pieces.push(pr.ok ? (pr.empty ? '' : pr.text) : c);
+              } catch (e) {
+                if (e && (e.cancelled || e.name === 'AbortError')) throw e;
+                pieces.push(c);
+              }
+            }
+            aiOut = pieces.filter(Boolean).join('\n\n');
+            /* 变短得离谱（>90%）说明模型删过头了 → 保留本地清洗结果 */
+            if (aiOut && aiOut.length < text.length * 0.1) aiOut = '';
+            if (aiOut) text = aiOut;
+          }
+          text = String(text || '').trim();
+          /* 洗成空壳就保留原样（宁可留着垃圾，也不能把用户的资料洗没了）。
+             ⚠️ 门槛按"原文多大"算，别用绝对字数：短资料（一二百字）洗掉站点废话后
+             只剩几十字是正常的，用绝对 80 字会把它们全 skip 掉（实测踩到）。 */
+          const rawLen = String(raw || '').replace(/\s+/g, '').length;
+          const newLen = text.replace(/\s+/g, '').length;
+          if (newLen < 30 || (rawLen >= 400 && newLen < rawLen * 0.15)) { skipped++; continue; }
+          if (text.length === before && !r.content_raw) { skipped++; continue; } // 本来就没变化
+          upd.run(text, r.content_raw || String(r.content || ''), Math.max(0, before - text.length), r.id);
+          if (text !== raw) { changed++; removed += Math.max(0, before - text.length); }
+          done++;
+          /* 每处理完一条就报一次：用户要看的是"已经清洗了多少篇"，
+             而不是一个不知道走没走的百分比（真实反馈）。 */
+          cSend({
+            status: '已清洗 ' + done + '/' + todo.length + ' 篇' + (useAI && aiCalls ? '（AI 调用 ' + aiCalls + ' 次）' : '') + ' · 已用 ' + el(),
+            done, total: todo.length, pct: Math.round(done / Math.max(1, todo.length) * 100),
+            title: String(r.title || '').slice(0, 46),
+            removed, aiCalls, elapsedMs: Date.now() - t0, ai: useAI
+          });
+        }
+        try { rag.autoIndex(id); } catch (e) {}
+        backup();
+        cSend({
+          finish: true, ok: true, total: rows.length, cleaned: changed, skipped, removed, aiCalls, ai: useAI,
+          aiLeft, aiMax, costMs: Date.now() - t0,
+          status: '清洗完成：' + changed + ' 篇有改动' + (removed ? '，共去掉 ' + Math.round(removed / 1000) + 'k 字' : ''), pct: 100
+        });
+        tk.done({ ok: true });
+      } catch (e) {
+        tk.fail(e);
+        try { cSend({ error: (e && e.message) || String(e), cancelled: !!(e && e.cancelled) }); } catch (e2) {}
+      }
+      try { res.end(); } catch (e) {}
+    })();
+    return;
+  }
+
+  /* 补抓正文（全部目标）：把"只有标题 + 搜索摘要、正文是空的"资料重抓一遍。
+     为什么要它（实测数据）：库里 908 条网络资料有 483 条（53%）正文为空 —— 知乎 95%、
+     BOSS 直聘 100%、CSDN 70%、51CTO 94%；它们照样各占一个检索切片，把真有内容的资料挤下去。
+     而随手抽 24 条重抓，14 条（58%）**当场就抓回来了**：大头不是反爬，是当初抓失败没有重试
+     （见 fetchPage 的三档重试）。
+     所以：抓回来的写回正文（顺手补上发布时间）；换招到底仍抓不到的（要登录态那种）直接删掉 ——
+     用户的原话是"抓不到就删"，留个空壳比没有更糟（它占检索位，还会让 AI 以为"这条我读过"）。
+     删除前库里有自动备份可回滚；每次删除都同步清掉检索索引里的块。 */
+  if (p === '/api/sources/refetch' && method === 'POST') {
+    const rbody = await readBody(req).catch(() => ({}));
+    /* 门槛跟采集时的硬闸门一致：正文少于 260 字的候选本来就不该入库（见 collect-screen.hardGate） */
+    const minBody = Math.max(80, Math.min(2000, Number(rbody && rbody.minBody) || 260));
+    res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache' });
+    const tk = tasks.begin({ type: 'refetch', title: '补抓资料正文', message: '准备补抓…' });
+    const rsig = tk.signal;
+    const rSend = o => {
+      try { res.write(`data: ${JSON.stringify(o)}\n\n`); } catch (e) {}
+      /* 补抓同样是纯计数型，理由同清洗那处 */
+      if (!o) return;
+      if (o.total != null && o.done != null && o.total > 0) tk.count(o.done, o.total, o.status || undefined);
+      else if (o.status || o.pct != null) tk.progress(o.pct != null ? o.pct : undefined, o.status);
+    };
+    rSend({ taskId: tk.id, status: '准备补抓…', done: 0, total: 0, pct: 0 });
+    (async () => {
+      let stopped = false;
+      try {
+        const rows = db.prepare('SELECT id, goal_id, title, url, site FROM sources WHERE url LIKE ? AND length(trim(content)) < ? ORDER BY id')
+          .all('http%', minBody);
+        rSend({
+          status: rows.length
+            ? ('共 ' + rows.length + ' 条资料没有正文（少于 ' + minBody + ' 字），开始逐条补抓：抓到的写回，抓不到的删掉')
+            : '没有需要补抓的资料：每条网络资料都已经有正文了',
+          done: 0, total: rows.length, pct: rows.length ? 0 : 100
+        });
+        let done = 0, got = 0, dropped = 0, chars = 0;
+        const t0 = Date.now();
+        const el = () => { const sec = Math.round((Date.now() - t0) / 1000); return sec < 60 ? sec + ' 秒' : Math.floor(sec / 60) + ' 分' + (sec % 60 ? ' ' + (sec % 60) + ' 秒' : ''); };
+        /* 归档原文？这里没有"原文"可存（当初就没抓到），content_raw 留空更诚实；
+           published_at 只在原本是空的时候补，别把已有的日期覆盖掉。 */
+        const upd = db.prepare("UPDATE sources SET content = ?, content_raw = '', cleaned = 1, clean_removed = 0, published_at = COALESCE(NULLIF(published_at, ''), ?) WHERE id = ?");
+        const del = db.prepare('DELETE FROM sources WHERE id = ?');
+        const touchedGoals = new Set();
+        /* 4 条并发：补抓是纯网络 IO，串行跑 489 条要半小时以上，用户只会以为卡死了。
+           ⚠️ mapLimit 会吞掉异常（它 catch 后置 null），所以取消要用标志位传，不能靠 throw。 */
+        await mapLimit(rows, 4, async r => {
+          if (rsig && rsig.aborted) { stopped = true; return; }
+          let page = { text: '', why: '' };
+          /* 6MB 上限而不是默认的 800KB：微信公众号、B 站这类页面本身就有 1~3MB，
+             卡在体积上等于"明明能抓到却自己放弃"（实测有两条就是这样被丢的）。 */
+          try { page = await fetchPage(r.url, 40000, { bytes: 6 * 1024 * 1024, timeoutMs: 15000, attempts: 3 }); }
+          catch (e) { page = { text: '', why: e.message || String(e) }; }
+          const text = String(page.text || '').trim();
+          if (text.replace(/\s+/g, '').length >= minBody) {
+            upd.run(text, page.date ? new Date(page.date).toISOString().slice(0, 10) : '', r.id);
+            got++; chars += text.length;
+            touchedGoals.add(r.goal_id);
+          } else {
+            del.run(r.id);
+            db.prepare('DELETE FROM code_repo_files WHERE source_id = ?').run(r.id);
+            try { rag.dropSource(r.id); } catch (e) {}
+            dropped++;
+            touchedGoals.add(r.goal_id);
+          }
+          done++;
+          /* 每抓完一条就报一次：用户要看的是"已经补了多少条 / 救回几条 / 删了几条"，
+             而不是一个转圈的百分比（真实反馈：只说"正在补抓"等于没说）。 */
+          rSend({
+            status: '补抓 ' + done + '/' + rows.length + '（抓回 ' + got + ' · 删掉 ' + dropped + '）· 已用 ' + el(),
+            done, total: rows.length, pct: Math.round(done / Math.max(1, rows.length) * 100),
+            title: String(r.title || '').slice(0, 46), got, dropped, chars,
+            reason: page.why || '', site: String(r.site || '').slice(0, 16)
+          });
+        });
+        if (stopped) { const e = new Error('已停止'); e.cancelled = true; throw e; }
+        for (const gid of touchedGoals) { try { rag.autoIndex(gid); } catch (e) {} }
+        backup();
+        rSend({
+          finish: true, ok: true, total: rows.length, got, dropped, chars, costMs: Date.now() - t0,
+          status: rows.length
+            ? ('补抓完成：抓回 ' + got + ' 条正文（+' + Math.round(chars / 1000) + 'k 字），删掉抓不到的 ' + dropped + ' 条')
+            : '没有需要补抓的资料',
+          pct: 100
+        });
+        tk.done({ ok: true });
+      } catch (e) {
+        tk.fail(e);
+        try { rSend({ error: (e && e.message) || String(e), cancelled: !!(e && e.cancelled) }); } catch (e2) {}
+      }
+      try { res.end(); } catch (e) {}
+    })();
+    return;
+  }
+
   const collectMatch = p.match(/^\/api\/goals\/(\d+)\/collect$/);
   if (collectMatch && method === 'POST') {
     const id = Number(collectMatch[1]);
     const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(id);
     if (!g) return sendJSON(res, 404, { error: '目标不存在' });
     res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache' });
-    const tk = tasks.begin({ type: 'collect', title: '搜集信息源：' + String(g.title || '').slice(0, 30), goalId: id, nodeId: 0, note: '' });
+    /* 搜集资料要跑好几分钟：把四个阶段声明出来，条才会照着阶段往前走，
+       而不是一条不动的走马灯（用户反馈："有的任务有条、有的只有一行字"）。 */
+    const tk = tasks.begin({
+      type: 'collect', title: '搜集信息源：' + String(g.title || '').slice(0, 30), goalId: id, nodeId: 0, note: '',
+      phases: ['搜索候选', '抓取正文', 'AI 把关', '整理入库']
+    });
     const sig = tk.signal;   // 只有主动取消才中断；切换/关闭页面不影响后台继续
-    const tkSend = s => { try { res.write(`data: ${JSON.stringify(s)}\n\n`); } catch (e) {} if (s && s.status) tk.progress(undefined, s.status); };
+    /* onProgress 带 `prog: {phase, frac}` 时走阶段推进，只带 status 时退化成"只换文案"
+       （阶段内由引擎按时间平滑）—— 两种都能在同一套渲染里画出来。 */
+    const tkSend = s => {
+      try { res.write(`data: ${JSON.stringify(s)}\n\n`); } catch (e) {}
+      if (!s) return;
+      if (s.prog) tk.phase(s.prog.phase, s.status, { frac: s.prog.frac });
+      else if (s.status) tk.progress(undefined, s.status);
+    };
     (async () => {
       try {
         let ebSummary = '';
@@ -4616,7 +5444,7 @@ async function handleAPI(req, res, u) {
         }
         const r = await collectForGoal(g, tkSend, sig);
         const list = sourcesOf(id);
-        try { res.write(`data: ${JSON.stringify({ done: true, count: r.saved, blocked: r.blocked, sources: list, ebooks: ebSummary })}\n\n`); } catch (e) {}
+        try { res.write(`data: ${JSON.stringify({ done: true, count: r.saved, blocked: r.blocked, sources: list, ebooks: ebSummary, stats: r.stats || null })}\n\n`); } catch (e) {}
         rag.autoIndex(id);
         tk.done({ ok: true });
       } catch (e) {
@@ -4950,7 +5778,18 @@ function redactText(raw) {
        漏传 signal 的后果和教程一样 —— 点了停止，剩下的调用照打、节点照写。 */
     const sig = tk.signal;
     const checkStop = () => { if (sig.aborted) { const e = new Error('已停止'); e.cancelled = true; throw e; } };
-    const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} if (obj && obj.status) tk.progress(undefined, obj.status); };
+    /* 进度上报：⚠️ 这里以前**只转 status**，于是「AI 拆分」全程只有一句静态文案 ——
+       切好一次 AI 调用就只能干等（实测那次「按意见调整」跑了 8 分 28 秒），
+       卡片上进度恒 0%、没有阶段、没有"它在想什么"，用户只能判断成"卡死了"。
+       现在 pct / steps / thinking / eta 一并转给任务中心，
+       前端 taskProgressHTML 会画成「阶段点 + 动效条 + 实时思考」。 */
+    const send = obj => {
+      try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {}
+      /* 只报"我在想什么"（status 为空）也要转 —— 不过滤的话实时思考刷不上去 */
+      if (obj && (obj.status || obj.pct != null || obj.thinking != null || obj.steps)) {
+        tk.progress(obj.pct, obj.status, { steps: obj.steps, thinking: obj.thinking, eta: obj.eta });
+      }
+    };
     /* ⚠️ 每条退出路径都必须落终态。这里原来有三条路直接 return 而**没调用 tk.done()**：
        「按意见调整」的调整成功分支 + 两个"需要先问几个问题"分支。
        现场就是这样卡住的：AI 跑完（39.9s）、节点也写进库了，
@@ -4960,6 +5799,9 @@ function redactText(raw) {
     const ok = (r) => { if (!settled) { settled = true; tk.done(r || { ok: true }); } };
     const bad = (e) => { if (!settled) { settled = true; tk.fail(e); } };
     (async () => {
+      /* 心跳句柄放在 try 外面：任何退出路径（含上面两个 return）都要能清掉它，
+         否则一个 3 秒的定时器会跟着进程转到底。 */
+      let hb = 0;
       try {
         const goal = db.prepare('SELECT * FROM goals WHERE id = ?').get(n.goal_id);
         if (!goal) throw new Error('目标不存在');
@@ -4971,20 +5813,70 @@ function redactText(raw) {
           n = db.prepare('SELECT * FROM nodes WHERE id = ?').get(id);
         }
         const reason = feedback ? ('按意见调整：' + n.title) : ('节点拆分：' + n.title);
+        /* ---------- 进度上报 ----------
+           为什么要有这一段：这条流程的 AI 调用是全应用最慢的一次
+           （「按意见调整」实测 8 分 28 秒才回来），而它以前从头到尾**只发一句文案**，
+           界面因此完全无法区分"在跑"和"卡死"（真实反馈："显示不出进度，
+           不知道进展到哪一步"）。所以这里做三件事：
+             ① 阶段清单：把整件事切成 4 步，前端画成一排阶段点，走到哪一目了然；
+             ② 实时思考：把模型正在流的文本尾巴打上去（节流 1.2 秒）；
+             ③ 心跳：哪怕一个字都没吐（推理模型尤其常见）也每 3 秒刷一次"已等 N 秒"，
+                顺带把"太久没进展"的误报（看门狗与前端 90 秒提示）挡掉。 */
+        const STEPS = feedback
+          ? [{ key: 'prep', label: '备齐依据' }, { key: 'plan', label: '按意见重划' }, { key: 'write', label: '写入子任务' }, { key: 'save', label: '存版本收尾' }]
+          : [{ key: 'src', label: '搜集资料' }, { key: 'plan', label: '制定拆分计划' }, { key: 'write', label: '写入子任务' }, { key: 'save', label: '存版本收尾' }];
+        const idxOf = k => STEPS.findIndex(x => x.key === k);
+        let curKey = STEPS[0].key, msgBase = '', thinkTail = '', full = '', thinkAt = 0, phaseAt = Date.now();
+        /* 数"已经列出几项"：只认 "title" 这个键。
+           ⚠️ 别用 progressTitles() —— 它把 "name" 也算一项（来源里的 name），
+           6 个子任务会数成 10 几项，报给用户的数字就是错的。 */
+        const countItems = () => (full.match(/"title"\s*:/g) || []).length;
+        const secs = () => Math.max(0, Math.round((Date.now() - phaseAt) / 1000));
+        const stepsNow = () => STEPS.map(s => ({
+          key: s.key, label: s.label,
+          state: s.key === curKey ? 'active' : (idxOf(s.key) < idxOf(curKey) ? 'done' : 'pending'),
+          detail: s.detail || ''
+        }));
+        const emit = (pct, msg, detail) => {
+          if (detail != null) { const s = STEPS.find(x => x.key === curKey); if (s) s.detail = String(detail).slice(0, 80); }
+          send({ pct: pct == null ? undefined : pct, status: msg || null, steps: stepsNow(), thinking: thinkTail });
+        };
+        const phase = (key, pct, msg) => { curKey = key; phaseAt = Date.now(); msgBase = msg || ''; emit(pct, msg); };
+        /* 模型流式输出的尾巴 → "它现在在想什么 / 已经列到第几项"。
+           节流 1.2 秒：每个 token 推一次会把 SSE 打满（教程那条流程同此约定）。 */
+        const onStream = ev => {
+          if (!ev) return;
+          if (ev.text) full += ev.text;
+          const piece = ev.thinking || ev.text || '';
+          if (piece) thinkTail = String(piece).replace(/\s+/g, ' ').slice(-120);
+          const now = Date.now();
+          if (now - thinkAt < 1200) return;
+          thinkAt = now;
+          const cnt = countItems();
+          emit(null, msgBase + '（AI 已跑 ' + secs() + ' 秒' + (cnt ? ' · 已列出 ' + cnt + ' 项' : '') + '…）');
+        };
+        hb = setInterval(() => {
+          /* 只在"等 AI"的阶段刷心跳；写库那几步本身很快，不需要 */
+          if (curKey !== 'plan' && curKey !== 'prep') return;
+          const cnt = countItems();
+          emit(null, msgBase + '（已等 ' + secs() + ' 秒' + (cnt ? ' · 已列出 ' + cnt + ' 项' : '') + '…）');
+        }, 3000);
+        if (hb.unref) hb.unref();
+        phase('prep', 3, feedback ? '正在准备重新划分的依据…' : '正在准备拆分依据…');
         /* 挂载文件夹的源码：拆分也要读 —— 否则 AI 只能拍脑袋编阶段。
            走共用的 prepareNodeCode（AI 先看清单挑，再读），失败就当没挂，照常拆。 */
         let expandCode = '';
         try {
           const hasFolders = nodeFolders.collectFolderEntries(db, Number(id)).filter(e => !e.missing);
           if (hasFolders.length) {
-            send({ status: '正在读挂载文件夹的源码，拆分会沿代码真实结构走…' });
+            phase('prep', 5, '正在读挂载文件夹的源码，拆分会沿代码真实结构走…');
             const g = await nodeFolders.prepareNodeCode({
               aiText, model, db, nodeId: Number(id),
               title: n.title, detail: n.detail, budget: 15000, signal: sig
             });
             if (g.block) {
               expandCode = g.block;
-              send({ status: `已读入挂载文件夹的 ${g.list.length} 个源码文件，拆分会沿代码真实结构走…` });
+              emit(12, `已读入挂载文件夹的 ${g.list.length} 个源码文件，拆分会沿代码真实结构走…`, g.list.length + ' 个文件');
             }
           }
         } catch (e) {
@@ -4993,9 +5885,9 @@ function redactText(raw) {
         }
         if (feedback) {
           // 带用户意见调整现有子任务
-          send({ status: '正在根据你的意见调整划分…' });
           const kids = db.prepare('SELECT title, detail, status FROM nodes WHERE parent_id = ? ORDER BY sort_order, id').all(n.id);
-          const txt = await aiText(await buildRefineNodePrompt(goal, n, kids, feedback, expandCode), model, 300000, null, sig, '节点细化');
+          phase('plan', 25, '正在根据你的意见调整划分…', '现有 ' + kids.length + ' 条子任务');
+          const txt = await aiText(await buildRefineNodePrompt(goal, n, kids, feedback, expandCode), model, 300000, onStream, sig, '节点细化');
           const data = extractJSON(txt);
           if (data && Array.isArray(data.questions) && data.questions.length) {
             saveNodeQuestions(n.id, data, feedback);
@@ -5006,19 +5898,23 @@ function redactText(raw) {
           }
           if (!data || !Array.isArray(data.tasks) || !data.tasks.length) throw new Error('调整结果解析失败，请重试');
           checkStop();   /* 取消后一个节点都不许写 */
+          phase('write', 78, '正在按新划分写入子任务…', 'AI 列出 ' + data.tasks.length + ' 项');
           const vid = beginVersion(goal.id, reason);
           const statusByTitle = {};
           for (const k of kids) statusByTitle[k.title] = k.status;
           for (const oid of db.prepare('SELECT id FROM nodes WHERE parent_id = ?').all(n.id).map(x => x.id)) deleteNodeTree(oid);
           let order = 0, added = 0;
+          const tot = data.tasks.slice(0, 10).length;
           for (const t of data.tasks.slice(0, 10)) {
             insertNode(goal.id, n.id, Math.min(n.level + 1, 5), t.title || '子任务', t.detail || '', t.sources, order++, { artifact: t.artifact, acceptance: t.acceptance, hours: t.hours });
             const newId = db.prepare('SELECT last_insert_rowid() AS id').get().id;
             const st = statusByTitle[t.title];
             if (st && st !== 'todo') db.prepare('UPDATE nodes SET status = ? WHERE id = ?').run(st, newId);
             added++;
+            emit(78 + Math.round(14 * added / Math.max(1, tot)), '正在写入子任务 ' + added + '/' + tot + '：' + String(t.title || '').slice(0, 30));
           }
           db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), goal.id);
+          phase('save', 94, '正在生成版本快照与回执…');
           const report = await finishVersion(goal, vid, reason);
           backup();
           send({ done: true, added, refined: true, goal: getGoal(goal.id), report, versionId: vid });
@@ -5026,6 +5922,7 @@ function redactText(raw) {
         } else {
           // 无意见：先搜集资料，再生成细分（回答追问后的续跑不再重复搜集）
           if (!answers && goalCompOn(goal.id, 'sources')) {
+            phase('src', 4, '正在搜集资料（搜到的每一条都会过一遍 AI 质量判读）…');
             const before = db.prepare('SELECT COUNT(*) AS n FROM sources WHERE goal_id = ?').get(goal.id).n;
             try {
               await fetchEbooksForGoal(goal, s => send(s), sig);
@@ -5037,10 +5934,10 @@ function redactText(raw) {
             const after = db.prepare('SELECT COUNT(*) AS n FROM sources WHERE goal_id = ?').get(goal.id).n;
             send({ status: `信息源新增 ${after - before} 条（共 ${after} 条），开始制定拆分计划…`, sources: sourcesOf(goal.id) });
           }
-          send({ status: '开始制定拆分计划…' });
           checkStop();
+          phase('plan', 45, '正在制定拆分计划（AI 要给出每项的做法、产出物与验收标准，通常要等一两分钟）…');
           var vid = beginVersion(goal.id, reason);
-          const txt = await aiText(await buildExpandPrompt(goal, n, null, expandCode), model, 300000, null, sig, '骨架展开');
+          const txt = await aiText(await buildExpandPrompt(goal, n, null, expandCode), model, 300000, onStream, sig, '骨架展开');
           const data = extractJSON(txt);
           if (data && Array.isArray(data.questions) && data.questions.length) {
             saveNodeQuestions(n.id, data, feedback);
@@ -5051,14 +5948,18 @@ function redactText(raw) {
           }
           if (!data || !Array.isArray(data.tasks) || !data.tasks.length) throw new Error('拆分结果解析失败，请重试');
           checkStop();   /* 取消后一个节点都不许写 */
+          phase('write', 78, '正在写入子任务…', 'AI 列出 ' + data.tasks.length + ' 项');
           const childLevel = Math.min(n.level + 1, 5);
           let order = db.prepare('SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM nodes WHERE parent_id = ?').get(n.id).n;
           let added = 0;
+          const tot = data.tasks.slice(0, 10).length;
           for (const t of data.tasks.slice(0, 10)) {
             insertNode(goal.id, n.id, childLevel, t.title || '子任务', t.detail || '', t.sources, order++, { artifact: t.artifact, acceptance: t.acceptance, hours: t.hours });
             added++;
+            emit(78 + Math.round(14 * added / Math.max(1, tot)), '正在写入子任务 ' + added + '/' + tot + '：' + String(t.title || '').slice(0, 30));
           }
           db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), goal.id);
+          phase('save', 94, '正在生成版本快照与回执…');
           const report2 = await finishVersion(goal, vid, reason);
           backup();
           ok({ added });
@@ -5069,6 +5970,8 @@ function redactText(raw) {
            任务失败在任务中心显示成成功，用户完全看不出出了什么事。 */
         bad(e);
         send({ error: e.message });
+      } finally {
+        if (hb) clearInterval(hb);   /* 任何退出路径都要停掉心跳，别让定时器悬着 */
       }
       res.end();
     })();
@@ -5116,19 +6019,34 @@ function redactText(raw) {
   if (sessListMatch) {
     const gid = Number(sessListMatch[1]);
     if (method === 'GET') {
-      const rows = db.prepare(`SELECT s.id, s.goal_id, s.title, s.model, s.created_at, s.updated_at,
-        (SELECT COUNT(*) FROM chats c WHERE c.session_id = s.id) AS msg_count
+      /* node_title：对话列表里要能一眼看出"这条是哪个节点的对话"（🎯 前缀在界面上加） */
+      const rows = db.prepare(`SELECT s.id, s.goal_id, s.title, s.model, s.node_id, s.nodes, s.created_at, s.updated_at,
+        (SELECT COUNT(*) FROM chats c WHERE c.session_id = s.id) AS msg_count,
+        (SELECT title FROM nodes n WHERE n.id = s.node_id) AS node_title
         FROM chat_sessions s WHERE s.goal_id = ? ORDER BY s.updated_at DESC, s.id DESC`).all(gid);
       return sendJSON(res, 200, { sessions: rows });
     }
     if (method === 'POST') {
       const g = db.prepare('SELECT id FROM goals WHERE id = ?').get(gid);
       if (!g) return sendJSON(res, 404, { error: '目标不存在' });
-      let title = '新对话', model = '';
-      try { const b = await readBody(req); if (b.title) title = String(b.title).slice(0, 60); if (b.model) model = String(b.model).slice(0, 120); } catch (e) {}
+      let title = '新对话', model = '', nodeId = 0, nodes = '[]';
+      try {
+        const b = await readBody(req);
+        if (b.title) title = String(b.title).slice(0, 60);
+        if (b.model) model = String(b.model).slice(0, 120);
+        /* node_id：这条对话是"某个节点自己的对话"（右键节点 → AI 功能 走这条）。
+           必须校验它属于本目标 —— 否则客户端编个 id 就能把别的目标的节点写进对话。 */
+        const nid = Number(b.node_id || 0);
+        if (nid) {
+          const n = db.prepare('SELECT id, title FROM nodes WHERE id = ? AND goal_id = ?').get(nid, gid);
+          if (n) { nodeId = nid; if (title === '新对话') title = String(n.title || '').slice(0, 60); }
+        }
+        if (Array.isArray(b.nodes)) nodes = JSON.stringify(sanitizeChatNodes(b.nodes, gid));
+      } catch (e) {}
       const t = nowISO();
-      const r = db.prepare('INSERT INTO chat_sessions (goal_id, title, model, created_at, updated_at) VALUES (?,?,?,?,?)').run(gid, title, model, t, t);
-      const session = db.prepare('SELECT id, goal_id, title, model, created_at, updated_at, 0 AS msg_count FROM chat_sessions WHERE id = ?').get(Number(r.lastInsertRowid));
+      const r = db.prepare('INSERT INTO chat_sessions (goal_id, title, model, node_id, nodes, created_at, updated_at) VALUES (?,?,?,?,?,?,?)')
+        .run(gid, title, model, nodeId, nodes, t, t);
+      const session = db.prepare('SELECT id, goal_id, title, model, node_id, nodes, created_at, updated_at, 0 AS msg_count FROM chat_sessions WHERE id = ?').get(Number(r.lastInsertRowid));
       return sendJSON(res, 201, { session });
     }
   }
@@ -5141,7 +6059,12 @@ function redactText(raw) {
       const body = await readBody(req);
       const title = body.title != null ? String(body.title).trim().slice(0, 60) : s.title;
       const model = body.model != null ? String(body.model).trim().slice(0, 120) : s.model;
-      db.prepare('UPDATE chat_sessions SET title = ?, model = ?, updated_at = ? WHERE id = ?').run(title || s.title, model, nowISO(), sid);
+      /* nodes：对话里"带上了哪些节点"的附件清单（AI 助手里 ＋添加节点 / 取消某个节点）。
+         走这里存，刷新和换设备都还在（和 node_id 同一个理由）。 */
+      let nodes = s.nodes;
+      if (Array.isArray(body.nodes)) nodes = JSON.stringify(sanitizeChatNodes(body.nodes, s.goal_id));
+      db.prepare('UPDATE chat_sessions SET title = ?, model = ?, nodes = ?, updated_at = ? WHERE id = ?')
+        .run(title || s.title, model, nodes || '[]', nowISO(), sid);
       return sendJSON(res, 200, { session: db.prepare('SELECT * FROM chat_sessions WHERE id = ?').get(sid) });
     }
     if (method === 'DELETE') {
@@ -5163,7 +6086,7 @@ function redactText(raw) {
     const sid = Number(sessMsgsMatch[1]);
     const s = db.prepare('SELECT * FROM chat_sessions WHERE id = ?').get(sid);
     if (!s) return sendJSON(res, 404, { error: '对话不存在' });
-    const rows = db.prepare('SELECT id, role, content, ops, version_id, created_at FROM chats WHERE session_id = ? ORDER BY id').all(sid);
+    const rows = db.prepare('SELECT id, role, content, ops, version_id, trace, created_at FROM chats WHERE session_id = ? ORDER BY id').all(sid);
     return sendJSON(res, 200, { session: s, messages: rows });
   }
   const sessChatMatch = p.match(/^\/api\/chat-sessions\/(\d+)\/chat$/);
@@ -5180,7 +6103,17 @@ function redactText(raw) {
        tutorial_id: 用户当前在看哪份教程 —— 有它才允许 AI 提议改教程。 */
     const mode = String(body.mode || '').toLowerCase() === 'ask' ? 'ask' : 'agent';
     const tutorial = Number(body.tutorial_id || 0) ? { id: Number(body.tutorial_id) } : null;
-    return streamChat(req, res, g, message, s, { mode, tutorial });
+    /* 这条对话带了哪些节点：以请求为准（前端可以随时加/去掉），落库到会话上，
+       这样刷新、换设备、重新打开都还在。node_id 是老的单值参数，继续认。 */
+    let chatNodes = null;
+    if (Array.isArray(body.node_ids)) chatNodes = sanitizeChatNodes(body.node_ids, g.id);
+    else if (Number(body.node_id || 0)) chatNodes = sanitizeChatNodes([{ id: Number(body.node_id), withKids: !!body.with_kids }], g.id);
+    if (chatNodes) {
+      try { db.prepare('UPDATE chat_sessions SET nodes = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(chatNodes), nowISO(), sid); } catch (e) {}
+    } else {
+      try { chatNodes = sanitizeChatNodes(safeParse(s.nodes) || [], g.id); } catch (e) { chatNodes = []; }
+    }
+    return streamChat(req, res, g, message, s, { mode, tutorial, nodes: chatNodes || [] });
   }
   const chatsMatch = p.match(/^\/api\/goals\/(\d+)\/chats$/);
   if (chatsMatch && method === 'DELETE') {
@@ -5228,20 +6161,27 @@ function redactText(raw) {
 /* 教程修改任务的进展写回对话。
    以前任务跑完只改数据库，对话里永远停在"已把这条修改意见交给 AI" ——
    用户不知道后来成了没有、为什么没成。 */
-function tutEditSay(sess, tut, kind, payload) {
+function tutEditSay(sess, tut, kind, payload, extra) {
   const sid = sess && sess.id ? Number(sess.id) : 0;
   const gid = tut && tut.goal_id ? Number(tut.goal_id) : 0;
   if (!gid) return;
+  const e = extra || {};
   const title = String((tut && tut.title) || '').slice(0, 30);
   let text;
   if (kind === 'stopped') {
     text = '⏹ 已停止：教程没动。\n\n' + title + ' 还是原样。想重跑就点左下角任务上的「🔄 重试」，或者把要改什么再说一遍。';
   } else if (kind === 'ok') {
     text = '✅ 教程已改完：' + title + '（正文 ' + (payload ? String(payload).length : 0) + ' 字）\n\n'
+      + (e.structureNote ? e.structureNote + '\n\n' : '')
       + '页面已自动刷新，可以直接往下读。改得不满意，点教程右上角的「📜 版本对比」就能回到上一版。';
   } else {
+    /* ⚠️ 失败原因不同，能做的动作也不同：结构守卫拦下的那种，点「🔄 重试」是**注定再失败一次**
+       （同一份意见、同一个提示词、同一个判据），要引导用户去点卡片上的「🔓 允许改结构再跑」。 */
     text = '✗ 教程没改成：' + title + '\n\n原因：' + String(payload || '未知').slice(0, 600) + '\n\n'
-      + '原教程一个字没动。点左下角任务上的「🔄 重试」可以原样重跑，或把修改意见拆小一点分多次提。';
+      + '原教程一个字没动。'
+      + (e.allowRestructure
+        ? '这条不是 AI 写不出来，是它这次动了你想保留的章节 —— 点任务卡片上的「🔓 允许改结构再跑」就会放行，直接点「🔄 重试」只会原样再失败一次。'
+        : '点左下角任务上的「🔄 重试」可以原样重跑，或把修改意见拆小一点分多次提。');
   }
   try {
     db.prepare('INSERT INTO chats (goal_id, session_id, role, content, created_at) VALUES (?,?,?,?,?)')
@@ -5250,6 +6190,63 @@ function tutEditSay(sess, tut, kind, payload) {
     backup();
   } catch (e) { console.log('[tutorial] 回执写库失败:', e.message); }
 }
+/* ---------- 结构改动先核对范围（给「Agent 替用户转述需求」那条路用）----------
+   用户原话："我觉得 Agent 有必要跟用户核对一下改动范围再动手，不然容易错改。"
+   为什么必须在**服务端**判：AI 把范围写宽这件事，用户在对话里看不出来 ——
+   等发现时三分钟已经花掉、教程也已经改坏（真实翻车 2026-10-14）。
+   这里只做纯文本判定（同 tut-guard 那套范围解析），不花 AI 调用。
+   挂起状态与"同意"词表在模块级（见文件顶部的 PENDING_EDIT / CONFIRM_WORDS）。 */
+
+/** 把一串标题说成人话：「A」「B」等 12 节（太长就截断，取前 n 个） */
+function fmtTitles(list, n) {
+  const titles = (list || []).map(x => String(x && x.title || x || '').replace(/\s+/g, ' '));
+  if (!titles.length) return '（没有）';
+  const head = titles.slice(0, n || 2).map(t => '「' + t.slice(0, 26) + (t.length > 26 ? '…' : '') + '」').join('');
+  return head + (titles.length > (n || 2) ? ' 等 ' + titles.length + ' 节' : '');
+}
+
+/** 这次意见是不是要动结构？是的话给出"要改哪一段"的人类可读说法（给用户核对用）。
+ *  ⚠️ 一定要用**小节标题**说，别只说"第 13~26 节" —— 用户看标题才知道要改的是哪些（真实反馈）。 */
+function scopeConfirmAsk(tut, feedback) {
+  const content = String((tut && tut.content) || '');
+  const sc = tutGuard.parseEditScope(feedback, content);
+  if (sc.mode === 'doc') return null;
+  const hs = tutGuard.headings(content);
+  const fromIdx = sc.mode === 'range' ? sc.fromIdx : 0;
+  const toIdx = (sc.mode === 'range' && Number.isFinite(sc.toIdx)) ? sc.toIdx : hs.length;
+  const inScope = hs.slice(fromIdx, toIdx);
+  const keep = hs.slice(0, fromIdx).concat(hs.slice(toIdx));
+  const toEnd = toIdx >= hs.length;
+  const rangeLine = sc.mode === 'range'
+    ? (toEnd
+      ? '从「' + hs[fromIdx].title + '」这一节开始，一直到全篇最后'
+      : '从「' + hs[fromIdx].title + '」开始，到「' + hs[toIdx].title + '」之前')
+    : '整篇重排（每一节都可能被改动）';
+  return {
+    sc, line: rangeLine, before: keep.length, count: hs.length,
+    keepTitles: fmtTitles(keep, 3),
+    inTitles: fmtTitles(inScope, 3),
+    view: {
+      mode: sc.mode, from: sc.fromTitle || '', fromIdx, toIdx, sections: hs.length,
+      fromTitle: hs[fromIdx] ? hs[fromIdx].title : '', toTitle: toEnd ? '' : (hs[toIdx] ? hs[toIdx].title : ''),
+      toEnd, inCount: inScope.length, keepCount: keep.length,
+      inSample: inScope.slice(0, 3).map(x => String(x.title).slice(0, 30)),
+      keepSample: keep.slice(0, 3).map(x => String(x.title).slice(0, 30))
+    }
+  };
+}
+
+/** 用户最近说的那句话（用来判断"他有没有授权这次结构改动"） */
+function lastUserWords(sess, goalId) {
+  try {
+    const sid = sess && sess.id ? Number(sess.id) : 0;
+    const r = sid
+      ? db.prepare("SELECT content FROM chats WHERE session_id = ? AND role = 'user' ORDER BY id DESC LIMIT 1").get(sid)
+      : db.prepare("SELECT content FROM chats WHERE goal_id = ? AND role = 'user' ORDER BY id DESC LIMIT 1").get(goalId);
+    return r ? String(r.content || '') : '';
+  } catch (e) { return ''; }
+}
+
 const tutEditMatch = p.match(/^\/api\/tutorials\/(\d+)\/edit$/);
   if (tutEditMatch && method === 'POST') {
     const tid = Number(tutEditMatch[1]);
@@ -5271,11 +6268,56 @@ const tutEditMatch = p.match(/^\/api\/tutorials\/(\d+)\/edit$/);
       sess = db.prepare('SELECT * FROM chat_sessions WHERE id = ?').get(sidRaw);
       if (!sess || Number(sess.goal_id) !== Number(tut.goal_id)) return sendJSON(res, 400, { error: '对话不存在或不属于该目标，请刷新后重试' });
     }
+    /* ---------- 结构改动先跟用户核对范围（Agent 发起的那条路）----------
+       为什么要这道闸：从对话发起的修改是 **AI 替用户转述需求**，它把范围写宽一点，
+       用户是看不见的 —— 真跑完三分钟才发现教程被删了 12 节（真实翻车 2026-10-14：
+       用户只想"再加一个 HTTP+SSE 的实现"，AI 把整段重写了）。用户的原话：
+       "我觉得 Agent 有必要跟用户核对一下改动范围再动手，不然容易错改。"
+       判定：
+         · 用户自己的话里就点了范围 / 允许整篇重写 → 他授权了，直接开跑
+         · 用户刚回过"可以 / 就这样改" → 视为对上一次挂起范围的确认
+         · 其余情况（AI 想动结构、用户没提）→ 不跑，先在对话里把范围摊开问一句 */
+    const pendKey = tut.goal_id + ':' + tid;
+    if (quiet && !(body && body.confirmed)) {
+      const ask = scopeConfirmAsk(tut, feedback);
+      if (ask) {
+        const pend = PENDING_EDIT.get(pendKey);
+        const userWords = String(lastUserWords(sess, tut.goal_id) || '').trim();
+        const userAsked = !!userWords && tutGuard.parseEditScope(userWords, tut.content || '').mode !== 'doc';
+        const userOk = !!pend && (Date.now() - pend.at < 30 * 60 * 1000) && CONFIRM_WORDS.test(userWords);
+        if (!userAsked && !userOk) {
+          PENDING_EDIT.set(pendKey, { feedback, at: Date.now() });
+          console.log('[tutorial] 结构改动挂起待确认：' + ask.line + '（用户没提结构：' + userWords.slice(0, 30) + '）');
+          const text = '📐 这次要改的是**结构**，先跟你核对范围，确认了我再动手（不然白跑三分钟还可能删错）：\n\n'
+            + '**· 改哪里**：' + ask.line + '\n'
+            + (ask.sc.mode === 'range'
+              ? '**· 这一段里的小节**（共 ' + ask.view.inCount + ' 节）：' + ask.inTitles + '\n'
+                + '**· 保持不动**（共 ' + ask.view.keepCount + ' 节）：' + ask.keepTitles + '\n'
+              : '**· 注意**：整篇重排时章节可能被合并、改名或删除（改完可用「📜 版本对比」回滚）\n')
+            + '\n范围对就点「✅ 就按这个范围改」（回一句"可以"也行）；不对就点「✏️ 范围不对」，在下面的输入框里把要改哪几节说清楚。';
+          try {
+            db.prepare('INSERT INTO chats (goal_id, session_id, role, content, ops, created_at) VALUES (?,?,?,?,?,?)')
+              .run(tut.goal_id, sess ? sess.id : 0, 'assistant', text.slice(0, 3000),
+                JSON.stringify([{ op: 'pending_edit', tutorial_id: tid, feedback, view: ask.view }]), nowISO());
+            if (sess) db.prepare('UPDATE chat_sessions SET updated_at = ? WHERE id = ?').run(nowISO(), sess.id);
+            backup();
+          } catch (e) { console.log('[tutorial] 核对消息写库失败:', e.message); }
+          return sendJSON(res, 200, { ok: true, pending: true, needConfirm: true, sessionId: sess ? sess.id : 0, scope: ask.view });
+        }
+        PENDING_EDIT.delete(pendKey);
+      }
+    }
     /* 任务重试闭包：重跑「教程修改」，入参与当初完全一致。
-       失败时不必把那条修改意见重新打一遍（意见常常很长，重打一遍最容易出错）。 */
-    const startEditTask = () => tasks.submit({
+       失败时不必把那条修改意见重新打一遍（意见常常很长，重打一遍最容易出错）。
+       opts.allowRestructure = 卡片上「🔓 允许改结构再跑」点的：结构守卫这次不再拦。
+       opts.fromRetry / originId 只用来记「这条是重试来的」（失败率指标要分得清）。 */
+    const startEditTask = (opts) => {
+      const ro = opts || {};
+      const allowRestructure = !!(ro.allowRestructure || (body && body.allow_restructure));
+      return tasks.submit({
       type: 'tutorial', title: '修改教程：' + String(tut.title || '').slice(0, 30), goalId: tut.goal_id, nodeId: tut.node_id, note: feedback,
       retry: startEditTask,
+      retried: ro.fromRetry ? 1 : 0, originId: ro.originId || 0,
       run: async ({ progress, signal }) => {
         try {
         /* 这条任务以前**不声明阶段**（只报一句百分比），左下角卡片就只有一个光秃秃的
@@ -5288,12 +6330,14 @@ const tutEditMatch = p.match(/^\/api\/tutorials\/(\d+)\/edit$/);
           { key: 'fix', label: '续写补齐' },
           { key: 'save', label: '保存版本' }
         ].map(x => ({ key: x.key, label: x.label, state: 'pending' }));
-        let curStep = -1, thinkTail = '';
-        const stepAt = (k, pct, msg, think) => {
+        let curStep = -1, thinkTail = '', etaLive = '';
+        const stepAt = (k, pct, msg, think, eta) => {
           if (k != null && k > curStep) curStep = k;
           est.forEach((x, i) => { x.state = i < curStep ? 'done' : (i === curStep ? 'active' : 'pending'); });
-          /* pct / msg 传 null = 「只更新阶段与思考」，别把百分比和当前文案覆盖掉 */
-          progress(pct == null ? null : pct, msg || null, { steps: est, thinking: think != null ? think : thinkTail });
+          /* pct / msg 传 null = 「只更新阶段与思考」，别把百分比和当前文案覆盖掉。
+             eta 传 undefined = 保持上一条（"约还需多久"要一直显示到这一步结束）；传 '' = 清掉。 */
+          if (eta !== undefined) etaLive = eta;
+          progress(pct == null ? null : pct, msg || null, { steps: est, thinking: think != null ? think : thinkTail, eta: etaLive });
         };
         stepAt(0, 5, '正在按你的意见修改教程…');
         /* 同教程生成那条约定：AI 调用都带 signal，写入前再查一次 ——
@@ -5316,20 +6360,212 @@ const tutEditMatch = p.match(/^\/api\/tutorials\/(\d+)\/edit$/);
             editCodeBlock = parts.join('\n\n');
           }
         } catch (e) { console.log('[tutorial] 修改时源码载入失败:', e.message); }
-        const editBase = buildTutorialEditPrompt(goal, node, tut, feedback, tut.format, editCodeBlock);
-        /* onEvent 把模型此刻在写什么带回来（推理片段 / 正文尾巴）——
-           卡片上那行 💭 才有内容，否则用户只知道"在跑"，不知道"在跑什么" */
-        const runEdit = async (prompt) => cleanTutorialText(String(await ai.text({
-          prompt, model: currentModel(), timeoutMs: 600000, signal, scene: '教程修改',
-          onEvent: ev => {
-            if (ev.thinking) thinkTail = ev.thinking;
-            else if (ev.text) thinkTail = ev.text;
-            else return;
-            stepAt(null, null, null);
+        /* ⚠️ 整篇修改提示词要**用的时候才拼**：它内部有"正文超过 9 万字就拒收"的保护
+           （fullTutorialForEdit），而长教程现在走分节改写、根本不需要整篇提示词。
+           提前拼会在 9 万字以上直接抛错，用户连分节改写的门都进不去。 */
+        let editBaseLazy = null;
+        const editBase = () => {
+          if (editBaseLazy == null) editBaseLazy = buildTutorialEditPrompt(goal, node, tut, feedback, tut.format, editCodeBlock);
+          return editBaseLazy;
+        };
+        /* ---------- 「AI 重写」那一步的进度是怎么算出来的 ----------
+           这一步就是整个任务 95% 的时间（实测这篇 7.9 万字要 2~4 分钟），而它原来
+           只报一句 15% 就一动不动，直到整个任务结束才跳到 100% —— 用户盯着一条
+           不动的进度条干等，完全估不出还要多久（线上反馈）。
+           现在用两个**真信号**推算，映射到 15%~68%：
+             · 已写出多少字 ÷ 预计要写的字数（流式接口能拿到增量，最准）
+             · 已花多少时间 ÷ 预估耗时（非流式 / agent 那条路拿不到增量时的兜底）
+           两个取较大值；能量出速率时再补一句「约还需 X 分 Y 秒」。
+           ⚠️ 别让它爬到顶就停：结构自检 / 续写补齐 / 保存版本还要走 68%→100%。 */
+        const origChars = String(tut.content || '').length;
+        let expectChars = Math.max(2000, Math.round(origChars * 0.9));
+        let expectMs = Math.max(60000, Math.min(300000, 45000 + origChars * 1.6));
+        let rewriteT0 = Date.now();
+        let gotChars = 0, bodyTail = '';
+        const fmtLeft = ms => {
+          const s = Math.max(0, Math.round(ms / 1000));
+          return s < 60 ? s + ' 秒' : Math.floor(s / 60) + ' 分' + (s % 60 ? ' ' + (s % 60) + ' 秒' : '');
+        };
+        const paintRewrite = () => {
+          const el = Date.now() - rewriteT0;
+          const byChars = gotChars / expectChars;
+          const byTime = Math.min(0.9, el / expectMs);      // 时间兜底最多推到 63%，剩下的留给字数控
+          const frac = Math.min(1, Math.max(byChars, byTime));
+          let eta = '';
+          if (gotChars >= 1200 && el >= 5000) {
+            const rate = gotChars / el;                     // 字/毫秒
+            const left = (expectChars - gotChars) / rate;
+            eta = left > 0 ? '约还需 ' + fmtLeft(left) : '快写完了';
+          } else if (el > 8000) {
+            eta = '约还需 ' + fmtLeft(Math.max(0, expectMs - el));
           }
-        }) || ''), tut.format);
-        stepAt(1, 15, '正在按你的意见重写正文…');
-        let out = await runEdit(editBase);
+          stepAt(1, 15 + Math.round(53 * frac),
+            gotChars >= 1000 ? '正在按你的意见重写正文…（已写约 ' + Math.round(gotChars / 1000) + ' 千字 / 全文约 ' + Math.round(expectChars / 1000) + ' 千字）' : null,
+            null, eta);
+        };
+        /* onEvent 把模型此刻在写什么带回来（推理片段 / 正文尾巴）——
+           卡片上那行 💭 才有内容，否则用户只知道"在跑"，不知道"在跑什么"。
+           正文增量顺便拿来算上面的进度（只看尾巴 220 字，别把整篇正文留在内存里）。 */
+        const runEdit = async (prompt) => {
+          /* 保底心跳：万一这条连接根本不吐增量（非流式 / agent 那条路），
+             也得让进度条按时间往前爬、并把「约还需多久」显示出来 ——
+             否则卡片又是一动不动（用户报的就是这个）。
+             unref + finally 清掉，别让定时器拖住进程或活到任务结束之后。 */
+          const tick = setInterval(() => { try { paintRewrite(); } catch (e) {} }, 2500);
+          if (tick.unref) tick.unref();
+          try {
+            return cleanTutorialText(String(await ai.text({
+              prompt, model: currentModel(), timeoutMs: 600000, signal, scene: '教程修改',
+              onEvent: ev => {
+                if (ev.text) {
+                  gotChars += String(ev.text).length;
+                  bodyTail = (bodyTail + ev.text).slice(-220);
+                  thinkTail = bodyTail;
+                } else if (ev.thinking) {
+                  thinkTail = ev.thinking;
+                } else return;
+                paintRewrite();
+              }
+            }) || ''), tut.format);
+          } finally { clearInterval(tick); }
+        };
+        stepAt(1, 15, '正在按你的意见重写正文…', null, '');
+        let out = '';
+        /* ---------- 先试「补丁模式」：小改动不该等五分钟 ----------
+           判断是纯文本启发式（不花 AI 调用，判断本身要等半分钟就本末倒置了）。
+           补丁套不上、或模型说这是整篇重做，就原样回到下面的全文重写 —— 慢但正确。
+           ⚠️ 意见里点名了重写范围（"从「X」往后重写"）时直接走全文重写：
+           补丁只能改一处，把整段重排交给它只会白花一轮 AI 调用。 */
+        const scopeHint = tutGuard.parseEditScope(feedback, tut.content || '');
+        const ed = scopeHint.mode === 'doc'
+          ? effort.editEffort(feedback, tutPatch)
+          : { mode: 'full', why: scopeHint.why };
+        console.log('[tutorial] 修改复杂度判断：' + ed.mode + ' ← ' + ed.why);
+        if (tut.format === 'md' && ed.mode === 'patch') {
+          try {
+            const rel = tutPatch.pickRelevant(tut.content, feedback, 26000);
+            console.log('[tutorial] 试补丁模式：相关章节 ' + (rel.whole ? '全文(' + rel.excerpt.length + '字)' : rel.picked.join(' / ')));
+            stepAt(1, 10, rel.whole ? '正在定位要改的地方（只改这一处，不重写全文）…'
+              : '正在定位要改的地方（已挑出相关章节：' + rel.picked.slice(0, 2).join('、') + '）…', null, '');
+            /* 补丁也给它两轮：第一轮常犯的毛病是 REPLACE 里漏了收尾的 ```
+               或把代码块截断（实测翻过：补丁套上后 ```json 没闭合）。
+               补丁本身很快，重试一次比掉进"全文重写几分钟"划算得多。 */
+            let patchHint = '';
+            for (let pr = 1; pr <= 2 && !out; pr++) {
+              const praw = String(await ai.text({
+                prompt: buildTutorialPatchPrompt(tut, feedback, rel.excerpt, rel.whole, editCodeBlock) + patchHint,
+                model: currentModel(), timeoutMs: 300000, signal, scene: '教程局部修改',
+                onEvent: ev => {
+                  const t2 = ev.thinking || ev.text;
+                  if (t2) { thinkTail = t2; stepAt(null, null, null); }
+                }
+              }) || '');
+              const parsed = tutPatch.parsePatches(praw);
+              if (parsed.needFull) {
+                console.log('[tutorial] 模型判定为整篇重做，转全文重写');
+                stepAt(1, 15, '这次改动涉及整篇，正在重写正文…', null, '');
+                break;
+              }
+              if (!parsed.patches.length) {
+                console.log('[tutorial] 补丁模式没解析出补丁（回文长度 ' + praw.length + '），' + (pr < 2 ? '再试一次' : '转全文重写'));
+                if (pr >= 2) break;
+                patchHint = '\n\n【⚠️ 上一次你没有按格式输出】请严格按 <<<<<<< SEARCH / ======= / >>>>>>> REPLACE 三行标记输出补丁，不要有任何别的文字。';
+                continue;
+              }
+              const ap = tutPatch.applyPatches(tut.content, parsed.patches);
+              console.log('[tutorial] 补丁模式第 ' + pr + ' 轮：' + ap.applied + '/' + parsed.patches.length + ' 条命中'
+                + (ap.failed.length ? '，未命中：' + ap.failed.join(' | ') : ''));
+              if (!ap.ok) {
+                if (pr >= 2) { console.log('[tutorial] 补丁两轮都没全部套上，转全文重写（宁可慢也不能只改一半）'); break; }
+                /* 差一点就套上时，把没命中的原文片段回给模型让它照抄 —— 比让它凭记忆重写准得多 */
+                patchHint = '\n\n【⚠️ 上一轮的这几段 SEARCH 在原文里找不到，必须**逐字**照抄原文再试一次】\n'
+                  + ap.failed.map(x => '· ' + x).join('\n');
+                continue;
+              }
+              stepAt(2, 40, '已改好，正在检查完整性…', null, '');
+              const chkP = tutIntegrity(ap.text, tut.format);
+              if (chkP.ok) { out = ap.text; break; }
+              console.log('[tutorial] 补丁第 ' + pr + ' 轮结果结构不合法（' + chkP.issues.join('；') + '）');
+              if (pr >= 2) { console.log('[tutorial] 补丁两轮都改坏了结构，转全文重写'); break; }
+              patchHint = '\n\n【⚠️ 上一轮的补丁把代码块/可视化块改坏了】' + chkP.issues.join('；')
+                + '。请重写补丁：SEARCH 与 REPLACE 里的围栏（```）数量必须一一对应，一个都不能多、不能少；'
+                + '如果改动会让篇幅变长，宁少改一点也不要截断代码块。';
+            }
+          } catch (e) {
+            console.log('[tutorial] 补丁模式异常，转全文重写：', e.message);
+          }
+        }
+        if (out) {
+          /* 补丁已经改完，跳过全文重写的那些重试/防截断逻辑，
+             但下面共用的几道体检（围栏、可视化块、结构、跑题）照跑。 */
+          stepAt(3, 62, '正在体检改动结果…', null, '');
+          global.__tutScene = 'tutorial_edit';
+          let chkP = tutIntegrity(out, tut.format);
+          if (!chkP.ok) {
+            /* 补丁改坏结构（比如把 ``` 删了）：不修，直接判失败退回全文重写。
+               补丁本身就是"改动很小"，这里出问题说明模型抄错了原文。 */
+            console.log('[tutorial] 补丁结果的围栏/结构不合法（' + chkP.issues.join('；') + '），退回全文重写');
+            out = '';
+          }
+        }
+        /* ---------- 长教程：分节改写（只把要改的那几段发过去） ----------
+           为什么要有这条路：全文重写要求模型把整篇重新吐一遍 ——
+           9 万字的教程光输出就要 4~6 轮续写（实测 8 万字就常撞"AI 输出过长"），
+           9 万字以上更被 TUT_EDIT_MAX 直接拒收，用户根本改不了。
+           而意见通常点名了范围（"从「X」到「Y」之前"），那就只改那一段：
+           输出量从"整篇"降到"这一段"，范围外的正文逐字拼回、没机会被改坏。 */
+        let segFail = '';
+        if (!out && tutSeg.shouldSegment(tut.content, scopeHint.mode, SEG_MIN)) {
+          try {
+          const hsAll = tutGuard.headings(tut.content || '');
+          const fIdx = scopeHint.mode === 'range' ? scopeHint.fromIdx : 0;
+          const tIdx = (scopeHint.mode === 'range' && Number.isFinite(scopeHint.toIdx)) ? Math.min(scopeHint.toIdx, hsAll.length) : hsAll.length;
+          const chunks = tutSeg.splitScopeChunks(tut.content || '', hsAll, fIdx, tIdx, SEG_CHUNK);
+          const inScopeChars = chunks.reduce((s2, c) => s2 + c.chars, 0);
+          console.log('[tutorial] 分节改写：范围 ' + (fIdx + 1) + '~' + tIdx + ' 节 → ' + chunks.length + ' 块 / ' + inScopeChars + ' 字（原文 ' + String(tut.content || '').length + ' 字）');
+          expectChars = Math.max(1500, inScopeChars);
+          expectMs = Math.max(45000, Math.min(300000, 25000 + inScopeChars * 1.6));
+          rewriteT0 = Date.now(); gotChars = 0; bodyTail = '';
+          const outs = [];
+          let prevTail = '';
+          for (let ci = 0; ci < chunks.length; ci++) {
+            stopCheck();
+            const c = chunks[ci];
+            const info = {
+              no: ci + 1, total: chunks.length, text: String(tut.content).slice(c.start, c.end),
+              prevTail, nextTitle: tIdx < hsAll.length && ci === chunks.length - 1 ? hsAll[tIdx].title : ''
+            };
+            stepAt(1, null, '正文较长，正在分段重写（第 ' + (ci + 1) + '/' + chunks.length + ' 段：' + String(c.title).slice(0, 16) + '）…');
+            let piece = await runEdit(buildSegmentPrompt(goal, node, tut, feedback, c, info, editCodeBlock));
+            piece = tutSeg.cleanSegment(piece, c, info.nextTitle, true);
+            /* 一块写得离谱地长（把别的段也带出来了）→ 判定这一段失败，整条路回退到全文重写 */
+            if (piece.length > Math.max(4000, c.chars * 2.5)) {
+              throw new Error('第 ' + (ci + 1) + ' 段返回长度异常（' + piece.length + ' 字 / 原文 ' + c.chars + ' 字），疑似把别的段也写回来了');
+            }
+            const uf = unclosedFences(piece);
+            if (uf && uf.kind) throw new Error('第 ' + (ci + 1) + ' 段的 ' + uf.kind + ' 没有闭合，分段结果不可用');
+            outs.push(piece);
+            prevTail = piece;
+          }
+          out = tutSeg.splice(tut.content || '', chunks, outs);
+          stepAt(2, 70, '分段重写完成，正在校验整篇…');
+          } catch (e) {
+            /* 分段没成 → 回退全文重写（短文/小改还能救）；正文超上限时给一句能照做的提示 */
+            segFail = e && e.message ? e.message : String(e);
+            console.log('[tutorial] 分节改写没成，回退全文重写：' + segFail);
+            expectChars = Math.max(2000, Math.round(origChars * 0.9));
+            expectMs = Math.max(60000, Math.min(300000, 45000 + origChars * 1.6));
+            rewriteT0 = Date.now(); gotChars = 0; bodyTail = '';
+            out = '';
+            if (String(tut.content || '').length > TUT_EDIT_MAX) {
+              throw new Error('这份教程有 ' + String(tut.content || '').length + ' 字，一次改完超出上限（' + TUT_EDIT_MAX + ' 字）；系统本来会按你点名的范围分段改，但这一次没成（' + segFail + '）。'
+                + '请把意见写得更具体一点（**点名到某一节**，写它的标题），或把意见拆小分多次提。原教程没动。');
+            }
+          }
+        }
+        if (!out) {
+        let out2 = await runEdit(editBase());
+        out = out2;
         /* 模型偷懒有两类，都得再要一次全文，别让用户干等：
            ① 只回了句确认语（"好的，我来改…"）
            ② 更阴的一种：反过来向**我们**要材料 —— "请把上次已输出的尾部粘贴过来"
@@ -5340,8 +6576,8 @@ const tutEditMatch = p.match(/^\/api\/tutorials\/(\d+)\/edit$/);
           if (out && out.length >= 80 && !looksLikeAskBack(out)) break;
           if (!out || !out.length) break;
           console.log('[tutorial] 修改初回只有 ' + out.length + ' 字（' + (looksLikeAskBack(out) ? '模型反过来要我们提供材料' : '疑似确认语') + '），追加指令重试。首字：' + out.slice(0, 60));
-          stepAt(1, 55 + round * 5, 'AI 第一次没给出正文，正在让它直接输出全文…');
-          out = await runEdit(editBase + '\n\n【重要】不要只回复确认、解释或道歉，也不要向我索要任何材料 —— 你需要的原文已经完整包含在上面了。现在直接输出修改后的完整教程正文。');
+          stepAt(1, 55 + round * 5, 'AI 第一次没给出正文，正在让它直接输出全文…', null, '');
+          out = await runEdit(editBase() + '\n\n【重要】不要只回复确认、解释或道歉，也不要向我索要任何材料 —— 你需要的原文已经完整包含在上面了。现在直接输出修改后的完整教程正文。');
         }
         if (!out || out.length < 80) {
           console.log('[tutorial] 修改失败：清洗后长度 ' + (out ? out.length : 0) + '，原文长度 ' + String(tut.content || '').length);
@@ -5351,7 +6587,7 @@ const tutEditMatch = p.match(/^\/api\/tutorials\/(\d+)\/edit$/);
         }
         // 防截断兜底：原文很长、新文却只有一小截时，宁可报错也不覆盖好教程
         const origLen = String(tut.content || '').length;
-        stepAt(2, 70, '正在校验结果…');
+        stepAt(2, 70, '正在校验结果…', null, '');
         if (origLen > 3000 && out.length < Math.max(500, Math.floor(origLen * 0.2))) {
           throw new Error('AI 返回内容过短（仅原文 ' + Math.round(out.length / Math.max(1, origLen) * 100) + '%，疑似被截断），原教程没动：点任务上的「🔄 重试」即可原样重跑，或把修改意见拆小一点分多次提');
         }
@@ -5362,7 +6598,7 @@ const tutEditMatch = p.match(/^\/api\/tutorials\/(\d+)\/edit$/);
         let chk = tutIntegrity(out, tut.format);
         if (!chk.ok) {
           console.log('[tutorial] 修改结果疑似截断：' + chk.issues.join('；'));
-          stepAt(3, 76, '结果被截断，正在让 AI 补全缺失部分…');
+          stepAt(3, 76, '结果被截断，正在让 AI 补全缺失部分…', null, '');
           const fixed = await repairTruncatedText({
             raw: out, format: tut.format, title: tut.title, issues: chk.issues,
             runText: (p) => ai.text({ prompt: p, model: currentModel(), timeoutMs: 600000, signal, scene: '教程续写' })
@@ -5379,60 +6615,8 @@ const tutEditMatch = p.match(/^\/api\/tutorials\/(\d+)\/edit$/);
               + '。原教程没动，点「🔄 重试」可原样重跑');
           }
         }
-        /* 数一份教程里的 ```viz 块，并给每个块算个"长相指纹"（长度 + 开头特征），
-   用来判断"这个块还在不在、还是不是原来那个"。改教程时 AI 把可视化整段删掉、
-   或者悄悄换成一段文字，只看总长度是发现不了的 —— 那正是用户肉眼会发现的损失。 */
-function vizBlocks(txt) {
-  const out = [];
-  const re = /```(?:viz|demo|htmlviz)\n([\s\S]*?)\n```/g;
-  let m;
-  while ((m = re.exec(String(txt || '')))) {
-    const b = m[1];
-    out.push({ len: b.length, head: b.replace(/\s+/g, ' ').slice(0, 40), isHtml: /<[a-zA-Z][\w-]*[\s\S]*>/.test(b) });
-  }
-  return out;
-}
-/* 原教程里的可视化块，改完还在不在、还是不是原来那个。
-   ⚠️ 之前这版在 `a.length <= b.length` 时直接返回 null —— 于是"删掉一个旧的、
-   另写一个新的"这种最典型的丢失（实测：把我那张 HTML 流程图换成了一张字符画，
-   块数不变，守卫全绿）根本不会被发现。数不变不代表没丢，要逐块对指纹。 */
-function vizLoss(before, after) {
-  const a = vizBlocks(before), b = vizBlocks(after);
-  if (!a.length) return null;
-  const match = x => b.some(y => y.isHtml === x.isHtml && Math.abs(y.len - x.len) < Math.max(300, x.len * 0.25));
-  const gone = a.filter(x => !match(x));
-  if (!gone.length) return null;
-  const hadHtml = a.filter(x => x.isHtml).length, nowHtml = b.filter(x => x.isHtml).length;
-  /* ⚠️ 只要「总块数」和「HTML 演示数」都没减少，就不算丢失 —— 那只是**重写**。
-     实测误报（2026-10-12）：用户要求"把 ReAct 那段做成 HTML 可视化"，AI 从 6 块做到 8 块
-     （净增 2 块），同时重写了原有的一块 → 指纹对不上 → 判成"丢失"，把用户正想要的结果拒了。
-     真正要拦的是这两种，它们都会让计数**下降**：
-       · 整块被删掉
-       · HTML 演示被降级成一段文字或字符画（块数可能不变，但 HTML 数会掉） */
-  if (b.length >= a.length && nowHtml >= hadHtml) {
-    console.log('[tutorial] 可视化块被重写（块 ' + a.length + '→' + b.length + '，其中 HTML ' + hadHtml + '→' + nowHtml + '），不算丢失：'
-      + gone.map(x => x.head).join(' / '));
-    return null;
-  }
-  return { had: a.length, now: b.length, gone: gone.slice(0, 2).map(x => (x.isHtml ? 'HTML 演示「' : '非 HTML 内容「') + x.head + '」') };
-}
-/* 章节流失：用户只说"这一段讲得不清楚"，AI 却把大半本教程重写了 ——
-   实测一次编辑消失了 22 个章节里的 14 个（分步实践、验收标准、面试追问、速查卡全没了），
-   而长度校验只看总长（22882 / 32134 = 71%，远高于 20% 阈值），一路放行。
-   现在按 ## / ### 标题逐个对：掉得太多就拒收，并告诉用户真想重写怎么说。 */
-function structureLoss(before, after, feedback) {
-  if (/允许重写|全部重写|重写整篇|推倒重来|重新组织|重构结构|不用保留原结构/.test(String(feedback || ''))) return null;
-  const grab = t => {
-    const m = String(t || '').match(/^#{2,3}\s+(.+)$/gm) || [];
-    return m.map(s => s.replace(/^#+\s+/, '').trim()).filter(Boolean);
-  };
-  const a = grab(before), b = grab(after);
-  if (a.length < 5) return null;                       // 章节本来就不多，不做判断
-  const set = new Set(b);
-  const lost = a.filter(x => !set.has(x));
-  if (lost.length < 4 || lost.length / a.length < 0.3) return null;
-  return { had: a.length, lost: lost.slice(0, 4) };
-}
+        }
+
 // 防跑题兜底：标题留着、正文被换成毫不相干的内容时，长度检查拦不住
         // （线上翻车：RAGFlow 教程被改成离线同步引擎）。命中即拒收，原教程不动。
         const drift = topicDrifted(out, tut.content, [tut.title, node && node.title]);
@@ -5451,17 +6635,36 @@ function structureLoss(before, after, feedback) {
             + '请在修改意见里明确写一句"保留所有可视化块"，或点「🔄 重试」原样重跑');
         }
         /* 章节流失兜底：一次"讲清楚一点"的要求，被改成了重写大半本教程。
-           静默丢掉"分步实践 / 验收标准 / 面试追问"这类章节，用户过几天才发现。 */
-        const lostSec = structureLoss(tut.content, out, feedback);
+           静默丢掉"分步实践 / 验收标准 / 面试追问"这类章节，用户过几天才发现。
+           ⚠️ 判据分范围（见 tut-guard.js）：用户点名要重写的那一段允许重组，
+           只有**范围外**的章节少了、或范围内被删成空壳才算问题。 */
+        const lostSec = tutGuard.structureLoss(tut.content, out, feedback, { allowRestructure: allowRestructure });
         if (lostSec) {
-          console.log('[tutorial] 修改疑似把教程重写了：原有 ' + lostSec.had + ' 个章节，消失了至少 ' + lostSec.lost.length + ' 个 → ' + lostSec.lost.join(' / '));
-          throw new Error('这次改动把教程的章节结构改掉了（原有 ' + lostSec.had + ' 个章节，至少消失了「' + lostSec.lost.join('」「') + '」等），已保留原教程：'
-            + '只想改某一段的话，请把意见写得更具体（例如"只改 2. 可视化那一节，其余章节一个字别动"）；'
-            + '确实想整篇重写，请在意见里加上"允许重写结构"');
+          console.log('[tutorial] 结构守卫拒收（' + lostSec.kind + '，' + lostSec.scope.why + '）：'
+            + (lostSec.kind === 'lost'
+              ? '原有 ' + lostSec.had + ' 节，范围外 ' + lostSec.outScope + ' 节里消失了 ' + lostSec.lost.length + ' 节 → ' + lostSec.lost.map(x => x.title).join(' / ')
+              : '范围内原有 ' + lostSec.inScopeChars + ' 字，改后整篇只剩 ' + lostSec.nowLen + ' 字'));
+          const scope = lostSec.scope || {};
+          const inRange = scope.mode === 'range';
+          const e = new Error(lostSec.kind === 'gutted'
+            ? '这次改动把「' + scope.fromTitle + '」往后的内容删得太狠了（原文那一段有 ' + lostSec.inScopeChars
+              + ' 字，改完整篇只剩 ' + lostSec.nowLen + ' 字），已保留原教程。'
+              + '想让 AI 放开手重写，点任务卡片上的「🔓 允许改结构再跑」；也可以把范围拆小一点分多次提'
+            : inRange
+              ? '这次改动动到了你要保留的章节「' + lostSec.lost.map(x => x.title).join('」「') + '」'
+                + '（你要改的是从「' + scope.fromTitle + '」往后的部分，之前那 ' + lostSec.outScope + ' 节应当原样保留），已保留原教程。'
+                + '想让 AI 连结构一起重排，点任务卡片上的「🔓 允许改结构再跑」；'
+                + '只想改范围外的一小处，请把意见写得更具体（写清楚要改的是哪一节，用它的标题）'
+              : '这次改动把教程的章节结构改掉了（原有 ' + lostSec.had + ' 个章节，至少消失了「' + lostSec.lost.map(x => x.title).join('」「') + '」等），已保留原教程：'
+                + '只想改某一段的话，请把意见写得更具体（写清楚要改的是哪一节，用它的标题）；'
+                + '确实想整篇重写，点任务卡片上的「🔓 允许改结构再跑」或在意见里加上"允许重写结构"');
+          /* 这条失败有救：卡片上给一个"允许改结构再跑"的按钮，别让用户去点注定再失败一次的重试 */
+          e.allowRestructure = true;
+          throw e;
         }
         // 先存旧版（教程版本表），再覆盖正文 —— 改坏了能从历史版本恢复
         stopCheck();
-        stepAt(4, 90, '正在保存新版本…');
+        stepAt(4, 90, '正在保存新版本…', null, '');
         try { saveTutorialVersion(tid, 'AI 修改：' + String(feedback || '').slice(0, 100)); } catch (e) {}
         // 保留历史版本（写入 goal_versions 便于回滚），再覆盖教程内容
         stopCheck();
@@ -5472,18 +6675,22 @@ function structureLoss(before, after, feedback) {
         } catch (e) {
           db.prepare('UPDATE tutorials SET content = ?, updated_at = ? WHERE id = ?').run(out, nowISO(), tid);
         }
-        progress(100, '修改完成');
+        est.forEach(x => { x.state = 'done'; });   // 收尾：全部打勾，别留一个转圈的
+        progress(100, '修改完成', { steps: est, thinking: '', eta: '' });
         backup();
-        tutEditSay(sess, tut, 'ok', out);
+        /* 结构有变化就说一声（消失/新增了哪几节）—— 守卫现在允许"范围内重组"，
+           那就必须让用户看得见"哪几节没了"，而不是等他过几天自己发现。 */
+        tutEditSay(sess, tut, 'ok', out, { structureNote: tutGuard.structureChangeNote(tut.content, out) });
         return { tutorialId: tid, length: out.length };
         } catch (e) {
           /* 用户自己点了停止 ≠ 失败。混在一起报"没改成…原因：已停止"会让人以为出错了。 */
           const stopped = !!(e && (e.cancelled || e.name === 'AbortError'));
-          tutEditSay(sess, tut, stopped ? 'stopped' : 'fail', e && e.message);
+          tutEditSay(sess, tut, stopped ? 'stopped' : 'fail', e && e.message, { allowRestructure: !!(e && e.allowRestructure) });
           throw e;
         }
       }
     });
+    };
     const taskId = startEditTask();
     // 先落库对话记录（任务在后台跑，记录立刻可见；刷新后从会话里读出来）
     if (sess) {
@@ -5987,10 +7194,13 @@ function extractEbookPrefFromAnswers(answers) {
     return sendJSON(res, 200, tasks.cancel(Number(taskCancelMatch[1])));
   }
   /* 失败重试：用当初那份入参重新提交一个新任务（用户不用把意见/命令再打一遍）。
-     旧任务保留（还能看到它当时的报错），新任务是独立的一条。 */
+     旧任务保留（还能看到它当时的报错），新任务是独立的一条。
+     body.allow_restructure = 卡片上的「🔓 允许改结构再跑」：
+     结构守卫拦下的那类失败，原样重跑必然再失败一次，必须带着这个标记重跑才有意义。 */
   const taskRetryMatch = p.match(/^\/api\/tasks\/(\d+)\/retry$/);
   if (taskRetryMatch && method === 'POST') {
-    return sendJSON(res, 200, await tasks.retry(Number(taskRetryMatch[1])));
+    const b = await readBody(req).catch(() => ({}));
+    return sendJSON(res, 200, await tasks.retry(Number(taskRetryMatch[1]), { allowRestructure: !!(b && b.allow_restructure) }));
   }
   if (p === '/api/tasks/clear' && method === 'POST') {
     const b = await readBody(req).catch(() => ({}));
@@ -6669,6 +7879,13 @@ function extractEbookPrefFromAnswers(answers) {
       vis_has_key: !!getSetting('vis_api_key', ''),
       /* 检索增强：向量模型独立配置（很多服务商没有 /embeddings，如 DeepSeek） */
       rag_enabled: (getSetting('rag_enabled', '1') || '1') !== '0',
+      /* 信息源把关（搜集时 AI 判读的门槛；存本机、全局沿用） */
+      collect_review: (getSetting('collect_review', '1') || '1') !== '0',
+      collect_min_score: getSetting('collect_min_score', '3'),
+      collect_candidates: getSetting('collect_candidates', '220'),
+      collect_per_site: getSetting('collect_per_site', '12'),
+      collect_full: (getSetting('collect_full', '1') || '1') !== '0',
+      collect_full_max: getSetting('collect_full_max', '60000'),
       emb_base_url: getSetting('emb_base_url', ''),
       emb_has_key: !!getSetting('emb_api_key', ''),
       emb_model: getSetting('emb_model', ''),
@@ -6703,6 +7920,10 @@ function extractEbookPrefFromAnswers(answers) {
     if (body.vis_api_key === '') setSetting('vis_api_key', '');
     /* 检索增强（RAG）：开关 + 向量模型独立配置（地址/模型留空 = 未配置，退化为关键词检索） */
     if (body.rag_enabled != null) setSetting('rag_enabled', body.rag_enabled ? '1' : '0');
+    /* 信息源把关设置（收集时 AI 判读的门槛、候选上限、全文抓取） */
+    for (const k of ['collect_review', 'collect_min_score', 'collect_candidates', 'collect_per_site', 'collect_full', 'collect_full_max']) {
+      if (body[k] != null) set(k, body[k]);
+    }
     if (body.emb_base_url != null) set('emb_base_url', body.emb_base_url);
     if (body.emb_model != null) set('emb_model', body.emb_model);
     if (body.emb_api_key != null && String(body.emb_api_key).trim() && !/^•+$/.test(String(body.emb_api_key).trim())) set('emb_api_key', body.emb_api_key);
@@ -6796,7 +8017,9 @@ server.listen(PORT, () => {
   const url = `http://localhost:${PORT}`;
   if (process.platform === 'win32') { try { execFile('cmd', ['/c', 'start', '', url], () => {}); } catch (e) {} }
   else if (process.platform === 'darwin') { try { execFile('open', [url], () => {}); } catch (e) {} }
-  else { try { execFile('xdg-open', [url], () => {}); } catch (e) {} }
+  /* 开机自启（systemd 用户服务）起来的实例环境里没有 DISPLAY，xdg-open 会静默失败：
+     补一份显示环境再喊浏览器（见 gui-env.js） */
+  else { try { execFile('xdg-open', [url], { env: guiEnv() }, () => {}); } catch (e) {} }
 });
 server.on('error', e => {
   if (e.code === 'EADDRINUSE') {
