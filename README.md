@@ -17,7 +17,7 @@
   <img src="https://img.shields.io/badge/Zero_Deps-2ea44f" alt="Zero dependencies" />
   <img src="https://img.shields.io/badge/Local_First-5B2E9E" alt="Local first" />
   <img src="https://img.shields.io/badge/Windows%20%7C%20Linux%20%7C%20macOS-0074d9" alt="Platforms" />
-  <a href="#-配置-ai唯一必须做的事"><img src="https://img.shields.io/badge/AI-OpenAI_Compatible-8A2BE2" alt="AI" /></a>
+  <a href="#配置-ai唯一必须做的事"><img src="https://img.shields.io/badge/AI-OpenAI_Compatible-8A2BE2" alt="AI" /></a>
   <a href="#-界面语言中文--english--任意语言"><img src="https://img.shields.io/badge/i18n-中文%20%2F%20English-ff69b4" alt="i18n" /></a>
 </p>
 
