@@ -80,7 +80,41 @@ curl -s http://127.0.0.1:3213/api/ai/test -X POST -H 'Content-Type: application/
 | `name` | `DSH` | 思而行里显示的连接名 |
 | `token` | 随机 | 固定 token（不填则每次启动随机，写进 host-agent.json） |
 | `dataDir` | 自动解析 | 强制指定思而行 DATA_DIR（测试/多实例时用） |
-| `autoStart` | `false` | 思而行没在跑时是否自动拉起 |
+| `autoStart` | `false` | 思而行没在跑时是否自动拉起（优先 `systemctl --user start`，无 systemd 才兜底 spawn） |
+
+## 配套：把思而行 MCP 也接进 DSH（换工作区也能读数据）
+
+桥只解决「思而行用 DSH 的模型」；要让 **DSH Agent 反过来读写思而行数据**，把 MCP 也接上。
+DSH 自带 `@deepseek-ai/dsh-mcp-client`，在同一个 `cordis.patch.yml` 里再插一条即可
+（profile 级，跟工作区无关；任意 workspace 的会话都能用）：
+
+```yaml
+- insert:
+    - name: "@deepseek-ai/dsh-mcp-client"
+      config:
+        transport: stdio
+        serverName: sierxing
+        command: /绝对路径/node
+        args:
+          - /绝对路径/SiErXing/scripts/sierxing-mcp.js
+        env:
+          SIERXING_URL: http://127.0.0.1:3213
+        cwd: /绝对路径/SiErXing
+        toolCallTimeoutMs: 120000
+        failOnStartupError: false
+```
+
+接入后 Agent 的工具名形如 `mcp__sierxing__goal_list`（54 个：规划、资料、教程、条件、版本、命令审批等），
+和 `scripts/install-skills.js` 装给 Claude/Cursor 的是同一套。**读数据走 MCP/HTTP，不要直接读
+DATA_DIR 里的 sqlite**（受工作区文件策略限制，也可能和运行中的服务抢锁）。
+
+工作区说明：插件是 **DSH profile 级**的，路径全是绝对路径，所以切换 workspace 不影响——
+桥照常注册模型、MCP 照常提供思而行数据；思而行自己由 `sierxing.service`（systemd 用户服务，
+`Restart=always`、开机自启）托管，和 DSH 工作区无关。
+
+启动顺序：DSH 起来时桥插件会先探活，没跑就 `systemctl --user start sierxing.service`
+（实测 DSH web 进程环境里没有 `DBUS_SESSION_BUS_ADDRESS`，插件会显式补 `/run/user/<uid>/bus`）；
+Agent 也可以在任何工作区直接执行 `systemctl --user start sierxing.service`。
 
 ## 边界
 
