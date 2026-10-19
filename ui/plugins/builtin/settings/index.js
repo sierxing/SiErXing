@@ -71,12 +71,13 @@ function connCardHTML(c, provs, ctx) {
         <button class="btn tiny cbtn" data-act="test">✓ 测试连通</button>
         <button class="btn tiny cbtn primary" data-act="models">🔄 获取并测试</button>
       </div>
-      <div data-role="availBox">${modelButtonsHTML(avail, sel, ((window.__aiTested || {})[c.id] || {}))}</div>
-      <div class="mAddRow">
-        <span class="inWrap"><i>⌨️</i><input data-role="mCustom" placeholder="手动输入模型名，回车加入" spellcheck="false"></span>
-        <span class="q" data-tip="官方出新模型、名单没更新时用这个">?</span>
-        <button type="button" class="btn tiny cbtn" data-act="madd">添加</button>
+      <div class="mSearchRow">
+        <span class="inWrap"><i>🔍</i><input data-role="mSearch" placeholder="${tr('搜索模型（输入关键字过滤）')}" spellcheck="false" autocomplete="off"></span>
+        <label class="mAll" title="${tr('全选所有模型')}"><input type="checkbox" data-role="mAll"${avail.length && avail.every(m => sel.indexOf(m) >= 0) ? ' checked' : ''}><span>${tr('全选')}</span></label>
+        <span class="hint mCount" data-role="mCount">${tr('共 {0} 个可选', avail.length)}</span>
+        <button type="button" class="btn tiny cbtn" data-act="madd" hidden title="${tr('把输入的名字加入候选（官方出新模型时用）')}">${tr('＋ 添加')}</button>
       </div>
+      <div data-role="availBox">${modelButtonsHTML(avail, sel, ((window.__aiTested || {})[c.id] || {}))}</div>
       <div class="ccLabel" style="margin-top:10px;"><span data-role="selCount">已选模型（${sel.length}）</span><span class="hint">保存后才会出现在对话栏</span></div>
       <div data-role="chosenBox">${chosenChipsHTML(avail, sel)}</div>
       <div class="ccHint" data-role="msghint"></div>
@@ -302,6 +303,17 @@ function sxi(name, size) {
   return `<svg class="${cls}" viewBox="0 0 16 16" aria-hidden="true">${d}</svg>`;
 }
 
+/** 给单个模型按钮上测试态（不整区重绘，进度实时可见） */
+function paintBtn(card, m, state, msg) {
+  const b = Array.from(card.querySelectorAll('[data-mbtn]')).find(x => x.getAttribute('data-mbtn') === m);
+  if (!b) return;
+  b.classList.remove('ok', 'bad', 'testing');
+  if (state === true) b.classList.add('ok');
+  else if (state === false) b.classList.add('bad');
+  else if (state === 'testing') b.classList.add('testing');
+  if (msg != null) b.title = msg;
+}
+
 /** 一排模型按钮。on = 已选；ok/bad = 批量测试过的结果（悬停看详情）；testing = 正在测。 */
 function modelButtonsHTML(models, sel, tested) {
   const s = sel || [], t = tested || {};
@@ -326,17 +338,6 @@ function chosenChipsHTML(models, sel) {
   /* 每个小片自带「测」：点一下只测这一个模型，结果直接标在小片上（✅/❌ + 原因）。
      注意：data-chip 留在外层 span，data-mtest 在按钮上，点「测」不能触发移除。 */
   return `<div class="mChips">${s.map(m => `<span class="mChip" data-chip="${H.esc(m)}">${H.esc(m)}<button type="button" class="mT" data-mtest="${H.esc(m)}" title="只测试这个模型能否联通">测</button><i title="移除">×</i></span>`).join('')}</div>`;
-}
-
-/** 给单个模型按钮上测试态（不整区重绘，进度实时可见） */
-function paintBtn(card, m, state, msg) {
-  const b = Array.from(card.querySelectorAll('[data-mbtn]')).find(x => x.getAttribute('data-mbtn') === m);
-  if (!b) return;
-  b.classList.remove('ok', 'bad', 'testing');
-  if (state === true) b.classList.add('ok');
-  else if (state === false) b.classList.add('bad');
-  else if (state === 'testing') b.classList.add('testing');
-  if (msg != null) b.title = msg;
 }
 
 /** 地址栏只留主机名当副标题：https://api.deepseek.com/v1 → api.deepseek.com */
@@ -651,12 +652,13 @@ function agentCardHTML(c, ctx) {
           ? `<span class="ok">✓ 已检测到 ${H.esc(a.name)}${H.esc(probe.version ? ' ' + probe.version : '')}</span>`
           : `<span class="bad">✗ ${H.esc(probe.hint || '未检测到')}</span>`)
         : '<span class="muted">点上面的按钮检测本机并列出可用模型</span>'}</div>
-      <div data-role="availBox">${modelButtonsHTML(avail, sel, ((window.__aiTested || {})[c.id] || {}))}</div>
-      <div class="mAddRow">
-        <span class="inWrap"><i>⌨️</i><input data-role="mCustom" placeholder="手动输入模型名，回车加入" spellcheck="false"></span>
-        <span class="q" data-tip="官方出新模型、名单没更新时用这个">?</span>
-        <button type="button" class="btn tiny cbtn" data-act="madd">添加</button>
+      <div class="mSearchRow">
+        <span class="inWrap"><i>🔍</i><input data-role="mSearch" placeholder="${tr('搜索模型（输入关键字过滤）')}" spellcheck="false" autocomplete="off"></span>
+        <label class="mAll" title="${tr('全选所有模型')}"><input type="checkbox" data-role="mAll"${avail.length && avail.every(m => sel.indexOf(m) >= 0) ? ' checked' : ''}><span>${tr('全选')}</span></label>
+        <span class="hint mCount" data-role="mCount">${tr('共 {0} 个可选', avail.length)}</span>
+        <button type="button" class="btn tiny cbtn" data-act="madd" hidden title="${tr('把输入的名字加入候选（官方出新模型时用）')}">${tr('＋ 添加')}</button>
       </div>
+      <div data-role="availBox">${modelButtonsHTML(avail, sel, ((window.__aiTested || {})[c.id] || {}))}</div>
       <div class="ccLabel" style="margin-top:10px;"><span data-role="selCount">已选模型（${sel.length}）</span><span class="hint">保存后才会出现在对话栏</span></div>
       <div data-role="chosenBox">${chosenChipsHTML(avail, sel)}</div>
       <div class="ccHint" data-role="msghint"></div>
@@ -1399,6 +1401,15 @@ async function renderSettings() {
   </div>`;
   H.app.innerHTML = html;
 
+  /* 模型搜索 / 全选要基于「完整列表」：先把每张卡初始渲染出来的按钮缓存下来。
+     之后搜索只是过滤显示，不会把没显示的模型从候选里永久筛掉。 */
+  Array.from(H.app.querySelectorAll('.connCard')).forEach(card => {
+    const cid = card.getAttribute('data-conn');
+    if (!cid || (aiCtx.avail[cid] && aiCtx.avail[cid].length)) return;
+    const list = Array.from(card.querySelectorAll('[data-mbtn]')).map(x => x.getAttribute('data-mbtn'));
+    if (list.length) aiCtx.avail[cid] = list;
+  });
+
   const val = id => { const el = document.getElementById(id); return el ? el.value : ''; };
   /* 向某条连接取模型列表，成功后把返回的模型铺成可选按钮（保留已选）。
      密钥必须先存下去再取，否则 /models 会因没鉴权 401 —— 而密钥框是空的，
@@ -1429,12 +1440,7 @@ async function renderSettings() {
         /* 记住这次取到的列表：保存后重绘时不再退回服务商自带的占位模型 */
         if (cid) aiCtx.avail[cid] = list;
         const sel = cardSel(card);
-        const box = card.querySelector('[data-role="availBox"]');
-        if (box) box.innerHTML = modelButtonsHTML(list, sel, testedOf(card));
-        const chosen = card.querySelector('[data-role="chosenBox"]');
-        if (chosen) chosen.innerHTML = chosenChipsHTML(list, sel);
-                const lbl = card.querySelector('[data-role="selCount"]');
-        if (lbl) lbl.textContent = '已选模型（' + sel.length + '）';
+        paintCardModels(card, sel);
         if (hint) hint.innerHTML = (r.error ? '<span style="color:var(--warn)">' + H.esc(r.error) + '</span><br>' : '')
           + '取到 <b>' + list.length + '</b> 个模型，下面自动逐个测试连通。';
         H.toast('取到 ' + list.length + ' 个模型，开始批量测试');
@@ -1486,19 +1492,55 @@ async function renderSettings() {
     if (chips.length) return chips;
     return Array.from(card.querySelectorAll('[data-mbtn].on')).map(x => x.getAttribute('data-mbtn'));
   };
-  /* 刷新一张卡的按钮区：可选模型排成按钮，已选的排成小片。
+  /* 一张卡的「完整可选模型」：搜索只改变显示，不能把过滤后的 DOM 当成新全集
+     （否则搜第二次时上次没显示的模型就永久消失了）。 */
+  const cardAvailModels = card => {
+    const cid = card.getAttribute('data-conn');
+    if (cid && aiCtx.avail && Array.isArray(aiCtx.avail[cid]) && aiCtx.avail[cid].length) return aiCtx.avail[cid].slice();
+    return Array.from(card.querySelectorAll('[data-mbtn]')).map(x => x.getAttribute('data-mbtn'));
+  };
+  const cardSearchQ = card => {
+    const el = card.querySelector('[data-role="mSearch"]');
+    return el ? el.value.trim() : '';
+  };
+  const filterModels = (list, q) => {
+    const s = String(q || '').toLowerCase();
+    return s ? list.filter(m => String(m).toLowerCase().indexOf(s) >= 0) : list.slice();
+  };
+  /* 刷新一张卡的模型区（搜索过滤 + 全选状态 + 已选小片 + 计数）。
      ⚠️ sel 必须由调用方传进来 —— 点模型按钮时要先改选中态再重绘，
      如果重绘里再从 DOM 反读，会把刚点的那一下丢掉（点不动的 bug 就是这么来的）。 */
-  const redrawCardModels = (card, sel) => {
-    const avail = Array.from(card.querySelectorAll('[data-mbtn]')).map(x => x.getAttribute('data-mbtn'));
+  const paintCardModels = (card, sel) => {
+    const avail = cardAvailModels(card);
     sel = sel || cardSel(card);
+    const q = cardSearchQ(card);
+    const shown = filterModels(avail, q);
     const box = card.querySelector('[data-role="availBox"]');
+    if (box) {
+      box.innerHTML = shown.length
+        ? modelButtonsHTML(shown, sel, testedOf(card))
+        : `<div class="hint" style="padding:8px 2px;">${tr('没有匹配「{0}」的模型；点右边「添加」可把它加进候选', q)}</div>`;
+    }
     const chosen = card.querySelector('[data-role="chosenBox"]');
-    if (box) box.innerHTML = modelButtonsHTML(avail, sel, testedOf(card));
     if (chosen) chosen.innerHTML = chosenChipsHTML(avail, sel);
     const lbl = card.querySelector('[data-role="selCount"]');
     if (lbl) lbl.textContent = '已选模型（' + sel.length + '）';
-      };
+    const cnt = card.querySelector('[data-role="mCount"]');
+    if (cnt) cnt.textContent = q ? tr('显示 {0} / 共 {1} 个', shown.length, avail.length) : tr('共 {0} 个可选', avail.length);
+    const all = card.querySelector('[data-role="mAll"]');
+    if (all) {
+      const allOn = shown.length > 0 && shown.every(m => sel.indexOf(m) >= 0);
+      all.checked = allOn;
+      all.indeterminate = !allOn && shown.some(m => sel.indexOf(m) >= 0);
+      all.title = q ? tr('全选当前搜索到的模型') : tr('全选所有模型');
+    }
+    const add = card.querySelector('[data-act="madd"]');
+    if (add) {
+      const missing = !!q && avail.indexOf(q) < 0;
+      add.hidden = !missing;
+      add.title = missing ? tr('把「{0}」加入候选（官方出新模型时用）', q) : '';
+    }
+  };
   /* 把卡片上的输入读成连接对象。密钥框留空 = 没碰过，不发 apiKey，
      服务端会保留已存的密钥（否则每次保存都把密钥清成空）。
      连接名不让用户填：按服务商自动起名，重名的加序号（DeepSeek、DeepSeek 2）。
@@ -1616,12 +1658,8 @@ async function renderSettings() {
       /* 换服务商后，之前那条连接选的模型多半在别家不存在，直接清掉免得误导 */
       const keep = cardSel(card).filter(m => !p || (p.models || []).indexOf(m) >= 0);
       if (p && (p.models || []).length) {
-        const box = card.querySelector('[data-role="availBox"]');
-        if (box) box.innerHTML = modelButtonsHTML(p.models, keep, testedOf(card));
-        const chosen = card.querySelector('[data-role="chosenBox"]');
-        if (chosen) chosen.innerHTML = chosenChipsHTML(p.models, keep);
-                const lbl = card.querySelector('[data-role="selCount"]');
-        if (lbl) lbl.textContent = '已选模型（' + keep.length + '）';
+        aiCtx.avail[card.getAttribute('data-conn')] = p.models.slice();
+        paintCardModels(card, keep);
       }
       return;
     }
@@ -1673,7 +1711,7 @@ async function renderSettings() {
       const sel = cardSel(card);
       const i = sel.indexOf(m);
       if (i >= 0) sel.splice(i, 1); else sel.push(m);
-      redrawCardModels(card, sel);
+      paintCardModels(card, sel);
       return;
     }
     /* 只测这一个模型：结果标在小片上，不动其它。必须放移除分支前面，
@@ -1706,14 +1744,8 @@ async function renderSettings() {
       const card = chip.closest('.connCard');
       const m = chip.getAttribute('data-chip');
       const sel = cardSel(card).filter(x => x !== m);
-      const avail = Array.from(card.querySelectorAll('[data-mbtn]')).map(x => x.getAttribute('data-mbtn'));
-      const box = card.querySelector('[data-role="availBox"]');
-      if (box) box.innerHTML = modelButtonsHTML(avail.length ? avail : (provs.find(x => x.id === card.getAttribute('data-prov')) || {}).models || [], sel, testedOf(card));
-      const chosen = card.querySelector('[data-role="chosenBox"]');
-      if (chosen) chosen.innerHTML = chosenChipsHTML(avail, sel);
-      const lbl = card.querySelector('[data-role="selCount"]');
-      if (lbl) lbl.textContent = '已选模型（' + sel.length + '）';
-            return;
+      paintCardModels(card, sel);
+      return;
     }
 
     /* 三种添加：API 连接 / Agent 连接（识图走下面专区，不再新开卡） */
@@ -1728,7 +1760,11 @@ async function renderSettings() {
       list.insertAdjacentHTML('beforeend', connCardHTML(draft, provs, aiCtx));
       document.getElementById('connEmpty').hidden = true;
       const el = list.lastElementChild;
-      if (el) el.scrollIntoView({ block: 'nearest' });
+      if (el) {
+        const al = Array.from(el.querySelectorAll('[data-mbtn]')).map(x => x.getAttribute('data-mbtn'));
+        if (al.length) aiCtx.avail[id] = al;
+        el.scrollIntoView({ block: 'nearest' });
+      }
       return;
     }
     const btn = e.target.closest('.connCard [data-act]');
@@ -1754,25 +1790,20 @@ async function renderSettings() {
       return;
     }
     if (act === 'madd') {
-      /* 手动加模型：名单更新不及时、官方出新模型时用户自己填。
-         加进可选列表并选中；保存后进库，重绘也不丢（靠已选小片 + 服务端 models）。 */
-      const inp = card.querySelector('[data-role="mCustom"]');
+      /* 搜索框里的名字不在候选里时，就是「手填」：加进候选并选中。
+         已经在候选里时等价于点一下那个模型（回车快速选中）。 */
+      const inp = card.querySelector('[data-role="mSearch"]');
       const m = ((inp && inp.value) || '').trim();
-      if (!m) { H.toast('先输入模型名'); if (inp) inp.focus(); return; }
+      if (!m) { H.toast(tr('先输入要搜索或添加的模型名')); if (inp) inp.focus(); return; }
       const cid = card.getAttribute('data-conn');
-      let avail = Array.from(card.querySelectorAll('[data-mbtn]')).map(x => x.getAttribute('data-mbtn'));
-      if (avail.indexOf(m) < 0) avail.push(m);
-      aiCtx.avail[cid] = avail;
+      const avail = cardAvailModels(card);
+      if (avail.indexOf(m) < 0) { avail.push(m); aiCtx.avail[cid] = avail; }
       const sel = cardSel(card);
       if (sel.indexOf(m) < 0) sel.push(m);
-      const box = card.querySelector('[data-role="availBox"]');
-      if (box) box.innerHTML = modelButtonsHTML(avail, sel, testedOf(card));
-      const chosen = card.querySelector('[data-role="chosenBox"]');
-      if (chosen) chosen.innerHTML = chosenChipsHTML(avail, sel);
-      const lbl = card.querySelector('[data-role="selCount"]');
-      if (lbl) lbl.textContent = '已选模型（' + sel.length + '）';
-            inp.value = '';
-      H.toast('已加入：' + m + '（记得点「保存设置」）');
+      if (inp) inp.value = '';
+      paintCardModels(card, sel);
+      markDirty(card);
+      H.toast(tr('已加入：{0}（记得点「保存设置」）', m));
       return;
     }
     if (act === 'test') {
@@ -1885,7 +1916,7 @@ async function renderSettings() {
   if (window.__aiSetKeyH) H.app.removeEventListener('keydown', window.__aiSetKeyH);
   window.__aiSetKeyH = e => {
     if (e.key !== 'Enter') return;
-    const inp = e.target && e.target.closest ? e.target.closest('[data-role="mCustom"]') : null;
+    const inp = e.target && e.target.closest ? e.target.closest('[data-role="mSearch"]') : null;
     if (!inp) return;
     e.preventDefault();
     const card = inp.closest('.connCard');
@@ -1901,6 +1932,30 @@ async function renderSettings() {
     markDirty(card);
   };
   H.app.addEventListener('input', window.__aiSetDirtyH);
+  /* 模型搜索框：输入即过滤（只重画模型按钮与小片，不碰输入框焦点） */
+  if (window.__aiSearchH) H.app.removeEventListener('input', window.__aiSearchH);
+  window.__aiSearchH = e => {
+    const inp = e.target && e.target.closest ? e.target.closest('[data-role="mSearch"]') : null;
+    if (!inp) return;
+    const card = inp.closest('.connCard');
+    if (card) paintCardModels(card);
+  };
+  H.app.addEventListener('input', window.__aiSearchH);
+  /* 「全选」勾选：勾上 = 当前搜索结果全选，取消 = 当前搜索结果全不选 */
+  if (window.__aiAllH) H.app.removeEventListener('change', window.__aiAllH);
+  window.__aiAllH = e => {
+    const all = e.target && e.target.closest ? e.target.closest('[data-role="mAll"]') : null;
+    if (!all) return;
+    const card = all.closest('.connCard');
+    if (!card) return;
+    const shown = filterModels(cardAvailModels(card), cardSearchQ(card));
+    const sel = cardSel(card).slice();
+    if (all.checked) { for (const m of shown) if (sel.indexOf(m) < 0) sel.push(m); }
+    else { for (const m of shown) { const i = sel.indexOf(m); if (i >= 0) sel.splice(i, 1); } }
+    paintCardModels(card, sel);
+    markDirty(card);
+  };
+  H.app.addEventListener('change', window.__aiAllH);
   /* 独立识图配置：地址/密钥/模型名 + 取列表 + 单独测试。存到 vis_* 设置，
      与对话连接完全分开（有的服务商没有视觉模型，绑在一起讲不清楚）。 */
   const visMsg = document.getElementById('visMsg');

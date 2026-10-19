@@ -1519,6 +1519,13 @@ body.aiOpen .nodePanel{right:calc(var(--ai-w, 440px) + 26px);}
 .mAddRow{display:flex; gap:7px; margin-top:8px;}
 .mAddRow .inWrap{flex:1;}
 .mAddRow .btn{flex:none; align-self:center;}
+/* 搜索 + 全选：模型一多（宿主 Agent 一次给两百个）就不能靠肉眼找了 */
+.mSearchRow{display:flex; gap:9px; margin-top:8px; align-items:center; flex-wrap:wrap;}
+.mSearchRow .inWrap{flex:1; min-width:200px;}
+.mSearchRow .mAll{display:inline-flex; align-items:center; gap:5px; font-size:12.5px; color:var(--muted); cursor:pointer; flex:none; user-select:none;}
+.mSearchRow .mAll input{margin:0;}
+.mSearchRow .mCount{flex:none; font-size:11.5px; color:var(--muted);}
+.mSearchRow .btn{flex:none; align-self:center;}
 /* 已选模型小片：点 × 移除 */
 .mChips{display:flex; flex-wrap:wrap; gap:7px; min-height:28px;}
 .mChip{display:inline-flex; align-items:center; gap:6px; padding:4px 6px 4px 11px; border:1px solid var(--accent-border); background:var(--accent-soft); color:var(--accent); border-radius:20px; font-size:12px; font-family:var(--mono,ui-monospace,Consolas,monospace);}
