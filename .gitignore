@@ -1,3 +1,6 @@
+# 依赖（构建期才有；运行时不依赖 node_modules）
+node_modules/
+
 # 数据与日志（不提交个人数据）
 data/
 data-location.json
@@ -25,3 +28,19 @@ public/_boot.html
 
 # 本地部署清单（只放本机，不提交）
 服务器下单清单.md
+
+# UI 迁移过程的稳定备份与像素验收截图（本机，不入库）
+.sx-backup/
+
+# 本地临时目录（语言包生成的开发中间产物 / 沙箱实例数据）
+.tmp-dev/
+.i18n-dev/
+language/locales/en-US/.parts/
+
+# 语言包开发中间产物（批次翻译 / 缺失清单，可随时用 scripts/build-language-source.js 重建）
+language/locales/*/.missing.json
+language/locales/*/.parts/
+
+# AI 工具本地产物（understand 缓存等，体积大、只在本机）
+.ua/
+.dsh-probe-*.tmp

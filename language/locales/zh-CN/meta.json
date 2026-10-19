@@ -1,0 +1,9 @@
+{
+ "code": "zh-CN",
+ "name": "中文",
+ "nativeName": "中文",
+ "englishName": "Chinese",
+ "rtl": false,
+ "documentTitle": "思而行：您的目标规划助手",
+ "documentDescription": "思而行：先问卷确认、再拆成可执行路径的目标规划助手。本地运行，可接入任意 OpenAI 兼容接口，支持功能组件与主题扩展。"
+}

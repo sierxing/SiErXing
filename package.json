@@ -6,7 +6,41 @@
   "scripts": {
     "start": "node --no-warnings server/server.js",
     "start:sqlite": "node --no-warnings --experimental-sqlite server/server.js",
-    "start:port": "PORT=3213 node --no-warnings server/server.js"
+    "start:port": "PORT=3213 node --no-warnings server/server.js",
+    "cli": "node scripts/sierxing.js",
+    "mcp": "node scripts/sierxing-mcp.js",
+    "skills": "node scripts/install-skills.js",
+    "build:plugin": "node scripts/build-plugin.js",
+    "build:ui": "vite build --config vite.config.mjs",
+    "dev:ui": "vite --config vite.config.mjs",
+    "test:ui": "node --no-warnings scripts/test-ui-lab.js && node --no-warnings scripts/test-ui-plugins.js",
+    "test:parity": "node scripts/test-ui-parity.js",
+    "test:mount": "node scripts/test-plugin-mount.js",
+    "test:dom": "node scripts/test-ui-dom.js",
+    "test:audit": "node scripts/test-plugin-audit.js",
+    "test:home": "node --no-warnings scripts/test-home-launcher.js",
+    "test:rail": "node --no-warnings scripts/test-rail-roadmap-ui.js && node --no-warnings scripts/test-rail-order-ui.js",
+    "test:kernel": "node --no-warnings --experimental-sqlite scripts/test-kernel.js",
+    "test:kernel-config": "node --no-warnings scripts/test-kernel-config.js",
+    "test:kernel-live": "node scripts/test-kernel-live.js",
+    "test:user-ui": "node scripts/test-user-vue-page.js",
+    "test:create": "node --no-warnings scripts/test-create-mode.js && node --no-warnings scripts/test-create-ui.js",
+    "test:core": "node --no-warnings scripts/test-core-components.js",
+    "kernel:config": "node scripts/kernel-config.js",
+    "build:pages": "node scripts/build-page-plugin.js --all",
+    "gen:hostmap": "node scripts/gen-host-map.js",
+    "test:components": "node --no-warnings scripts/test-components-page.js",
+    "test:goal-picker": "node --no-warnings scripts/test-goal-picker.js",
+    "test:ai-tasks": "node --no-warnings scripts/test-ai-tasks-cleanup.js",
+    "test:host-agent": "node --no-warnings scripts/test-host-agent.js",
+    "test:dsh-bridge": "node integrations/dsh-bridge/test/run.js",
+    "build:lang": "node scripts/build-language-source.js",
+    "check:i18n": "node scripts/check-i18n.js",
+    "test:i18n": "node --no-warnings scripts/test-language.js && node --no-warnings scripts/test-language-e2e.js",
+    "test:i18n-ui": "node --no-warnings scripts/test-language-ui.js",
+    "test:i18n-all": "npm run test:i18n && npm run test:i18n-ui",
+    "hooks:install": "node scripts/install-git-hooks.js",
+    "check": "node --check public/app.js && node --check server/server.js && node scripts/check-i18n.js"
   },
   "keywords": [
     "goal-planning",
@@ -18,5 +52,10 @@
   "engines": {
     "node": ">=22.5.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.10",
+    "vite": "^7.3.7",
+    "vue": "^3.5.44"
+  }
 }

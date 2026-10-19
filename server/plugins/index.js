@@ -1,57 +1,131 @@
 'use strict';
 /**
- * 思而行 · 插件加载器
- * ------------------------------------------------------------------
- * 插件放在 server/plugins/ 目录下，每个 .js 文件导出一个插件对象：
+ * 思而行 · 插件加载器（P1：已切到内核）
+ * ---------------------------------------------------------------------------
+ * 对外契约没变（server.js 只依赖 loadPlugins / pluginMeta / matchRoute），
+ * 内部从「for 循环 require + init」换成了内核装载：
  *
- *   module.exports = {
- *     id: 'myplugin',            // 唯一标识（用于目标级开关、目录名）
- *     name: '我的功能',           // 显示名
- *     icon: '✨',                // 图标（emoji 或单字）
- *     desc: '一句话说明',         // 说明（新建目标时的提示）
- *     order: 50,                 // 排序（左侧栏顺序）
- *     goalToggle: true,          // 是否可在「新建目标」里勾选
- *     defaultEnabled: false,     // 新建目标时默认是否勾选
- *     client: '/plugins/x.js',   // 前端脚本路径（可选，提供才显示界面入口）
+ *   - 插件文件仍放在 server/plugins/，导出对象契约完全不变（id/name/init/api/…）；
+ *   - 新增可选字段（不写照样跑）：
+ *       requires: ['db','ai']   声明依赖（服务名 / 别的插件 id / 别的插件 provides 的能力）
+ *       provides: ['mycap']     声明自己提供的能力
+ *       apiVersion              内核主版本不一致 → 不执行，标记 incompatible
+ *       migrations: [{version, up(ctx)}] 版本升序、幂等，由内核统一执行
+ *       builtin: true           标记内置插件（升级差异检测用）
+ *   - 缺依赖的插件会被跳过并在日志 / /api/kernel 里给出原因，不会拖垮整站；
+ *   - 每次 reload 先 dispose 旧内核（清理 effect、事件监听），避免重复注册；
+ *   - 状态快照走 kernelState()，自检页与测试都读它。
  *
- *     init(ctx) {},              // 启动时调用一次：建表、初始化（可选）
- *     onGoalDelete(goalId, ctx) {}, // 目标被删除时清理该目标的数据（可选）
- *     exportData(ctx) {},        // 导出全部数据时附带（可选）
- *     importData(data, ctx) {},  // 导入数据时恢复（可选）
- *
- *     // 路由：pattern 为正则（匹配 pathname）或 path 为精确路径
- *     api: [
- *       { method: 'GET', path: '/api/foo', handler: async (req, res, u, ctx) => {...} },
- *       { method: 'POST', pattern: /^\/api\/bar\/(\d+)$/, handler: async (req, res, u, ctx) => {...} }
- *     ]
- *   };
- *
- * ctx（宿主能力）：
- *   db / nowISO / safeParse / sendJSON / readBody / getSetting / setSetting / backup / log
- *   fs / path / os / spawn / APP_DIR / DATA_DIR / UPLOAD_DIR / PUBLIC_DIR
- *   getGoal / sourcesOf / aiText / aiTextFiles / currentModel / currentVisionModel
+ * 老插件不需要改一行：init(ctx) 照旧收到原来那份宿主 ctx（额外多 kernel / services / pluginId）。
  */
-
 const fs = require('node:fs');
 const path = require('node:path');
+const { createKernel } = require('../kernel.js');
+const { provideContext, KERNEL_API } = require('../kernel-services.js');
 
-function loadPlugins(dir, ctx) {
-  const plugins = [];
-  let files = [];
-  try { files = fs.readdirSync(dir).filter(f => f.endsWith('.js') && f !== 'index.js').sort(); } catch (e) { return plugins; }
-  for (const f of files) {
+/** 每个目录一个内核实例（目前只有 server/plugins 一个目录；保留 map 便于测试多实例） */
+const kernels = new Map();
+
+function _files(dir) {
+  try {
+    return fs.readdirSync(dir).filter(function (f) { return f.endsWith('.js') && f !== 'index.js'; }).sort();
+  } catch (e) { return []; }
+}
+
+function _log(ctx) {
+  return function () {
+    const args = Array.prototype.slice.call(arguments);
+    if (ctx && typeof ctx.log === 'function') { try { ctx.log.apply(null, args); return; } catch (e) {} }
+    console.log.apply(console, args);
+  };
+}
+
+/**
+ * 装载目录下全部插件。
+ * @param {string} dir  插件目录
+ * @param {object} ctx  宿主能力（原 pluginCtx()）
+ * @param {object} [opts] { log, apiVersion, configFor(id) }
+ * @returns {Array} 已成功装载的插件对象（原样返回，排序与老实现一致）
+ */
+function loadPlugins(dir, ctx, opts) {
+  opts = opts || {};
+  disposePlugins(dir);
+  const log = opts.log || _log(ctx);
+  const kernel = createKernel({ log: log, apiVersion: opts.apiVersion || KERNEL_API });
+  provideContext(kernel, ctx);
+  kernels.set(dir, kernel);
+
+  const entries = [];
+  for (const f of _files(dir)) {
     try {
       const mod = require(path.join(dir, f));
-      if (!mod || !mod.id) { ctx.log('[plugin] 跳过（缺少 id）:', f); continue; }
-      if (typeof mod.init === 'function') mod.init(ctx);
-      plugins.push(mod);
-      ctx.log('[plugin] 已加载:', mod.id, '—', mod.name || '');
+      if (!mod || !mod.id) { log('[plugin] 跳过（缺少 id）:', f); continue; }
+      entries.push({ file: f, mod: mod });
     } catch (e) {
-      ctx.log('[plugin] 加载失败:', f, '—', e.message);
+      log('[plugin] 加载失败:', f, '—', e.message);
     }
   }
-  plugins.sort((a, b) => (a.order || 100) - (b.order || 100));
-  return plugins;
+
+  const defs = entries.map(function (e) {
+    const mod = e.mod;
+    return {
+      id: String(mod.id),
+      name: mod.name,
+      version: mod.version || mod.componentVersion || '0.0.0',
+      apiVersion: mod.apiVersion || mod.kernelApiVersion || '',
+      requires: mod.requires || [],
+      provides: mod.provides || [],
+      builtin: mod.builtin !== false,
+      order: mod.order,
+      migrations: Array.isArray(mod.migrations) ? mod.migrations : null,
+      apply: function (kctx) {
+        const legacy = Object.assign({}, ctx, {
+          kernel: kctx.kernel,
+          services: kctx,
+          pluginId: mod.id,
+          config: kctx.config
+        });
+        if (typeof mod.init === 'function') mod.init(legacy);
+      }
+    };
+  });
+
+  const snap = kernel.loadPlugins(defs, opts.configFor);
+  const statusById = {};
+  for (const p of snap.plugins) statusById[p.id] = p;
+  const loaded = [];
+  for (const e of entries) {
+    const st = statusById[e.mod.id];
+    if (!st || st.status !== 'loaded') {
+      log('[plugin] 跳过:', e.mod.id, '—', (st && st.reason) || '未装载');
+      continue;
+    }
+    loaded.push(e.mod);
+  }
+  loaded.sort(function (a, b) {
+    return (Number(a.order) || 100) - (Number(b.order) || 100) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  });
+  for (const mod of loaded) log('[plugin] 已加载:', mod.id, '—', mod.name || '');
+  kernel.emit('plugins-ready', { count: loaded.length });
+  return loaded;
+}
+
+/** 卸载某目录的内核（reload / 测试收尾用） */
+function disposePlugins(dir) {
+  const k = kernels.get(dir);
+  if (!k) return false;
+  try { k.dispose(); } catch (e) {}
+  kernels.delete(dir);
+  return true;
+}
+
+function getKernel(dir) { return kernels.get(dir) || null; }
+
+/** 自检快照：服务 + 插件状态 + 为什么跳过 */
+function kernelState(dir) {
+  const k = kernels.get(dir);
+  if (!k) return { ok: false, apiVersion: KERNEL_API, services: [], plugins: [] };
+  return Object.assign({ ok: true }, k.state());
 }
 
 function pluginMeta(p) {
@@ -65,6 +139,9 @@ function pluginMeta(p) {
     goalToggle: p.goalToggle !== false,
     defaultEnabled: !!p.defaultEnabled,
     client: p.client || '',
+    builtin: p.builtin !== false,
+    provides: p.provides || [],
+    requires: p.requires || [],
     goalConfig: typeof p.goalConfig === 'function' ? p.goalConfig : null
   };
 }
@@ -81,4 +158,11 @@ function matchRoute(plugins, method, pathname) {
   return null;
 }
 
-module.exports = { loadPlugins, pluginMeta, matchRoute };
+module.exports = {
+  loadPlugins: loadPlugins,
+  pluginMeta: pluginMeta,
+  matchRoute: matchRoute,
+  disposePlugins: disposePlugins,
+  getKernel: getKernel,
+  kernelState: kernelState
+};

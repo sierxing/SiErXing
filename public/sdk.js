@@ -35,10 +35,21 @@
  *   parseRoute() —— 解析当前 hash
  *   rerender()  —— 重新渲染当前页
  *   serverPlugins() —— 服务端插件元数据（含 goalConfig 等）
+ *   tr('中文原文', 参数…) —— 界面文案取译文（组件里所有用户可见文字都必须用它，
+ *                          规则见 language/README.md；中文环境原样返回）
+ *   setLanguage(code) / language() —— 切换 / 读取界面语言
  */
 window.SiErXing = (function () {
   const plugins = [];
   let host = null;
+
+  /** 取译文：语言运行时（public/i18n.js）没加载时原样返回（中文环境行为不变） */
+  function tr(source) {
+    if (window.SXI18N && typeof window.SXI18N.tr === 'function') {
+      return window.SXI18N.tr.apply(null, arguments);
+    }
+    return String(source == null ? '' : source);
+  }
 
   const api = {
     version: 1,
@@ -89,7 +100,22 @@ window.SiErXing = (function () {
 
     /* 宿主注入 */
     provide(h) { host = h; },
-    host() { return host; }
+    host() { return host; },
+
+    /* ---------- 界面语言（i18n） ----------
+       ⚠️ 组件里的用户可见文字必须写成 tr('中文原文（或 key）')，不要写死。
+       运行时字典由 public/i18n.js 提供；中文环境原样返回。 */
+    tr(source) {
+      return tr.apply(null, arguments);
+    },
+    language() {
+      if (!window.SXI18N) return { code: 'zh-CN', name: tr('中文') };
+      return { code: window.SXI18N.code, name: window.SXI18N.name, rtl: !!window.SXI18N.rtl };
+    },
+    setLanguage(code) {
+      if (!window.SXI18N) return Promise.reject(new Error(tr('语言运行时未加载（i18n.js）')));
+      return window.SXI18N.setLanguage(code);
+    }
   };
 
   let serverPlugins = [];
@@ -99,11 +125,19 @@ window.SiErXing = (function () {
      （笔记栏的"点哪改哪"就靠它）。和 app.js 里画悬停描边用的是同一套判断，
      组件不必自己再猜一遍文本位置。 */
   const HOST_KEYS = ['app', 'api', 'esc', 'toast', 'go', 'state', 'mdToHTML', 'fmtDate', 'safeParse', 'parseRoute', 'rerender', 'loadGoal', 'ensureGoal', 'aiToggle', 'mdPickOffset',
+    /* AI 助手「就地」打开 + 绑目标 + 切模式：组件想引导用户"和 AI 聊着改"时用，
+       不要自己再写一套对话。aiToggle 会按当前 UI 形态跳到对话页；aiToggleLegacy 是抽屉。 */
+    'aiToggleLegacy', 'aiBindGoal', 'aiModeSet', 'aiModeGet', 'aiFocusInput',
+    /* 「🎯 只改」范围：组件想让用户"只改这一块"时先调 aiScopeSet('conditions'|'nodes'|…)。
+       宿主会把它随消息发给服务端，范围外的 ops 会被服务端硬拦。 */
+    'aiScopeSet',
     /* 语法高亮（hlCode 返回带 <span class="tk-xx"> 的 HTML / hlGuessLang 猜语言）：
        组件要自己渲染代码面板时别再写第二套高亮器，直接用宿主这套 —— 配色跟着主题走。 */
     'hlCode', 'hlGuessLang',
     /* 「就地编辑单块」共用能力（教程正文 / 笔记栏）：范围切片 + 编辑框生命周期 + 快捷键 */
-    'mdPickTarget', 'mdSrcRange', 'mdInlineEdit', 'editKeysBind'];
+    'mdPickTarget', 'mdSrcRange', 'mdInlineEdit', 'editKeysBind',
+    /* 选目标共用件：产出库 / 资源库等经典组件也要「目标多时能搜」 */
+    'sxiGoals', 'sxiGoalsSync', 'sxiGoalPickHTML', 'sxiGoalPickBind', 'sxiGoalPickOpen', 'sxiGoalPickClose'];
   function bridge() {
     if (!host) return;
     for (const k of HOST_KEYS) {

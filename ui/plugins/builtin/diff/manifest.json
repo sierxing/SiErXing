@@ -1,0 +1,8 @@
+{
+  "id": "diff",
+  "name": "版本对比页（内置）",
+  "apiVersion": "sierxing.ui/1",
+  "version": "1.0.0",
+  "description": "版本对比页：原版实现的插件化版本（#/g/:id/diff/:vid）。",
+  "entry": "index.js"
+}

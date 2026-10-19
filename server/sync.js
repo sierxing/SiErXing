@@ -24,7 +24,7 @@ const { spawn } = require('node:child_process');
 
 // 参与同步的表（顺序无关，导入时先清空再写入）
 const SYNC_TABLES = [
-  'goals', 'nodes', 'sources', 'tutorials', 'tutorial_versions', 'tutorial_bookmarks', 'tutorial_progress', 'node_notes', 'node_workspaces', 'goal_versions', 'study_records', 'study_days', 'study_segments', 'ai_prompts',
+  'goals', 'nodes', 'goal_conditions', 'sources', 'tutorials', 'tutorial_versions', 'tutorial_bookmarks', 'tutorial_progress', 'node_notes', 'node_workspaces', 'goal_versions', 'study_records', 'study_days', 'study_segments', 'ai_prompts',
   'chat_sessions', 'chats', 'problems', 'practice_records', 'daily_plans', 'jd_images',
   /* 执行可视化 HTML 跟着作答记录走（一记录一份，删记录级联删）。 */
   'record_visuals',
@@ -60,7 +60,9 @@ const SYNC_SETTINGS = [
   'components', 'component_categories', 'component_category_map', 'practice_lang', 'practice_daily',
   /* 「看懂代码」的讲解风格示例：是用户自己贴/上传的一段文字（不是密钥、跟设备无关），
      跟着同步走 —— 换台设备还是他自己喜欢的那个讲解风格。 */
-  'explain_style_sample'
+  'explain_style_sample',
+  /* 界面语言：是用户偏好（不是密钥），换设备后保持同一种界面语言 */
+  'app_language'
 ];
 
 module.exports = function createSync(ctx) {

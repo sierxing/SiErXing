@@ -9,6 +9,56 @@
 (function () {
   const { api, esc, toast } = SiErXing;
 
+  /* ---------- Vue 版弹窗（非页面 UI 组件迁移；加载失败回退旧弹窗） ---------- */
+  let apVueUnmount = null;
+  function aiPromptsVueEnabled() {
+    try {
+      const q = new URLSearchParams(location.search).get('ui');
+      if (q === 'legacy') return false;
+      if (q === 'vue') return true;
+      const saved = localStorage.getItem('sierxing-ui-aiprompts');
+      if (saved === 'legacy') return false;
+      if (saved === 'vue') return true;
+    } catch (e) {}
+    return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+  }
+  function ensureApVueCss() {
+    if (document.querySelector('link[data-ui-page="aiprompts"]')) return;
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/aiprompts.css'; l.setAttribute('data-ui-page', 'aiprompts');
+    document.head.appendChild(l);
+  }
+  async function togglePickerVue() {
+    const d = drawer(), input = ta();
+    if (!d || !input) return;
+    const p = document.createElement('div');
+    p.id = 'apPicker';
+    p.className = 'apPicker';
+    const r = input.getBoundingClientRect();
+    p.style.left = Math.max(8, r.left) + 'px';
+    p.style.right = Math.max(8, window.innerWidth - r.right) + 'px';
+    p.style.bottom = Math.max(8, window.innerHeight - r.top + 8) + 'px';
+    document.body.appendChild(p);
+    ensureApVueCss();
+    try {
+      const mod = await import('/ui-dist/aiprompts.js?v=' + Date.now());
+      if (!mod || typeof mod.mountAiPromptsPanel !== 'function') throw new Error('UI 插件没有导出 mountAiPromptsPanel');
+      apVueUnmount = mod.mountAiPromptsPanel(p, {
+        api: api, toast: toast,
+        insertText: insertText,
+        onClose: closePicker,
+        onCount: n => { const el = document.getElementById('apCount'); if (el) el.textContent = n ? n + '条' : ''; }
+      });
+      document.addEventListener('click', outsideClose, true);
+    } catch (e) {
+      try { p.remove(); } catch (e2) {}
+      toast('提示词库 Vue 加载失败，已回退旧弹窗');
+      await load();
+      renderPicker();
+      document.addEventListener('click', outsideClose, true);
+    }
+  }
+
   let cache = [];          // 全部提示词（服务端顺序）
   let tab = 'pick';        // pick | manage
   let filterCat = '';      // '' = 全部
@@ -32,6 +82,7 @@
       let bar = document.getElementById('apBar');
       if (!on) {
         if (bar) bar.remove();
+        if (apVueUnmount) { try { apVueUnmount(); } catch (e) {} apVueUnmount = null; }
         const p = document.getElementById('apPicker');
         if (p) p.remove();
         return;
@@ -89,6 +140,7 @@
   }
 
   function closePicker() {
+    if (apVueUnmount) { try { apVueUnmount(); } catch (e) {} apVueUnmount = null; }
     const p = document.getElementById('apPicker');
     if (p) p.remove();
     document.removeEventListener('click', outsideClose, true);
@@ -100,6 +152,7 @@
   }
   async function togglePicker() {
     if (document.getElementById('apPicker')) { closePicker(); return; }
+    if (aiPromptsVueEnabled()) { await togglePickerVue(); return; }
     await load();
     renderPicker();
     document.addEventListener('click', outsideClose, true);
@@ -133,6 +186,7 @@
     renderBody();
   }
   function closePickerSafe() {
+    if (apVueUnmount) { try { apVueUnmount(); } catch (e) {} apVueUnmount = null; }
     const p = document.getElementById('apPicker');
     if (p) p.remove();
   }

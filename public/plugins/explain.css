@@ -100,14 +100,6 @@ body.exResizingV *{cursor:row-resize !important;}
 .exCode .tk-va{color:var(--tk-va);}
 .exCode .tk-pp{color:var(--tk-pp);}
 .exCode .tk-at{color:var(--tk-at);}
-.exSnippet .tk-cm{color:var(--tk-cm); font-style:italic;}
-.exSnippet .tk-st{color:var(--tk-st);}
-.exSnippet .tk-nu{color:var(--tk-nu);}
-.exSnippet .tk-kw{color:var(--tk-kw); font-weight:600;}
-.exSnippet .tk-bi{color:var(--tk-bi);}
-.exSnippet .tk-va{color:var(--tk-va);}
-.exSnippet .tk-pp{color:var(--tk-pp);}
-.exSnippet .tk-at{color:var(--tk-at);}
 /* 模块分界：AI 划的讲解模块从这一行开始（虚线隔开，一眼看出"这一块是讲一个意思的"） */
 .exLine.exModStart{margin-top:5px; border-top:1px dashed var(--border); padding-top:3px;}
 .exLine.exOn{background:var(--accent-soft); border-left-color:var(--accent);}
@@ -119,7 +111,6 @@ body.exResizingV *{cursor:row-resize !important;}
 .exThreadHead{padding:9px 12px; border-bottom:1px solid var(--border); background:var(--soft); display:flex; flex-direction:column; gap:6px;}
 .exThTitle{font-size:12.5px; font-weight:700; color:var(--accent);}
 .exPendingTag{color:var(--muted); font-weight:400;}
-.exSnippet{margin:0; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12.4px; line-height:1.6; white-space:pre-wrap; overflow-wrap:anywhere; background:var(--code-bg); border:1px solid var(--code-border); border-radius:var(--r-sm); padding:6px 9px; max-height:120px; overflow:auto;}
 .exMsgs{flex:1 1 auto; overflow:auto; padding:13px 15px; display:flex; flex-direction:column; gap:14px;}
 .exMsg{display:flex; flex-direction:column; gap:6px;}
 .exMsg.me{align-items:flex-end;}
@@ -152,31 +143,41 @@ body.exResizingV *{cursor:row-resize !important;}
 .exCtxMenu .ctxTitle{max-width:320px;}
 .exCtxMenu button{display:block; width:100%; text-align:left;}
 
-/* ============ 前置知识（开讲前先过一遍） ============ */
-.exPre{flex:none; border-bottom:1px solid var(--border); background:var(--soft);}
+/* 讲解记录：目标级按任务节点分组（教程级是平铺的） */
+.exGroup{margin:14px 0 4px;}
+.exGroupHead{display:flex; align-items:center; gap:8px; width:100%; text-align:left; font-family:inherit; font-size:12.5px; font-weight:700;
+  color:var(--text); background:var(--soft); border:1px solid var(--border); border-radius:var(--r-sm); padding:7px 10px; cursor:pointer;}
+.exGroupHead:hover{border-color:var(--accent-border); background:var(--accent-soft);}
+.exGroupN{margin-left:auto; font-weight:400; font-size:11.5px; color:var(--muted);}
+.exGroup .exList{margin-top:6px;}
+
+/* ============ 前置知识（在左边代码栏上方，点知识点 → 右边看讲解） ============ */
+.exPre{flex:none; border-bottom:1px solid var(--border); background:var(--soft); max-height:42%; overflow:auto;}
 .exPreHead{display:flex; gap:8px; align-items:center; padding:9px 12px; font-size:12.5px; color:var(--muted);}
-.exPreCard{padding:10px 12px;}
-.exPreTitle{font-size:13px; font-weight:700; color:var(--accent); margin-bottom:4px;}
-.exPreHint{font-size:11.5px; color:var(--muted); line-height:1.6; margin-bottom:8px;}
-.exPreList{display:flex; flex-direction:column; gap:6px;}
-.exPreList.open{max-height:38vh; overflow:auto; padding-right:2px;}
-.exPreItem{display:flex; gap:8px; align-items:flex-start; padding:7px 9px; border:1px solid var(--border); border-radius:var(--r-sm); background:var(--card); font-size:12.5px;}
-.exPreItem.unk{border-color:var(--accent-border); background:var(--accent-soft);}
-.exPreItem.lesson{align-items:flex-start;}
-.exPreSeg{flex:none; font-size:11.5px; font-family:inherit; padding:3px 8px; border-radius:999px; border:1px solid var(--border); background:var(--soft); color:var(--muted); cursor:pointer;}
-.exPreSeg.on{border-color:var(--accent); background:var(--accent); color:#fff; font-weight:600;}
-.exPreBody{flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:2px;}
-.exPreWhy{font-size:11.5px; color:var(--muted);}
-.exPreMark{flex:none;}
-.exPreLesson{margin-top:6px; padding-top:6px; border-top:1px dashed var(--border); font-size:12.5px; line-height:1.75; color:var(--text);}
-.exPreLesson pre{background:var(--code-bg); border:1px solid var(--code-border); border-radius:var(--r-sm); padding:8px 10px; overflow:auto; font-size:12px;}
-.exPreFoot{display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:10px;}
-.exPreBar{display:flex; gap:8px; align-items:center; padding:7px 12px; font-size:12px;}
+.exPreBar{display:flex; gap:8px; align-items:center; padding:7px 12px; font-size:12px; position:sticky; top:0; background:var(--soft); z-index:2;}
 .exPreToggle{border:none; background:none; font-family:inherit; font-size:12.5px; font-weight:600; color:var(--text); cursor:pointer; padding:0;}
 .exPreSum{font-size:11.5px; color:var(--muted);}
+.exPreRows{display:flex; flex-direction:column; gap:2px; padding:0 6px 6px;}
+/* 一个知识点一行：点它就等于"左边选中了要问的东西"（跟点代码行一个道理） */
+.exPreRow{display:flex; align-items:center; gap:7px; padding:5px 7px; border-radius:var(--r-sm); cursor:pointer; font-size:12.5px; color:var(--text); border-left:3px solid transparent;}
+.exPreRow:hover{background:var(--card);}
+.exPreRow.on{background:var(--accent-soft); border-left-color:var(--accent);}
+.exPreRow.know .exPreName{opacity:.75;}
+.exPreRow.done .exPreIco{color:var(--ok);}
+.exPreIco{flex:none; font-style:normal; width:14px; text-align:center;}
+.exPreName{flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.exPreBtns{flex:none; display:flex; gap:4px;}
+.exPreSeg{font-size:11px; font-family:inherit; padding:2px 7px; border-radius:999px; border:1px solid var(--border); background:var(--card); color:var(--muted); cursor:pointer;}
+.exPreSeg.on{border-color:var(--accent); background:var(--accent); color:#fff; font-weight:600;}
+.exPreFoot{display:flex; gap:8px; align-items:center; flex-wrap:wrap; padding:0 12px 10px;}
+/* 右边（线程）里用到的小样式 */
+.exPreWhy{font-size:11.5px; color:var(--muted); font-weight:400;}
 .exPreWait{padding:10px 12px; font-size:12.5px; color:var(--muted); line-height:1.7;}
+/* 选中某个前置知识时，左边把它"引用的那几行"轻轻标出来（不重复贴代码） */
+.exLine.exRef{background:rgba(255, 214, 102, .18);}
+.exLine.exRef .exNo{color:var(--muted); opacity:1;}
 
-/* 追问区：永远摆在当前这一行的讲解下面 */
+/* 追问区：永远摆在当前这一行的讲解下面 *//* 追问区：永远摆在当前这一行的讲解下面 */
 .exAsk{border-top:1px solid var(--border); background:var(--accent-soft); padding:10px 12px;}
 .exQuick{display:flex; gap:7px; flex-wrap:wrap;}
 .exQuick .btn.small{font-size:12px;}

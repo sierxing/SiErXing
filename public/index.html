@@ -8,12 +8,15 @@
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="alternate icon" href="/favicon.svg">
 <link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/ui-skin.css" data-ui-skin="base">
 </head>
 <body>
   <!-- 只有左侧栏导航：品牌图标在顶部，功能入口居中，昼夜切换在底部 -->
   <nav class="rail" id="rail"></nav>
   <main class="wrap" id="app"></main>
   <div id="toast" class="toast"></div>
+  <!-- 语言运行时：server 会在前面注入 window.__SX_I18N__ 与语言包；必须在 sdk/app 之前 -->
+  <script src="/i18n.js"></script>
   <script src="/sdk.js"></script>
   <script src="/app.js"></script>
 </body>

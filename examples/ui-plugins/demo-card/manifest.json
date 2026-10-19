@@ -1,0 +1,8 @@
+{
+  "id": "demo-card",
+  "name": "用户覆盖版节奏卡片",
+  "apiVersion": "sierxing.ui/1",
+  "entry": "index.js",
+  "version": "0.1.0",
+  "description": "UI Lab 示例：覆盖同 id 的内置插件"
+}

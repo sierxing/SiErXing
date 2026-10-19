@@ -1,0 +1,9 @@
+{
+ "code": "en-US",
+ "name": "English",
+ "nativeName": "English",
+ "englishName": "English",
+ "rtl": false,
+ "documentTitle": "SiErXing: Your goal-planning assistant",
+ "documentDescription": "SiErXing is a local-first goal-planning assistant: it confirms requirements with a questionnaire first, then breaks your goal into an actionable path. Works with any OpenAI-compatible API, with extensible components and themes."
+}

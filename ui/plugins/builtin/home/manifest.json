@@ -1,0 +1,8 @@
+{
+  "id": "home",
+  "name": "主页（内置）",
+  "apiVersion": "sierxing.ui/1",
+  "version": "1.0.0",
+  "description": "主页：原版实现的插件化版本（#/）。",
+  "entry": "index.js"
+}

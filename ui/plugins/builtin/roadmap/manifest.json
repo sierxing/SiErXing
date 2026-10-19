@@ -1,0 +1,8 @@
+{
+  "id": "roadmap",
+  "name": "路线图（内置）",
+  "apiVersion": "sierxing.ui/1",
+  "version": "1.0.0",
+  "description": "目标路线图页：树形图 + 缩放平移 + 节点详情。原版实现的插件化版本。",
+  "entry": "index.js"
+}

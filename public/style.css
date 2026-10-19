@@ -762,8 +762,13 @@ body.mapMode{overflow:hidden;}
 .zoomPct{font-size:11.5px; color:var(--muted); min-width:42px; text-align:center; font-variant-numeric:tabular-nums;}
 .mapViewport{position:relative; flex:1; overflow:hidden; cursor:grab; user-select:none;}
 .mapViewport.dragging{cursor:grabbing;}
-.mapCanvas{position:absolute; left:0; top:0; transform-origin:0 0; will-change:transform;}
-.mapCanvas .mtree{background:transparent; border:none; border-radius:0; max-height:none; min-height:0; overflow:visible; padding:80px 110px;}
+.mapCanvas{position:absolute; left:0; top:0; transform-origin:0 0; will-change:transform; width:100%; height:100%;}
+.mapCanvas .mtree{
+  background:transparent; border:none; border-radius:0; max-height:none; min-height:0; overflow:visible;
+  /* 左右内边距从 110px 收到 40px：树内容本来就窄，110px 的留白让整块偏左、右边露出底色。
+     同时给一个最小宽度，保证树比视口窄时也铺满，不在右侧留灰条。 */
+  padding:80px 40px; width:100%; box-sizing:border-box;
+}
 .mapHint{white-space:nowrap;}
 @media (max-width:760px){ .mapHint{display:none;} }
 
@@ -1336,6 +1341,17 @@ h3.mdH{font-size:17px;} h4.mdH,h5.mdH,h6.mdH{font-size:15px;}
 }
 .adSelect:focus{outline:none; border-color:var(--accent);}
 .adModel{flex:0 0 46%;}
+/* 📄 正在看：当前页面会随消息带给 AI（AI 助手常驻后新增）。
+   只在有页面内容时显示一行，位置在消息区上方，不抢正文的地方。 */
+.adPage{
+  display:flex; align-items:center; gap:7px; padding:6px 12px;
+  border-bottom:1px solid var(--border); background:var(--accent-soft);
+  font-size:11.8px; color:var(--muted); min-width:0;
+}
+.adPage[hidden]{display:none;}
+.adPageLb{flex:none; font-weight:600; color:var(--accent);}
+.adPageName{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text);}
+.adPageN{flex:none; font-size:11px; opacity:.8;}
 .adMsgs{flex:1; overflow-y:auto; padding:14px 12px 6px; background:var(--bg);}
 .adMsgs .chBody{max-width:86%;}
 .adMsgs .mdBody{font-size:13.2px;}
@@ -1702,6 +1718,22 @@ body.aiOpen .nodePanel{right:calc(var(--ai-w, 440px) + 26px);}
 }
 .railItem:hover{background:var(--soft); color:var(--text);}
 .railItem.active{background:var(--accent-soft); color:var(--accent); border-color:var(--accent-border);}
+/* 路线图按钮"常驻但当前无目标"：置灰、不可点（不要隐藏，隐藏会显得左栏在跳） */
+.railItem.disabled{opacity:.38; cursor:not-allowed; filter:grayscale(1);}
+.railItem.disabled:hover{background:none; color:var(--muted);}
+/* 左栏功能按钮可按住上下拖动排序（顺序存本机 localStorage）：拖动中半透明、落点画强调色细线 */
+.railNav .railItem{cursor:grab; touch-action:none; user-select:none; -webkit-user-select:none; position:relative;}
+.railNav .railItem:active{cursor:grabbing;}
+.railNav .railItem.disabled{cursor:not-allowed;}
+.railItem.railDragging{opacity:.45; cursor:grabbing !important; background:var(--soft);}
+.railItem.railDropBefore::before,
+.railItem.railDropAfter::after{
+  content:''; position:absolute; left:9px; right:9px; height:2px; border-radius:2px;
+  background:var(--accent); box-shadow:0 0 6px var(--accent-border); pointer-events:none;
+}
+.railItem.railDropBefore::before{top:-3px;}
+.railItem.railDropAfter::after{bottom:-3px;}
+body.railSorting, body.railSorting *{cursor:grabbing !important; user-select:none !important;}
 .railIcon{font-size:18px; line-height:1;}
 .railLabel{font-size:10.5px; font-weight:600; letter-spacing:.02em; white-space:nowrap;}
 body{padding-left:78px;}
@@ -2774,6 +2806,11 @@ input,textarea{caret-color:var(--accent);}
 }
 .adToolBtn:hover, .adToolBtn.open{border-color:var(--accent-border); background:var(--accent-soft);}
 .adToolBtn .adCare{font-size:10px; color:var(--muted); margin-left:-2px;}
+/* 「🎯 只改」选中非「自动」时要显眼：提醒用户"这次 AI 只能动这一块" */
+.adToolBtn.scopeOn{border-color:var(--accent-border); background:var(--accent-soft); color:var(--accent);}
+.adToolBtn.scopeOn #adScopeLabel{font-weight:700;}
+/* 范围菜单比模式菜单宽一点（每一项都带一句说明） */
+.adModePop.adScopePop{width:min(360px, calc(100% - 24px));}
 /* 「✨ AI 功能」按钮上的节点名（小字，太长了就省略） */
 .adToolBtn em{font-style:normal; font-size:11px; color:var(--muted); max-width:90px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
 .adModeIco{font-size:12.5px;}
@@ -2898,14 +2935,14 @@ input,textarea{caret-color:var(--accent);}
    整列就跟着歪，几十行看下来非常难受。 */
 .aitRow{
   display:grid; align-items:center; gap:10px; padding:8px 2px; border-radius:8px; cursor:pointer;
-  grid-template-columns:18px minmax(0,1fr) 64px 138px 62px;
+  grid-template-columns:18px minmax(0,1fr) 64px 138px 62px 52px;
 }
 .aitRow:hover{background:var(--soft);}
 .aitRowIcon{font-size:13.5px;}
 /* 列的抬头（状态/时间），只在每组上面出现一次，告诉用户每列是什么 */
 .aitRowHead{
   display:grid; align-items:center; gap:10px; padding:2px 2px 4px;
-  grid-template-columns:18px minmax(0,1fr) 64px 138px 62px;
+  grid-template-columns:18px minmax(0,1fr) 64px 138px 62px 52px;
   font-size:10.5px; color:var(--muted); letter-spacing:.4px;
 }
 /* 抬头用和数据行完全一样的网格列，于是天然对齐 */
@@ -3342,3 +3379,580 @@ body.tutResizing *{cursor:col-resize !important;}
 .libCleanWarn{font-size:11.5px; color:var(--muted); line-height:1.6; margin:10px 0 12px;}
 .libCleanBig{font-size:19px; font-weight:700; color:var(--accent); letter-spacing:.2px;}
 .libCleanSub{font-size:12.5px; color:var(--text); margin-top:7px; min-height:16px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+
+/* ============================================================================
+ * 首页 · 目标桌面（收藏夹 / 三档尺寸 / 长按拖拽收纳）
+ * ----------------------------------------------------------------------------
+ * 手机桌面式的目标排布：
+ *   · 卡片 小(s) 占 1 列 / 中(m) 占 2 列 / 大(l) 占 3 列，信息量随之递增；
+ *   · 收藏夹同样三档大小，点开是类似 iOS 文件夹的弹层；
+ *   · 拖住卡片到目标位置松手 = 排序；压到另一张卡片上会出现「📁 收进收藏夹」，松在按钮上 = 融合；
+ *     拖到空隙 = 换顺序（.htDropBefore / .htDropAfter 竖线）。
+ * 类名统一 ht* 前缀，避免和 .goalCard / .card 这些旧样式打架。
+ * ========================================================================== */
+.homeDesk{margin-top:2px;}
+.homeDeskBar{display:flex; align-items:center; gap:9px; flex-wrap:wrap; margin:0 0 12px; font-size:12px; color:var(--muted);}
+.homeDeskBar .hdHint{display:flex; align-items:center; gap:5px; line-height:1.55; min-width:0;}
+.homeDeskBar .hdHint b{color:var(--text); font-weight:600;}
+.homeDeskBar .hdSegLabel{font-size:11.5px; color:var(--muted); white-space:nowrap;}
+.hdSeg{display:inline-flex; background:var(--soft); border:1px solid var(--border); border-radius:9px; padding:2px; gap:1px;}
+.hdSegBtn{border:none; background:none; color:var(--muted); font-family:inherit; font-size:12px; padding:3px 11px; border-radius:7px; cursor:pointer; transition:.15s;}
+.hdSegBtn:hover{color:var(--accent);}
+.hdSegBtn:focus-visible{outline:2px solid var(--accent); outline-offset:1px;}
+
+/* 列数用固定 6/4/2（而不是 auto-fill）：小/中/大 = 1/2/3 列，正好整除、每行都能排满，
+   不会出现「右边空出半张卡」的豁口。960px 是 6 列能保持卡片宽度的下限。 */
+.homeDeskGrid{display:grid; grid-template-columns:repeat(6, minmax(0, 1fr)); grid-auto-flow:row dense; gap:14px; align-items:stretch;}
+.homeTile{
+  position:relative; min-width:0; cursor:pointer;
+  background:var(--card); border:1px solid var(--border); border-radius:var(--r-lg);
+  box-shadow:var(--shadow-sm); padding:14px 15px 13px;
+  display:flex; flex-direction:column; gap:9px;
+  transition:border-color .15s, box-shadow .15s, transform .15s;
+  user-select:none; -webkit-user-select:none; touch-action:manipulation;
+}
+.homeTile:hover{border-color:var(--accent-border); box-shadow:var(--shadow); transform:translateY(-2px);}
+.homeTile:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+.homeTile[data-size="s"]{grid-column:span 1; padding:12px 13px; gap:7px; min-height:82px;}
+.homeTile[data-size="m"]{grid-column:span 2;}
+.homeTile[data-size="l"]{grid-column:span 3; padding:18px 19px 16px; gap:10px;}
+.htHead{display:flex; align-items:flex-start; gap:8px; min-width:0;}
+.htIcon{flex:none; font-size:15px; line-height:1.5;}
+.htTitle{flex:1; min-width:0; font-size:14px; font-weight:700; line-height:1.5; word-break:break-word;
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;}
+.homeTile[data-size="s"] .htTitle{font-size:12.5px; font-weight:600; -webkit-line-clamp:2;}
+.homeTile[data-size="l"] .htTitle{font-size:16px;}
+.htHead .chip{flex:none; margin-top:1px;}
+.htMore{flex:none; border:none; background:none; color:var(--muted); cursor:pointer; font-size:15px; line-height:1;
+  padding:2px 5px; border-radius:6px; opacity:.5; transition:.15s; font-family:inherit;}
+.htMore:hover{background:var(--soft); color:var(--accent); opacity:1;}
+.homeTile:hover .htMore{opacity:1;}
+.htDot{flex:none; width:8px; height:8px; border-radius:50%; margin-top:6px; background:var(--muted);}
+.htDot.ok{background:var(--ok);} .htDot.warn{background:var(--warn);} .htDot.danger{background:var(--danger);}
+.htSummary{font-size:12px; color:var(--muted); line-height:1.6; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;}
+.htProgress{display:flex; align-items:center; gap:8px;}
+.htProgress .bar{flex:1; margin:0;}
+.htPct{flex:none; font-size:11px; font-weight:700; color:var(--accent); font-variant-numeric:tabular-nums;}
+.htMeta{display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:auto;}
+.htMeta .chip{font-size:10.5px; padding:1px 7px;}
+.htSmallFoot{display:flex; align-items:center; gap:7px; margin-top:auto;}
+.htMiniBar{display:block; flex:1; height:4px; background:var(--soft); border-radius:99px; overflow:hidden;}
+.htMiniBar i{display:block; height:100%; background:linear-gradient(90deg, var(--accent), var(--accent-2)); border-radius:99px;}
+
+/* 收藏夹卡片：淡色底 + 里面套小卡片，一眼区分「这是文件夹」 */
+.homeTile-folder{background:linear-gradient(180deg, var(--accent-soft), var(--card) 78%); border-color:var(--accent-border);}
+.htFolderIcon{font-size:16px;}
+.htCount{flex:none; font-size:10.5px; font-weight:700; line-height:1.7; color:var(--accent);
+  background:var(--card); border:1px solid var(--accent-border); border-radius:999px; padding:0 7px;}
+/* ⚠️ 预览必须**顶部对齐**、逐行向下排：收藏夹卡片会被同一行更高的卡片拉伸（align-items:stretch），
+   如果这里用 margin-top:auto 把预览钉在卡片底部，就只有一行时贴底、后来加的行只能往上叠
+   —— 用户看到的是「从下往上排列」。别再加回来。 */
+.htFolderMini{display:grid; grid-template-columns:repeat(3, 1fr); gap:6px; align-content:start;}
+.homeTile-folder[data-size="s"] .htFolderMini{grid-template-columns:repeat(2, 1fr); gap:5px;}
+.htMini{min-width:0; background:var(--card); border:1px solid var(--border); border-radius:9px;
+  padding:6px 5px; display:flex; flex-direction:column; align-items:center; gap:3px; overflow:hidden;}
+.htMiniIcon{font-size:14px; line-height:1.2;}
+.htMiniName{width:100%; font-size:9.5px; line-height:1.3; color:var(--muted); text-align:center;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.htMini .htMiniBar{flex:none; width:100%; height:3px;}
+.htMiniIconOnly{padding:9px 5px;}
+.htMiniMore{justify-content:center; color:var(--muted); font-size:11px; font-weight:700;}
+.htFolderFoot{font-size:10.5px; color:var(--muted); text-align:center; margin-top:2px;}
+
+/* 长按拖动：原卡片留半透明占位，跟着手指的是 ghost（fixed 定位） */
+body.htDraggingBody{cursor:grabbing; user-select:none; -webkit-user-select:none;}
+.htDragging{opacity:.32; filter:saturate(.6);}
+.homeTileGhost{position:fixed !important; z-index:520; margin:0 !important; pointer-events:none;
+  box-shadow:var(--shadow-lg) !important; border-color:var(--accent-border) !important;
+  transform:rotate(-1.4deg) scale(1.03); opacity:.97; cursor:grabbing;}
+.homeDeskGrid.htDragGrid .homeTile:hover{transform:none; box-shadow:var(--shadow-sm);}
+.homeDeskGrid.htDragGrid .homeTile{cursor:grabbing;}
+/* 融合靠「显式按钮」，不用计时判定：拖动时压在另一张卡片上，卡片底部长出
+   「📁 收进收藏夹」，松手落在它上面才合并；松在卡片其它地方都只是排序。
+   （曾经用「停 450ms 自动进合并态」，用户反馈拖拽时手一慢就误融合、边界不稳定。） */
+/* 按钮做满卡片宽度（左右各留 8px）+ 足够高度：拖进收藏夹的可落区要大，
+   用户不该为了融合去像素级对准一个小圆点（用户反馈「区域太小，很难受」）。
+   判定时还会再向外扩 HOME_CHIP_SLOP（见 app.js），所以实际可落区比看到的更宽。 */
+.htMergeChip{position:absolute; left:8px; right:8px; bottom:6px; z-index:6;
+  display:flex; align-items:center; justify-content:center; gap:4px; padding:8px 8px; border-radius:12px;
+  background:var(--accent); color:#fff; font-size:11.5px; font-weight:700; line-height:1.25;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  box-shadow:var(--shadow); border:1.5px dashed rgba(255,255,255,.8);
+  cursor:pointer; animation:htChipIn .14s ease-out;}
+.homeTile[data-size="s"] .htMergeChip{font-size:10.5px; padding:7px 6px; border-radius:10px;}
+.htMergeChip.on{background:var(--ok); border-style:solid; transform:scale(1.02);
+  box-shadow:0 8px 22px rgba(0,0,0,.28);}
+@keyframes htChipIn{from{opacity:0; transform:translateY(4px) scale(.94);}
+  to{opacity:1; transform:translateY(0) scale(1);}}
+/* 指针压到「📁」上时藏掉插入竖线：此刻松手是融合，不是排序 */
+.homeDeskGrid.htChipHover .htDropBefore::before, .homeDeskGrid.htChipHover .htDropAfter::after{display:none;}
+/* 拖到空隙：竖线标出插入位置 */
+.htDropBefore::before, .htDropAfter::after{content:""; position:absolute; top:6px; bottom:6px; width:3px;
+  border-radius:2px; background:var(--accent); z-index:2;}
+.htDropBefore::before{left:-8px;}
+.htDropAfter::after{right:-8px;}
+
+/* 卡片右上角 ⋯ 菜单：三档大小 + 收藏夹操作 */
+.homeTileMenu{width:252px;}
+.homeTileMenu .htMenuLabel{font-size:11px; color:var(--muted); padding:4px 10px 2px; font-weight:600;}
+.homeTileMenu button{display:flex; align-items:center; gap:8px;}
+.homeTileMenu button .htMenuSizeName{flex:none; font-weight:700;}
+.homeTileMenu button em{flex:1; min-width:0; font-style:normal; font-size:11px; color:var(--muted);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.homeTileMenu button.on{background:var(--accent-soft); color:var(--accent);}
+.homeTileMenu button.on em{color:inherit; opacity:.8;}
+.homeTileMenu .htMenuTick{margin-left:auto; color:var(--accent); font-weight:700;}
+
+/* 收藏夹弹层（类似 iOS 打开文件夹） */
+.homeFolderMask{position:fixed; inset:0; z-index:380; background:rgba(19,17,28,.4);
+  -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
+  display:flex; align-items:center; justify-content:center; padding:28px 18px; animation:ctxIn .16s ease;}
+.homeFolderPanel{width:min(880px, 94vw); max-height:min(82vh, 760px); background:var(--bg);
+  border:1px solid var(--border); border-radius:22px; box-shadow:var(--shadow-lg);
+  display:flex; flex-direction:column; overflow:hidden; animation:hfIn .2s cubic-bezier(.2,.9,.3,1.1);}
+@keyframes hfIn{from{opacity:0; transform:scale(.94);} to{opacity:1; transform:scale(1);}}
+.homeFolderHead{display:flex; align-items:center; gap:9px; flex-wrap:wrap; flex:none;
+  padding:15px 20px 12px; border-bottom:1px solid var(--border); background:var(--card);}
+.hfIcon{font-size:19px;}
+.hfTitle{font-size:16px; font-weight:800; word-break:break-word;}
+.homeFolderBody{padding:16px 20px; overflow:auto; flex:1;}
+.homeFolderGrid{display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr)); gap:12px;}
+.homeFolderCard{position:relative; background:var(--card); border:1px solid var(--border); border-radius:var(--r-lg);
+  padding:13px 14px; display:flex; flex-direction:column; gap:8px; cursor:pointer; transition:.15s; min-width:0;
+  touch-action:manipulation; user-select:none; -webkit-user-select:none;}
+.homeFolderCard:hover{border-color:var(--accent-border); box-shadow:var(--shadow); transform:translateY(-1px);}
+.homeFolderCard:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+.hfcHead{display:flex; align-items:flex-start; gap:7px; min-width:0;}
+.hfcTitle{flex:1; min-width:0; font-size:13.5px; font-weight:700; line-height:1.5; word-break:break-word;
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;}
+.hfcHead .chip{flex:none; margin-top:1px;}
+.hfcFoot{display:flex; align-items:center; gap:8px; font-size:11px; color:var(--muted);}
+.hfcMeta{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.homeFolderTip{flex:none; padding:10px 20px 14px; font-size:11px; color:var(--muted);
+  border-top:1px solid var(--border); background:var(--card);}
+
+/* 顶部「最近目标」栏：横向一排小卡，点一下直接继续 */
+.homeRecent{margin:0 0 18px;}
+.homeSectionHead{display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; margin:0 0 10px;}
+.hsTitle{font-size:14px; font-weight:800; color:var(--text);}
+.hsSub{font-size:11.5px; color:var(--muted);}
+.homeRecentRow{display:flex; gap:10px; overflow-x:auto; padding:2px 2px 8px; scrollbar-width:thin;}
+.hrCard{flex:none; width:200px; text-align:left; font-family:inherit; color:var(--text); cursor:pointer;
+  background:var(--card); border:1px solid var(--border); border-radius:14px;
+  padding:10px 12px; display:flex; flex-direction:column; gap:7px; min-width:0;
+  transition:border-color .15s, box-shadow .15s, transform .15s;}
+.hrCard:hover{border-color:var(--accent-border); box-shadow:var(--shadow); transform:translateY(-2px);}
+.hrCard:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+.hrTop{display:flex; align-items:flex-start; gap:6px; min-width:0;}
+.hrIcon{flex:none; font-size:13px; line-height:1.5;}
+.hrTitle{flex:1; min-width:0; font-size:12.5px; font-weight:700; line-height:1.45; word-break:break-word;
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;}
+.hrBarRow{display:flex; align-items:center; gap:7px;}
+.hrBarRow .bar{flex:1; margin:0;}
+.hrPct{flex:none; font-size:10.5px; font-weight:700; color:var(--accent); font-variant-numeric:tabular-nums;}
+.hrFoot{display:flex; align-items:center; gap:6px; font-size:10.5px; color:var(--muted); min-width:0;}
+.hrFoot .chip{font-size:10px; padding:0 6px;}
+.hrMeta{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+
+/* 收藏夹弹层里的小卡片也支持拖动排序（ghost / 插入线 与桌面同一套视觉） */
+.homeFolderGrid.hfDragGrid .homeFolderCard{cursor:grabbing;}
+.hfcDragging{opacity:.3; filter:saturate(.6);}
+.hfcGhost{position:fixed !important; z-index:520; margin:0 !important; pointer-events:none;
+  box-shadow:var(--shadow-lg) !important; border-color:var(--accent-border) !important;
+  transform:rotate(-1.2deg) scale(1.02); opacity:.97;}
+.hfcDropBefore::before, .hfcDropAfter::after{content:""; position:absolute; top:4px; bottom:4px; width:3px;
+  border-radius:2px; background:var(--accent); z-index:2;}
+.hfcDropBefore::before{left:-6px;}
+.hfcDropAfter::after{right:-6px;}
+
+/* 中等宽度（平板 / 分屏）：4 列，中卡两张一行、大卡一张一行 */
+@media (max-width: 959px){
+  .homeDeskGrid{grid-template-columns:repeat(4, minmax(0, 1fr)); gap:12px;}
+  .homeDeskBar .hdHint{font-size:11.5px;}
+}
+/* 窄屏 / 手机：两列，小卡两张一行，中卡和大卡都占满一行（不横向溢出） */
+@media (max-width: 660px){
+  .homeDeskGrid{grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px;}
+  .homeTile[data-size="m"], .homeTile[data-size="l"]{grid-column:span 2;}
+  .homeTile[data-size="l"]{padding:14px 15px 13px;}
+  .homeFolderMask{padding:12px;}
+  .homeFolderPanel{max-height:88vh; border-radius:18px;}
+  .homeFolderGrid{grid-template-columns:1fr;}
+  .homeFolderHead{padding:12px 14px 10px;}
+  .homeFolderBody{padding:12px 14px;}
+  .homeFolderTip{padding:9px 14px 12px;}
+  .hrCard{width:174px;}
+}
+
+/* ===== 创造模式：AI 对话里的「已生成」卡片 =====
+   AI 只准备文件 + 暂存；卡片按钮才是真正的"批准安装"（装进数据目录，可撤销）。 */
+.chCreate{margin-top:10px; border:1px solid var(--border); border-radius:14px; background:var(--card); padding:13px 15px;}
+.chCreHead{font-size:13.5px; line-height:1.5;}
+.chCreHead b{font-weight:700;}
+.chCreId{display:inline-block; margin-left:6px; padding:1px 6px; border-radius:6px; background:var(--soft); color:var(--muted); font-size:11.5px; font-family:ui-monospace,Menlo,Consolas,monospace;}
+.chCreSum{margin-top:6px; font-size:12.8px; color:var(--text); line-height:1.6;}
+.chCreFiles{display:flex; flex-wrap:wrap; gap:6px; margin-top:8px;}
+.chCreFile{padding:2px 7px; border-radius:6px; background:var(--soft); color:var(--muted); font-size:11.5px; font-family:ui-monospace,Menlo,Consolas,monospace;}
+.chCreWarn{margin-top:8px; padding:6px 9px; border-radius:8px; background:rgba(245,158,11,.13); color:#b45309; font-size:12px; line-height:1.55;}
+.chCreRow{display:flex; flex-wrap:wrap; gap:8px; margin-top:11px;}
+.chCreRow .btn.small{padding:5px 12px; font-size:12.5px;}
+.chCreTip{margin-top:9px; font-size:11.8px; color:var(--muted); line-height:1.55;}
+.chCreCode{margin-top:10px; max-height:360px; overflow:auto; border-top:1px dashed var(--border); padding-top:8px;}
+.chCreFileHead{font-size:12px; color:var(--muted); margin:6px 0 4px; font-family:ui-monospace,Menlo,Consolas,monospace;}
+.chCrePre{margin:0; padding:9px 11px; border-radius:8px; background:var(--soft); font-size:12px; line-height:1.55; white-space:pre-wrap; word-break:break-word; font-family:ui-monospace,Menlo,Consolas,monospace;}
+.chCreGone{opacity:.75;}
+
+
+/* ============================================================================
+ * 组件管理页 v2（#/components）：分类折叠 + 搜索 + 面板化
+ * ----------------------------------------------------------------------------
+ * 设计目标（用户原话）：组件全铺一屏太难找、边框和类别名"一坨字"很难看。
+ * 做法：
+ *   · 每个分类 = 一张可折叠的"模块卡"（标题行整行可点，左侧折叠箭头 + 分类图标 + 名称 + 数量）
+ *     —— 默认收起，只留标题行；展开后才是组件网格，几十个组件也不会铺满整屏。
+ *   · 面板（.cmpPanel）承载搜索 / 列表 / 分组，卡片圆角 + 细边 + hover 阴影，避免"一坨字"。
+ *   · 管理范围、分类管理、分享说明各自成块，同类信息不再混在一起。
+ * 这里只放全局 style.css 没有的样式（.cmpCard/.cmpGrid/.cmpSwitch 等沿用原样式）。
+ * ========================================================================== */
+
+/* ---------- 页面头部 ---------- */
+.cmpPage .cmpPageHead{align-items:center;}
+.cmpPage .cmpHeadText{display:flex; flex-direction:column; gap:2px; min-width:0;}
+.cmpPage .cmpHeadText .title{margin-left:0 !important;}
+.cmpPage .cmpHeadHint{margin-left:0 !important;}
+
+/* ---------- 面板：一块一块的浅色卡片，替代原来裸露的 .sec ---------- */
+.cmpPanel{
+  background:var(--card); border:1px solid var(--border); border-radius:16px;
+  padding:16px 18px 18px; margin-bottom:18px; box-shadow:var(--shadow-sm);
+}
+.cmpPanelHead{display:flex; align-items:center; gap:9px; flex-wrap:wrap; margin-bottom:12px;}
+.cmpPanelTitle{font-size:15px; font-weight:750; letter-spacing:.2px; display:flex; align-items:center; gap:8px;}
+.cmpPanelHint{font-size:12px; color:var(--muted); margin-left:auto; text-align:right;}
+
+/* ---------- 管理范围 ---------- */
+.cmpPanelScope{padding-bottom:14px;}
+.cmpScopeRow{display:flex; align-items:center; gap:12px; flex-wrap:wrap;}
+.cmpScopeLabel{font-size:12px; font-weight:700; color:var(--muted); letter-spacing:.06em; flex:none;}
+.cmpPanelScope .ppCat{padding:5px 12px; font-size:12px;}
+.cmpPanelScope .ppCat.active{box-shadow:0 2px 10px rgba(79,70,229,.16);}
+.cmpScopeHint{margin:10px 0 0; font-size:12px; color:var(--muted); line-height:1.65;}
+
+/* ---------- 搜索框 ---------- */
+.cmpSearch{
+  display:flex; align-items:center; gap:8px; position:relative;
+  border:1.5px solid var(--border); border-radius:12px; background:var(--bg);
+  padding:0 12px; height:40px; transition:border-color .15s, box-shadow .15s;
+}
+.cmpSearch:focus-within{border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft);}
+.cmpSearchIcon{font-size:13px; opacity:.7; flex:none;}
+.cmpSearchInput{
+  flex:1; min-width:0; border:0; outline:0; background:transparent; color:var(--text);
+  font-family:inherit; font-size:13px; height:100%;
+}
+.cmpSearchInput::-webkit-search-cancel-button{-webkit-appearance:none;}
+.cmpSearchClear{
+  flex:none; border:0; background:var(--soft); color:var(--muted); cursor:pointer;
+  width:20px; height:20px; border-radius:50%; font-size:13px; line-height:1;
+  display:flex; align-items:center; justify-content:center; font-family:inherit;
+}
+.cmpSearchClear:hover{background:var(--border); color:var(--text);}
+.cmpSearchCount{flex:none; font-size:11.5px; color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap;}
+
+/* ---------- 工具条：全部展开 / 全部收起 ---------- */
+.cmpCatToolbar{display:flex; align-items:center; gap:6px; margin:10px 0 12px; flex-wrap:wrap;}
+.cmpCatToolbar .btn.tiny{font-size:11.5px; color:var(--muted);}
+.cmpCatToolbar .btn.tiny:hover{color:var(--accent); background:var(--accent-soft);}
+.cmpCatToolbar .hint{font-size:11.5px;}
+
+/* ---------- 分类模块（可折叠）---------- */
+.cmpCatList{display:flex; flex-direction:column; gap:9px;}
+.cmpCatMod{
+  border:1px solid var(--border); border-radius:13px; overflow:hidden;
+  background:var(--bg); transition:border-color .15s, box-shadow .15s;
+}
+.cmpCatMod:hover{border-color:var(--accent-border);}
+.cmpCatMod:not(.isFolded){border-color:var(--accent-border); background:var(--card); box-shadow:var(--shadow-sm);}
+.cmpCatHead{
+  display:flex; align-items:center; gap:9px; width:100%; text-align:left;
+  border:0; background:transparent; color:var(--text); cursor:pointer; font-family:inherit;
+  padding:11px 14px; font-size:13.5px;
+}
+.cmpCatHead:hover{background:var(--soft);}
+.cmpCatMod:not(.isFolded) .cmpCatHead{border-bottom:1px dashed var(--border); background:transparent;}
+.cmpCatFold{flex:none; width:14px; font-size:10px; color:var(--muted); text-align:center;}
+.cmpCatIcon{flex:none; font-size:16px; line-height:1;}
+.cmpCatName{font-weight:750; letter-spacing:.2px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.cmpCatBadge{
+  flex:none; font-size:11px; font-weight:600; color:var(--muted);
+  background:var(--soft); border:1px solid var(--border); border-radius:999px; padding:1px 9px;
+  font-variant-numeric:tabular-nums;
+}
+.cmpCatMod:not(.isFolded) .cmpCatBadge{background:var(--accent-soft); border-color:var(--accent-border); color:var(--accent);}
+.cmpCatAct{flex:none; font-size:11.5px; color:var(--muted); opacity:0; transition:opacity .15s;}
+.cmpCatHead:hover .cmpCatAct{opacity:1;}
+.cmpCatMod:not(.isFolded) .cmpCatAct{opacity:.8;}
+.cmpCatBody{padding:12px 14px 14px;}
+.cmpCatHint{margin:0 0 10px; font-size:11.8px; line-height:1.6;}
+.cmpEmpty{
+  padding:18px 12px; text-align:center; color:var(--muted); font-size:12.5px;
+  border:1px dashed var(--border); border-radius:11px; background:var(--card);
+}
+
+/* 折叠后的分类模块：整行更像"标签"，右侧补一个淡阴影，弱化边界 */
+.cmpCatMod.isFolded{background:var(--card);}
+.cmpCatMod.isFolded .cmpCatHead{border-bottom:0;}
+
+/* ---------- 组件卡片（在全局网格内微调；基础样式见上方 .cmpCard）---------- */
+.cmpPage .cmpGrid{grid-template-columns:repeat(auto-fill,minmax(272px,1fr)); gap:10px;}
+.cmpPage .cmpCard{
+  border-radius:13px; border:1px solid var(--border); background:var(--card);
+  padding:12px 13px 11px; gap:7px; box-shadow:none;
+}
+.cmpPage .cmpCard:hover{border-color:var(--accent-border); box-shadow:var(--shadow);}
+.cmpPage .cmpCard.isCore{border-style:dashed; background:var(--bg);}
+.cmpPage .cmpCard.isOff{opacity:.66;}
+.cmpPage .cmpCard.isOff:hover{opacity:1;}
+.cmpPage .cmpCardTop{align-items:center;}
+.cmpPage .cmpIcon{
+  width:32px; height:32px; border-radius:10px; background:var(--soft);
+  display:flex; align-items:center; justify-content:center; font-size:17px; flex:none;
+}
+.cmpPage .cmpCard .cmpName{gap:5px; font-size:13.2px; line-height:1.5;}
+.cmpPage .cmpCard .cmpDesc{font-size:12.2px; line-height:1.6; margin-top:1px;}
+.cmpPage .cmpCard .cmpCatRow{
+  display:flex; align-items:center; gap:7px; margin-top:2px;
+  padding-top:8px; border-top:1px dashed var(--border);
+}
+.cmpPage .cmpCatLabel{font-size:11px; color:var(--muted); flex:none;}
+.cmpPage .cmpCard .cmpCatSel{flex:1; min-width:0; max-width:none;}
+.cmpCardLinks{display:flex; gap:4px; flex:none;}
+.cmpPage .cmpFiles{font-size:10.5px; opacity:.72; line-height:1.5;}
+
+/* 分类下拉（原生 select 也换成自画；没被 sxiSelify 接管时保持可用） */
+.cmpPage .cmpCatSel{
+  border:1px solid var(--border); background:var(--card); color:var(--text);
+  border-radius:8px; padding:3px 8px; font-size:11.5px; font-family:inherit; cursor:pointer;
+  height:26px;
+}
+.cmpPage .cmpCatSel:hover{border-color:var(--accent-border); background:var(--accent-soft);}
+.cmpPage .cmpCatSel:focus{outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft);}
+
+/* ---------- 折叠块（分类管理 / 分享说明 / 全局折叠）---------- */
+.cmpCatManageFold, .cmpShareFold, .cmpGlobalFold{
+  border:1px solid var(--border); border-radius:14px; background:var(--card);
+  padding:0; margin-bottom:14px; overflow:hidden;
+}
+.cmpCatManageFold > summary, .cmpShareFold > summary{
+  cursor:pointer; list-style:none; padding:11px 16px; font-size:13px; font-weight:650;
+  display:flex; align-items:center; gap:8px; color:var(--text);
+}
+.cmpCatManageFold > summary::-webkit-details-marker, .cmpShareFold > summary::-webkit-details-marker{display:none;}
+.cmpCatManageFold > summary::before, .cmpShareFold > summary::before{
+  content:'▸'; color:var(--muted); font-size:10px; transition:transform .15s;
+}
+.cmpCatManageFold[open] > summary::before, .cmpShareFold[open] > summary::before{transform:rotate(90deg);}
+.cmpCatManageFold > summary:hover, .cmpShareFold > summary:hover{background:var(--soft);}
+.cmpCatManageFold[open] > summary, .cmpShareFold[open] > summary{border-bottom:1px solid var(--border);}
+.cmpCatManageFold .sec, .cmpShareFold .sec{
+  margin:0; padding:14px 16px 16px; max-width:none; background:transparent; border:0;
+}
+.cmpShareFold .hint{padding:0 16px 14px; display:block;}
+
+/* 全局折叠（选了某个目标时）—— 沿用原 .cmpGlobalFold 语义，只把内部间距对齐新面板 */
+.cmpGlobalFold{padding:0;}
+.cmpGlobalFold > summary{
+  padding:12px 16px; border-bottom:0; font-size:13px;
+}
+.cmpGlobalFold[open] > summary{border-bottom:1px solid var(--border); margin-bottom:0;}
+.cmpGlobalFold > .cmpPanel{margin:14px 16px;}
+.cmpGlobalFold > .cmpCatManageFold, .cmpGlobalFold > .cmpShareFold{margin:14px 16px;}
+.cmpGlobalFold > .cmpPanel:last-child{margin-bottom:16px;}
+
+/* ---------- 分类管理里的分类标签（沿用 .catList / .catItem，稍收紧）---------- */
+.cmpCatManage .catList{gap:7px;}
+.cmpCatManage .catItem{border-width:1px; border-radius:999px; padding:4px 6px 4px 11px;}
+
+/* ---------- 窄屏 ---------- */
+@media (max-width:700px){
+  .cmpPanel{padding:13px 14px 15px; border-radius:14px;}
+  .cmpPage .cmpGrid{grid-template-columns:1fr;}
+  .cmpSearchCount{display:none;}
+  .cmpPanelHint{display:none;}
+  .cmpCatAct{display:none;}
+  .cmpCatHead{padding:10px 12px; font-size:13px;}
+  .cmpCatBody{padding:10px 12px 12px;}
+}
+
+/* ============================================================================
+ * 目标选择器（全站共用）：一个按钮 + 可搜索弹层
+ * ----------------------------------------------------------------------------
+ * 用户原话：组件管理的「管理范围」把全部目标铺满一行；产出库 / 资源库 / AI 任务
+ * 里选目标也应有搜索。这里把「选目标」统一成一个按钮 + 带搜索的弹层。
+ * ========================================================================== */
+
+/* ---------- 按钮 ---------- */
+.sxiGoalPick{display:inline-flex; align-items:center; gap:8px; min-width:0; max-width:100%;}
+.sxiGoalPick .sgpLabel{
+  font-size:12px; font-weight:700; color:var(--muted); letter-spacing:.06em;
+  flex:none; white-space:nowrap;
+}
+.sxiGoalPick .sgpBtn{
+  display:inline-flex; align-items:center; gap:7px; min-width:0; max-width:340px;
+  border:1.5px solid var(--border); background:var(--card); color:var(--text);
+  border-radius:10px; padding:6px 12px; font-family:inherit; font-size:13px; cursor:pointer;
+  transition:border-color .15s, background .15s, box-shadow .15s;
+}
+.sxiGoalPick .sgpBtn:hover{border-color:var(--accent-border); background:var(--accent-soft);}
+.sxiGoalPick .sgpBtn:focus-visible{outline:2px solid var(--accent); outline-offset:1px;}
+.sxiGoalPick .sgpIcon{flex:none; font-size:13px; line-height:1;}
+.sxiGoalPick .sgpText{min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600;}
+.sxiGoalPick .sgpCaret{flex:none; font-size:9px; opacity:.55;}
+.sxiGoalPick.sm .sgpBtn,
+.sxiGoalPick.sxiGoalInline .sgpBtn{padding:4px 10px; font-size:12.5px; border-radius:9px; max-width:280px;}
+
+/* 页面头部工具条里用：和 .btn.small 等高 */
+.cmpPage .cmpScopePick .sgpBtn{font-size:13px;}
+.libGoalPick .sgpBtn, .olGoalPick .sgpBtn{height:30px;}
+
+/* ---------- 弹层 ---------- */
+.sxiGoalPop{
+  position:fixed; z-index:420; width:320px; max-width:calc(100vw - 20px);
+  background:var(--card); border:1px solid var(--border); border-radius:13px;
+  box-shadow:var(--shadow-lg); overflow:hidden;
+  animation:sgpIn .14s cubic-bezier(.16,1,.3,1);
+}
+@keyframes sgpIn{from{opacity:0; transform:translateY(-5px);} to{opacity:1; transform:none;}}
+.sgpSearchWrap{
+  display:flex; align-items:center; gap:7px; padding:9px 11px;
+  border-bottom:1px solid var(--border); background:var(--bg);
+}
+.sgpSearchIcon{flex:none; font-size:12px; opacity:.65;}
+.sgpSearch{
+  flex:1; min-width:0; border:0; outline:0; background:transparent; color:var(--text);
+  font-family:inherit; font-size:13px; height:22px;
+}
+.sgpSearch::-webkit-search-cancel-button{-webkit-appearance:none;}
+.sgpCount{flex:none; font-size:11px; color:var(--muted); font-variant-numeric:tabular-nums;}
+.sgpList{max-height:min(52vh, 360px); overflow-y:auto; padding:5px;}
+.sgpOpt{
+  display:flex; align-items:center; gap:8px; width:100%; text-align:left;
+  border:0; background:transparent; color:var(--text); cursor:pointer;
+  padding:8px 9px; border-radius:8px; font-family:inherit; font-size:13px;
+}
+.sgpOpt:hover{background:var(--soft);}
+.sgpOpt.on{background:var(--accent-soft); color:var(--accent); font-weight:650;}
+.sgpOptIcon{flex:none; font-size:13px; line-height:1; width:16px; text-align:center;}
+.sgpOptText{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.sgpTick{flex:none; font-size:11px; color:var(--accent);}
+.sgpEmpty{padding:18px 12px; text-align:center; font-size:12.5px; color:var(--muted);}
+
+/* ---------- AI 任务弹层里的「搜索目标」 ---------- */
+.sxiPopSearch{display:flex; align-items:center; gap:7px; padding:5px 8px 7px; border-bottom:1px dashed var(--border); margin-bottom:4px;}
+.sxiPopSearchInput{
+  flex:1; min-width:0; border:1px solid var(--border); border-radius:8px;
+  background:var(--bg); color:var(--text); font-family:inherit; font-size:12.5px;
+  padding:5px 9px; outline:none;
+}
+.sxiPopSearchInput:focus{border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft);}
+.sxiPopSearchCount{flex:none; font-size:11px; color:var(--muted); font-variant-numeric:tabular-nums;}
+.sxiPopGoalList{max-height:44vh; overflow-y:auto;}
+.sxiOptEmpty{padding:14px 10px; text-align:center; font-size:12px; color:var(--muted);}
+
+/* ---------- 组件管理页的「管理范围」面板（收成一个按钮） ---------- */
+.cmpPanelScope .cmpScopeRow{display:flex; align-items:center; gap:10px; flex-wrap:wrap;}
+.cmpPanelScope .cmpScopePick{flex:0 1 auto; min-width:0; max-width:520px;}
+.cmpPanelScope .cmpScopePick .sgpBtn{max-width:480px; padding:8px 14px; border-radius:11px; font-size:13.5px; background:var(--bg);}
+.cmpPanelScope .cmpScopePick .sgpBtn:hover{background:var(--accent-soft);}
+.cmpPanelScope .cmpScopePick .sgpText{font-weight:650;}
+/* 选中某个目标时给按钮一点强调，一眼能看出现在改的是这个目标 */
+.cmpPanelScope .cmpScopePick[data-value]:not([data-value="0"]) .sgpBtn{border-color:var(--accent-border); background:var(--accent-soft); color:var(--accent);}
+
+/* ---------- 窄屏 ---------- */
+@media (max-width:640px){
+  .sxiGoalPop{width:calc(100vw - 20px);}
+  .sxiGoalPick .sgpBtn{max-width:none; flex:1; min-width:0;}
+  .cmpPanelScope .cmpScopePick{width:100%;}
+}
+
+
+/* ===== AI 助手：粘贴图片（输入区缩略图 + 历史气泡） ===== */
+.adImgs{display:flex;gap:8px;flex-wrap:wrap;padding:8px 12px 2px;}
+.adImgs[hidden]{display:none;}
+.adImgChip{position:relative;width:56px;height:56px;border-radius:10px;overflow:hidden;border:1px solid var(--border);background:var(--soft);}
+.adImgChip img{width:100%;height:100%;object-fit:cover;display:block;}
+.adImgDel{position:absolute;top:1px;right:1px;width:18px;height:18px;line-height:16px;border-radius:50%;border:none;background:rgba(0,0,0,.55);color:#fff;font-size:13px;cursor:pointer;padding:0;}
+.adImgDel:hover{background:rgba(0,0,0,.8);}
+.adImgWarn{padding:4px 12px 0;font-size:11.5px;line-height:1.5;color:#b26a00;}
+.adImgWarn[hidden]{display:none;}
+.chImgs{display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 6px;}
+.chImgs img{max-width:180px;max-height:140px;border-radius:8px;border:1px solid var(--border);object-fit:cover;display:block;}
+
+/* 任务历史：行内删除按钮（只删这一条记录）。默认很淡，鼠标移到行上才显出来 */
+.aitRowDelBtn{justify-self:end; font-size:11px; padding:1px 7px; opacity:.35; transition:opacity .15s;}
+.aitRow:hover .aitRowDelBtn{opacity:1;}
+.aitRowDelBtn:hover{background:rgba(224,36,36,.08); color:var(--danger);}
+/* 分组头：已删除目标的「清理历史」按钮 */
+.aitGrpClean{flex:none; margin-right:10px; font-size:11.5px; white-space:nowrap;}
+.aitGrpClean:hover{color:var(--danger); border-color:rgba(224,36,36,.35);}
+/* 历史区标题旁的「清理已删除目标」：只在真有已删除目标时出现 */
+.aitCleanAll{margin-left:9px; font-size:11.5px; vertical-align:1px;}
+.aitCleanAll:hover{color:var(--danger); border-color:rgba(224,36,36,.35);}
+/* 分组头已从 <button> 改成 div + 内层 button，样式要跟着走 */
+.aitGrpHd{display:flex; align-items:center; gap:9px; padding:0; border:0; background:transparent;}
+.aitGrpOpen{display:flex; align-items:center; gap:9px; flex:1; min-width:0; padding:10px 12px; border:0; background:transparent; color:var(--text); font-family:inherit; font-size:13px; cursor:pointer; text-align:left;}
+.aitGrpOpen:hover{background:var(--soft);}
+.aitGrp:not(.open) .aitGrpClean{margin-right:10px;}
+
+
+
+/* ===== 设置 · 语言（i18n） ================================================= */
+.langTop{display:flex;align-items:center;gap:12px;flex-wrap:wrap;max-width:860px;margin-bottom:14px;}
+.langNow{display:flex;align-items:center;gap:12px;padding:10px 16px;border:1px solid var(--accent-border);
+  border-radius:var(--r-lg);background:var(--accent-soft);min-width:220px;flex:1;}
+.langCodeBadge{flex:none;display:inline-flex;align-items:center;justify-content:center;min-width:42px;height:30px;padding:0 7px;
+  border-radius:9px;background:linear-gradient(135deg,var(--accent-soft),var(--soft));border:1px solid var(--accent-border);
+  color:var(--accent);font-size:12px;font-weight:800;letter-spacing:.03em;line-height:1;}
+.langCodeBadge.big{min-width:52px;height:38px;font-size:14px;border-radius:11px;}
+.langNowText{display:flex;flex-direction:column;gap:1px;}
+.langNowText b{font-size:16px;font-weight:700;}
+.langNowSub{font-size:11px;color:var(--muted);letter-spacing:.02em;}
+.langFollow{display:inline-flex;align-items:center;gap:7px;padding:9px 14px;border:1px solid var(--border);
+  border-radius:var(--r);background:var(--card);cursor:pointer;font-size:13px;color:var(--text);}
+.langFollow input{accent-color:var(--accent);width:15px;height:15px;margin:0;cursor:pointer;}
+.langFollow:hover{border-color:var(--accent-border);}
+.langGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;max-width:860px;}
+.langCard{position:relative;display:flex;align-items:center;gap:12px;padding:12px 14px;
+  border:1px solid var(--border);border-radius:var(--r-lg);background:var(--card);cursor:pointer;
+  transition:border-color .15s,background .15s,transform .15s;}
+.langCard:hover{border-color:var(--accent-border);transform:translateY(-1px);}
+.langCard.on{border-color:var(--accent-border);background:var(--accent-soft);box-shadow:0 0 0 1px var(--accent-border) inset;}
+.langCard:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+
+.langCardBody{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;}
+.langCardBody b{font-size:15px;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.langCardBody span{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.langCardTick{flex:none;color:var(--accent);font-weight:800;}
+.langCardDel{position:absolute;top:6px;right:6px;width:22px;height:22px;border:0;border-radius:50%;
+  background:transparent;color:var(--muted);font-size:12px;line-height:22px;cursor:pointer;opacity:0;
+  transition:opacity .15s,background .15s,color .15s;padding:0;}
+.langCard:hover .langCardDel{opacity:1;}
+.langCardDel:hover{background:var(--soft);color:var(--danger);}
+.langAddSec{margin-top:22px;max-width:860px;}
+.langAddHead{font-size:14px;font-weight:700;margin-bottom:2px;}
+.langChips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;}
+.langChip{display:inline-flex;align-items:center;gap:7px;padding:8px 13px;border:1px solid var(--border);
+  border-radius:999px;background:var(--card);cursor:pointer;font:inherit;font-size:13px;color:var(--text);
+  transition:border-color .15s,background .15s,transform .15s;}
+.langChip:hover{border-color:var(--accent-border);background:var(--accent-soft);transform:translateY(-1px);}
+.langChip:disabled{opacity:.5;cursor:wait;transform:none;}
+.langChipBadge{flex:none;display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:20px;padding:0 5px;
+  border-radius:6px;background:var(--soft);color:var(--muted);font-size:10px;font-weight:800;letter-spacing:.03em;line-height:1;}
+.langChip b{font-weight:600;}
+.langChip span{font-size:11px;color:var(--muted);}
+.langCustom{display:flex;gap:8px;flex-wrap:wrap;max-width:620px;}
+.langCustom input{flex:1;min-width:220px;}
+.langProgress{margin-top:16px;max-width:620px;}
+.langProgBar{height:8px;border-radius:999px;background:var(--soft);overflow:hidden;margin-bottom:6px;}
+.langProgBar i{display:block;height:100%;width:0;border-radius:999px;
+  background:linear-gradient(90deg,var(--accent),var(--accent-2));transition:width .3s ease;}

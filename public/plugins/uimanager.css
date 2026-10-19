@@ -1,0 +1,26 @@
+/* 界面管理页（#/ui-plugins）—— 只放全局 style.css 没有的样式 */
+.uipPage .uipNote { font-size: 13px; line-height: 1.7; color: var(--fg2, #666); background: var(--bg2, rgba(0,0,0,.03)); border: 1px solid var(--line, rgba(0,0,0,.08)); border-radius: 10px; padding: 10px 14px; margin: 8px 0 12px; }
+.uipPage .uipNote code, .uipPage .uipMeta code, .uipPage .uipPath code { font-size: 12px; }
+.uipStats { font-size: 13px; color: var(--fg2, #666); margin-bottom: 12px; }
+.uipGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+.uipCard { border: 1px solid var(--line, rgba(0,0,0,.1)); border-radius: 12px; padding: 12px 14px; background: var(--card, #fff); display: flex; flex-direction: column; gap: 6px; }
+.uipCard.user { border-color: var(--accent, #4a7dff); box-shadow: 0 0 0 1px var(--accent, #4a7dff) inset; }
+.uipCard.off { opacity: .72; }
+.uipCardHead { display: flex; align-items: center; gap: 8px; }
+.uipCardHead b { font-size: 15px; }
+.uipBadge { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line, rgba(0,0,0,.14)); color: var(--fg2, #666); }
+.uipBadge.user { color: #2b6cff; border-color: rgba(43,108,255,.4); background: rgba(43,108,255,.08); }
+.uipBadge.off { color: #b26b00; border-color: rgba(178,107,0,.4); background: rgba(178,107,0,.08); }
+.uipMeta { font-size: 12px; color: var(--fg2, #666); }
+.uipDesc { font-size: 13px; color: var(--fg2, #666); }
+.uipActions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 2px; }
+.uipHint { font-size: 12px; color: var(--fg2, #888); }
+.uipPath { font-size: 11px; color: var(--fg2, #999); word-break: break-all; }
+.uipFold { margin-top: 14px; border: 1px solid var(--line, rgba(0,0,0,.08)); border-radius: 10px; padding: 8px 12px; }
+.uipFold > summary { cursor: pointer; font-weight: 600; font-size: 13px; padding: 2px 0; }
+.uipFold[open] > summary { margin-bottom: 8px; }
+.uipTable { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+.uipTable th, .uipTable td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line, rgba(0,0,0,.06)); vertical-align: top; }
+.uipOk { color: #1a9f5a; } .uipBad { color: #d33; }
+.uipSkinList { margin: 8px 0 0 18px; font-size: 12px; line-height: 1.8; }
+.uipCode { font-size: 12px; line-height: 1.6; background: var(--bg2, rgba(0,0,0,.04)); border-radius: 8px; padding: 10px 12px; overflow: auto; max-height: 380px; white-space: pre; }

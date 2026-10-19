@@ -14,6 +14,51 @@
   const { api, esc, toast, mdToHTML, mdPickOffset, mdPickTarget, mdInlineEdit, editKeysBind } = SiErXing;
 
   let tid = 0, nodeId = 0, nodeTitle = '';
+  /* ---------- Vue 版笔记栏（Markdown 页签；划线页签委托 TutNotes.renderInto） ---------- */
+  let notesVue = null;
+  function notesVueEnabled() {
+    try {
+      const q = new URLSearchParams(location.search).get('ui');
+      if (q === 'legacy') return false;
+      if (q === 'vue') return true;
+      const saved = localStorage.getItem('sierxing-ui-notes');
+      if (saved === 'legacy') return false;
+      if (saved === 'vue') return true;
+    } catch (e) {}
+    return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+  }
+  function ensureNotesVueCss() {
+    if (document.querySelector('link[data-ui-panel="notes"]')) return;
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/notespanel.css'; l.setAttribute('data-ui-panel', 'notes');
+    document.head.appendChild(l);
+  }
+  function cleanupNotesVue() {
+    if (!notesVue) return;
+    try { notesVue.unmount(); } catch (e) {}
+    try { notesVue.root.remove(); } catch (e) {}
+    notesVue = null;
+  }
+  async function mountNotesVue(tutorialId, nid, ntitle) {
+    if (document.getElementById('nodeNotesVueWrap')) return;   // 已经挂着
+    if (!isOpen()) { showTab(); return; }
+    const tb = tabEl(); if (tb) tb.remove();
+    const wrap = document.createElement('div');
+    wrap.id = 'nodeNotesVueWrap';
+    wrap.style.display = 'contents';
+    document.body.appendChild(wrap);
+    ensureNotesVueCss();
+    try {
+      const mod = await import('/ui-dist/notespanel.js?v=' + Date.now());
+      if (!mod || typeof mod.mountNotesPanel !== 'function') throw new Error('UI 插件没有导出 mountNotesPanel');
+      const unmount = mod.mountNotesPanel(wrap, { api: api, toast: toast, mdToHTML: mdToHTML, tutorialId: Number(tutorialId) || 0, nodeId: Number(nid) || 0, nodeTitle: String(ntitle || ''), hide: function () { window.NodeNotes.hide(); } });
+      notesVue = { unmount: unmount, root: wrap };
+    } catch (e) {
+      try { wrap.remove(); } catch (e2) {}
+      throw e;
+    }
+  }
+
   let current = '';          // 已保存的内容
   let editing = false;
   let nnUnbind = null;       // 整篇编辑框的 Ctrl+S/Esc 解绑函数
@@ -306,6 +351,7 @@
       if (tutorialId != null) tid = tutorialId;
       if (nid != null) nodeId = nid;
       if (ntitle != null) nodeTitle = ntitle;
+      if (notesVueEnabled()) { mountNotesVue(tutorialId, nid, ntitle).catch(function (e) { console.warn('[notes] Vue 面板加载失败', e); }); return; }
       /* ⚠️ 没有节点（教程对应的任务被删了）也照样开栏：那就只有「📌 划线笔记」页签 ——
          划线是绑教程的，不依赖节点。 */
       if (!isOpen()) { showTab(); return; }
@@ -362,6 +408,7 @@
     /* 收起（保留内容，边缘小标签可再打开） */
     hide() {
       flush();
+      cleanupNotesVue();
       setOpen(false);
       if (window.TutNotes && typeof window.TutNotes.detach === 'function') { try { window.TutNotes.detach(); } catch (e) {} }
       const p = panelEl();
@@ -379,6 +426,7 @@
     /* 路由切换时清理 */
     unmount() {
       flush();
+      cleanupNotesVue();
       effTab = null;               // 下一栏的页签重新按 storage + 可用性推
       if (window.TutNotes && typeof window.TutNotes.detach === 'function') { try { window.TutNotes.detach(); } catch (e) {} }
       const p = panelEl();

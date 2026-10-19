@@ -1,0 +1,8 @@
+{
+  "id": "aitasks",
+  "name": "任务中心（内置）",
+  "apiVersion": "sierxing.ui/1",
+  "version": "1.0.0",
+  "description": "任务中心：原版实现的插件化版本（#/aitasks）。",
+  "entry": "index.js"
+}

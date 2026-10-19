@@ -9,6 +9,53 @@
 (function () {
   const { api, esc, toast } = SiErXing;
 
+  /* ---------- Vue 版面板（非页面 UI 组件迁移；加载失败回退旧面板） ---------- */
+  let bmVueUnmount = null;
+  function bmVueEnabled() {
+    try {
+      const q = new URLSearchParams(location.search).get('ui');
+      if (q === 'legacy') return false;
+      if (q === 'vue') return true;
+      const saved = localStorage.getItem('sierxing-ui-tutbookmark');
+      if (saved === 'legacy') return false;
+      if (saved === 'vue') return true;
+    } catch (e) {}
+    return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+  }
+  function ensureBmVueCss() {
+    if (document.querySelector('link[data-ui-page="tutbookmark"]')) return;
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/tutbookmark.css'; l.setAttribute('data-ui-page', 'tutbookmark');
+    document.head.appendChild(l);
+  }
+  async function toggleVue(tid) {
+    const old = panelEl();
+    if (old) {
+      if (bmVueUnmount) { try { bmVueUnmount(); } catch (e) {} bmVueUnmount = null; }
+      old.remove();
+      return;
+    }
+    const div = document.createElement('div');
+    div.id = 'tutBmPanel';
+    div.className = 'tutBmPanel';
+    document.body.appendChild(div);
+    ensureBmVueCss();
+    try {
+      const mod = await import('/ui-dist/tutbookmark.js?v=' + Date.now());
+      if (!mod || typeof mod.mountTutBookmarkPanel !== 'function') throw new Error('UI 插件没有导出 mountTutBookmarkPanel');
+      bmVueUnmount = mod.mountTutBookmarkPanel(div, {
+        api: api, toast: toast, tid: Number(tid) || 0,
+        getCurrent: curSection, jump: jump,
+        onCount: () => { updateBadge(tid); },
+        onClose: () => { toggleVue(tid); }
+      });
+    } catch (e) {
+      try { div.remove(); } catch (e2) {}
+      toast('书签面板 Vue 加载失败，已回退旧面板');
+      window.TutBookmarkLegacyToggle(tid);
+    }
+  }
+
   /* ⚠️ HTML 教程的正文在 <iframe id="tutFrame"> 里（srcdoc、同源），而且那个 iframe 是固定高度、
      滚动发生在它内部。tutsec-N 这些标题 id 是 tutTocBuild 打的，打在 iframe 的文档里。
      所以「找标题」和「滚动」都得认 iframe，不能一律用 document / window ——
@@ -75,6 +122,10 @@
   window.TutBookmark = {
     /* 打开/关闭浮动面板（顶栏按钮调用，随时可用） */
     toggle(tid) {
+      if (bmVueEnabled()) { toggleVue(tid); return; }
+      window.TutBookmarkLegacyToggle(tid);
+    },
+    toggleLegacy(tid) {
       const old = panelEl();
       if (old) { old.remove(); return; }
       const div = document.createElement('div');
@@ -106,7 +157,7 @@
       refreshCur(); refreshList(tid);
     },
     /* 路由切换时清理 */
-    unmount() { const p = panelEl(); if (p) p.remove(); },
+    unmount() { if (bmVueUnmount) { try { bmVueUnmount(); } catch (e) {} bmVueUnmount = null; } const p = panelEl(); if (p) p.remove(); },
     init(tid) { this.toggle(tid); },
     badge: updateBadge,
     jump,
@@ -135,5 +186,6 @@
       });
     }
   };
+  window.TutBookmarkLegacyToggle = function (tid) { return window.TutBookmark.toggleLegacy(tid); };
   SiErXing.registerPlugin({ id: 'tutbookmark' });
 })();

@@ -87,6 +87,90 @@ const AGENTS = [
 function agentById(id) { return AGENTS.find(a => a.id === id) || null; }
 function providerById(id) { return PROVIDERS.find(p => p.id === id) || null; }
 
+/* ---------------- 宿主 Agent 自动接入 ----------------
+ * 场景：思而行作为某个 Agent（Claude Code / Cursor / DSH…）的插件被打开时，
+ * 「当前 Agent」应该自动出现在设置 → AI 接入方式里，它的模型列表直接可选。
+ *
+ * 注入方式（宿主插件二选一，推荐文件）：
+ *   ① 环境变量：SIERXING_HOST_AGENT_NAME / _URL / _KEY / _MODELS / _VISION
+ *   ② DATA_DIR/host-agent.json（或 SIERXING_HOST_AGENT_CONFIG 指向的 JSON）：
+ *      { "name":"DSH", "url":"http://127.0.0.1:8091/v1",
+ *        "key":"", "models":["deepseek-v4.1-flash-1017"], "vision":"" }
+ * 写文件后调 POST /api/host-agent/refresh 即可免重启生效。
+ *
+ * ⚠️ 边界：这里只负责「登记地址 + 模型列表」。思而行要真的用这些模型对话，
+ * 宿主必须真的提供 OpenAI 兼容 /chat/completions（或一个兼容网关）。
+ * MCP 是「宿主 → 思而行」单向的，思而行无法反向调用宿主 Agent 本身。 */
+const HOST_AGENT_ID = 'host-agent';
+const HOST_AGENT_PROVIDER = 'host';
+const HOST_AGENT_FILE = 'host-agent.json';
+
+function parseModelList(raw) {
+  if (Array.isArray(raw)) {
+    return raw.map(m => (typeof m === 'string' ? m : (m && (m.id || m.name)) || ''))
+      .map(s => String(s).trim()).filter(Boolean);
+  }
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s) return [];
+  try {
+    const j = JSON.parse(s);
+    if (Array.isArray(j)) return parseModelList(j);
+  } catch (e) { /* 不是 JSON，按逗号/换行分隔 */ }
+  return s.split(/[\n,，]/).map(x => String(x).trim()).filter(Boolean);
+}
+
+function hostAgentFile() {
+  const explicit = env('SIERXING_HOST_AGENT_CONFIG');
+  if (explicit) return explicit;
+  return (ctx && ctx.dataDir) ? path.join(ctx.dataDir, HOST_AGENT_FILE) : '';
+}
+
+/** 撤掉宿主自动创建的服务商与连接（宿主插件卸载 / 配置文件被删时）。 */
+function pruneHostAgent() {
+  const list = connections();
+  const keep = list.filter(x => x.id !== HOST_AGENT_ID && x.providerId !== HOST_AGENT_PROVIDER);
+  const removed = keep.length !== list.length;
+  const pi = PROVIDERS.findIndex(x => x.id === HOST_AGENT_PROVIDER);
+  if (pi >= 0) PROVIDERS.splice(pi, 1);
+  if (removed) {
+    saveConnections(keep);
+    /* 只剩宿主连接时，saveConnections 不会清老的单值设置 —— 这里补一刀，
+       否则 currentModel 还会指向已经消失的宿主地址。 */
+    if (!keep.some(c => c.enabled && c.purpose !== 'vision')) {
+      ctx.setSetting('ai_provider', 'openai');
+      ctx.setSetting('ai_base_url', '');
+      ctx.setSetting('ai_api_key', '');
+      ctx.setSetting('ai_model', '');
+      ctx.setSetting('ai_vision_model', '');
+    }
+  }
+  return { pruned: removed };
+}
+
+/** 读宿主注入的配置；地址或模型列表缺一不可，否则视为「宿主没接」。 */
+function hostAgentConfig() {
+  let file = {};
+  const fp = hostAgentFile();
+  if (fp) {
+    try {
+      const j = JSON.parse(fs.readFileSync(fp, 'utf8'));
+      if (j && typeof j === 'object') file = j;
+    } catch (e) { file = {}; }
+  }
+  const name = env('SIERXING_HOST_AGENT_NAME') || String(file.name || '').trim();
+  const rawUrl = env('SIERXING_HOST_AGENT_URL') || String(file.url || file.baseUrl || '').trim();
+  const apiKey = env('SIERXING_HOST_AGENT_KEY') || String(file.key || file.apiKey || '').trim();
+  const models = parseModelList(env('SIERXING_HOST_MODELS') || file.models || '');
+  const vision = env('SIERXING_HOST_AGENT_VISION') || String(file.vision || file.visionModel || '').trim();
+  if (!rawUrl || !models.length) return null;
+  return {
+    name: name || '当前宿主 Agent',
+    baseUrl: rawUrl.replace(/\/+$/, ''),
+    apiKey, models, vision,
+    file: fp || ''
+  };
+}
+
 function env(name, alt) {
   const v = process.env[name];
   if (v != null && String(v).trim() !== '') return String(v).trim();
@@ -1086,7 +1170,8 @@ const ai = {
     ctx = {
       getSetting: (options && options.getSetting) || (() => ''),
       setSetting: (options && options.setSetting) || (() => {}),
-      appDir: (options && options.appDir) || process.cwd()
+      appDir: (options && options.appDir) || process.cwd(),
+      dataDir: (options && options.dataDir) || process.env.SIERXING_DATA_DIR || ''
     };
     return ai;
   },
@@ -1094,6 +1179,65 @@ const ai = {
   /* 连接与模型池 */
   PROVIDERS,
   AGENTS,
+  /* 宿主 Agent：把插件宿主注入的模型登记成一条普通连接（设置页/对话下拉直接可用） */
+  hostAgentConfig,
+  hostAgentStatus() {
+    const c = connections().find(x => x.id === HOST_AGENT_ID);
+    const cfgHost = hostAgentConfig();
+    return {
+      available: !!cfgHost,
+      configured: !!c,
+      id: HOST_AGENT_ID,
+      name: (cfgHost && cfgHost.name) || (c && c.name) || '',
+      baseUrl: (cfgHost && cfgHost.baseUrl) || (c && c.baseUrl) || '',
+      models: cfgHost ? cfgHost.models.slice() : (c ? c.models.slice() : []),
+      enabled: c ? c.enabled : false,
+      file: hostAgentFile()
+    };
+  },
+  mountHostAgent() {
+    const cfgHost = hostAgentConfig();
+    if (!cfgHost) {
+      /* 宿主插件卸了/文件被删了：把自动创建的那条连接一起撤掉，别留一个连不上的死条目。
+         只清理 providerId=host 的自动连接，不碰用户自己加的任何连接。 */
+      const p = pruneHostAgent();
+      return { mounted: false, reason: 'no_host_config', pruned: p.pruned, file: hostAgentFile() };
+    }
+    /* 1) 服务商列表里加/更新一项，设置页的「服务商按钮」与卡片标题都靠它 */
+    const prov = {
+      id: HOST_AGENT_PROVIDER, name: cfgHost.name, brand: 'HOST',
+      baseUrl: cfgHost.baseUrl, models: cfgHost.models.slice(), vision: cfgHost.vision || '',
+      docs: '', hostAuto: true
+    };
+    const oldProv = PROVIDERS.find(x => x.id === HOST_AGENT_PROVIDER);
+    if (oldProv) Object.assign(oldProv, prov); else PROVIDERS.push(prov);
+    /* 2) 连接：按固定 id 更新，不重复添加；用户手动关掉的不强行打开 */
+    const list = connections();
+    const old = list.find(x => x.id === HOST_AGENT_ID) || list.find(x => x.providerId === HOST_AGENT_PROVIDER);
+    const next = {
+      ...(old || {}),
+      id: HOST_AGENT_ID,
+      name: cfgHost.name,
+      provider: 'openai',
+      kind: 'api',
+      purpose: 'chat',
+      providerId: HOST_AGENT_PROVIDER,
+      baseUrl: cfgHost.baseUrl,
+      apiKey: cfgHost.apiKey || (old && old.apiKey) || '',
+      models: cfgHost.models.slice(),
+      defaultModel: (old && cfgHost.models.includes(old.defaultModel)) ? old.defaultModel : cfgHost.models[0],
+      visionModel: cfgHost.vision || '',
+      enabled: old ? old.enabled !== false : true
+    };
+    if (old) Object.assign(old, next); else list.push(next);
+    saveConnections(list);
+    const c = connections().find(x => x.id === HOST_AGENT_ID);
+    return {
+      mounted: true, id: HOST_AGENT_ID, name: cfgHost.name,
+      baseUrl: cfgHost.baseUrl, models: cfgHost.models.slice(),
+      enabled: !!(c && c.enabled), file: hostAgentFile()
+    };
+  },
   connections() {
     /* 密钥不下发给前端，只回 hasKey —— 前端留空表示「不修改」 */
     return connections().map(c => ({ ...c, hasKey: !!c.apiKey, apiKey: '' }));

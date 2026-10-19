@@ -14,6 +14,50 @@
   const toast = m => { try { H().toast(m); } catch (e) { console.log(m); } };
   const go = h => { try { H().go(h); } catch (e) { location.hash = h; } };
 
+  /* ---------- Vue 版页面（渐进迁移；加载失败自动回退旧页面） ----------
+     默认新页面；?ui=legacy 或 localStorage=sierxing-ui-outlib:legacy 可回退。
+     当前只读版：目标切换/目录树/文件列表/预览/下载；写操作暂留旧版。 */
+  let outlibVueUnmount = null;
+  function outlibVueEnabled() {
+    try {
+      const q = new URLSearchParams(location.search).get('ui');
+      if (q === 'legacy') return false;
+      if (q === 'vue') return true;
+      const saved = localStorage.getItem('sierxing-ui-outlib');
+      if (saved === 'legacy') return false;
+      if (saved === 'vue') return true;
+    } catch (e) {}
+    return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+  }
+  function ensureOutlibVueCss() {
+    const add = (href, key) => {
+      if (document.querySelector('link[data-ui-page="' + key + '"]')) return;
+      const l = document.createElement('link');
+      l.rel = 'stylesheet'; l.href = href; l.setAttribute('data-ui-page', key);
+      document.head.appendChild(l);
+    };
+    add('/plugins/outlib.css', 'outlib-legacy');
+    add('/ui-dist/outlib.css', 'outlib-vue');
+  }
+  async function renderPageVue(goalId) {
+    const root = document.getElementById('app');
+    if (!root) throw new Error('页面容器不存在');
+    if (outlibVueUnmount) { try { outlibVueUnmount(); } catch (e) {} outlibVueUnmount = null; }
+    ensureOutlibVueCss();
+    const mod = await import('/ui-dist/outlib.js?v=' + Date.now());
+    if (!mod || typeof mod.mountOutlibPage !== 'function') throw new Error('UI 插件没有导出 mountOutlibPage');
+    const st = window.SiErXing && SiErXing.state;
+    const gid = Number(goalId) || (st && st.goal ? Number(st.goal.id) : 0);
+    outlibVueUnmount = mod.mountOutlibPage(root, { api: api, toast: toast, goalId: gid });
+    return true;
+  }
+  window.addEventListener('hashchange', function () {
+    if (outlibVueUnmount && !/^#\/outlib/.test(location.hash)) {
+      try { outlibVueUnmount(); } catch (e) {}
+      outlibVueUnmount = null;
+    }
+  });
+
   /* 非主题组件的 css 宿主不会自动挂（只有主题走 link[data-theme-style]），这里自己挂一次 */
   (function injectCss() {
     if (document.getElementById('ol-style')) return;
@@ -68,7 +112,7 @@
       <span class="mapTitle">📦 产出库</span>
       <span class="chip gray">目录化管理 · 每个目标独立</span>
       <div class="spacer"></div>
-      ${goals.length ? `<select class="sxi-sel sxi-sel-sm" id="olGoalSel">${opts}</select>` : ''}
+      ${goals.length ? H().sxiGoalPickHTML('olGoalSel', { value: gid, goals: goals.map(function (g) { return { id: g.id, title: g.title || ('目标 ' + g.id) }; }), compact: true, cls: 'olGoalPick' }) : ''}
       <button class="btn small" id="olMkdir">＋ 新建文件夹</button>
       <button class="btn small primary" id="olAddFiles">＋ 添加产出</button>
     </div>`;
@@ -588,8 +632,7 @@
     box.querySelectorAll('[data-cd]').forEach(el => el.addEventListener('click', () => {
       curDir = Number(el.getAttribute('data-cd')) || 0; picked = 0; preview = null; refresh();
     }));
-    const sel = document.getElementById('olGoalSel');
-    if (sel) sel.addEventListener('change', () => { gid = Number(sel.value) || 0; go('#/outlib/' + gid); });
+    if (H().sxiGoalPickBind) H().sxiGoalPickBind('olGoalSel', { onPick: function (g2) { if (!g2) return; gid = Number(g2) || 0; go('#/outlib/' + gid); } });
     const mk = document.getElementById('olMkdir');
     if (mk) mk.addEventListener('click', mkdir);
     const add = document.getElementById('olAddFiles');
@@ -687,8 +730,27 @@
     H_.registerPlugin({
       id: 'outlib',
       routes: [
-        { match: h => h.match(/^#\/outlib\/(\d+)$/), render: (m) => render(m) },
-        { match: h => /^#\/outlib$/.test(h), render: () => render(null) }
+        {
+          match: h => h.match(/^#\/outlib\/(\d+)$/),
+          render: async (m) => {
+            const id = Number(m[1]);
+            if (outlibVueEnabled()) {
+              try { if (await renderPageVue(id)) return; }
+              catch (e) { try { toast('产出库 Vue 页面加载失败，已回退旧页面'); } catch (e2) {} }
+            }
+            await render(m);
+          }
+        },
+        {
+          match: h => /^#\/outlib$/.test(h),
+          render: async () => {
+            if (outlibVueEnabled()) {
+              try { if (await renderPageVue(0)) return; }
+              catch (e) { try { toast('产出库 Vue 页面加载失败，已回退旧页面'); } catch (e2) {} }
+            }
+            await render(null);
+          }
+        }
       ]
     });
   }

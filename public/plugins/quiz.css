@@ -34,11 +34,9 @@
 .quizFb{border-radius:10px; padding:10px 13px; font-size:13.5px; line-height:1.7;}
 .quizFb.ok{background:rgba(14,159,110,.09); border:1px solid rgba(14,159,110,.3);}
 .quizFb.bad{background:rgba(217,119,6,.09); border:1px solid rgba(217,119,6,.32);}
-.quizThread{margin-top:12px; display:flex; flex-direction:column; gap:8px;}
-.quizChatQ{background:var(--accent-soft); border-radius:10px 10px 4px 10px; padding:9px 13px; font-size:13px; align-self:flex-end; max-width:92%;}
-.quizChatA{background:var(--card); border:1px solid var(--border); border-radius:10px 10px 10px 4px; padding:9px 13px; font-size:13px; line-height:1.75; align-self:flex-start; max-width:96%;}
-.quizChatBox{display:flex; gap:8px; margin-top:12px;}
-.quizChatBox input{flex:1; border:1.5px solid var(--border); border-radius:10px; padding:8px 12px; font-family:inherit; font-size:13px; background:var(--card); color:var(--text);}
+/* 追问统一走 AI 助手之后，这里只留一行指路提示（不再有自己的问答框与气泡）。 */
+.quizAskHint{margin-top:12px; font-size:12.5px; color:var(--muted); line-height:1.7;}
+.quizAskHint b{color:var(--text);}
 .quizScore{font-size:16px; font-weight:700; margin:4px 0 14px;}
 .quizRepList{display:flex; flex-direction:column; gap:8px;}
 .quizRepRow{display:flex; align-items:center; gap:10px; background:var(--card); border:1px solid var(--border); border-radius:10px; padding:10px 13px; font-size:13px;}

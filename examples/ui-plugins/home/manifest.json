@@ -1,0 +1,11 @@
+{
+  "id": "home",
+  "name": "我的主页（示例）",
+  "apiVersion": "sierxing.ui/1",
+  "version": "1.0.0",
+  "entry": "index.js",
+  "format": "esm",
+  "standalone": true,
+  "route": "#/",
+  "description": "示例：整页接管首页（Vue ESM，免构建）"
+}

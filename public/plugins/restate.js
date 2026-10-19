@@ -13,6 +13,42 @@
 (function () {
   const { api, esc, toast, mdToHTML } = SiErXing;
 
+  /* ---------- Vue 版页面（渐进迁移；加载失败自动回退旧页面） ---------- */
+  let restateVueUnmount = null;
+  function restateVueEnabled() {
+    try {
+      const q = new URLSearchParams(location.search).get('ui');
+      if (q === 'legacy') return false;
+      if (q === 'vue') return true;
+      const saved = localStorage.getItem('sierxing-ui-restate');
+      if (saved === 'legacy') return false;
+      if (saved === 'vue') return true;
+    } catch (e) {}
+    return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+  }
+  function ensureRestateVueCss() {
+    if (document.querySelector('link[data-ui-page="restate"]')) return;
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/restate.css'; l.setAttribute('data-ui-page', 'restate');
+    document.head.appendChild(l);
+  }
+  async function renderRestatePageVue(t) {
+    const root = document.getElementById('app');
+    if (!root) throw new Error('页面容器不存在');
+    if (restateVueUnmount) { try { restateVueUnmount(); } catch (e) {} restateVueUnmount = null; }
+    ensureRestateVueCss();
+    const mod = await import('/ui-dist/restate.js?v=' + Date.now());
+    if (!mod || typeof mod.mountRestatePage !== 'function') throw new Error('UI 插件没有导出 mountRestatePage');
+    restateVueUnmount = mod.mountRestatePage(root, { api: api, toast: toast, mdToHTML: mdToHTML, tid: Number(t) || 0 });
+    return true;
+  }
+  window.addEventListener('hashchange', function () {
+    if (restateVueUnmount && !/^#\/t\/\d+\/restate/.test(location.hash)) {
+      try { restateVueUnmount(); } catch (e) {}
+      restateVueUnmount = null;
+    }
+  });
+
   let tid = 0, points = [], rounds = [], arc = null;
   let view = 'pick';
   let cur = null;          // { round, point, turns }
@@ -1019,7 +1055,14 @@
     routes: [
       {
         match: h => h.match(/^#\/t\/(\d+)\/restate$/),
-        render: async m => { await renderPage(Number(m[1])); }
+        render: async m => {
+          const t = Number(m[1]);
+          if (restateVueEnabled()) {
+            try { if (await renderRestatePageVue(t)) return; }
+            catch (e) { try { toast('用自己的话 Vue 页面加载失败，已回退旧页面'); } catch (e2) {} }
+          }
+          await renderPage(t);
+        }
       }
     ]
   });

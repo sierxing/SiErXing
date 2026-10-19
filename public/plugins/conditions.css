@@ -1,0 +1,110 @@
+/* 达成条件组件（conditions）—— 只写组件自己的样式，通用样式（chip / bar / emptyBox / field）复用全局 */
+.condPage{max-width:980px; margin:0 auto; padding:0 4px 80px;}
+.condPage .pageHead{flex-wrap:wrap; row-gap:8px;}
+.condIntro{position:relative; background:var(--soft); border:1px solid var(--border); border-left:3px solid var(--accent-border); border-radius:10px; padding:10px 14px; font-size:13px; color:var(--muted); line-height:1.7; margin-bottom:16px;}
+.condIntro b{color:var(--text);}
+.condAiTip{color:var(--accent);}
+/* 顶部汇总：带浅渐变 + 强调描边，和下面的条件卡明显分层 */
+.condSum{background:linear-gradient(180deg, var(--card) 0%, var(--soft) 100%); border:1px solid var(--accent-border); border-radius:14px; padding:15px 18px; margin-bottom:14px; box-shadow:var(--shadow-sm);}
+.condSumTop{display:flex; align-items:baseline; justify-content:space-between; margin-bottom:8px;}
+.condSumTitle{font-size:13px; color:var(--muted);}
+.condBigPct{font-size:28px; font-weight:800; letter-spacing:-.5px; color:var(--accent);}
+.condSumMeta{display:flex; flex-wrap:wrap; gap:8px; margin-top:10px;}
+.condPage .bar.big{height:10px; border-radius:6px; background:var(--card);}
+/* 列表工具条：总条数 + 全部展开/收起 */
+.condListBar{display:flex; align-items:center; gap:10px; margin:2px 2px 10px;}
+.condListBar .hint{flex:1;}
+.condListBar .btn.tiny{border:1px solid var(--border); background:var(--card); color:var(--muted); padding:2px 10px; border-radius:999px;}
+.condListBar .btn.tiny:hover{border-color:var(--accent-border); color:var(--accent); background:var(--accent-soft);}
+.condList{display:flex; flex-direction:column; gap:12px;}
+/* 条件卡：左侧 4px 优先级色条 + 明确边框/阴影，白色卡片不再糊成一片 */
+.condCard{position:relative; background:var(--card); border:1px solid var(--border); border-left:4px solid var(--danger); border-radius:12px; padding:14px 16px 12px; box-shadow:var(--shadow-sm); transition:border-color .15s, box-shadow .15s;}
+.condCard:hover{border-color:var(--accent-border); box-shadow:var(--shadow);}
+.condCard.prio-should{border-left-color:var(--warn);}
+.condCard.prio-nice{border-left-color:#94a3b8;}
+.condCard.met{border-color:var(--ok-border); border-left-color:var(--ok); background:linear-gradient(180deg, var(--card) 65%, var(--ok-soft) 100%);}
+.condCardHead{display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
+.condCardTitle{font-size:15px; font-weight:700; line-height:1.4; flex:1; min-width:180px;}
+.condCardPct{font-size:15px; font-weight:800; color:var(--accent); margin-left:auto; white-space:nowrap;}
+/* 折叠开关 */
+.condToggle{flex:none; display:inline-flex; align-items:center; gap:4px; border:1px solid var(--border); background:var(--card); color:var(--muted); border-radius:999px; padding:2px 10px 2px 8px; font-size:12px; font-family:inherit; line-height:1.7; cursor:pointer; transition:.15s;}
+.condToggle:hover{border-color:var(--accent-border); color:var(--accent); background:var(--accent-soft);}
+.condToggle .condChev{display:inline-block; font-size:11px; line-height:1; transition:transform .18s;}
+.condCard.open .condToggle{color:var(--accent); border-color:var(--accent-border); background:var(--accent-soft);}
+.condCard.open .condToggle .condChev{transform:rotate(180deg);}
+.condProgress{display:flex; align-items:center; gap:10px; margin:10px 0 0;}
+.condProgress .bar{flex:1; height:7px; border-radius:4px; overflow:hidden; background:var(--soft);}
+.condProgress .barFill{display:block; height:100%; border-radius:4px; background:linear-gradient(90deg,var(--accent),var(--accent-2)); transition:width .3s;}
+.condCard.met .condProgress .barFill{background:var(--ok);}
+.condCount{font-size:12px; color:var(--muted); white-space:nowrap;}
+/* 折叠区：默认收起，展开才显示说明 / 达成标准 / 操作 / 节点 */
+.condBody{display:none;}
+.condCard.open .condBody{display:block; margin-top:12px; padding-top:12px; border-top:1px dashed var(--border);}
+.condDetail{font-size:13px; color:var(--muted); line-height:1.75; margin-bottom:8px;}
+.condJd{font-size:13px; line-height:1.7; background:var(--accent-soft); border:1px solid var(--accent-border); border-radius:9px; padding:9px 11px; margin-bottom:8px; color:var(--text);}
+.condJdTag{display:inline-block; font-size:11px; font-weight:700; color:var(--accent); margin-right:8px; padding:1px 6px; border-radius:5px; background:var(--card);}
+.condAccept{font-size:13px; line-height:1.7; background:var(--soft); border:1px solid var(--border); border-radius:9px; padding:9px 11px; margin-bottom:10px;}
+.condAcceptTag{display:inline-block; font-size:11px; font-weight:700; color:var(--accent); margin-right:8px; padding:1px 6px; border-radius:5px; background:var(--accent-soft);}
+.condCardActions{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:2px;}
+.condCardActions .hint{font-size:12px; color:var(--muted);}
+.condNodes{margin-top:10px; border-top:1px dashed var(--border); padding-top:8px;}
+.condNodesHead{font-size:12px; font-weight:600; color:var(--muted); padding:0 0 4px;}
+.condNodeList{display:flex; flex-direction:column; gap:2px;}
+.condNode{display:flex; align-items:center; gap:8px; font-size:13px; padding:6px 8px; border-radius:7px; cursor:pointer;}
+.condNode:hover{background:var(--soft);}
+.condDot{width:8px; height:8px; border-radius:50%; flex:none; background:#c9ced6;}
+.condDot.doing{background:#f0a020;}
+.condDot.done{background:#35b37e;}
+.condLv{font-size:11px; color:var(--muted); background:var(--soft); border-radius:5px; padding:1px 6px; flex:none;}
+.condNodeTitle{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.condNode.done .condNodeTitle{color:var(--muted); text-decoration:line-through; text-decoration-color:rgba(0,0,0,.2);}
+.condNodeMeta{font-size:11px; color:var(--muted); white-space:nowrap; max-width:180px; overflow:hidden; text-overflow:ellipsis;}
+.condNodeSt{font-size:11px; color:var(--muted); flex:none;}
+.condNodeSt.doing{color:#f0a020;}
+.condNodeSt.done{color:#35b37e;}
+.condNodeDetail{margin:2px 0 8px 26px; padding:10px 12px; background:var(--soft); border:1px solid var(--border); border-radius:9px; font-size:13px; line-height:1.7;}
+.condNdTop{display:flex; flex-wrap:wrap; gap:6px; margin-bottom:6px;}
+.condNdText{white-space:pre-wrap; color:var(--text);}
+.condNdText.muted{color:var(--muted);}
+.condNdAcc{margin-top:6px; color:var(--muted);}
+.condNdFoot{margin-top:8px;}
+.condWarn{background:var(--warn-soft, #fff7e6); border:1px solid var(--warn-line, #ffd591); border-radius:12px; padding:14px 16px; margin-top:16px;}
+.condWarnHead{font-size:14px; font-weight:700; color:var(--warn-text, #ad6800);}
+.condWarnText{font-size:13px; color:var(--muted); line-height:1.7; margin:6px 0 10px;}
+.condWarnBtns{display:flex; gap:8px; flex-wrap:wrap;}
+.condWarnList{margin-top:8px; font-size:12px; color:var(--muted);}
+.condWarnList summary{cursor:pointer; user-select:none;}
+.condWarnList div{margin-top:6px; line-height:1.7;}
+.condEmptyBtns{display:flex; gap:8px; justify-content:center; flex-wrap:wrap; margin-bottom:10px;}
+.condPage .emptyBox .hint{font-size:12px; color:var(--muted); margin-top:4px;}
+.condBusy{position:fixed; left:50%; bottom:32px; transform:translateX(-50%); display:flex; align-items:center; gap:10px; background:var(--card); border:1px solid var(--border); box-shadow:0 8px 30px rgba(0,0,0,.14); border-radius:30px; padding:10px 18px; font-size:13px; z-index:60;}
+.condBusy[hidden]{display:none;}
+.condSpin{width:14px; height:14px; border-radius:50%; border:2px solid var(--border); border-top-color:var(--accent); animation:condSpin .8s linear infinite; flex:none;}
+@keyframes condSpin{to{transform:rotate(360deg);}}
+.condMask{position:fixed; inset:0; background:rgba(15,23,42,.42); display:flex; align-items:center; justify-content:center; padding:20px; z-index:70;}
+.condDialog{width:min(560px, 96vw); max-height:88vh; overflow:auto; background:var(--card); border:1px solid var(--border); border-radius:14px; box-shadow:0 20px 60px rgba(0,0,0,.28); display:flex; flex-direction:column;}
+.condDialogWide{width:min(860px, 96vw);}
+.condDlgHead{display:flex; align-items:center; gap:10px; padding:14px 18px; border-bottom:1px solid var(--border); font-size:15px; font-weight:700;}
+.condDlgHead .hint{font-weight:400; font-size:12px; color:var(--muted); flex:1;}
+.condDlgBody{padding:16px 18px; overflow:auto;}
+.condDlgFoot{display:flex; align-items:center; gap:8px; justify-content:flex-end; padding:12px 18px; border-top:1px solid var(--border);}
+.condDlgFoot .hint{flex:1; font-size:12px; color:var(--muted);}
+.condAssignTop{display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:12px; font-size:13px;}
+.condChk{display:flex; align-items:center; gap:6px; color:var(--muted); font-size:13px; cursor:pointer;}
+.condBulk{display:flex; align-items:center; gap:6px; margin-left:auto; flex-wrap:wrap; font-size:12px; color:var(--muted);}
+.condBulk select{padding:4px 8px; border-radius:7px; border:1px solid var(--border); background:var(--card); font-size:12px; max-width:180px;}
+.condAssignList{display:flex; flex-direction:column; gap:12px;}
+.condAssignGroup{border:1px solid var(--border); border-radius:10px; padding:10px 12px;}
+.condAssignStage{font-size:13px; font-weight:700; margin-bottom:6px;}
+.condAssignRow{display:flex; align-items:center; gap:8px; padding:3px 0 3px 10px; font-size:13px;}
+.condAssignRow select{padding:3px 6px; border-radius:6px; border:1px solid var(--border); background:var(--card); font-size:12px; margin-left:auto; max-width:240px;}
+.condAssignRow.unassigned .condAssignTitle{color:var(--warn-text, #ad6800);}
+.condPage .btn.tiny{padding:2px 8px; font-size:12px; border-radius:6px;}
+.condPage .btn.danger{color:#d4380d; border-color:#ffccc7;}
+.condPage .btn.danger:hover{background:#fff2f0;}
+@media (max-width:640px){
+  .condNodeMeta{display:none;}
+  .condCardPct{margin-left:0;}
+  .condDialogWide{width:96vw;}
+  .condToggle{padding:2px 8px;}
+}

@@ -14,6 +14,42 @@
 (function () {
   const { api, esc, toast, mdToHTML } = SiErXing;
 
+  /* ---------- Vue 版页面（渐进迁移；加载失败自动回退旧页面） ---------- */
+  let interviewVueUnmount = null;
+  function interviewVueEnabled() {
+    try {
+      const q = new URLSearchParams(location.search).get('ui');
+      if (q === 'legacy') return false;
+      if (q === 'vue') return true;
+      const saved = localStorage.getItem('sierxing-ui-interview');
+      if (saved === 'legacy') return false;
+      if (saved === 'vue') return true;
+    } catch (e) {}
+    return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+  }
+  function ensureInterviewVueCss() {
+    if (document.querySelector('link[data-ui-page="interview"]')) return;
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/interview.css'; l.setAttribute('data-ui-page', 'interview');
+    document.head.appendChild(l);
+  }
+  async function renderInterviewPageVue(goalId) {
+    const root = document.getElementById('app');
+    if (!root) throw new Error('页面容器不存在');
+    if (interviewVueUnmount) { try { interviewVueUnmount(); } catch (e) {} interviewVueUnmount = null; }
+    ensureInterviewVueCss();
+    const mod = await import('/ui-dist/interview.js?v=' + Date.now());
+    if (!mod || typeof mod.mountInterviewPage !== 'function') throw new Error('UI 插件没有导出 mountInterviewPage');
+    interviewVueUnmount = mod.mountInterviewPage(root, { api: api, toast: toast, goalId: Number(goalId) || 0 });
+    return true;
+  }
+  window.addEventListener('hashchange', function () {
+    if (interviewVueUnmount && !/^#\/g\/\d+\/interview/.test(location.hash)) {
+      try { interviewVueUnmount(); } catch (e) {}
+      interviewVueUnmount = null;
+    }
+  });
+
   let gid = 0;
   let sessions = [];
   let cur = null;          // { session, turns }
@@ -544,7 +580,15 @@
     routes: [
       {
         match: h => h.match(/^#\/g\/(\d+)\/interview$/),
-        render: async m => { const goal = await SiErXing.loadGoal(Number(m[1])); await renderPage(goal || { id: Number(m[1]) }); }
+        render: async m => {
+          const gid0 = Number(m[1]);
+          if (interviewVueEnabled()) {
+            try { if (await renderInterviewPageVue(gid0)) return; }
+            catch (e) { try { toast('模拟面试 Vue 页面加载失败，已回退旧页面'); } catch (e2) {} }
+          }
+          const goal = await SiErXing.loadGoal(gid0);
+          await renderPage(goal || { id: gid0 });
+        }
       }
     ]
   });

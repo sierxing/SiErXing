@@ -47,7 +47,11 @@ const REPO_PATH = 'sierxing/SiErXing';
 
 /* 要打进 exe 的东西。只放运行时真正会读的：
    package.json / scripts/ 运行时没人读（已核过），data/ 是用户数据绝对不能打进去。 */
-const INCLUDE_DIRS = ['server', 'public'];
+/* config/ 也要带：kernel.schema.json 是分层配置的 builtin 层默认值，缺了 exe 里 /api/kernel 就没有 config。
+   （ui/ 里的内置页面插件是生成物、体积翻倍，暂不打进 exe：缺了会自动回退原版 render*，不影响使用。） */
+/* language/ 必须进包：提示词正文（language/prompts）与界面语言包（language/locales）都在里面，
+   漏了它打包后的程序启动即报错、也切不了语言。 */
+const INCLUDE_DIRS = ['server', 'public', 'config', 'language'];
 const INCLUDE_FILES = ['LICENSE', 'README.md', 'AGENTS.md'];
 
 const argv = process.argv.slice(2);

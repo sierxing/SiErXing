@@ -29,13 +29,34 @@ const AI_MODES = [
   { id: 'ask', icon: '💬', label: 'ASK', short: '只提问',
     desc: '只回答，不改动。AI 不会修改路线图 / 教程 / 资料库里的任何东西。' },
   { id: 'agent', icon: '⚙️', label: 'Agent', short: '能动手',
-    desc: '先判断你的意图：只是提问就直接回答，需要改路线图 / 改教程时才动手。' }
+    desc: '先判断你的意图：只是提问就直接回答，需要改路线图 / 改教程时才动手。' },
+  /* 创造模式：仿 DSH 的 Creator preset —— 对话生成「可安装的插件文件」，
+     服务端校验 + 暂存，用户点「安装并查看」才真正生效（AI 不能自己批准安装）。 */
+  { id: 'create', icon: '🎨', label: '创造', short: '造插件',
+    desc: '通过对话定制界面（换肤 / 重做页面）或新增功能组件；生成后你确认才安装，可随时撤销。' }
+];
+
+/* 「🎯 只改」：用户在用 AI 之前先钉死"这次只改哪一块"。
+   病根（用户反馈）：在达成条件页说"按 JD 重写条件"，AI 却把路线图节点改了一通 ——
+   它知道自己能改很多地方，但不知道用户这次只想改哪一块。所以给一个显式开关，
+   前端把它随消息发上去，服务端按范围硬拦 ops（不是只靠提示词祈祷）。 */
+const AI_SCOPES = [
+  { id: 'auto', icon: '🧭', label: '自动', short: '不限定', desc: '由 AI 判断要改哪一块（最灵活，也最容易被改错地方）' },
+  { id: 'conditions', icon: '🎯', label: '达成条件', short: '只改条件', desc: '只改「达成条件」页里的条件与节点归属；路线图节点不会被改' },
+  { id: 'nodes', icon: '🗺', label: '路线图节点', short: '只改节点', desc: '只改阶段 / 小目标 / 任务；达成条件与目标信息不会被碰' },
+  { id: 'goal', icon: '📌', label: '目标信息', short: '只改目标', desc: '只改标题 / 现状 / 期限 / 参考资料 / 规划约束' },
+  { id: 'sources', icon: '📚', label: '资料库', short: '只改资料', desc: '只加/删资料、触发提炼或收集；不动规划与条件' },
+  { id: 'tutorials', icon: '📖', label: '教程', short: '只改教程', desc: '只改当前正在看的那份教程；不动规划与条件' }
 ];
 
 
 const state = { goals: [], goal: null, sources: [], planning: false, collecting: false, collectStatus: '', expanded: {}, filter: '', models: [], model: '', showNew: false, showEdit: false, mapScale: 1, mapTx: 40, mapTy: 40, _drag: null, _suppressClick: false, taskKidsOpen: {},
   /* AI 助手：这条对话带着哪些节点（右键节点 → AI 功能 会把它加进来）、功能区选中的是哪个节点 */
-  aiNodes: [], aiFnPick: 0 };
+  aiNodes: [], aiFnPick: 0,
+  /* 「🎯 只改」范围：aiScope = auto/conditions/nodes/goal/sources/tutorials；
+     manual = 用户自己点过（页面自动建议不再覆盖）；autoPage = 当前是页面自动建议的，
+     离开这个页面就还原成 auto。 */
+  aiScope: 'auto', aiScopeManual: false, aiScopeAuto: false };
 
 /* ============ 主题（白天/黑夜 + 亮暗各自的皮肤） ============ */
 function currentThemeEff() {
@@ -56,6 +77,49 @@ function setThemeFor(mode, id) {
   try { localStorage.setItem('sierxing-theme-map', JSON.stringify(m)); } catch (e) {}
   applyThemeStyles();
 }
+/* 用户 UI 皮肤：/api/ui/skin.css（DATA_DIR/ui-plugins/<id>/skin.css 拼接）。
+   加载在内置基础皮肤 /ui-skin.css 之后 → 能覆盖基础皮肤，实现「UI 可被用户随意改」。
+   没有用户皮肤时接口返回空，无副作用。 */
+function applyUserSkin() {
+  try {
+    const old = document.querySelector('link[data-ui-skin="user"]');
+    if (old && sxCfg('ui.skins', true) === false) { old.remove(); return; }
+    if (old) old.remove();
+    if (sxCfg('ui.skins', true) === false) return;
+    const l = document.createElement('link');
+    l.rel = 'stylesheet';
+    l.href = assetUrl('/api/ui/skin.css');
+    l.setAttribute('data-ui-skin', 'user');
+    l.onerror = function () { try { l.remove(); } catch (e) {} };
+    document.head.appendChild(l);
+  } catch (e) { console.warn('用户皮肤加载失败：' + e.message); }
+}
+/* 内核分层配置（P3）：/api/kernel 的 config.values = builtin < profile < user 的最终值。
+   用户改 DATA_DIR/config/user.json 就能开关页面插件 / 用户插件 / 皮肤，不用改一行代码。
+   ⚠️ 只能在 route() 之前调用（pagePluginEnabled 是同步函数，读 window 上的快照）。 */
+function sxCfg(key, dflt) {
+  try {
+    const c = window.__sxKernelConfig;
+    if (!c || !Object.prototype.hasOwnProperty.call(c, key)) return dflt;
+    return c[key];
+  } catch (e) { return dflt; }
+}
+async function loadKernelConfig() {
+  try {
+    const k = await api('/api/kernel');
+    window.__sxKernelConfig = (k && k.config && k.config.values) || {};
+    window.__sxKernelState = k || null;
+    for (const w of ((k && k.config && k.config.warnings) || [])) {
+      try { console.warn('[config] ' + w.layer + ' / ' + (w.key || '') + '：' + w.message); } catch (e) {}
+    }
+  } catch (e) {
+    window.__sxKernelConfig = {};
+    try { console.warn('内核配置读取失败（按内置默认运行）：' + e.message); } catch (e2) {}
+  }
+  /* 皮肤开关可能因为配置而变：重挂一次（没有变化时无副作用） */
+  try { applyUserSkin(); } catch (e) {}
+}
+
 /* 按当前（亮/暗）模式挂对应的主题皮肤 CSS；另一模式的皮肤卸载掉，
    避免两套变量同时生效互相打架。 */
 function applyThemeStyles() {
@@ -89,6 +153,7 @@ try { window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change
 /* 教程页跟随主题：切换后重新渲染 */
 try { const rr0 = parseRoute(); if (rr0.view === 'tutorial') renderTutorialPage(rr0.id); } catch (e) {}
 applyTheme();
+applyUserSkin();
 
 /* 单段文本的行内 Markdown（**粗体** / `代码` / 链接 / *斜体*）→ HTML（先转义，安全） */
 function mdOneLine(text) {
@@ -154,13 +219,20 @@ function parseRoute() {
   const h = location.hash || '#/';
   const tm = h.match(/^#\/t\/(\d+)$/);
   if (tm) return { view: 'tutorial', id: Number(tm[1]) };
-  const cm = h.match(/^#\/g\/(\d+)\/chat$/);
-  if (cm) return { view: 'goal', id: Number(cm[1]), openAI: true };
+  const cm = h.match(/^#\/g\/(\d+)\/chat(?:\?(.*))?$/);
+  if (cm) {
+    const qp = new URLSearchParams(cm[2] || '');
+    return { view: 'chat', id: Number(cm[1]), tut: Number(qp.get('tut')) || 0, node: Number(qp.get('node')) || 0 };
+  }
+  if (h === '#/chat' || h === '#/chat/') return { view: 'chat', id: 0 };
 
   const dm = h.match(/^#\/g\/(\d+)\/diff\/(\d+)$/);
   if (dm) return { view: 'diff', id: Number(dm[1]), vid: Number(dm[2]) };
-  const m = h.match(/^#\/g\/(\d+)(\/map)?$/);
-  if (m) return { view: m[2] ? 'map' : 'goal', id: Number(m[1]) };
+  const m = h.match(/^#\/g\/(\d+)(\/map)?(?:\?(.*))?$/);
+  if (m) {
+    const qp = new URLSearchParams(m[3] || '');
+    return { view: m[2] ? 'map' : 'goal', id: Number(m[1]), open: String(qp.get('open') || ''), node: Number(qp.get('node')) || 0 };
+  }
   const gd = h.match(/^#\/guide\/(\d+)$/);
   if (gd) return { view: 'guide', step: Math.max(1, Math.min(9, Number(gd[1]))) };
   if (h.startsWith('#/settings')) return { view: 'settings' };
@@ -381,48 +453,177 @@ async function route() {
   // 换页要把"上次位置"的锁重置，否则新教程进来时不会重新读取它的书签
   try { window.__tutTocTid = null; window.__tutTocRestoring = false; window.__tutTocNeedRestore = false; } catch (e) {}
   const r = parseRoute();
+  /* 「最近使用」：进入某个目标的执行页/路线图/对话/版本/对比都算用过它（本机记录，
+     首页顶部「最近目标」栏按这个顺序排；不进数据库、不参与多端同步）。 */
+  try {
+    if (r.id && ['goal', 'map', 'chat', 'versions', 'diff'].indexOf(r.view) >= 0) homeRecentTouch(r.id);
+  } catch (e) {}
+  /* 皮肤布局档位：把"这条路由该用多宽"告诉 CSS 层（见 public/ui-skin.css）。
+     这样各 Vue 页面插件即使都只写 .page，也能各自回到经典界面的宽度，
+     用户改皮肤时也只需覆盖 [data-sx-view] 对应规则。 */
+  try {
+    const sxView = r.view === 'map' ? 'map'
+      : (r.view === 'chat' ? 'chat'
+      : (r.view === 'tutorial' ? 'tutorial'
+      : (r.view === 'components' ? 'components'
+      : (r.view === 'diff' ? 'diff'
+      : (r.view === 'settings' ? 'settings'
+      : (r.view === 'versions' ? 'versions'
+      : (r.view === 'home' ? 'home'
+      : (r.view === 'aitasks' ? 'aitasks'
+      : (r.view === 'library' ? 'library'
+      : (r.view === 'guide' ? 'guide' : (r.view === 'goal' ? 'goal' : 'other')))))))))));
+    document.body.setAttribute('data-sx-view', sxView);
+  } catch (e) {}
   try { tutProgressFlush(); } catch (e) {}   // 离开教程页先把阅读位置记上（DOM 替换前）
   const backScroll = navTrack();   // 先记滚动（此时还是旧页面），返回导航则带回待恢复位置
   document.body.classList.toggle('mapMode', r.view === 'map');
   try {
     aiEnsureDOM();
-    const hasGoalCtx = (r.view === 'goal' || r.view === 'map');
+    /* AI 助手常驻：有目标上下文的页面显示入口（首页/设置/组件管理/学习统计先不显示）。
+       这里只做"先藏起来"的快速判定，真正的绑定在页面渲染完之后的 aiSyncRoute() 里
+       —— 教程/组件页要拿到目标 id，得等页面把数据取回来。 */
     const fab = document.getElementById('aiFab');
     const drw = document.getElementById('aiDrawer');
-    if (!hasGoalCtx && r.view !== 'tutorial') {
+    /* 只有对话页本身不摆入口（避免两套对话）；其它页面一律常驻。
+       这里不做"有目标才显示"的快速隐藏 —— AI 助手已经是核心组件，所有页面都能用，
+       无目标页面由 aiSyncRoute() 绑到全局助手（goal_id=0）。 */
+    if (r.view === 'chat') {
       if (fab) fab.classList.add('hidden');
       if (drw) drw.classList.remove('open');
     }
-    if (r.view === 'tutorial') { if (fab) fab.classList.remove('hidden'); }   // 教程页保留 AI 助手入口
-    if (r.view === 'home') { setHeader(r); await renderHome(); }
-    else if (r.view === 'settings') { setHeader(r); state.settingsTab = ''; await renderSettings(); }
-    else if (r.view === 'guide') { setHeader(r); await renderHome(); showGuide(r.step - 1); }
-    else if (r.view === 'components') { setHeader(r); await renderComponentsPage(); }
-    else if (r.view === 'versions') { await loadGoal(r.id); setHeader(r); await renderVersionsPage(r.id); }
-    else if (r.view === 'library') { setHeader(r); await renderLibraryPage(); }
-    else if (r.view === 'aitasks') { setHeader(r); await renderAiTasksPage(); }
-    else if (r.view === 'map') { await loadGoal(r.id); setHeader(r); renderMapPage(); }
-    else if (r.view === 'diff') { await loadGoal(r.id); setHeader(r); await renderDiffPage(r.vid); }
-    else if (r.view === 'tutorial') { setHeader(r); await renderTutorialPage(r.id); await aiBindGoal(state.tutGoalId); try { tutViewInit(); } catch (e) {} }
-    else if (r.view === 'chat') { await loadGoal(r.id); setHeader(r); renderGoal(); }
+    if (r.view === 'home') {
+      setHeader(r);
+      /* 已插件化：ui/plugins/builtin/home/；失败回退原版 renderHome() */
+      let done = false;
+      try { done = await renderPagePlugin('home', {}); }
+      catch (e) { try { toast('主页插件加载失败，已回退原版'); } catch (e2) {} }
+      if (!done) await renderHome();
+    }
+    else if (r.view === 'settings') {
+      setHeader(r);
+      /* 设置页已插件化：ui/plugins/builtin/settings/（原版 renderSettings 及其闭包）。
+         所有子页（#/settings/ai、/data、/sync、/rag、/service、/update、/system、/theme）
+         都由同一个 renderSettings() 按 location.hash 渲染，与原版一致。
+         state.settingsTab 的复位也与原版 else 分支保持一致。 */
+      state.settingsTab = '';
+      let done = false;
+      try { done = await renderPagePlugin('settings', {}); }
+      catch (e) { try { toast('设置插件加载失败，已回退原版'); } catch (e2) {} state.settingsTab = ''; }
+      if (!done) { state.settingsTab = ''; await renderSettings(); }
+    }
+    else if (r.view === 'guide') {
+      setHeader(r);
+      /* 引导页 = 主页 + 引导蒙层，两段都由插件渲染：
+         home 插件画页面，guide 插件画蒙层（showGuide/drawGuide/closeGuide/gdInline 已搬进插件）。 */
+      let homeOk = false;
+      try { homeOk = await renderPagePlugin('home', {}); }
+      catch (e) { try { toast('主页插件加载失败，已回退原版'); } catch (e2) {} }
+      if (!homeOk) await renderHome();
+      let guideOk = false;
+      try { guideOk = await renderPagePlugin('guide', { __step: r.step - 1 }); }
+      catch (e) { try { toast('引导插件加载失败，已回退原版'); } catch (e2) {} }
+      if (!guideOk) showGuide(r.step - 1);
+    }
+    else if (r.view === 'components') {
+      setHeader(r);
+      /* 已插件化：ui/plugins/builtin/components/ */
+      let done = false;
+      try { done = await renderPagePlugin('components', {}); }
+      catch (e) { try { toast('组件管理插件加载失败，已回退原版'); } catch (e2) {} }
+      if (!done) await renderComponentsPage();
+    }
+    else if (r.view === 'versions') {
+      await loadGoal(r.id); setHeader(r);
+      /* 已插件化：优先插件，失败回退原版 */
+      let done = false;
+      try { done = await renderPagePlugin('versions', { gid: r.id, __gid: r.id }); }
+      catch (e) { try { toast('版本管理插件加载失败，已回退原版'); } catch (e2) {} }
+      if (!done) await renderVersionsPage(r.id);
+    }
+    else if (r.view === 'library') {
+      setHeader(r);
+      /* 已插件化：ui/plugins/builtin/library/ */
+      let done = false;
+      try { done = await renderPagePlugin('library', {}); }
+      catch (e) { try { toast('资源库插件加载失败，已回退原版'); } catch (e2) {} }
+      if (!done) await renderLibraryPage();
+    }
+    else if (r.view === 'aitasks') {
+      setHeader(r);
+      let done = false;
+      try { done = await renderPagePlugin('aitasks', {}); }
+      catch (e) { try { toast('任务中心插件加载失败，已回退原版'); } catch (e2) {} }
+      if (!done) await renderAiTasksPage();
+    }
+    else if (r.view === 'map') {
+      setHeader(r);
+      await loadGoal(r.id);
+      /* 路线图页已插件化：优先用插件（用户插件可覆盖内置），失败才回退原版渲染。
+         `?ui=legacy` 仍然强制走原版实现（对照 / 紧急回退）。
+         ⚠️ 判据用 `renderRoadmapPlugin()` 自己的返回值 —— 它内部就是 `renderPagePlugin('roadmap')`，
+         已经做过 `pagePluginEnabled('roadmap')` 门控（`?ui=legacy` / `localStorage.sierxing-ui-map=legacy`）。
+         别再在这里写一个"Vue 开关"式的判定：曾写成 `roadmapVueEnabled()`，那个函数**根本不存在**，
+         于是每次进路线图页都 ReferenceError → 「页面出错：roadmapVueEnabled is not defined」。 */
+      let mapRendered = false;
+      try { mapRendered = await renderRoadmapPlugin(r.id); }
+      catch (e) { try { toast('路线图插件加载失败，已回退原版'); } catch (e2) {} }
+      if (!mapRendered) renderMapPage();
+    }
+    else if (r.view === 'diff') {
+      await loadGoal(r.id); setHeader(r);
+      /* 已插件化：优先插件，失败回退原版 renderDiffPage() */
+      let done = false;
+      try { done = await renderPagePlugin('diff', { gid: r.id, __vid: r.vid }); }
+      catch (e) { try { toast('版本对比插件加载失败，已回退原版'); } catch (e2) {} }
+      if (!done) await renderDiffPage(r.vid);
+    }
+    else if (r.view === 'tutorial') {
+      setHeader(r);
+      /* 已插件化：ui/plugins/builtin/tutorial/
+         ⚠️ 渲染完必须补 aiBindGoal + tutViewInit（与旧版一致）：
+            AI 助手要绑到教程所属目标，教程阅读器的滚动/目录/进度也要初始化。 */
+      let done = false;
+      try { done = await renderPagePlugin('tutorial', { __tid: r.id }); }
+      catch (e) { try { toast('教程页插件加载失败，已回退原版'); } catch (e2) {} }
+      if (!done) await renderTutorialPage(r.id);
+      try { await aiBindGoal(state.tutGoalId); } catch (e) {}
+      try { tutViewInit(); } catch (e) {}
+    }
+    else if (r.view === 'chat') {
+      setHeader(r);
+      /* 对话页 = 执行页 + AI 抽屉：页面本身用 goal 插件渲染，再打开抽屉 */
+      await loadGoal(r.id);
+      if (!state.components) await loadComponents();
+      window.__sxAiForceLegacy = true;
+      let done = false;
+      try { done = await renderPagePlugin('goal', {}); }
+      catch (e) { try { toast('对话页插件加载失败，已回退原版'); } catch (e2) {} }
+      if (!done) renderGoal();
+      aiToggleLegacy(true);
+    }
 
     else if (r.view === 'plugin') { setHeader(r); await r.route.render(r.match, window.SiErXing); }
+    else if (r.view === 'goal') {
+      setHeader(r);
+      await loadGoal(r.id);
+      if (!state.components) await loadComponents();
+      /* 已插件化：ui/plugins/builtin/goal/（原版 renderGoal 及其闭包） */
+      let done = false;
+      try { done = await renderPagePlugin('goal', {}); }
+      catch (e) { try { toast('执行页插件加载失败，已回退原版'); } catch (e2) {} }
+      if (!done) renderGoal();
+    }
     else { await loadGoal(r.id); setHeader(r); if (!state.components) await loadComponents(); renderGoal(); }
     try { sxiSelify(document); } catch (e) {}   // 页面里所有 select.sxi-sel 统一换成自画下拉
     renderRail();
+    /* AI 助手常驻：每个"有目标上下文"的页面都把入口摆出来、绑到该页面对应的目标。
+       ⚠️ 放在所有页面渲染之后：教程页的目标 id 是页面渲染时才拿到的（state.tutGoalId），
+       插件页也可能自己 loadGoal 换了 state.goal。 */
+    try { await aiSyncRoute(); } catch (e) { console.warn('[ai] 同步入口失败', e); }
     if (r.view === 'goal' || r.view === 'map') {
-      await aiBindGoal(r.id);
+      /* 目标页额外处理「?openAI=1」：从别的入口点进来要求直接把对话打开 */
       if (r.openAI) aiToggle(true);
-      else {
-        const open = state.aiOpen != null ? state.aiOpen : (localStorage.getItem('sierxing-ai-open') === '1');
-        if (open) aiToggle(true);
-        else {
-          const fab2 = document.getElementById('aiFab');
-          if (fab2) fab2.classList.remove('hidden');
-          const d2 = document.getElementById('aiDrawer');
-          if (d2) d2.classList.remove('open');
-        }
-      }
     }
     /* 返回导航：渲染完回到离开时的位置（内容可能是异步图片，补一次）。
        ⚠️ 教程页**不走这条**：它自己有一套按锚点恢复的机制（tutRestoreSettled，见 tutTocBuild），
@@ -438,6 +639,997 @@ async function route() {
 }
 
 /* ============ 首页 ============ */
+/* ---------- 主页 Vue 版 ---------- */
+let homeVueUnmount = null;
+function homeVueEnabled() {
+  try {
+    const q = new URLSearchParams(location.search).get('ui');
+    if (q === 'legacy') return false;
+    if (q === 'vue') return true;
+    const saved = localStorage.getItem('sierxing-ui-home');
+    if (saved === 'legacy') return false;
+    if (saved === 'vue') return true;
+  } catch (e) {}
+  return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+}
+function ensureHomeVueCss() {
+  if (document.querySelector('link[data-ui-page="home"]')) return;
+  const l = document.createElement('link');
+  l.rel = 'stylesheet'; l.href = '/ui-dist/home.css'; l.setAttribute('data-ui-page', 'home');
+  document.head.appendChild(l);
+}
+async function renderHomeVue() {
+  const root = document.getElementById('app');
+  if (!root) return false;
+  if (homeVueUnmount) { try { homeVueUnmount(); } catch (e) {} homeVueUnmount = null; }
+  ensureHomeVueCss();
+  const mod = await import('/ui-dist/home.js?v=' + Date.now());
+  if (!mod || typeof mod.mountHomePage !== 'function') throw new Error('UI 插件没有导出 mountHomePage');
+  homeVueUnmount = mod.mountHomePage(root, { api: api, toast: toast });
+  return true;
+}
+window.addEventListener('hashchange', function () {
+  if (homeVueUnmount && !/^#\/(home)?\/?$/.test(location.hash)) {
+    try { homeVueUnmount(); } catch (e) {}
+    homeVueUnmount = null;
+  }
+});
+/* ============ 首页 · 目标桌面（最近目标 / 收藏夹 / 三档尺寸 / 拖拽排序） ============
+   背景：目标一多（上百个）全从上到下铺开就没法用了。这里把首页做成「手机桌面」：
+   · 顶部一栏「最近目标」= 最近打开过的目标（本机记录，点一下直接继续）；
+   · 下面「所有目标」= 卡片 / 收藏夹，顺序**完全由用户拖动决定**（拖到哪就是第几个）；
+     新建/更新的目标排到最后，不会再把用户排好的版式冲乱；
+   · 卡片有 小 / 中 / 大 三档固定尺寸（不是无极缩放）——越小信息越少，越大信息越多；
+   · 拖到想放的位置松手 = 排序；拖动时压在另一张卡片上，卡片底部会出现「📁 收进收藏夹」按钮，
+     **松手落在这个按钮上**才收进收藏夹。不用「停一会儿」这种计时判定 —— 拖拽时手一慢就会被
+     误判成想合并，排序和融合的边界必须看得见、摸得着；
+   · 收藏夹大小同样可调，点开是类似 iOS 文件夹的弹层：里面也能拖动排序、右键卡片移出。
+   ⚠️ 布局只存本机 localStorage（不同设备屏幕/习惯不同，强行多端同步反而难用；
+      与顶栏收藏栏的 sierxing-*-bar 一样属于「显示偏好」）。 */
+
+const HOME_LAYOUT_KEY = 'sierxing-home-layout-v1';
+const HOME_RECENT_KEY = 'sierxing-home-recent-v1';
+const HOME_RECENT_MAX = 12;          // 最多记 12 条，顶部只展示最近 8 个
+const HOME_RECENT_SHOW = 8;
+const HOME_TILE_SIZES = ['s', 'm', 'l'];
+const HOME_SIZE_NAME = { s: '小', m: '中', l: '大' };
+const HOME_SIZE_DESC = { s: '只显示标题与进度', m: '简介 + 进度 + 关键信息', l: '全部信息（下一步 / 更新时间等）' };
+const HOME_TILE_DEFAULT_SIZE = 'm';
+/* 「📁 收进收藏夹」的可落区：按钮本身做满卡片宽度，判定时再向左右外扩一圈。
+   用户反馈「拖进收藏夹的区域太小、要对准很难受」——拖拽时手做不到像素级对准，
+   所以横向多接住一点；但**上下几乎不外扩**：卡片中心必须始终是「排序」，
+   否则拖到卡片中间松手会被误判成融合（小卡片高度只有 82px，垂直外扩会吃掉半张卡）。 */
+const HOME_CHIP_SLOP_X = 12;
+const HOME_CHIP_SLOP_Y = 2;
+
+/* 最近打开过的目标（进入执行页/路线图/对话/版本/对比时记一笔）。纯本机偏好，
+   不进数据库、不参与多端同步 —— 和布局一样属于「这台设备的显示习惯」。 */
+function homeRecentRead() {
+  let ids = [];
+  try { ids = JSON.parse(localStorage.getItem(HOME_RECENT_KEY) || '[]'); } catch (e) { ids = []; }
+  if (!Array.isArray(ids)) return [];
+  const out = [];
+  for (const raw of ids) {
+    const id = Number(raw);
+    if (!id || !isFinite(id) || out.indexOf(id) >= 0) continue;
+    out.push(id);
+  }
+  return out.slice(0, HOME_RECENT_MAX);
+}
+
+function homeRecentTouch(gid) {
+  const id = Number(gid);
+  if (!id || !isFinite(id)) return;
+  const ids = homeRecentRead().filter(x => x !== id);
+  ids.unshift(id);
+  try { localStorage.setItem(HOME_RECENT_KEY, JSON.stringify(ids.slice(0, HOME_RECENT_MAX))); } catch (e) {}
+}
+
+/* 正在进行的拖拽（null = 没在拖）。鼠标按下后一动就拖；触摸先等 300ms 长按，
+   这样普通点击 / 上下滚动页面不会误触发。 */
+let homeLauncherDrag = null;
+/* 拖拽刚结束时浏览器还会补一个 click，用它压掉（避免一松手就跳进目标页） */
+let homeLauncherNoClickUntil = 0;
+/* 收藏夹弹层（挂在 body 下，关闭时连同监听一起收掉） */
+let homeFolderDialog = null;
+let homeFolderDialogOnKey = null;
+let homeFolderDialogOnHash = null;
+
+function homeLauncherSize(v) {
+  return HOME_TILE_SIZES.indexOf(v) >= 0 ? v : HOME_TILE_DEFAULT_SIZE;
+}
+
+function homeLauncherStatus(g) {
+  const statusMap = {
+    draft: ['待规划', 'warn'], planning: ['规划中', ''], review: ['骨架待确认', 'warn'],
+    planned: ['已规划', 'ok'], failed: ['规划失败', 'danger']
+  };
+  return statusMap[g.status] || ['未知', 'gray'];
+}
+
+/* 读布局 + 和当前目标列表对账：删掉已删除的目标、自动摊平只剩一个目标的收藏夹、
+   新目标放到最前面（与默认「最近更新优先」一致）。没存过 → 全部按默认大小平铺。 */
+function homeLauncherLoad(goals) {
+  const byId = {};
+  for (const g of (goals || [])) byId[g.id] = g;
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(HOME_LAYOUT_KEY) || 'null'); } catch (e) { saved = null; }
+  if (!saved || !Array.isArray(saved.items)) {
+    return { items: (goals || []).map(g => ({ type: 'goal', id: g.id, size: HOME_TILE_DEFAULT_SIZE })) };
+  }
+  const seen = {};
+  const items = [];
+  for (const raw of saved.items) {
+    if (!raw || (raw.type !== 'goal' && raw.type !== 'folder')) continue;
+    if (raw.type === 'goal') {
+      const gid = Number(raw.id);
+      if (!byId[gid] || seen[gid]) continue;
+      seen[gid] = 1;
+      items.push({ type: 'goal', id: gid, size: homeLauncherSize(raw.size) });
+      continue;
+    }
+    const ids = [];
+    for (const rawId of (Array.isArray(raw.goals) ? raw.goals : [])) {
+      const gid = Number(rawId);
+      if (!byId[gid] || seen[gid] || ids.indexOf(gid) >= 0) continue;
+      seen[gid] = 1;
+      ids.push(gid);
+    }
+    if (!ids.length) continue;
+    items.push({
+      type: 'folder', id: String(raw.id || homeLauncherNewFolderId()),
+      name: String(raw.name || '收藏夹').slice(0, 24), size: homeLauncherSize(raw.size), goals: ids
+    });
+  }
+  /* 新增的目标一律排到**最后**：这个页面的顺序完全由用户拖动决定，
+     不能因为新建/更新了一个目标就把用户排好的版式冲乱。 */
+  const fresh = [];
+  for (const g of (goals || [])) if (!seen[g.id]) { seen[g.id] = 1; fresh.push({ type: 'goal', id: g.id, size: HOME_TILE_DEFAULT_SIZE }); }
+  const merged = items.concat(fresh);
+  /* 只剩一个目标的收藏夹没有存在意义，摊回普通卡片 */
+  const flat = [];
+  for (const it of merged) {
+    if (it.type === 'folder' && it.goals.length === 1) flat.push({ type: 'goal', id: it.goals[0], size: it.size });
+    else flat.push(it);
+  }
+  return { items: flat };
+}
+
+function homeLauncherSave(layout) {
+  try {
+    localStorage.setItem(HOME_LAYOUT_KEY, JSON.stringify({
+      v: 1,
+      items: layout.items.map(it => it.type === 'folder'
+        ? { type: 'folder', id: it.id, name: it.name, size: it.size, goals: it.goals.slice() }
+        : { type: 'goal', id: it.id, size: it.size })
+    }));
+  } catch (e) { /* 隐私模式写不进去也不影响本次使用 */ }
+}
+
+function homeLauncherNewFolderId() {
+  return 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
+function homeLauncherFind(layout, key) {
+  if (!layout || !key) return null;
+  for (const it of layout.items) {
+    if (it.type + ':' + it.id === key) return it;
+  }
+  return null;
+}
+
+function homeLauncherFolderName(layout) {
+  let count = 0;
+  for (const it of layout.items) if (it.type === 'folder') count++;
+  return '收藏夹 ' + (count + 1);
+}
+
+/* ---------- 卡片渲染（小 / 中 / 大三档，信息量递增） ---------- */
+function homeLauncherGoalHTML(g, size) {
+  if (!g) return '';
+  const st = homeLauncherStatus(g);
+  const pct = g.tasks_total ? Math.round((g.tasks_done || 0) / g.tasks_total * 100) : 0;
+  const updated = g.updated_at ? String(g.updated_at).slice(0, 10) : '';
+  const head = `<div class="htHead">
+      <span class="htIcon">🎯</span>
+      <span class="htTitle">${esc(g.title)}</span>
+      ${size === 's' ? `<span class="htDot ${st[1]}" title="${st[0]}"></span>` : `<span class="chip ${st[1]}">${st[0]}</span>`}
+      <button class="htMore" type="button" data-tile-more="goal:${g.id}" data-morebtn="homeTile" title="卡片设置：大小 / 组件">⋯</button>
+    </div>`;
+  let body = '';
+  if (size === 's') {
+    body = `<div class="htSmallFoot"><span class="htMiniBar"><i style="width:${pct}%"></i></span><span class="htPct">${pct}%</span></div>`;
+  } else if (size === 'm') {
+    body = `${g.summary ? `<div class="htSummary">${mdOneLine(g.summary)}</div>` : '<div class="htSummary muted">尚未生成规划</div>'}
+      <div class="htProgress"><div class="bar"><div class="barFill" style="width:${pct}%"></div></div><span class="htPct">${pct}%</span></div>
+      <div class="htMeta">
+        ${g.weekly_hours ? `<span class="chip gray">每周 ${esc(g.weekly_hours)}</span>` : ''}
+        ${g.deadline ? `<span class="chip gray">期限 ${esc(g.deadline)}</span>` : ''}
+        <span class="chip gray">${g.tasks_done || 0}/${g.tasks_total || 0} 任务</span>
+      </div>`;
+  } else {
+    body = `${g.summary ? `<div class="htSummary">${mdOneLine(g.summary)}</div>` : '<div class="htSummary muted">尚未生成规划</div>'}
+      ${g.next_task ? `<div class="gcNext">▸ 下一步：${esc(g.next_task)}</div>` : ''}
+      <div class="htProgress"><div class="bar"><div class="barFill" style="width:${pct}%"></div></div><span class="htPct">${pct}%</span></div>
+      <div class="htMeta">
+        ${g.weekly_hours ? `<span class="chip gray">每周 ${esc(g.weekly_hours)}</span>` : ''}
+        ${g.deadline ? `<span class="chip gray">期限 ${esc(g.deadline)}</span>` : ''}
+        <span class="chip gray">${g.tasks_done || 0}/${g.tasks_total || 0} 任务</span>
+        ${updated ? `<span class="gcDate">更新于 ${updated}</span>` : ''}
+      </div>`;
+  }
+  return `<div class="homeTile homeTile-${size}" data-tile-key="goal:${g.id}" data-tile-type="goal" data-size="${size}" tabindex="0" role="button" aria-label="${esc(g.title)}">${head}${body}</div>`;
+}
+
+/* 收藏夹卡片里的小图标网格（s 露 4 个 / m 露 6 个 / l 露 9 个并带进度） */
+function homeLauncherFolderMiniHTML(f, byId) {
+  const ids = f.goals || [];
+  const max = f.size === 's' ? 4 : (f.size === 'm' ? 6 : 9);
+  const showName = f.size !== 's';
+  const mini = ids.slice(0, max).map(gid => {
+    const g = byId[gid];
+    if (!g) return '';
+    if (!showName) return `<div class="htMini htMiniIconOnly" title="${esc(g.title)}"><span class="htMiniIcon">🎯</span></div>`;
+    const pct = g.tasks_total ? Math.round((g.tasks_done || 0) / g.tasks_total * 100) : 0;
+    return `<div class="htMini" title="${esc(g.title)}"><span class="htMiniIcon">🎯</span><span class="htMiniName">${esc(g.title)}</span>${f.size === 'l' ? `<span class="htMiniBar"><i style="width:${pct}%"></i></span>` : ''}</div>`;
+  }).join('');
+  const restCount = ids.length - Math.min(ids.length, max);
+  return mini + (restCount > 0 ? `<div class="htMini htMiniMore">+${restCount}</div>` : '');
+}
+
+function homeLauncherFolderHTML(f, byId) {
+  const ids = f.goals || [];
+  return `<div class="homeTile homeTile-folder homeTile-${f.size}" data-tile-key="folder:${esc(f.id)}" data-tile-type="folder" data-size="${f.size}" tabindex="0" role="button" aria-label="收藏夹 ${esc(f.name)}">
+    <div class="htHead">
+      <span class="htIcon htFolderIcon">📁</span>
+      <span class="htTitle">${esc(f.name)}</span>
+      <span class="htCount">${ids.length}</span>
+      <button class="htMore" type="button" data-tile-more="folder:${esc(f.id)}" data-morebtn="homeTile" title="收藏夹设置">⋯</button>
+    </div>
+    <div class="htFolderMini">${homeLauncherFolderMiniHTML(f, byId)}</div>
+    ${f.size === 'l' ? `<div class="htFolderFoot">点开查看全部 ${ids.length} 个目标</div>` : ''}
+  </div>`;
+}
+
+/* 顶部「最近目标」：最近打开过的目标（横向一排，点一下直接继续）。
+   没有记录时整块不渲染，避免新用户看到一条空栏。 */
+function homeLauncherRecentHTML(goals) {
+  const byId = {};
+  for (const g of (goals || [])) byId[g.id] = g;
+  const ids = homeRecentRead().filter(id => byId[id]).slice(0, HOME_RECENT_SHOW);
+  if (!ids.length) return '';
+  const cards = ids.map(gid => {
+    const g = byId[gid];
+    const st = homeLauncherStatus(g);
+    const pct = g.tasks_total ? Math.round((g.tasks_done || 0) / g.tasks_total * 100) : 0;
+    return `<button type="button" class="hrCard" data-go="#/g/${g.id}" title="继续「${esc(g.title)}」">
+      <span class="hrTop"><span class="hrIcon">🎯</span><span class="hrTitle">${esc(g.title)}</span></span>
+      <span class="hrBarRow"><span class="bar"><span class="barFill" style="width:${pct}%"></span></span><span class="hrPct">${pct}%</span></span>
+      <span class="hrFoot"><span class="chip ${st[1]}">${st[0]}</span><span class="hrMeta">${g.tasks_done || 0}/${g.tasks_total || 0} 任务</span></span>
+    </button>`;
+  }).join('');
+  return `<div class="homeRecent" id="homeRecent">
+    <div class="homeSectionHead">
+      <span class="hsTitle">🕘 最近目标</span>
+      <span class="hsSub">最近打开过的，点一下直接继续</span>
+    </div>
+    <div class="homeRecentRow">${cards}</div>
+  </div>`;
+}
+
+/* 整块桌面：标题（所有目标）+ 工具栏（批量大小 / 恢复默认）+ 网格 */
+function homeLauncherDeskHTML(goals, layout) {
+  const byId = {};
+  for (const g of goals) byId[g.id] = g;
+  const folderCount = layout.items.filter(it => it.type === 'folder').length;
+  return `<div class="homeDesk" id="homeDesk">
+    <div class="homeSectionHead">
+      <span class="hsTitle">🎯 所有目标</span>
+      <span class="hsSub">顺序由你决定：拖到哪，它就是第几个</span>
+    </div>
+    <div class="homeDeskBar">
+      <div class="hdHint">🖐 <b>拖住卡片</b>：拖到想放的位置松手 = 排序；拖到另一张卡片上会出现「📁 收进收藏夹」，松在它上面 = 融合</div>
+      <div class="spacer"></div>
+      <span class="hdSegLabel" title="批量设置所有卡片的大小；单张卡片在右上角 ⋯ 里单独调">全部大小</span>
+      <div class="hdSeg" id="homeSizeSeg" role="group" aria-label="全部卡片大小">
+        ${HOME_TILE_SIZES.map(s => `<button type="button" class="hdSegBtn" data-home-size-all="${s}" title="${HOME_SIZE_DESC[s]}">${HOME_SIZE_NAME[s]}</button>`).join('')}
+      </div>
+      <button class="btn tiny" type="button" id="homeLayoutReset" title="清空收藏夹与大小设置，恢复默认卡片列表">${folderCount ? '恢复默认' : '重置布局'}</button>
+    </div>
+    <div class="homeDeskGrid" id="homeDeskGrid">
+      ${layout.items.map(it => it.type === 'folder' ? homeLauncherFolderHTML(it, byId) : homeLauncherGoalHTML(byId[it.id], it.size)).join('')}
+    </div>
+  </div>`;
+}
+
+/* ---------- 桌面交互：点击 / 菜单 / 长按拖拽 ---------- */
+function bindHomeLauncher(layout, byId) {
+  const grid = document.getElementById('homeDeskGrid');
+  if (!grid) return;
+  const seg = document.getElementById('homeSizeSeg');
+  if (seg) seg.querySelectorAll('[data-home-size-all]').forEach(btn => btn.addEventListener('click', () => {
+    const size = btn.getAttribute('data-home-size-all');
+    if (HOME_TILE_SIZES.indexOf(size) < 0) return;
+    layout.items.forEach(it => { it.size = size; });
+    homeLauncherSave(layout);
+    toast('已把所有卡片设为「' + HOME_SIZE_NAME[size] + '」');
+    renderHome();
+  }));
+  const reset = document.getElementById('homeLayoutReset');
+  if (reset) reset.addEventListener('click', () => {
+    if (!confirm('恢复默认布局？收藏夹会解散，所有卡片回到默认大小。')) return;
+    try { localStorage.removeItem(HOME_LAYOUT_KEY); } catch (e) {}
+    toast('已恢复默认布局');
+    renderHome();
+  });
+
+  /* 点卡片：目标 → 进入执行页；收藏夹 → 打开弹层 */
+  grid.addEventListener('click', e => {
+    const more = e.target.closest('[data-tile-more]');
+    if (more) { e.preventDefault(); e.stopPropagation(); homeLauncherOpenMenu(more, layout, byId); return; }
+    if (Date.now() < homeLauncherNoClickUntil) return;
+    const tile = e.target.closest('[data-tile-key]');
+    if (!tile || !grid.contains(tile)) return;
+    const it = homeLauncherFind(layout, tile.getAttribute('data-tile-key'));
+    if (!it) return;
+    if (it.type === 'folder') { homeLauncherOpenFolder(layout, it, byId); return; }
+    go('#/g/' + it.id);
+  });
+  grid.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const tile = e.target.closest('[data-tile-key]');
+    if (!tile) return;
+    e.preventDefault();
+    tile.click();
+  });
+  /* 右键 / 手机长按（contextmenu）也打开卡片设置；正在拖动时不弹（手机长按会先触发拖拽） */
+  grid.addEventListener('contextmenu', e => {
+    if (homeLauncherDrag) { e.preventDefault(); return; }
+    const tile = e.target.closest('[data-tile-key]');
+    if (!tile) return;
+    e.preventDefault();
+    const more = tile.querySelector('[data-tile-more]');
+    if (more) homeLauncherOpenMenu(more, layout, byId);
+  });
+  /* 长按 300ms 才进入拖拽（普通点击 / 滚动不受影响） */
+  grid.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (!e.isPrimary) return;
+    if (e.target.closest('button, a, input, select, textarea')) return;
+    const tile = e.target.closest('[data-tile-key]');
+    if (!tile || !grid.contains(tile)) return;
+    homeLauncherBeginPress(e, tile, grid, layout);
+  });
+}
+
+function homeLauncherOpenMenu(anchor, layout, byId) {
+  document.querySelectorAll('.homeTileMenu').forEach(m => m.remove());
+  const it = homeLauncherFind(layout, anchor.getAttribute('data-tile-more'));
+  if (!it) return;
+  const goal = it.type === 'goal' ? byId[it.id] : null;
+  const title = it.type === 'folder' ? it.name : ((goal && goal.title) || '目标');
+  const m = document.createElement('div');
+  m.className = 'ctxMenu homeTileMenu';
+  m.innerHTML = `<div class="ctxTitle">${esc(title)}</div>
+    <div class="htMenuLabel">卡片大小</div>
+    ${HOME_TILE_SIZES.map(s => `<button type="button" class="htMenuSize${it.size === s ? ' on' : ''}" data-hm-size="${s}"><span class="htMenuSizeName">${HOME_SIZE_NAME[s]}</span><em>${HOME_SIZE_DESC[s]}</em>${it.size === s ? '<span class="htMenuTick">✓</span>' : ''}</button>`).join('')}
+    <div class="ctxSep"></div>
+    ${it.type === 'folder'
+      ? `<button type="button" data-hm-open>📂 打开收藏夹</button><button type="button" data-hm-rename>✏ 重命名收藏夹</button><button type="button" class="danger" data-hm-dissolve>↩ 解散收藏夹（目标回到桌面）</button>`
+      : `<button type="button" data-hm-comps>🧩 管理本目标的组件</button>`}
+  `;
+  const r = anchor.getBoundingClientRect();
+  m.style.left = '0px'; m.style.top = '0px'; m.style.visibility = 'hidden';
+  document.body.appendChild(m);
+  const mw = m.offsetWidth || 250, mh = m.offsetHeight || 260;
+  let left = r.left + r.width - mw;
+  if (left + mw > window.innerWidth - 8) left = window.innerWidth - mw - 8;
+  if (left < 8) left = 8;
+  let top = r.bottom + 6;
+  if (top + mh > window.innerHeight - 8) top = Math.max(8, r.top - mh - 6);
+  m.style.left = left + 'px'; m.style.top = top + 'px'; m.style.visibility = '';
+  const closeMenu = () => { try { m.remove(); } catch (e) {} };
+  m.querySelectorAll('[data-hm-size]').forEach(btn => btn.addEventListener('click', () => {
+    it.size = homeLauncherSize(btn.getAttribute('data-hm-size'));
+    homeLauncherSave(layout);
+    closeMenu();
+    toast('已设为「' + HOME_SIZE_NAME[it.size] + '」');
+    renderHome();
+  }));
+  const openBtn = m.querySelector('[data-hm-open]');
+  if (openBtn) openBtn.addEventListener('click', () => { closeMenu(); homeLauncherOpenFolder(layout, it, byId); });
+  const renameBtn = m.querySelector('[data-hm-rename]');
+  if (renameBtn) renameBtn.addEventListener('click', () => {
+    closeMenu();
+    const name = prompt('收藏夹名称（最多 24 字）', it.name);
+    if (name == null) return;
+    it.name = String(name).trim().slice(0, 24) || '收藏夹';
+    homeLauncherSave(layout);
+    renderHome();
+  });
+  const dissolveBtn = m.querySelector('[data-hm-dissolve]');
+  if (dissolveBtn) dissolveBtn.addEventListener('click', () => { closeMenu(); homeLauncherDissolveFolder(layout, it); });
+  const compsBtn = m.querySelector('[data-hm-comps]');
+  if (compsBtn) compsBtn.addEventListener('click', () => { closeMenu(); showGoalPluginsMenu(it.id, anchor); });
+}
+
+function homeLauncherDissolveFolder(layout, folder) {
+  if (!confirm('解散「' + folder.name + '」？里面的 ' + folder.goals.length + ' 个目标会回到桌面。')) return;
+  const idx = layout.items.indexOf(folder);
+  if (idx < 0) return;
+  const back = folder.goals.map(gid => ({ type: 'goal', id: gid, size: HOME_TILE_DEFAULT_SIZE }));
+  layout.items.splice.apply(layout.items, [idx, 1].concat(back));
+  homeLauncherSave(layout);
+  toast('已解散收藏夹');
+  renderHome();
+}
+
+/* ---------- 收藏夹弹层（类似 iOS 文件夹展开） ---------- */
+let homeFolderDirty = false;       // 弹层里改过内容（排序 / 移出 / 改名）：关闭后要重画首页
+let homeFolderCancelDrag = null;   // 弹层内拖拽的清理函数（关闭时兜底调用）
+
+function homeLauncherCloseFolder() {
+  if (homeFolderCancelDrag) { try { homeFolderCancelDrag(); } catch (e) {} homeFolderCancelDrag = null; }
+  if (homeFolderDialogOnKey) { document.removeEventListener('keydown', homeFolderDialogOnKey); homeFolderDialogOnKey = null; }
+  if (homeFolderDialogOnHash) { window.removeEventListener('hashchange', homeFolderDialogOnHash); homeFolderDialogOnHash = null; }
+  if (homeFolderDialog) { try { homeFolderDialog.remove(); } catch (e) {} homeFolderDialog = null; }
+}
+
+/* 弹层里的一张目标卡（单击进执行页 / 右键或「移出」放回桌面） */
+function homeLauncherFolderCardHTML(g) {
+  if (!g) return '';
+  const st = homeLauncherStatus(g);
+  const pct = g.tasks_total ? Math.round((g.tasks_done || 0) / g.tasks_total * 100) : 0;
+  return `<div class="homeFolderCard" data-hf-goal="${g.id}" role="button" tabindex="0">
+    <div class="hfcHead"><span class="htIcon">🎯</span><span class="hfcTitle">${esc(g.title)}</span><span class="chip ${st[1]}">${st[0]}</span></div>
+    <div class="htProgress"><div class="bar"><div class="barFill" style="width:${pct}%"></div></div><span class="htPct">${pct}%</span></div>
+    <div class="hfcFoot"><span class="hfcMeta">${g.tasks_done || 0}/${g.tasks_total || 0} 任务${g.deadline ? ' · 期限 ' + esc(g.deadline) : ''}</span>
+      <button class="btn tiny" type="button" data-hf-remove="${g.id}" title="移出收藏夹，放回桌面">↩ 移出</button></div>
+  </div>`;
+}
+
+/* 收藏夹弹层里右键卡片：打开 / 移出（位置贴着鼠标，越界自动翻边） */
+function homeLauncherFolderMenu(ev, goal, onOpen, onEject) {
+  document.querySelectorAll('.ctxMenu').forEach(m => m.remove());
+  const m = document.createElement('div');
+  m.className = 'ctxMenu homeTileMenu';
+  m.innerHTML = `<div class="ctxTitle">${esc((goal && goal.title) || '目标')}</div>
+    <button type="button" data-hf-menu-open>🎯 打开目标</button>
+    <button type="button" class="danger" data-hf-menu-eject>↩ 移出收藏夹</button>`;
+  m.style.left = '0px'; m.style.top = '0px'; m.style.visibility = 'hidden';
+  document.body.appendChild(m);
+  const mw = m.offsetWidth || 210, mh = m.offsetHeight || 120;
+  let left = ev.clientX + 2, top = ev.clientY + 2;
+  if (left + mw > window.innerWidth - 8) left = Math.max(8, ev.clientX - mw - 6);
+  if (top + mh > window.innerHeight - 8) top = Math.max(8, ev.clientY - mh - 6);
+  m.style.left = left + 'px'; m.style.top = top + 'px'; m.style.visibility = '';
+  const done = () => { try { m.remove(); } catch (e) {} };
+  const openBtn = m.querySelector('[data-hf-menu-open]');
+  if (openBtn) openBtn.addEventListener('click', () => { done(); if (onOpen) onOpen(); });
+  const ejectBtn = m.querySelector('[data-hf-menu-eject]');
+  if (ejectBtn) ejectBtn.addEventListener('click', () => { done(); if (onEject) onEject(); });
+}
+
+function homeLauncherOpenFolder(layout, folder, byId) {
+  homeLauncherCloseFolder();
+  homeFolderDirty = false;
+  const mask = document.createElement('div');
+  mask.className = 'homeFolderMask';
+  mask.innerHTML = `<div class="homeFolderPanel" role="dialog" aria-label="收藏夹 ${esc(folder.name)}">
+    <div class="homeFolderHead">
+      <span class="hfIcon">📁</span>
+      <span class="hfTitle">${esc(folder.name)}</span>
+      <span class="chip gray hfCount">${folder.goals.length} 个目标</span>
+      <div class="spacer"></div>
+      <button class="btn tiny" type="button" data-hf-rename>重命名</button>
+      <button class="btn tiny danger" type="button" data-hf-dissolve>解散收藏夹</button>
+      <button class="btn tiny" type="button" data-hf-close title="关闭（Esc）">✕</button>
+    </div>
+    <div class="homeFolderBody"><div class="homeFolderGrid" id="homeFolderGrid"></div></div>
+    <div class="homeFolderTip">拖住卡片可调整顺序 · 右键卡片可移出收藏夹 · 单击卡片进入执行页</div>
+  </div>`;
+  document.body.appendChild(mask);
+  homeFolderDialog = mask;
+  const grid = mask.querySelector('#homeFolderGrid');
+
+  /* keepHome=true 时（点卡片进目标页 / 路由变化）不重画首页 —— 路由自己会渲染。 */
+  const close = opts => {
+    const dirty = homeFolderDirty;
+    homeFolderDirty = false;
+    homeLauncherCloseFolder();
+    if (dirty && !(opts && opts.keepHome)) renderHome();
+  };
+  const openGoal = gid => { close({ keepHome: true }); go('#/g/' + gid); };
+
+  /* 移出收藏夹：目标回到桌面（紧挨着收藏夹的位置）。
+     只剩 1 个目标的收藏夹没有存在意义（渲染时也会被摊平），所以直接连剩下的目标一起摊回桌面。 */
+  const eject = gid => {
+    const idx = folder.goals.indexOf(gid);
+    if (idx < 0) return;
+    const pos = layout.items.indexOf(folder);
+    folder.goals.splice(idx, 1);
+    homeFolderDirty = true;
+    if (folder.goals.length <= 1) {
+      const back = [{ type: 'goal', id: gid, size: HOME_TILE_DEFAULT_SIZE }]
+        .concat(folder.goals.map(x => ({ type: 'goal', id: x, size: HOME_TILE_DEFAULT_SIZE })));
+      if (pos >= 0) layout.items.splice.apply(layout.items, [pos, 1].concat(back));
+      homeLauncherSave(layout);
+      toast('已移出收藏夹');
+      close();
+      return;
+    }
+    if (pos >= 0) layout.items.splice(pos + 1, 0, { type: 'goal', id: gid, size: HOME_TILE_DEFAULT_SIZE });
+    homeLauncherSave(layout);
+    toast('已移出收藏夹');
+    paint();
+  };
+
+  let drag = null;   // 弹层内拖拽状态
+
+  function paint() {
+    grid.innerHTML = folder.goals.length
+      ? folder.goals.map(gid => homeLauncherFolderCardHTML(byId[gid])).join('')
+      : '<div class="muted">收藏夹是空的</div>';
+    const cnt = mask.querySelector('.hfCount');
+    if (cnt) cnt.textContent = folder.goals.length + ' 个目标';
+    bindCards();
+  }
+
+  function bindCards() {
+    grid.querySelectorAll('[data-hf-goal]').forEach(card => {
+      card.addEventListener('click', e => {
+        if (Date.now() < homeLauncherNoClickUntil) return;
+        if (e.target.closest('button')) return;
+        const gid = Number(card.getAttribute('data-hf-goal'));
+        if (gid) openGoal(gid);
+      });
+      card.addEventListener('keydown', e => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        const gid = Number(card.getAttribute('data-hf-goal'));
+        if (gid) openGoal(gid);
+      });
+      card.addEventListener('contextmenu', e => {
+        e.preventDefault();
+        const gid = Number(card.getAttribute('data-hf-goal'));
+        if (!gid) return;
+        homeLauncherFolderMenu(e, byId[gid],
+          () => openGoal(gid),
+          () => eject(gid));
+      });
+      card.addEventListener('pointerdown', e => {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        if (!e.isPrimary) return;
+        if (e.target.closest('button, a, input, select, textarea')) return;
+        beginPress(e, card);
+      });
+    });
+    grid.querySelectorAll('[data-hf-remove]').forEach(btn => btn.addEventListener('click', e => {
+      e.stopPropagation();
+      eject(Number(btn.getAttribute('data-hf-remove')));
+    }));
+  }
+
+  /* ---- 弹层内的拖动排序（鼠标一动就拖；触摸先长按 300ms） ---- */
+  function beginPress(e, card) {
+    abortDrag();
+    const isMouse = (e.pointerType || 'mouse') === 'mouse';
+    const d = {
+      phase: 'pending', card: card, isMouse: isMouse,
+      startX: e.clientX, startY: e.clientY, offsetX: 0, offsetY: 0,
+      ghost: null, timer: null, insert: -1
+    };
+    d.onMove = ev => {
+      if (d.phase === 'pending') {
+        const dx = ev.clientX - d.startX, dy = ev.clientY - d.startY;
+        const dist2 = dx * dx + dy * dy;
+        if (d.isMouse) { if (dist2 > 25) startDrag(d); return; }
+        if (dist2 > 100) abortDrag();
+        return;
+      }
+      moveDrag(d, ev);
+    };
+    d.onUp = () => { if (d.phase === 'dragging') dropDrag(d); else abortDrag(); };
+    d.onCancel = () => abortDrag();
+    d.onKey = ev => { if (ev.key === 'Escape') abortDrag(); };
+    d.onTouch = ev => { if (d.phase === 'dragging' && ev.cancelable) ev.preventDefault(); };
+    drag = d;
+    document.addEventListener('pointermove', d.onMove, { passive: true });
+    document.addEventListener('pointerup', d.onUp);
+    document.addEventListener('pointercancel', d.onCancel);
+    document.addEventListener('keydown', d.onKey);
+    if (!isMouse) d.timer = setTimeout(() => startDrag(d), 300);
+  }
+
+  function startDrag(d) {
+    if (!d || d.phase !== 'pending' || !d.card || !d.card.isConnected) { abortDrag(); return; }
+    d.phase = 'dragging';
+    if (d.timer) { clearTimeout(d.timer); d.timer = null; }
+    const rect = d.card.getBoundingClientRect();
+    d.offsetX = Math.max(0, Math.min(rect.width, d.startX - rect.left));
+    d.offsetY = Math.max(0, Math.min(rect.height, d.startY - rect.top));
+    const ghost = d.card.cloneNode(true);
+    ghost.className = d.card.className + ' hfcGhost';
+    ghost.style.width = rect.width + 'px';
+    ghost.style.height = rect.height + 'px';
+    ghost.style.left = (d.startX - d.offsetX) + 'px';
+    ghost.style.top = (d.startY - d.offsetY) + 'px';
+    ghost.removeAttribute('tabindex');
+    document.body.appendChild(ghost);
+    d.ghost = ghost;
+    d.card.classList.add('hfcDragging');
+    grid.classList.add('hfDragGrid');
+    document.body.classList.add('htDraggingBody');
+    document.addEventListener('touchmove', d.onTouch, { passive: false });
+    homeLauncherNoClickUntil = Date.now() + 400;
+    try { if (navigator.vibrate) navigator.vibrate(12); } catch (e) {}
+  }
+
+  function moveDrag(d, ev) {
+    if (!d.ghost) return;
+    d.ghost.style.left = (ev.clientX - d.offsetX) + 'px';
+    d.ghost.style.top = (ev.clientY - d.offsetY) + 'px';
+    hitTest(d, ev.clientX, ev.clientY);
+  }
+
+  /* 插入位置：优先按“指针压在哪张卡上 + 左半/右半”，否则按行扫描空隙 */
+  function hitTest(d, x, y) {
+    const cards = Array.prototype.slice.call(grid.querySelectorAll('[data-hf-goal]'));
+    cards.forEach(c => c.classList.remove('hfcDropBefore', 'hfcDropAfter'));
+    const rest = cards.filter(c => c !== d.card);
+    const hit = document.elementFromPoint(x, y);
+    const over = hit && hit.closest ? hit.closest('[data-hf-goal]') : null;
+    const pick = over && over !== d.card && grid.contains(over) ? over : null;
+    let idx = rest.length;
+    if (pick) {
+      const r = pick.getBoundingClientRect();
+      const i = rest.indexOf(pick);
+      idx = x < r.left + r.width / 2 ? i : i + 1;
+    } else {
+      for (let i = 0; i < rest.length; i++) {
+        const r = rest[i].getBoundingClientRect();
+        const pad = Math.min(8, r.height / 4);
+        if (y > r.bottom - pad) continue;
+        if (y < r.top + pad) { idx = i; break; }
+        if (x > r.left + r.width / 2) continue;
+        idx = i; break;
+      }
+    }
+    d.insert = idx;
+    if (idx < rest.length) rest[idx].classList.add('hfcDropBefore');
+    else if (rest.length) rest[rest.length - 1].classList.add('hfcDropAfter');
+  }
+
+  function dropDrag(d) {
+    const insert = d.insert;
+    const card = d.card;
+    abortDrag();
+    const gid = Number(card && card.getAttribute('data-hf-goal'));
+    const from = folder.goals.indexOf(gid);
+    if (from < 0) { paint(); return; }
+    if (insert >= 0) {
+      const rest = folder.goals.filter(x => x !== gid);
+      const idx = Math.max(0, Math.min(insert, rest.length));
+      if (idx !== from) {
+        rest.splice(idx, 0, gid);
+        folder.goals = rest;
+        homeFolderDirty = true;
+        homeLauncherSave(layout);
+      }
+    }
+    paint();
+    toast('顺序已保存');
+  }
+
+  function abortDrag() {
+    const d = drag;
+    if (!d) return;
+    drag = null;
+    if (d.timer) { try { clearTimeout(d.timer); } catch (e) {} d.timer = null; }
+    document.removeEventListener('pointermove', d.onMove, { passive: true });
+    document.removeEventListener('pointerup', d.onUp);
+    document.removeEventListener('pointercancel', d.onCancel);
+    document.removeEventListener('keydown', d.onKey);
+    document.removeEventListener('touchmove', d.onTouch, { passive: false });
+    if (d.ghost && d.ghost.parentNode) d.ghost.parentNode.removeChild(d.ghost);
+    if (d.card) d.card.classList.remove('hfcDragging');
+    if (grid) {
+      grid.classList.remove('hfDragGrid');
+      grid.querySelectorAll('.hfcDropBefore, .hfcDropAfter').forEach(c => c.classList.remove('hfcDropBefore', 'hfcDropAfter'));
+    }
+    document.body.classList.remove('htDraggingBody');
+    if (d.phase === 'dragging') homeLauncherNoClickUntil = Date.now() + 350;
+  }
+  homeFolderCancelDrag = abortDrag;
+
+  mask.addEventListener('click', e => { if (e.target === mask) close(); });
+  mask.querySelector('[data-hf-close]').addEventListener('click', () => close());
+  mask.querySelector('[data-hf-rename]').addEventListener('click', () => {
+    const name = prompt('收藏夹名称（最多 24 字）', folder.name);
+    if (name == null) return;
+    folder.name = String(name).trim().slice(0, 24) || '收藏夹';
+    homeLauncherSave(layout);
+    homeFolderDirty = true;
+    const titleEl = mask.querySelector('.hfTitle');
+    if (titleEl) titleEl.textContent = folder.name;
+    toast('已重命名');
+  });
+  mask.querySelector('[data-hf-dissolve]').addEventListener('click', () => {
+    close({ keepHome: true });
+    homeLauncherDissolveFolder(layout, folder);
+  });
+  homeFolderDialogOnKey = ev => { if (ev.key === 'Escape') close(); };
+  document.addEventListener('keydown', homeFolderDialogOnKey);
+  homeFolderDialogOnHash = () => close({ keepHome: true });
+  window.addEventListener('hashchange', homeFolderDialogOnHash);
+  paint();
+}
+
+/* ---------- 拖拽：拖到哪就是第几个；松在「📁 收进收藏夹」上 = 收进收藏夹 ---------- */
+function homeLauncherBeginPress(e, tile, grid, layout) {
+  homeLauncherAbortDrag();
+  /* 鼠标（精确指针）：按下后**一动就拖**，不需要先按住 —— 桌面用户习惯「拖住就走」。
+     触摸 / 手写笔：先等 300ms 长按，否则会和「上下滑动页面」抢手势（手机上手指一滑
+     就起拖会让页面根本滚不动）。这两种设备语义不同，别合并成一套。 */
+  const isMouse = (e.pointerType || 'mouse') === 'mouse';
+  const d = {
+    phase: 'pending', tile: tile, grid: grid, layout: layout, isMouse: isMouse,
+    key: tile.getAttribute('data-tile-key'),
+    startX: e.clientX, startY: e.clientY,
+    offsetX: 0, offsetY: 0, ghost: null, timer: null,
+    overKey: '', insert: -1, chipText: ''
+  };
+  d.onMove = ev => {
+    if (d.phase === 'pending') {
+      const dx = ev.clientX - d.startX, dy = ev.clientY - d.startY;
+      const dist2 = dx * dx + dy * dy;
+      if (d.isMouse) {
+        /* 5px 以内算「点击时的轻微抖动」，超过就进入拖拽（不用长按） */
+        if (dist2 > 25) homeLauncherStartDrag(d);
+        return;
+      }
+      if (dist2 > 100) homeLauncherAbortDrag();
+      return;
+    }
+    homeLauncherDragMove(d, ev);
+  };
+  d.onUp = ev => {
+    if (d.phase === 'dragging') homeLauncherDragDrop(d, ev);
+    else homeLauncherAbortDrag();
+  };
+  d.onCancel = () => homeLauncherAbortDrag();
+  d.onKey = ev => { if (ev.key === 'Escape') homeLauncherAbortDrag(); };
+  d.onTouch = ev => { if (d.phase === 'dragging' && ev.cancelable) ev.preventDefault(); };
+  d.onHash = () => homeLauncherAbortDrag();
+  homeLauncherDrag = d;
+  document.addEventListener('pointermove', d.onMove, { passive: true });
+  document.addEventListener('pointerup', d.onUp);
+  document.addEventListener('pointercancel', d.onCancel);
+  document.addEventListener('keydown', d.onKey);
+  window.addEventListener('hashchange', d.onHash);
+  if (!isMouse) d.timer = setTimeout(() => homeLauncherStartDrag(d), 300);
+}
+
+function homeLauncherStartDrag(d) {
+  if (!d || d.phase !== 'pending' || !d.tile || !d.tile.isConnected) { homeLauncherAbortDrag(); return; }
+  d.phase = 'dragging';
+  if (d.timer) { clearTimeout(d.timer); d.timer = null; }
+  const rect = d.tile.getBoundingClientRect();
+  d.offsetX = Math.max(0, Math.min(rect.width, d.startX - rect.left));
+  d.offsetY = Math.max(0, Math.min(rect.height, d.startY - rect.top));
+  const ghost = d.tile.cloneNode(true);
+  ghost.className = d.tile.className + ' homeTileGhost';
+  ghost.style.width = rect.width + 'px';
+  ghost.style.height = rect.height + 'px';
+  ghost.style.left = (d.startX - d.offsetX) + 'px';
+  ghost.style.top = (d.startY - d.offsetY) + 'px';
+  ghost.removeAttribute('tabindex');
+  document.body.appendChild(ghost);
+  d.ghost = ghost;
+  d.tile.classList.add('htDragging');
+  d.grid.classList.add('htDragGrid');
+  document.body.classList.add('htDraggingBody');
+  document.addEventListener('touchmove', d.onTouch, { passive: false });
+  homeLauncherNoClickUntil = Date.now() + 400;
+  try { if (navigator.vibrate) navigator.vibrate(15); } catch (e) {}
+}
+
+function homeLauncherDragMove(d, ev) {
+  if (!d.ghost) return;
+  d.ghost.style.left = (ev.clientX - d.offsetX) + 'px';
+  d.ghost.style.top = (ev.clientY - d.offsetY) + 'px';
+  homeLauncherHitTest(d, ev.clientX, ev.clientY);
+  homeLauncherPaintChipHover(d, ev.clientX, ev.clientY);
+}
+
+/* 松手位置判定：
+   · 压在另一张卡片上 —— 按左/右半区算插入位置（排序预览），**同时**在那张卡片底部
+     长出「📁 收进收藏夹」按钮；松手落在按钮上才是融合，落在卡片其它地方都只排序。
+     这里没有任何计时器：停多久都不会自己变成合并态。
+   · 落在空隙 —— 按行/列扫描出插入位置。 */
+function homeLauncherHitTest(d, x, y) {
+  const grid = d.grid;
+  if (!grid) return;
+  const tiles = Array.prototype.slice.call(grid.querySelectorAll('[data-tile-key]'));
+  const hit = document.elementFromPoint(x, y);
+  const hitTile = hit && hit.closest ? hit.closest('[data-tile-key]') : null;
+  d.insert = -1;
+  const rest = tiles.filter(t => t !== d.tile);
+  if (hitTile && hitTile !== d.tile && grid.contains(hitTile)) {
+    d.overKey = hitTile.getAttribute('data-tile-key');
+    const r = hitTile.getBoundingClientRect();
+    const i = rest.indexOf(hitTile);
+    const base = i < 0 ? rest.length : i;
+    d.insert = x < r.left + r.width / 2 ? base : base + 1;
+    homeLauncherPaintDrop(d);
+    return;
+  }
+  d.overKey = '';
+  let idx = rest.length;
+  for (let i = 0; i < rest.length; i++) {
+    const r = rest[i].getBoundingClientRect();
+    const pad = Math.min(10, r.height / 4);
+    if (y > r.bottom - pad) continue;
+    if (y < r.top + pad) { idx = i; break; }
+    if (x > r.left + r.width / 2) continue;
+    idx = i; break;
+  }
+  d.insert = idx;
+  homeLauncherPaintDrop(d);
+}
+
+/* 「📁 收进收藏夹」按钮的文案：谁被收进谁，说清楚 */
+function homeLauncherMergeChipText(d, host) {
+  const src = homeLauncherFind(d.layout, d.key);
+  const target = homeLauncherFind(d.layout, d.overKey);
+  const name = it => (it && it.type === 'folder' && it.name) ? it.name : '收藏夹';
+  if (src && src.type === 'folder') return '📁 并入「' + name(src) + '」';
+  if (target && target.type === 'folder') return '📁 收进「' + name(target) + '」';
+  return '📁 收进收藏夹';
+}
+
+/* 拖拽反馈统一走这里：
+   · 排序 → 竖线标出插入位置；
+   · 融合 → 目标卡片底部出现「📁 收进收藏夹」按钮（只能靠松在它上面触发）。
+   ⚠️ 别在 hitTest 里散着加 class / 建节点，目标一变就会留残影、按钮也会重复。 */
+function homeLauncherPaintDrop(d) {
+  const grid = d.grid;
+  if (!grid) return;
+  const tiles = Array.prototype.slice.call(grid.querySelectorAll('[data-tile-key]'));
+  tiles.forEach(t => t.classList.remove('htDropBefore', 'htDropAfter'));
+  /* 只在「压在另一张卡片上」时挂按钮；换目标就搬过去，离开卡片就摘掉 */
+  const host = d.overKey ? grid.querySelector('[data-tile-key="' + d.overKey.replace(/"/g, '\\"') + '"]') : null;
+  const chips = Array.prototype.slice.call(grid.querySelectorAll('.htMergeChip'));
+  chips.forEach(c => { if (!host || c.parentNode !== host) c.parentNode.removeChild(c); });
+  if (host) {
+    let chip = host.querySelector('.htMergeChip');
+    if (!chip) {
+      chip = document.createElement('span');
+      chip.className = 'htMergeChip';
+      chip.setAttribute('data-merge-chip', '');
+      host.appendChild(chip);
+    }
+    const text = homeLauncherMergeChipText(d, host);
+    if (d.chipText !== text || chip.textContent !== text) {
+      chip.textContent = text;
+      d.chipText = text;
+    }
+    chip.setAttribute('data-chip-target', d.overKey);
+  } else {
+    d.chipText = '';
+  }
+  if (d.insert < 0) return;
+  const rest = tiles.filter(t => t !== d.tile);
+  if (d.insert < rest.length) rest[d.insert].classList.add('htDropBefore');
+  else if (rest.length) rest[rest.length - 1].classList.add('htDropAfter');
+}
+
+/* 指针压在「📁 收进收藏夹」按钮上时高亮它，并先把插入竖线藏掉 ——
+   让用户一眼看出现在松手是「融合」而不是「排序」 */
+function homeLauncherPaintChipHover(d, x, y) {
+  const grid = d.grid;
+  if (!grid) return;
+  const hit = homeLauncherChipHit(d, x, y);
+  const on = !!hit;
+  grid.querySelectorAll('.htMergeChip').forEach(c => c.classList.toggle('on', c === hit));
+  grid.classList.toggle('htChipHover', on);
+  /* 压在按钮上时把插入竖线一起摘掉（不只是 CSS 隐藏 class）：此刻松手是融合，不是排序 */
+  if (on) grid.querySelectorAll('.htDropBefore, .htDropAfter').forEach(t => t.classList.remove('htDropBefore', 'htDropAfter'));
+}
+
+function homeLauncherChipHit(d, x, y) {
+  const grid = d.grid;
+  if (!grid) return null;
+  const chip = grid.querySelector('.htMergeChip');
+  if (!chip) return null;
+  const r = chip.getBoundingClientRect();
+  const sx = HOME_CHIP_SLOP_X, sy = HOME_CHIP_SLOP_Y;
+  return (x >= r.left - sx && x <= r.right + sx && y >= r.top - sy && y <= r.bottom + sy) ? chip : null;
+}
+
+function homeLauncherDragDrop(d, ev) {
+  homeLauncherHitTest(d, ev.clientX, ev.clientY);
+  homeLauncherPaintChipHover(d, ev.clientX, ev.clientY);
+  const src = homeLauncherFind(d.layout, d.key);
+  const insert = d.insert;
+  const chip = homeLauncherChipHit(d, ev.clientX, ev.clientY);
+  const chipTargetKey = chip ? chip.getAttribute('data-chip-target') : '';
+  homeLauncherAbortDrag();
+  if (!src) { renderHome(); return; }
+  if (chipTargetKey) {
+    const target = homeLauncherFind(d.layout, chipTargetKey);
+    if (target && target !== src && homeLauncherMerge(d.layout, src, target)) {
+      homeLauncherSave(d.layout);
+      toast('已收进收藏夹');
+      renderHome();
+      return;
+    }
+  }
+  if (insert >= 0) {
+    const before = d.layout.items.indexOf(src);
+    const rest = d.layout.items.filter(it => it !== src);
+    const idx = Math.max(0, Math.min(insert, rest.length));
+    if (idx !== before) {
+      rest.splice(idx, 0, src);
+      d.layout.items = rest;
+      homeLauncherSave(d.layout);
+      renderHome();
+    }
+  }
+}
+
+/* 把 src 收进 target：目标+目标 → 新建收藏夹；目标+收藏夹 → 放进去；
+   收藏夹+目标 → 收藏夹吸收目标；收藏夹+收藏夹 → 合并内容（保留目标位置那个） */
+function homeLauncherMerge(layout, src, target) {
+  const items = layout.items;
+  if (!src || !target || src === target) return false;
+  if (src.type === 'folder' && target.type === 'folder') {
+    target.goals = target.goals.concat(src.goals.filter(gid => target.goals.indexOf(gid) < 0));
+    items.splice(items.indexOf(src), 1);
+    return true;
+  }
+  if (src.type === 'goal' && target.type === 'goal') {
+    const folder = { type: 'folder', id: homeLauncherNewFolderId(), name: homeLauncherFolderName(layout), size: target.size, goals: [target.id, src.id] };
+    items.splice(items.indexOf(target), 1, folder);
+    items.splice(items.indexOf(src), 1);
+    return true;
+  }
+  if (src.type === 'goal' && target.type === 'folder') {
+    if (target.goals.indexOf(src.id) < 0) target.goals.push(src.id);
+    items.splice(items.indexOf(src), 1);
+    return true;
+  }
+  if (src.type === 'folder' && target.type === 'goal') {
+    if (src.goals.indexOf(target.id) < 0) src.goals.push(target.id);
+    items.splice(items.indexOf(target), 1);
+    return true;
+  }
+  return false;
+}
+
+function homeLauncherAbortDrag() {
+  const d = homeLauncherDrag;
+  if (!d) return;
+  homeLauncherDrag = null;
+  if (d.timer) { try { clearTimeout(d.timer); } catch (e) {} d.timer = null; }
+  document.removeEventListener('pointermove', d.onMove, { passive: true });
+  document.removeEventListener('pointerup', d.onUp);
+  document.removeEventListener('pointercancel', d.onCancel);
+  document.removeEventListener('keydown', d.onKey);
+  document.removeEventListener('touchmove', d.onTouch, { passive: false });
+  window.removeEventListener('hashchange', d.onHash);
+  if (d.ghost && d.ghost.parentNode) d.ghost.parentNode.removeChild(d.ghost);
+  if (d.tile) d.tile.classList.remove('htDragging');
+  const grid = d.grid || document.getElementById('homeDeskGrid');
+  if (grid) {
+    grid.classList.remove('htDragGrid', 'htChipHover');
+    grid.querySelectorAll('.htMergeChip').forEach(c => { if (c.parentNode) c.parentNode.removeChild(c); });
+    grid.querySelectorAll('.htDropBefore, .htDropAfter').forEach(t => t.classList.remove('htDropBefore', 'htDropAfter'));
+  }
+  document.body.classList.remove('htDraggingBody');
+  if (d.phase === 'dragging') homeLauncherNoClickUntil = Date.now() + 350;
+}
+
 async function renderHome() {
   app.innerHTML = '<p class="muted">加载中…</p>';
   const [{ goals }, st] = await Promise.all([
@@ -468,39 +1660,20 @@ async function renderHome() {
       <label class="btn" style="margin-left:8px;">⬆ 导入分享<input type="file" id="shareImportFile2" accept=".json,application/json" hidden></label>
     </div>`;
   }
+  /* 目标桌面：卡片 / 收藏夹 / 三档大小（长按拖拽收纳），布局存本机（详见 homeLauncher* 一段） */
+  let homeLayout = null;
   if (goals.length) {
-    html += '<div class="goalGrid">';
-    for (const g of goals) {
-      const pct = g.tasks_total ? Math.round(g.tasks_done / g.tasks_total * 100) : 0;
-      const st = { draft: ['待规划', 'warn'], planning: ['规划中', ''], planned: ['已规划', 'ok'], failed: ['规划失败', 'danger'] }[g.status] || ['未知', 'gray'];
-      const updated = g.updated_at ? String(g.updated_at).slice(0, 10) : '';
-      html += `<div class="goalCard" data-go="#/g/${g.id}">
-        <div class="gcHead"><span class="gcTitle">${esc(g.title)}</span><span class="chip ${st[1]}">${st[0]}</span><button class="btn tiny gcComps" data-gc-comps="${g.id}" title="管理本目标的组件（只改这个目标）">🧩</button></div>
-        ${g.summary ? `<div class="gcSummary">${mdOneLine(g.summary)}</div>` : '<div class="gcSummary muted">尚未生成规划</div>'}
-        ${g.next_task ? `<div class="gcNext">▸ 下一步：${esc(g.next_task)}</div>` : ''}
-        <div class="gcProgress">
-          <div class="bar"><div class="barFill" style="width:${pct}%"></div></div>
-          <span class="gcPct">${pct}%</span>
-        </div>
-        <div class="gcMeta">
-          ${g.weekly_hours ? `<span class="chip gray">每周 ${esc(g.weekly_hours)}</span>` : ''}
-          ${g.deadline ? `<span class="chip gray">期限 ${esc(g.deadline)}</span>` : ''}
-          <span class="chip gray">${g.tasks_done}/${g.tasks_total} 任务</span>
-          ${updated ? `<span class="gcDate">更新于 ${updated}</span>` : ''}
-        </div>
-      </div>`;
-    }
-    html += '</div>';
+    homeLayout = homeLauncherLoad(goals);
+    html += homeLauncherRecentHTML(goals);      // 顶部「最近目标」（没有记录时整块不渲染）
+    html += homeLauncherDeskHTML(goals, homeLayout);
   }
   html += '</div>';
   app.innerHTML = html;
-  // 主页各目标卡片：🧩 只管自己这个目标的组件
-  app.querySelectorAll('[data-gc-comps]').forEach(b => b.addEventListener('click', e => {
-    e.stopPropagation(); e.preventDefault();
-    const gid = Number(b.getAttribute('data-gc-comps'));
-    if (document.getElementById('goalPluginMenu')) document.querySelectorAll('#goalPluginMenu').forEach(x => x.remove());
-    else showGoalPluginsMenu(gid, b);
-  }));
+  if (homeLayout) {
+    const homeGoalsById = {};
+    for (const g of goals) homeGoalsById[g.id] = g;
+    bindHomeLauncher(homeLayout, homeGoalsById);
+  }
 
   const gb = document.getElementById('guideBtn');
   if (gb) gb.addEventListener('click', () => showGuide(0));
@@ -762,10 +1935,14 @@ function mapFit() {
   if (!vp || !tree) return;
   const vw = vp.clientWidth, vh = vp.clientHeight;
   const tw = Math.max(tree.scrollWidth, 1), th = Math.max(tree.scrollHeight, 1);
-  const s = Math.min(1.1, (vw - 90) / tw, (vh - 90) / th);
+  /* 画布已按视口铺满（.mtree width:100%）：此时 tw≈vw，若再按 (vw - tw*s)/2 平移，
+     画布会被右推、右侧露出底色（用户反馈的灰色框）。铺满时不再平移，只做缩放。 */
+  const fillsW = tw >= vw - 2;
+  const fillsH = th >= vh - 2;
+  const s = Math.min(1.1, fillsW ? 1.1 : (vw - 90) / tw, fillsH ? 1.1 : (vh - 90) / th);
   state.mapScale = Math.max(0.25, Math.min(1.6, s));
-  state.mapTx = (vw - tw * state.mapScale) / 2;
-  state.mapTy = (vh - th * state.mapScale) / 2;
+  state.mapTx = fillsW ? 0 : (vw - tw * state.mapScale) / 2;
+  state.mapTy = fillsH ? 0 : (vh - th * state.mapScale) / 2;
   applyCanvasTransform();
   drawMapLines();
 }
@@ -882,7 +2059,9 @@ function renderMapPage() {
   </div>`;
   bindTreeEvents(renderMapPage);
   bindMapTools();
-  requestAnimationFrame(() => mapFit());
+  /* 双帧 fit：第一帧时 .mtree 的 width:100% 可能还没参与布局（scrollWidth 仍是内容宽），
+     此时算出的平移会把画布右推、右侧留灰。第二帧布局稳定后再算一次。 */
+  requestAnimationFrame(() => { try { mapFit(); } catch (e) {} requestAnimationFrame(() => { try { mapFit(); } catch (e) {} }); });
 }
 /* 把节点里 AI 写的依据名匹配到资料库真实条目（与服务端同策略：去前缀、去类型、逐级放宽） */
 function findLibSource(ref) {
@@ -2323,7 +3502,7 @@ function tutBindClickEdit() {
      判断（那是给单击写的）—— 直接改成 dblclick 会被它全部挡掉。
      所以这里把选区**折叠掉**再继续：既不误触，又能让编辑从双击的那个词开始。 */
   document.addEventListener('dblclick', e => {
-    if (tutEditing) return;
+    if (tutEditing || window.__sxTutVueActive) return;   // Vue 教程页自己处理双击就地改块
     const t = e.target;
     if (!t || !t.closest) return;
     if (t.closest('a,button,input,textarea,select,svg,img,sup.cite,mark.tnm,[data-toc]')) return;
@@ -2349,6 +3528,7 @@ document.addEventListener('click', async e => {
   const sb = e.target.closest && e.target.closest('#tutSaveBtn');
   const cb0 = e.target.closest && e.target.closest('#tutCancelBtn');
   if (!eb && !sb && !cb0) return;
+  if (window.__sxTutVueActive) return;   // Vue 教程页自己有手动编辑弹窗
   if (parseRoute().view !== 'tutorial') return;
   if (eb) { await tutManualEnter(null); return; }
   if (cb0) { await tutManualCancel(); return; }
@@ -2857,6 +4037,13 @@ document.addEventListener('click', async e => {
   const rr = parseRoute();
   if (rr.view !== 'tutorial') return;
   const t = ((state.goal && state.goal.tutorials) || []).find(x => Number(x.id) === Number(rr.id));
+  /* 教程页的「让 AI 修改」：Vue 对话页支持教程绑定时，直接带 tutorial_id 进对话页。 */
+  try {
+    if (tutorialVueEnabled() && chatVueEnabled()) {
+      const gidTut = Number((t && t.goal_id) || state.tutGoalId || 0);
+      if (gidTut) { location.hash = '#/g/' + gidTut + '/chat?tut=' + Number(rr.id); return; }
+    }
+  } catch (e) {}
   aiToggle(true);
   setTimeout(() => {
     const ta = document.getElementById('adText');
@@ -2867,6 +4054,7 @@ document.addEventListener('click', async e => {
 document.addEventListener('click', async e => {
   const btn = e.target.closest && e.target.closest('#tutVersBtn');
   if (!btn) return;
+  if (window.__sxTutVueActive) return;   // Vue 教程页自己弹版本面板
   const rr = parseRoute();
   if (rr.view !== 'tutorial') return;
   openTutVersions(Number(rr.id));
@@ -3073,6 +4261,247 @@ function openTutRename(tid, tut) {
   try { input.select(); } catch (e) {}
 }
 /* ===== AI 助手（右侧侧边栏） ===== */
+/* ═══════════「当前页面」上下文：AI 常驻每个页面 ═══════════
+   为什么：以前每个组件各写一套 AI 问答（随堂测验的「问 AI」、看懂代码的追问…），
+   一百个组件就是一百套提示词，效果一定参差不齐。现在统一用这一个 AI 助手，
+   代价是它得知道用户此刻在看什么 —— 于是发消息时把**当前页面的文字**一起带上。
+
+   三条规矩：
+   ① **只抓主内容**：抓 #app 里的正文，把按钮/输入框/工具栏等交互元素剔掉，
+      否则提示词里全是「保存」「取消」「上一页」；
+   ② **有上限**：资料库/长教程的 innerText 几万字，原样塞会把路线图和历史挤掉
+      （服务端还会再掐一次，见 server/prompts/page-context.js）；
+   ③ **认得出"页面"**：每类页面给一个人话标签（随堂测验 / 看懂代码 / 教程…），
+      提示词里写清"用户说'这个'指的就是这一页"。 */
+const PAGE_LABELS = {
+  tutorial: '教程阅读页', chat: 'AI 对话页', map: '路线图页', goal: '目标概览页',
+  components: '组件管理页', settings: '设置页', library: '资源库', outlib: '产出库',
+  aitasks: 'AI 任务中心', studystats: '学习统计', home: '目标列表', guide: '使用引导',
+  versions: '版本管理页', diff: '版本对比页'
+};
+/* 插件页面（随堂测验 / 每日刷题 / 看懂代码 …）按路由末段认人，认不出就用插件元数据里的名字 */
+function pageLabelOf(r) {
+  const h = location.hash || '';
+  if (r.view === 'plugin') {
+    try {
+      const meta = (SiErXing.serverPlugins() || []).find(p => p.id === (r.pluginId || (r.route && r.route.pluginId)));
+      if (meta && meta.name) return meta.name;
+    } catch (e) {}
+    const m = h.match(/^#\/(?:t|g)\/\d+\/([a-z0-9_-]+)/i);
+    if (m) {
+      const known = { quiz: '随堂测验', restate: '用自己的话', explain: '看懂代码', interview: '模拟面试', hot100: '每日刷题', jd: '信息源导入', quests: '今日任务', ragbench: '检索增强评测' };
+      if (known[m[1]]) return known[m[1]];
+      return '功能页';
+    }
+    return '功能页';
+  }
+  return PAGE_LABELS[r.view] || '当前页面';
+}
+/* 页面标题：优先取页面上那个 h2.title（各页面统一），没有就用标签 */
+function pageTitleOf(label) {
+  try {
+    const t = document.querySelector('#app .pageHead .title, #app .pageHead h2, #app h2.title, #app .jdHead .mapTitle, #app .mapTitle');
+    const s = t ? String(t.innerText || t.textContent || '').replace(/\s+/g, ' ').trim() : '';
+    if (s && s.length <= 80) return s.replace(/^[^\u4e00-\u9fa5A-Za-z0-9]+/, '');
+  } catch (e) {}
+  return label || '';
+}
+/* 把一块 DOM 里的"界面文字"剔掉，只留正文。
+   ⚠️ 三个坑：
+   ① 必须 cloneNode 再删 —— 直接改原 DOM 会触发教程页/笔记栏重排；
+   ② **`innerText` 对不在文档里的节点会退化成 `textContent`**（块级元素之间的换行全丢，
+      整页变成一长串）。所以克隆体要临时挂到一个屏幕外的容器里量一次，读完立刻摘掉；
+   ③ 别把 `button` 全删掉：随堂测验的选项、路线图上的操作都是按钮，删了 AI 就看不到
+      "这道题的四个选项"——只删工具栏/页头这类**外壳**。 */
+function pageTextFromDom(root) {
+  if (!root) return '';
+  let box = null, host = null;
+  try { box = root.cloneNode(true); } catch (e) { return ''; }
+  try {
+    box.querySelectorAll('script,style,noscript,svg,select,option,textarea,input,.toolbarRow,.pageHead,.tutHead,.tutSticky,.rail,.toast,.jdHead,.adResizeX,.adResizeY,.spinner,.sxi,.quizChatBox,.attachBar,.inputRow,.sessCol,.sessList').forEach(n => n.remove());
+    /* 按钮一般是操作壳子，删掉；但**选项类按钮是内容**（随堂测验的 A/B/C/D、
+       刷题的「对/错」），删了 AI 就看不到"这道题有哪几个选项"。 */
+    box.querySelectorAll('button,.btn').forEach(n => {
+      try {
+        if (n.matches('.quizOpt,.quizOpt *,[data-opt],.optBtn,.choice')) return;
+        n.remove();
+      } catch (e) {}
+    });
+    /* 折叠/隐藏的东西（<details> 收起后的内容、hidden 面板）用户此刻看不见，不算"当前页面" */
+    box.querySelectorAll('[hidden],[aria-hidden="true"]').forEach(n => n.remove());
+  } catch (e) {}
+  let s = '';
+  try {
+    host = document.createElement('div');
+    host.setAttribute('aria-hidden', 'true');
+    host.style.cssText = 'position:fixed;left:-10000px;top:0;width:900px;height:auto;overflow:hidden;pointer-events:none;z-index:-1;';
+    host.appendChild(box);
+    document.body.appendChild(host);
+    s = String(box.innerText || box.textContent || '');
+  } catch (e) { s = ''; }
+  finally {
+    try { if (host && host.parentNode) host.parentNode.removeChild(host); } catch (e) {}
+  }
+  return s.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+/* 教程页：正文在 iframe 里（坑 #14），主文档只有工具栏 —— 必须走 tutRoot()。
+   而且只带**当前这一节**：整篇几万字，带上去纯属浪费（服务端另有教程块）。 */
+function pageTextForTutorial() {
+  try {
+    const root = tutRoot();
+    if (!root) return '';
+    const cur = (window.__tutCur && window.__tutCur.idx) || 0;
+    const heads = root.querySelectorAll('h2, h3');
+    if (heads.length && heads[cur]) {
+      let txt = '';
+      let n = heads[cur].nextElementSibling;
+      txt = String(heads[cur].textContent || '');
+      while (n && !/^H[23]$/.test(n.tagName)) { txt += '\n' + String(n.innerText || n.textContent || ''); n = n.nextElementSibling; }
+      return txt.trim();
+    }
+    return String(root.innerText || root.textContent || '').trim();
+  } catch (e) { return ''; }
+}
+/* 采集"当前页面"：返回给服务端的 {label,title,route,text}；没有信息就返回 null */
+function collectPageContext() {
+  let r = null;
+  try { r = parseRoute(); } catch (e) { return null; }
+  /* 任何页面都要能采集（AI 助手是核心组件、全页面常驻）：
+     以前这里要求 aiRouteHasGoal(r)，导致首页/设置/资源库/组件/任务中心等页面
+     采集不到正文，AI 只能回"我看不到你当前页面"。 */
+  if (!r) return null;
+  const label = pageLabelOf(r);
+  const title = pageTitleOf(label);
+  let text = '';
+  try {
+    if (r.view === 'tutorial') text = pageTextForTutorial();
+    else if (r.view === 'chat') {
+      /* 对话页整页就是聊天记录 —— 它已经作为【最近的对话】进提示词了，
+         再抓一遍只会把同一段内容说两遍、挤掉别的上下文。只留标题。 */
+      text = '';
+    } else {
+      text = pageTextFromDom(document.getElementById('app'));
+    }
+  } catch (e) { text = ''; }
+  text = String(text || '').trim();
+  if (!text && !title) return null;
+  return { label, title, route: location.hash || '', text: text.slice(0, 20000) };
+}
+/* 当前路由有没有"目标上下文"：有才显示 AI 入口（首页/设置/组件管理/学习统计先不做）。 */
+function aiRouteHasGoal(r) {
+  let rr = r;
+  if (!rr) { try { rr = parseRoute(); } catch (e) { return false; } }
+  if (!rr) return false;
+  if (rr.view === 'goal' || rr.view === 'map' || rr.view === 'tutorial') return true;
+  /* 对话页本身就是 AI 助手（Vue 版）—— 再摆一个悬浮入口等于两套对话，反而更乱 */
+  if (rr.view === 'chat') return false;
+  if (rr.view === 'plugin') return true;      // 插件页一律算（页面自己会用 state.goal / loadGoal 绑定）
+  /* library / aitasks 是全局页（不一定有目标上下文）：归"全局助手"读，避免拿上一个目标的上下文瞎答 */
+  if (rr.view === 'versions' || rr.view === 'diff') return true;
+  return false;
+}
+/* 路由 → 它属于哪个目标。
+   ⚠️ 插件页（随堂测验 `#/t/:id/quiz`、看懂代码 `#/t/:id/explain`…）在 parseRoute 里是
+   `view:'plugin'`，既不是 tutorial 也不带目标 id —— 只能从 hash 里认：
+   `#/g/<gid>/...` 直接就是目标；`#/t/<tid>/...` 得问一次教程属于哪个目标（带缓存，
+   同一个教程只问一次；换教程/换设备都不影响，教程的 goal_id 不会变）。 */
+const _aiTutGoalCache = new Map();
+async function aiResolveRouteGoal(r) {
+  let rr = r;
+  if (!rr) { try { rr = parseRoute(); } catch (e) { return 0; } }
+  if (!rr) return 0;
+  if (rr.view === 'tutorial') return Number(state.tutGoalId || (state.tutGoal && state.tutGoal.id) || 0);
+  if (rr.view === 'goal' || rr.view === 'map' || rr.view === 'chat' || rr.view === 'versions' || rr.view === 'diff') return Number(rr.id || 0);
+  const h = location.hash || '';
+  const gm = h.match(/^#\/g\/(\d+)(?:\/|$)/);
+  if (gm) return Number(gm[1]);
+  const tm = h.match(/^#\/t\/(\d+)(?:\/|$)/);
+  if (tm) {
+    const tid = Number(tm[1]);
+    if (_aiTutGoalCache.has(tid)) return _aiTutGoalCache.get(tid);
+    try {
+      const res = await api('/api/tutorials/' + tid);
+      const gid = Number((res && res.tutorial && res.tutorial.goal_id) || 0);
+      _aiTutGoalCache.set(tid, gid);
+      return gid;
+    } catch (e) { return 0; }
+  }
+  return Number((state.goal && state.goal.id) || 0);
+}
+/* 当前 AI 助手绑定的目标 id；0 = 全局助手（无目标上下文）。显式 0 不能被 `||` 吞掉。 */
+function aiGid() {
+  if (state.aiGoalId != null) return Number(state.aiGoalId) || 0;
+  return Number((state.goal && state.goal.id) || state.tutGoalId || 0);
+}
+/* 每个页面渲染完之后同步一次 AI 助手：
+   ① 显示/隐藏悬浮入口；
+   ② 把对话绑到该页面对应的目标（换目标就换会话）；
+   ③ 重画"正在看：XX 页"那一条。 */
+let _aiSyncToken = 0;
+async function aiSyncRoute() {
+  const token = ++_aiSyncToken;
+  let r = null;
+  try { r = parseRoute(); } catch (e) { return; }
+  const fab = document.getElementById('aiFab');
+  const drw = document.getElementById('aiDrawer');
+  /* AI 助手是核心组件：**所有页面常驻**（只有对话页本身不再摆入口，避免两套对话）。
+     没有目标的页面（首页 / 设置 / 组件 / 资料库 / 任务中心…）绑定"全局助手"（goal_id=0），
+     它只读全站内容、负责回答与指路；有目标的页面照旧可改目标/条件/资料/教程。 */
+  const show = r.view !== 'chat';
+  if (fab) fab.classList.toggle('hidden', !show);
+  if (!show) {
+    if (drw) drw.classList.remove('open');
+    document.body.classList.remove('aiOpen');
+    return;
+  }
+  const hasGoalCtx = aiRouteHasGoal(r);
+  const gid = hasGoalCtx ? Number(await aiResolveRouteGoal(r) || 0) : 0;
+  if (token !== _aiSyncToken) return;   // 期间又切了页面：这次的结果作废
+  /* 组件开关：该目标关了「AI 助手」就别摆入口（跟原来的判定一致）。
+     目标数据不一定在 state.goal 里（插件页可能没 loadGoal），这时按全局开关判，
+     真发消息时服务端还有一道 403，不会绕过。 */
+  const g = (state.goal && Number(state.goal.id) === gid) ? state.goal
+    : (state.tutGoal && Number(state.tutGoal.id) === gid) ? state.tutGoal : null;
+  if (g && !goalCompOn(g, 'chat')) { if (fab) fab.classList.add('hidden'); return; }
+  if (fab) fab.classList.remove('hidden');
+  try { await aiBindGoal(gid); } catch (e) {}
+  if (token !== _aiSyncToken) return;   // 期间又切了页面：这次的结果作废
+  state.aiRouteGoalId = gid;
+  /* 页面自动建议范围：进「达成条件」页就建议「只改达成条件」（用户手动选过就不抢；
+     离开该页时自动还原成「自动」）。这样在条件页直接说"按 JD 重写条件"就不会去动路线图。 */
+  let scopeHint = '';
+  try { if (r.view === 'plugin' && r.pluginId === 'conditions') scopeHint = 'conditions'; } catch (e) {}
+  try { aiScopeAutoSuggest(scopeHint); } catch (e) {}
+  /* 抽屉跨页保持：用户上次开着就继续开着（以前只有目标页/路线图页恢复） */
+  const wantOpen = state.aiOpen != null ? state.aiOpen : (localStorage.getItem('sierxing-ai-open') === '1');
+  if (wantOpen) aiToggleLegacy(true, { silent: true });
+  aiPaintPageChip();
+}
+/* 抽屉里的「📄 正在看」那一条：让用户知道 AI 会读到这一页 */
+function aiPaintPageChip() {
+  const box = document.getElementById('adPage');
+  if (!box) return;
+  const p = (function () { try { return collectPageContext(); } catch (e) { return null; } })();
+  /* 没有绑定具体目标时是"全局助手"：告诉用户它能读全站，但修改要打开对应页面。 */
+  const globalMode = Number(state.aiGoalId) === 0;
+  if (!p) {
+    if (!globalMode) { box.hidden = true; box.innerHTML = ''; return; }
+    box.hidden = false;
+    box.innerHTML = '<span class="adPageLb">🌐 全局助手</span>'
+      + '<span class="adPageName">能读全站内容；要修改请打开对应目标页</span>'
+      + '<span class="adPageN" title="全局助手只读">只读</span>';
+    return;
+  }
+  box.hidden = false;
+  const chars = p.text ? p.text.length : 0;
+  const pageLabel = tr(p.label);
+  const pageTitle = tr(p.title || p.label);
+  box.innerHTML = '<span class="adPageLb">' + (globalMode ? tr('🌐 全局 · 正在看') : tr('📄 正在看')) + '</span>'
+    + '<span class="adPageName" title="' + esc(pageTitle + (chars ? tr('（{0} 字）', chars) : '')) + '">' + esc(pageLabel)
+    + (p.title && p.title !== p.label && pageTitle !== pageLabel ? tr('：') + esc(pageTitle.slice(0, 24)) : '') + '</span>'
+    + (globalMode ? '<span class="adPageN" title="' + esc(tr('可读全站内容；修改请打开对应目标页')) + '">' + esc(tr('只读')) + '</span>'
+      : (chars ? '<span class="adPageN">' + esc(tr('{0} 字', chars)) + '</span>' : ''));
+}
 /* ═══════════「它做了什么」：本轮看了什么上下文、调了哪些工具 ═══════════
    目的：让用户知道 AI 在回答 / 动手之前到底干了什么（而不是只看到一句"正在思考"）。
    三条规矩：
@@ -3092,6 +4521,9 @@ function chShortUrl(u) {
 }
 /* 一步 → 一句人话。返回 {ico, text, note} */
 function chStepSay(s) {
+  if (s && s.kind === 'create') {
+    return { ico: '🎨', text: s.label || '准备了一个可安装的插件', note: s.detail || '' };
+  }
   const inp = s.input || {};
   const tool = String(s.tool || '');
   const p = chShortPath(inp.path || inp.filePath || '');
@@ -3228,14 +4660,133 @@ function pendingEditHTML(p) {
     <div class="chPendTip" hidden></div>
   </div>`;
 }
+/* ===== 创造模式：对话里的「已生成」卡片 =====
+   AI 只负责准备文件（暂存在 DATA_DIR/agent-changes/<id>/），卡片上的按钮才是真正的"批准安装"。
+   刷新页面后卡片还在：服务端把 create 信息随 trace 步骤落库了（streamChat 的 pushStep）。 */
+const CREATE_KIND_LABEL = { 'ui-page': '页面插件', skin: '皮肤', component: '功能组件' };
+function chatCreateHTML(c) {
+  if (!c || !c.changeId) return '';
+  const kind = CREATE_KIND_LABEL[c.kind] || c.kind || '插件';
+  const files = (c.files || []).map(function (f) {
+    const kb = f.bytes ? (f.bytes / 1024).toFixed(1) + ' KB' : '';
+    return '<span class="chCreFile">' + esc(f.name) + (kb ? ' · ' + kb : '') + '</span>';
+  }).join('');
+  const warns = (c.warnings && c.warnings.length)
+    ? '<div class="chCreWarn">⚠️ ' + c.warnings.map(esc).join('；') + '</div>' : '';
+  return '<div class="chCreate" data-create="' + esc(c.changeId) + '" data-create-id="' + esc(c.id) + '"'
+    + ' data-create-name="' + esc(c.name) + '" data-create-kind="' + esc(c.kind) + '" data-create-route="' + esc(c.route || '') + '">'
+    + '<div class="chCreHead">🎨 已生成' + kind + '：<b>' + esc(c.name) + '</b> <span class="chCreId">' + esc(c.id) + '</span></div>'
+    + (c.summary ? '<div class="chCreSum">' + esc(c.summary) + '</div>' : '')
+    + '<div class="chCreFiles">' + files + '</div>'
+    + warns
+    + '<div class="chCreRow">'
+    + '<button class="btn small primary" data-create-act="install">安装并查看</button>'
+    + '<button class="btn small" data-create-act="code">查看代码</button>'
+    + '<button class="btn small" data-create-act="discard">放弃</button>'
+    + '</div>'
+    + '<div class="chCreCode" hidden></div>'
+    + '<div class="chCreTip">只装进数据目录，不改程序文件；装完不满意可以「撤销安装」。页面/皮肤在「界面管理」页可随时停用。</div>'
+    + '</div>';
+}
+function chatCreateInstalledHTML(c) {
+  const kind = CREATE_KIND_LABEL[c.kind] || c.kind || '插件';
+  const warn = (c.warnings && c.warnings.length) ? '<div class="chCreWarn">⚠️ ' + c.warnings.map(esc).join('；') + '</div>' : '';
+  return '<div class="chCreHead">✅ 已安装' + kind + '：<b>' + esc(c.name || c.id) + '</b> <span class="chCreId">' + esc(c.id) + '</span></div>'
+    + warn
+    + '<div class="chCreRow">'
+    + '<button class="btn small primary" data-create-act="reload">刷新查看</button>'
+    + '<button class="btn small" data-create-act="rollback" data-change="' + esc(c.changeId) + '">撤销安装</button>'
+    + '</div>';
+}
+async function chatCreateAct(card, act, btn) {
+  const cid = card.getAttribute('data-create');
+  if (!cid) return;
+  if (act === 'code') {
+    const box = card.querySelector('.chCreCode');
+    if (!box) return;
+    if (!box.hidden) { box.hidden = true; btn.textContent = '查看代码'; return; }
+    btn.disabled = true;
+    try {
+      const r = await api('/api/create/changes/' + encodeURIComponent(cid));
+      const files = (r.change && r.change.files) || [];
+      box.innerHTML = files.map(function (f) {
+        return '<div class="chCreFileHead">' + esc(f.name) + '</div><pre class="chCrePre">' + esc(f.code || '') + '</pre>';
+      }).join('');
+      box.hidden = false;
+      btn.textContent = '收起代码';
+    } catch (e) { toast('读取代码失败：' + e.message); }
+    btn.disabled = false;
+    return;
+  }
+  if (act === 'install') {
+    btn.disabled = true; btn.textContent = '安装中…';
+    try {
+      const r = await api('/api/create/changes/' + encodeURIComponent(cid) + '/install', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: true })
+      });
+      const name = card.getAttribute('data-create-name') || r.id;
+      card.innerHTML = chatCreateInstalledHTML(Object.assign({ changeId: cid, name: name, kind: card.getAttribute('data-create-kind'), id: r.id, warnings: r.warnings || [] }, r));
+      toast('✅ 已安装「' + (r.name || name) + '」，点「刷新查看」就能看到');
+    } catch (e) {
+      /* 刷新后卡片会回到「已生成」，但服务端记录是已安装 —— 这不算失败，直接切到已安装面板 */
+      if (String(e.message || '').indexOf('已经安装过') >= 0) {
+        const nm = card.getAttribute('data-create-name') || card.getAttribute('data-create-id');
+        card.innerHTML = chatCreateInstalledHTML({ changeId: cid, name: nm, kind: card.getAttribute('data-create-kind'), id: card.getAttribute('data-create-id'), warnings: [] });
+        toast('这个版本已经安装过了，点「刷新查看」即可；要改就再让 AI 生成一版');
+        return;
+      }
+      btn.disabled = false; btn.textContent = '安装并查看';
+      toast('安装失败：' + e.message);
+    }
+    return;
+  }
+  if (act === 'discard') {
+    btn.disabled = true;
+    try {
+      await api('/api/create/changes/' + encodeURIComponent(cid) + '/discard', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      card.classList.add('chCreGone');
+      card.innerHTML = '<div class="chCreHead">🗑 已放弃：' + esc(card.getAttribute('data-create-name') || card.getAttribute('data-create-id')) + '</div>';
+      toast('已放弃这次生成（没有改动任何东西）');
+    } catch (e) { btn.disabled = false; toast('放弃失败：' + e.message); }
+    return;
+  }
+  if (act === 'rollback') {
+    btn.disabled = true; btn.textContent = '撤销中…';
+    try {
+      const r = await api('/api/create/changes/' + encodeURIComponent(cid) + '/rollback', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      card.innerHTML = '<div class="chCreHead">↩️ 已撤销：' + esc(card.getAttribute('data-create-name') || r.id) + '</div>'
+        + '<div class="chCreRow"><button class="btn small" data-create-act="reload">刷新查看</button></div>';
+      toast('已撤销安装');
+    } catch (e) { btn.disabled = false; btn.textContent = '撤销安装'; toast('撤销失败：' + e.message); }
+    return;
+  }
+  if (act === 'reload') {
+    let route = card.getAttribute('data-create-route') || '';
+    if (route.indexOf(':id') >= 0) {
+      const gid = (state.goal && state.goal.id) || 0;
+      route = gid ? route.replace(':id', String(gid)) : '#/';
+    }
+    try { if (route) location.hash = route; } catch (e) {}
+    setTimeout(function () { location.reload(); }, 30);
+  }
+}
 function chatBubbleHTML(m, goalId) {
   const isUser = m.role === 'user';
   let ops = [];
   try { ops = JSON.parse(m.ops || '[]'); } catch (e) {}
   let trace = [];
   try { trace = JSON.parse(m.trace || '[]'); } catch (e) {}
+  let msgImgs = m.images;
+  if (typeof msgImgs === 'string') { try { msgImgs = JSON.parse(msgImgs || '[]'); } catch (e) { msgImgs = []; } }
+  if (!Array.isArray(msgImgs)) msgImgs = [];
+  const imgsLine = isUser && msgImgs.length
+    ? '<div class="chImgs">' + msgImgs.slice(0, 4).map(function (src) { return '<img src="' + esc(src) + '" alt="用户发的图片" loading="lazy">'; }).join('') + '</div>'
+    : '';
   const pend = ops.find(o => o && o.op === 'pending_edit');
   if (pend) { (state.pendingEdits || (state.pendingEdits = {}))[String(pend.tutorial_id)] = pend; }
+  /* 创造模式的卡片：优先用流式收尾时带的对象；刷新后从 trace 的 create 步骤还原 */
+  const createStep = !isUser ? trace.find(function (s) { return s && s.kind === 'create' && s.create; }) : null;
+  const createData = (!isUser && (m.create || (createStep && createStep.create))) || null;
   /* 「它做了什么」放在正文**上方**：它是这段回复的来路（看了什么、调了什么），
      和流式期间的展示位置一致，收尾时不会跳一下。 */
   const traceLine = (!isUser && trace.length) ? chTraceHTML(trace, chTraceIsOpen(m.id), false, m.id) : '';
@@ -3251,8 +4802,10 @@ function chatBubbleHTML(m, goalId) {
     <div class="chAvatar">${isUser ? '我' : 'AI'}</div>
     <div class="chBody">
       ${traceLine}
+      ${imgsLine}
       <div class="chText mdBody">${isUser ? esc(m.content).replace(/\n/g, '<br>') : mdToHTML(m.content)}</div>
       ${opsLine}
+      ${createData ? chatCreateHTML(createData) : ''}
       <div class="chTime">${esc(fmtDate(m.created_at))}</div>
     </div>
   </div>`;
@@ -3402,7 +4955,7 @@ function aiEnsureDOM() {
   const fab = document.createElement('button');
   fab.id = 'aiFab';
   fab.className = 'aiFab';
-  fab.title = '打开 AI 助手（改规划 / 存资料 / 加约束…）';
+  fab.title = '打开 AI 助手（能读到当前页面；也能改规划 / 存资料 / 加约束…）';
   fab.textContent = '💬';
   fab.addEventListener('click', () => aiToggle(true));
   document.body.appendChild(fab);
@@ -3422,6 +4975,8 @@ function aiEnsureDOM() {
       <select id="adSession" class="adSelect" title="切换历史对话"></select>
       <select id="adModel" class="adSelect adModel" title="选择模型"></select>
     </div>
+    <!-- 📄 正在看：当前页面的内容会随消息带给 AI（见 collectPageContext） -->
+    <div class="adPage" id="adPage" hidden></div>
     <div class="adMsgs" id="adMsgs"></div>
     <div class="adResizeY" id="adResizeY" title="上下拖动调整输入框高度（双击复位）"></div>
     <div class="adNodes" id="adNodes" hidden></div>
@@ -3436,19 +4991,37 @@ function aiEnsureDOM() {
           <span class="adModeItemTxt"><b>${esc(m.label)}</b><span class="adModeItemSub">${esc(m.short)}</span>
             <span class="adModeItemDesc">${esc(m.desc)}</span></span>
         </button>`).join('')}
-        <div class="adModePopN">ASK 里 AI 改不了任何东西；要让它动手就切 Agent。</div>
+        <div class="adModePopN">ASK 里 AI 改不了任何东西；要让它动手就切 Agent；想造新界面/新功能就切「创造」。</div>
+      </div>
+      <!-- 🎯 只改：钉死"这次只动哪一块"。不加这个，AI 会按自己的理解把别处也改了
+           （用户真实反馈：在达成条件页让 AI 按 JD 重写条件，结果它去改路线图节点）。 -->
+      <button class="adToolBtn" id="adScopeBtn" aria-haspopup="true" aria-expanded="false"
+        title="这次让 AI 只改哪一块（防止它改到别的地方）">
+        <span class="adModeIco" id="adScopeIco">🧭</span><span id="adScopeLabel">只改：自动</span><span class="adCare">▾</span>
+      </button>
+      <div class="adModePop adScopePop" id="adScopePop" hidden role="menu">
+        <div class="adModePopT">这次只改哪里</div>
+        ${AI_SCOPES.map(sc => `<button class="adModeItem" role="menuitemradio" data-ais="${sc.id}" aria-checked="false">
+          <span class="adModeItemIco">${sc.icon}</span>
+          <span class="adModeItemTxt"><b>${esc(sc.label)}</b><span class="adModeItemSub">${esc(sc.short)}</span>
+            <span class="adModeItemDesc">${esc(sc.desc)}</span></span>
+        </button>`).join('')}
+        <div class="adModePopN">选了之后，服务端会**只执行**这个范围里的操作；范围外的改动一律挡掉并告诉你。</div>
       </div>
       <!-- 📝 提示词 等插件工具按钮会追加到这里（见 plugins/aiprompts.js） -->
       <button class="adToolBtn" id="adNodeAdd" title="把一个或多个节点加进这次对话（可连子节点一起加）">＋ 节点</button>
       <button class="adToolBtn" id="adFnBtn" hidden>✨ AI 功能<span class="adCare">▾</span></button>
       <div class="adFnPop" id="adFnPop" hidden role="menu"></div>
     </div>
+    <div class="adImgs" id="adImgs" hidden></div>
+    <div class="adImgWarn" id="adImgWarn" hidden></div>
     <div class="adInput">
-      <textarea id="adText" rows="1" placeholder="可以让它：改路线图 / 把这段资料存进资料库 / 提炼全部资料 / 再收集些资料 / 加一条约束 / 改目标现状与时间（Enter 发送）"></textarea>
+      <textarea id="adText" rows="1" placeholder="可以让它：改路线图 / 把这段资料存进资料库 / 提炼全部资料 / 再收集些资料 / 加一条约束 / 改目标现状与时间（Enter 发送；也可以直接粘贴图片）"></textarea>
       <button class="adSendBtn" id="adSend" title="发送（Enter）">➤</button>
     </div>
     <div class="adResizeX" id="adResizeX" title="左右拖动调整侧边栏宽度（双击复位）"></div>`;
   document.body.appendChild(d);
+  try { aiBindImageInput(); } catch (e) {}   /* 输入框支持粘贴 / 拖入图片 */
   aiPaintNodes();   /* 侧边栏是懒创建的：此刻若这条对话已经带着节点，那排 🎯 标签要跟着画出来 */
   d.querySelector('#adClose').addEventListener('click', () => aiToggle(false));
   d.querySelector('#adNew').addEventListener('click', aiNewSession);
@@ -3486,6 +5059,24 @@ function aiEnsureDOM() {
     aiModeSet(it.getAttribute('data-aimode'));
     aiModePopOpen(false);
   });
+  /* 「🎯 只改」：点开菜单 → 选一个范围（写进 state，发消息时带给服务端） */
+  d.querySelector('#adScopeBtn').addEventListener('click', ev => {
+    ev.stopPropagation();
+    const pop = document.getElementById('adScopePop');
+    aiScopePopOpen(!!(pop && pop.hidden));
+  });
+  d.querySelector('#adScopePop').addEventListener('click', ev => {
+    const it = ev.target.closest && ev.target.closest('[data-ais]');
+    if (!it) return;
+    aiScopeSet(it.getAttribute('data-ais'));
+    aiScopePopOpen(false);
+  });
+  document.addEventListener('click', ev => {
+    const t = ev.target;
+    if (t && t.closest && (t.closest('#adScopePop') || t.closest('#adScopeBtn'))) return;
+    aiScopePopOpen(false);
+  }, true);
+  document.addEventListener('keydown', ev => { if (ev.key === 'Escape') aiScopePopOpen(false); });
   /* 点别处 / Esc 关闭。用捕获阶段 —— 面板里有不少按钮会 stopPropagation。 */
   document.addEventListener('click', ev => {
     if (!document.getElementById('adModePop')) return;
@@ -3506,6 +5097,13 @@ function aiEnsureDOM() {
     else aiSend();
   });
   d.querySelector('#adMsgs').addEventListener('click', async e => {
+    /* 创造模式的卡片按钮：安装 / 看代码 / 放弃 / 刷新 / 撤销（装在数据目录，可随时回滚） */
+    const creBtn = e.target.closest && e.target.closest('[data-create-act]');
+    if (creBtn) {
+      const creCard = creBtn.closest('.chCreate');
+      if (creCard) await chatCreateAct(creCard, creBtn.getAttribute('data-create-act'), creBtn);
+      return;
+    }
     const ok = e.target.closest('[data-pend-ok]');
     if (ok) {
       const tid = ok.getAttribute('data-pend-ok');
@@ -3545,7 +5143,8 @@ function aiEnsureDOM() {
     if (h) chTraceToggle(h);
   });
 }
-function aiToggle(open) {
+function aiToggleLegacy(open, opts) {
+  const o = opts || {};
   if (open && !goalCompOn(goalCtx(), 'chat')) { toast('「AI 助手」组件在本目标已关闭：目标页 🧩 可单独开启'); return; }
   aiEnsureDOM();
   state.aiOpen = open;
@@ -3555,7 +5154,32 @@ function aiToggle(open) {
   if (d) d.classList.toggle('open', open);
   if (fab) fab.classList.toggle('hidden', open);
   document.body.classList.toggle('aiOpen', !!open);
-  if (open) { aiApplyWidth(state.aiWidth || 440, false); aiApplyInputH(state.aiInputH || 60, false); aiFocusInput(); setTimeout(aiUpdateSendBtn, 0); }
+  if (open) {
+    aiApplyWidth(state.aiWidth || 440, false);
+    aiApplyInputH(state.aiInputH || 60, false);
+    try { aiPaintPageChip(); } catch (e) {}   // 「📄 正在看」跟着当前页面走
+    /* silent = 只是"切页面时把上次开着的抽屉恢复回来"：
+       这时候抢焦点会让用户刚点的链接/输入框失焦（以前只有目标页会恢复，所以没暴露）。 */
+    if (!o.silent) aiFocusInput();
+    setTimeout(aiUpdateSendBtn, 0);
+  }
+}
+/* 💬 入口统一走 Vue 对话页（有目标上下文就带目标；教程页带 tutorial_id；都没有就去选目标）。
+   旧抽屉只在 ?ui=legacy 或对话页加载失败时使用。 */
+function aiToggle(open) {
+  if (!open) return aiToggleLegacy(false);
+  try {
+    if (chatVueEnabled() && !window.__sxAiForceLegacy) {
+      const rr = parseRoute();
+      const tut = rr && rr.view === 'tutorial' ? Number(rr.id) : 0;
+      const gid = aiGid();
+      /* 没有目标上下文：就地打开全局助手抽屉（读全站、只读），别跳去空的对话页 */
+      if (!gid) return aiToggleLegacy(true);
+      location.hash = '#/g/' + gid + '/chat' + (tut ? '?tut=' + tut : '');
+      return;
+    }
+  } catch (e) {}
+  return aiToggleLegacy(true);
 }
 function aiAutoGrow() {
   const ta = document.getElementById('adText');
@@ -3711,10 +5335,13 @@ async function aiOpenNodeChat(id) {
   if (!n) return toast('这个节点还没加载好，稍后再试');
   const gid = Number(n.goal_id || (state.goal && state.goal.id) || 0);
   if (!gid) return;
-  aiToggle(true);
+  try {
+    if (chatVueEnabled()) { location.hash = '#/g/' + gid + '/chat?node=' + Number(id); return; }
+  } catch (e) {}
+  aiToggleLegacy(true);
   try {
     await ensureAIConfigured();
-    if (state.aiGoalId !== gid) { state.aiGoalId = gid; state.aiSessionId = 0; state.aiMsgs = []; await aiLoadModels(); await aiLoadSessions(gid); }
+    if (state.aiGoalId !== gid) { state.aiGoalId = gid; state.aiSessionId = 0; state.aiMsgs = []; try { aiImgsClear(); } catch (e) {} await aiLoadModels(); await aiLoadSessions(gid); }
     else if (!state.aiSessions) await aiLoadSessions(gid);
     let s = (state.aiSessions || []).find(x => Number(x.node_id) === Number(id));
     if (!s) {
@@ -3920,7 +5547,7 @@ function showNodePicker(selected, onOk) {
 }
 /* 侧边栏绑定到某目标的会话（目标页 / 导图页 / 教程页共用；同目标不重复加载） */
 async function aiBindGoal(gid) {
-  if (!gid) return;
+  gid = Number(gid) || 0;   // 0 = 全局助手（不绑定具体目标）
   if (state.aiGoalId !== gid) {
     state.aiGoalId = gid; state.aiSessionId = 0; state.aiMsgs = [];
     /* 换目标：附件与页面都跟着清（不然"聊的是节点"会指到上一个目标的节点上） */
@@ -3930,7 +5557,7 @@ async function aiBindGoal(gid) {
   else aiRender();
 }
 async function aiLoadSessions(goalId) {
-  if (!goalId) return;
+  if (goalId == null) return;
   state.aiSessions = state.aiSessions || [];
   try {
     const r = await api('/api/goals/' + goalId + '/chat-sessions');
@@ -3950,7 +5577,12 @@ async function aiLoadMsgs() {
   if (!state.aiSessionId) { state.aiMsgs = []; state.aiNodes = []; aiRender(); aiPaintNodes(); aiPaintFnBtn(); return; }
   try {
     const r = await api('/api/chat-sessions/' + state.aiSessionId + '/messages');
-    state.aiMsgs = r.messages || [];
+    state.aiMsgs = (r.messages || []).map(function (m) {
+      let im = [];
+      try { im = JSON.parse(m.images || '[]'); } catch (e) { im = []; }
+      if (!Array.isArray(im)) im = [];
+      return Object.assign({}, m, { images: im });
+    });
     state.aiModel = r.session.model || state.aiModel || '';
     /* 这条对话带着哪些节点：以服务端存的为准（右键节点进来、或上次＋添加节点加的都在里面） */
     state.aiNodes = aiNodesParse(r.session.nodes);
@@ -3960,6 +5592,7 @@ async function aiLoadMsgs() {
 async function aiSwitchSession(sid) {
   if (state.aiBusy) return toast('AI 正在回复，请稍候');
   state.aiSessionId = sid;
+  try { aiImgsClear(); } catch (e) {}
   const s = (state.aiSessions || []).find(x => x.id === sid);
   state.aiModel = (s && s.model) || '';
   /* 附件跟着会话走：切到哪条对话，就显示那条对话带着哪些节点（服务端存着的） */
@@ -3970,8 +5603,10 @@ async function aiSwitchSession(sid) {
   aiFocusInput();
 }
 async function aiNewSession() {
-  const gid = (state.goal && state.goal.id) || state.tutGoalId;
-  if (!gid) return toast('请先进入一个目标');
+  /* 先认"当前页面绑的那个目标"（aiSyncRoute 刚设过）：
+     插件页（随堂测验 / 看懂代码…）会自己 loadGoal，state.goal 不一定就是这一页的目标。 */
+  const gid = aiGid();
+  if (!gid && state.aiGoalId !== 0) return toast('请先进入一个目标');
   if (state.aiBusy) return toast('AI 正在回复，请稍候');
   try {
     const r = await api('/api/goals/' + gid + '/chat-sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: state.aiModel || '' }) });
@@ -4062,8 +5697,8 @@ function aiRenderMsgs() {
       <div class="ceText">意见会记在当前对话里（刷新也不丢），AI 在后台重写，完成后教程自动刷新。例如：<br>「第三章再展开讲讲，多给一个完整代码示例」<br>「练习换成更简单的，加一节常见报错排查」</div>
     </div>` : `<div class="chatEmpty">
       <div class="ceIcon">💬</div>
-      <div class="ceTitle">随时告诉我怎么改</div>
-      <div class="ceText">路线图定稿后也能继续调整。例如：<br>「第二阶段太笼统了，帮我拆成更细的任务」<br>「我已经会 Python 基础了，把相关的入门任务删掉」<br>「加一个 Docker 部署的任务，放在项目阶段最后」</div>
+      <div class="ceTitle">问这一页上的任何问题</div>
+      <div class="ceText">AI 会读到<b>当前页面</b>的内容（题目、代码、列表…），直接说「这道题」「这里」就行。例如：<br>「这道题为什么选 B？把错的那几个也讲讲」<br>「第 3 步没看懂，换个说法再讲一遍」<br>「第二阶段太笼统了，帮我拆成更细的任务」</div>
     </div>`;
   } else {
     const gid = state.goal ? state.goal.id : 0;
@@ -4106,6 +5741,132 @@ function aiRender() {
   aiRenderMsgs();
 }
 /* 发送键在工作时变成停止键 */
+/* ===== 对话图片：粘贴 / 拖入 → 压缩 → 随消息发送 ===== 
+   用户要求（2026-10-19）：助手输入框能直接粘贴图片；模型支持多模态就识别，
+   不支持就明确回一句「当前模型不支持识别图片」（服务端按模型能力判断，见 server.js）。
+   原图只随这次请求发给模型；数据库只存缩略图（刷新后还能看到自己发过什么）。 */
+const AI_IMG_MAX = 4;
+function aiImgs() { if (!Array.isArray(state.aiImgs)) state.aiImgs = []; return state.aiImgs; }
+function aiImgFit(img, max, q) {
+  const scale = Math.min(1, max / Math.max(img.width || 1, img.height || 1));
+  const w = Math.max(1, Math.round((img.width || 1) * scale));
+  const h = Math.max(1, Math.round((img.height || 1) * scale));
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const cx = cv.getContext('2d');
+  cx.fillStyle = '#fff'; cx.fillRect(0, 0, w, h);
+  cx.drawImage(img, 0, 0, w, h);
+  return cv.toDataURL('image/jpeg', q);
+}
+function aiImgFromFile(file) {
+  return new Promise(function (resolve, reject) {
+    if (!file || !/^image\//.test(String(file.type || ''))) return reject(new Error('不是图片文件'));
+    const fr = new FileReader();
+    fr.onload = function () {
+      const img = new Image();
+      img.onload = function () {
+        try {
+          resolve({
+            data: aiImgFit(img, 1400, 0.82),
+            thumb: aiImgFit(img, 320, 0.7),
+            w: img.width || 0, h: img.height || 0,
+            name: String(file.name || '粘贴的图片').slice(0, 40)
+          });
+        } catch (e) { reject(e); }
+      };
+      img.onerror = function () { reject(new Error('图片打不开')); };
+      img.src = String(fr.result || '');
+    };
+    fr.onerror = function () { reject(new Error('读图失败')); };
+    fr.readAsDataURL(file);
+  });
+}
+async function aiImgAddFiles(files) {
+  const list = Array.prototype.slice.call(files || []).filter(function (f) { return f && /^image\//.test(String(f.type || '')); });
+  if (!list.length) return;
+  const box = aiImgs();
+  for (const f of list) {
+    if (box.length >= AI_IMG_MAX) { toast('一次最多发 ' + AI_IMG_MAX + ' 张图片'); break; }
+    if (f.size > 20 * 1024 * 1024) { toast('图片太大（单张 ≤20MB）'); continue; }
+    try { box.push(await aiImgFromFile(f)); } catch (e) { toast('图片读取失败：' + (e.message || '未知')); }
+  }
+  aiImgsRender();
+}
+function aiImgsClear() {
+  state.aiImgs = [];
+  const box = document.getElementById('adImgs');
+  if (box) { box.hidden = true; box.innerHTML = ''; }
+  const warn = document.getElementById('adImgWarn');
+  if (warn) { warn.hidden = true; warn.textContent = ''; }
+}
+function aiImgsRender() {
+  const box = document.getElementById('adImgs');
+  if (!box) return;
+  const list = aiImgs();
+  box.hidden = !list.length;
+  box.innerHTML = list.map(function (it, i) {
+    return '<span class="adImgChip" title="' + esc(it.name || '图片') + '"><img src="' + esc(it.thumb || it.data) + '" alt="">'
+      + '<button class="adImgDel" data-aiimgdel="' + i + '" title="移除这张图">×</button></span>';
+  }).join('');
+  box.querySelectorAll('[data-aiimgdel]').forEach(function (b) {
+    b.addEventListener('click', function (ev) {
+      ev.preventDefault(); ev.stopPropagation();
+      const i = Number(b.getAttribute('data-aiimgdel'));
+      if (i >= 0) aiImgs().splice(i, 1);
+      aiImgsRender();
+    });
+  });
+  if (list.length) aiImgWarnCheck();
+  else { const w = document.getElementById('adImgWarn'); if (w) { w.hidden = true; w.textContent = ''; } }
+}
+let _aiImgWarnSeq = 0;
+async function aiImgWarnCheck() {
+  const warn = document.getElementById('adImgWarn');
+  if (!warn) return;
+  const seq = ++_aiImgWarnSeq;
+  const model = state.aiModel || '';
+  try {
+    const r = await api('/api/ai/can-vision?model=' + encodeURIComponent(model));
+    if (seq !== _aiImgWarnSeq) return;
+    if (r && r.ok) { warn.hidden = true; warn.textContent = ''; return; }
+    warn.hidden = false;
+    if (r && r.fallback_model) {
+      warn.textContent = 'ℹ️ 当前模型不直接识图；发图会自动用设置里的识图模型「' + r.fallback_model + '」识别，再把识别结果交给它回答。';
+      return;
+    }
+    warn.textContent = '⚠️ 模型「' + ((r && r.model) || model || '默认') + '」不支持识图，设置里也还没配识图模型，现在发图会直接提示。'
+      + ' 可以去「设置 → AI 接入方式」配一个识图模型，或换一个多模态模型。';
+  } catch (e) { warn.hidden = true; }
+}
+function aiBindImageInput() {
+  const ta = document.getElementById('adText');
+  if (!ta || ta.dataset.imgBound) return;
+  ta.dataset.imgBound = '1';
+  ta.addEventListener('paste', function (ev) {
+    const dt = ev.clipboardData;
+    if (!dt) return;
+    const files = [];
+    try {
+      for (const it of (dt.items || [])) {
+        if (it && it.kind === 'file') { const f = it.getAsFile(); if (f) files.push(f); }
+      }
+    } catch (e) {}
+    if (!files.length && dt.files && dt.files.length) {
+      for (const f of dt.files) files.push(f);
+    }
+    if (files.length) { ev.preventDefault(); aiImgAddFiles(files); }
+  });
+  ta.addEventListener('dragover', function (ev) {
+    try { if (ev.dataTransfer && Array.prototype.indexOf.call(ev.dataTransfer.types || [], 'Files') >= 0) ev.preventDefault(); } catch (e) {}
+  });
+  ta.addEventListener('drop', function (ev) {
+    const dt = ev.dataTransfer;
+    if (!dt) return;
+    const files = dt.files;
+    if (files && files.length) { ev.preventDefault(); aiImgAddFiles(files); }
+  });
+}
+
 function aiUpdateSendBtn() {
   const b = document.getElementById('adSend');
   if (!b) return;
@@ -4118,18 +5879,83 @@ function aiUpdateSendBtn() {
    存本机 localStorage —— 这是「我这次想怎么用」，跟目标无关，不需要多端同步。
    默认 ASK：出错的方向是"没帮上忙"，而不是"把你的教程改坏了"。 */
 function aiModeGet() {
-  try { return localStorage.getItem('sierxing-ai-mode') === 'agent' ? 'agent' : 'ask'; } catch (e) { return 'ask'; }
+  try {
+    const v = localStorage.getItem('sierxing-ai-mode');
+    return (v === 'agent' || v === 'create') ? v : 'ask';
+  } catch (e) { return 'ask'; }
+}
+/* ---- 「🎯 只改」范围 ---- */
+function aiScopeDef(id) { return AI_SCOPES.find(x => x.id === id) || AI_SCOPES[0]; }
+function aiScopeGet() { return aiScopeDef(state.aiScope).id; }
+/* 用户手动选：manual=true，之后切页面也不会被自动建议覆盖 */
+function aiScopeSet(id, opts) {
+  const o = opts || {};
+  const v = aiScopeDef(id).id;
+  const changed = state.aiScope !== v;
+  state.aiScope = v;
+  if (o.auto) { state.aiScopeManual = false; state.aiScopeAuto = true; }
+  else { state.aiScopeManual = true; state.aiScopeAuto = false; }
+  try { aiScopeRender(); } catch (e) {}
+  if (!o.silent && changed) {
+    if (v === 'auto') toast('🎯 已取消范围限制：AI 可以改任何地方');
+    else toast('🎯 这次只改「' + aiScopeDef(v).label + '」：超出这个范围的改动会被挡掉');
+  }
+}
+/* 页面自动建议（例如进了「达成条件」页就建议只改达成条件）。
+   ⚠️ 只在用户没手动选过时生效；离开那个页面再还原成「自动」。 */
+function aiScopeAutoSuggest(id) {
+  const v = id ? aiScopeDef(id).id : 'auto';
+  if (state.aiScopeManual) return;          // 用户自己钉过，别抢
+  if (!state.aiScopeAuto && state.aiScope !== 'auto') return;
+  if (state.aiScope === v) { if (v !== 'auto') state.aiScopeAuto = true; return; }
+  state.aiScope = v;
+  state.aiScopeAuto = v !== 'auto';
+  try { aiScopeRender(); } catch (e) {}
+}
+function aiScopePopOpen(on) {
+  const pop = document.getElementById('adScopePop');
+  const btn = document.getElementById('adScopeBtn');
+  if (!pop || !btn) return;
+  pop.hidden = !on;
+  btn.classList.toggle('open', !!on);
+  btn.setAttribute('aria-expanded', on ? 'true' : 'false');
+}
+function aiScopeRender() {
+  const def = aiScopeDef(state.aiScope);
+  const ico = document.getElementById('adScopeIco');
+  if (ico) ico.textContent = def.icon;
+  const lab = document.getElementById('adScopeLabel');
+  if (lab) lab.textContent = '只改：' + def.label;
+  const btn = document.getElementById('adScopeBtn');
+  if (btn) {
+    btn.classList.toggle('scopeOn', def.id !== 'auto');
+    btn.title = tr('这次的改动范围：{0} —— {1}（点击更换）', tr(def.label), tr(def.desc));
+  }
+  const pop = document.getElementById('adScopePop');
+  if (pop) {
+    for (const it of pop.querySelectorAll('[data-ais]')) {
+      const on = it.getAttribute('data-ais') === def.id;
+      it.classList.toggle('on', on);
+      it.setAttribute('aria-checked', on ? 'true' : 'false');
+    }
+  }
+  /* 输入框提示语跟着范围走：让用户一眼知道"现在说的话落到哪一块" */
+  try { aiRenderMode(); } catch (e) {}
 }
 function aiModeSet(m) {
-  const v = m === 'agent' ? 'agent' : 'ask';
+  const v = (m === 'agent' || m === 'create') ? m : 'ask';
   const changed = state.aiMode !== v;
   state.aiMode = v;
   try { localStorage.setItem('sierxing-ai-mode', v); } catch (e) {}
   aiRenderMode();
   if (!changed) return;   // 选的是当前模式：不弹提示、不啰嗦
-  toast(v === 'agent'
-    ? '已切到 Agent：AI 会先判断你的意图，需要改路线图 / 改教程时才动手'
-    : '已切到 ASK：只回答、不改动，AI 不会修改任何东西');
+  if (v === 'create') {
+    toast('🎨 创造模式：直接说想改哪个页面 / 换什么风格 / 加什么功能；生成后点「安装并查看」才生效');
+  } else if (v === 'agent') {
+    toast('已切到 Agent：AI 会先判断你的意图，需要改路线图 / 改教程时才动手');
+  } else {
+    toast('已切到 ASK：只回答、不改动，AI 不会修改任何东西');
+  }
 }
 /* 模式相关的界面：按钮选中态 + 输入框提示语（教程页与目标页的提示语不同） */
 /* 菜单开合（按钮、菜单项、说明都由 AI_MODES 生成） */
@@ -4142,16 +5968,19 @@ function aiModePopOpen(on) {
   btn.setAttribute('aria-expanded', on ? 'true' : 'false');
 }
 function aiRenderMode() {
-  if (state.aiMode !== 'ask' && state.aiMode !== 'agent') state.aiMode = aiModeGet();
-  const m = state.aiMode === 'agent' ? 'agent' : 'ask';
+  if (['ask', 'agent', 'create'].indexOf(state.aiMode) < 0) state.aiMode = aiModeGet();
+  const m = ['ask', 'agent', 'create'].indexOf(state.aiMode) >= 0 ? state.aiMode : 'ask';
   state.aiMode = m;
+  /* 「只改」是路线图/教程 ops 的范围限制，创造模式不适用 —— 收起来免得误导 */
+  const scopeBtnEl = document.getElementById('adScopeBtn');
+  if (scopeBtnEl) scopeBtnEl.hidden = (m === 'create');
   const cur = AI_MODES.find(x => x.id === m) || AI_MODES[0];
   const ico = document.getElementById('adModeIco');
   if (ico) ico.textContent = cur.icon;
   const lab = document.getElementById('adModeLabel');
   if (lab) lab.textContent = cur.label;
   const btn = document.getElementById('adModeBtn');
-  if (btn) btn.title = '执行模式：' + cur.label + ' —— ' + cur.desc + '（点击切换）';
+  if (btn) btn.title = tr('执行模式：{0} —— {1}（点击切换）', tr(cur.label), tr(cur.desc));
   const pop = document.getElementById('adModePop');
   if (pop) {
     for (const it of pop.querySelectorAll('[data-aimode]')) {
@@ -4164,11 +5993,23 @@ function aiRenderMode() {
   if (!ta) return;
   let onTut = false;
   try { onTut = parseRoute().view === 'tutorial'; } catch (e) {}
-  ta.placeholder = m === 'ask'
+  /* 常驻之后，提示语要跟着**当前页面**走：在随堂测验里问"这道题"和在目标页问"改路线图"
+     完全是两件事，写死一句会让人以为它只会改规划。 */
+  const pageLabel = (function () { try { const r = parseRoute(); return aiRouteHasGoal(r) ? pageLabelOf(r) : ''; } catch (e) { return ''; } })();
+  ta.placeholder = m === 'create'
+    ? '🎨 创造模式 · 说想改哪里、改成什么样，或想加什么功能。例：把首页改成暖色卡片风 / 在目标页加一个「专注计时」组件 / 把按钮都改圆一点'
+    : m === 'ask'
     ? (onTut ? 'ASK 模式 · 问这份教程的任何问题（不会修改它）。要改就切到 Agent。'
-             : 'ASK 模式 · 问规划 / 资料 / 进度，AI 只回答、不改动。要改就切到 Agent。')
+             : (pageLabel && pageLabel !== '目标概览页' && pageLabel !== '路线图页'
+               ? 'ASK 模式 · 问「' + pageLabel + '」这一页上的任何问题（AI 能读到页面内容）。要改就切到 Agent。'
+               : 'ASK 模式 · 问规划 / 资料 / 进度，AI 只回答、不改动。要改就切到 Agent。'))
     : (onTut ? 'Agent 模式 · 说你想怎么改这份教程（也可以直接提问，它会先判断），例如：1.2 ReAct 那节再展开讲讲'
-             : 'Agent 模式 · 可以让它：改路线图 / 把这段资料存进资料库 / 提炼全部资料 / 再收集些资料 / 加一条约束 / 改目标现状与时间');
+             : 'Agent 模式 · 可以让它：改路线图 / 改达成条件 / 把这段资料存进资料库 / 提炼全部资料 / 再收集些资料 / 加一条约束 / 改目标现状与时间');
+  /* 限定范围时，提示语直接说清"现在这句话会落到哪一块"，免得用户以为它还能改别处 */
+  if (m === 'agent') {
+    const sc = aiScopeDef(state.aiScope);
+    if (sc.id !== 'auto') ta.placeholder = 'Agent · 只改「' + sc.label + '」：直接说要把哪一条改成什么（超出范围的改动会被挡掉）。';
+  }
 }
 /* 把一条修改意见交给教程修改任务。两条来源共用：
    ① Agent 模式下 AI 判断出「用户要改教程」→ ops 里的 tutorial_edit
@@ -4195,8 +6036,11 @@ async function submitTutorialEdit(tid, feedback, opts) {
 }
 async function aiSend() {
   const ta = document.getElementById('adText');
-  const msg = (ta && ta.value || '').trim();
+  let msg = (ta && ta.value || '').trim();
+  const hasImgs = aiImgs().length > 0;
+  if (hasImgs && !msg) msg = '请看我发的图片。';   /* 只发图片也可以 */
   if (!msg) return;
+
   await aiSendText(msg, { ta, hostId: 'adMsgs', nodeIds: (state.aiNodes || []).map(a => ({ id: a.id, withKids: !!a.withKids })) });
 }
 /* 真正发消息的唯一实现：AI 助手侧边栏与节点「✨ AI 功能」弹窗共用。
@@ -4205,6 +6049,8 @@ async function aiSendText(msg, opts) {
   const o = opts || {};
   const ta = o.ta || null;
   if (state.aiBusy) return;
+  /* 这次要随消息发出去的图片（先在内存里拿一份：下面会清空输入区） */
+  const pendingImgs = aiImgs().slice(0, AI_IMG_MAX);
   // 教程页：消息作为修改意见，交给后台任务重写教程（记录记入当前会话，刷新也不丢；完成后自动刷新渲染）
   /* ⚠️ 这里以前是「只要在教程页，任何消息都当修改意见发出去」—— 用户只是想问一句，
      教程却被重写了。现在两种模式都走**同一个对话接口**，靠 mode 分流：
@@ -4220,8 +6066,15 @@ async function aiSendText(msg, opts) {
   }
   if (!(await ensureAIConfigured())) return;
   if (!msg) return;
-  const gid = state.aiGoalId || (state.goal && state.goal.id) || state.tutGoalId || 0;
-  if (!gid) return toast('请先进入一个目标');
+  const gid = aiGid();
+  if (!gid && state.aiGoalId !== 0) return toast('请先进入一个目标');
+  /* 常驻之后，消息可能在任意"有目标的页面"发出（随堂测验 / 刷题 / 看懂代码…）。
+     插件页会用自己的目标覆盖 state.goal，换目标就必须换会话 ——
+     否则 AI 拿着上一个目标的路线图回答这一页的问题。 */
+  if (state.aiGoalId !== gid) {
+    state.aiGoalId = gid; state.aiSessionId = 0; state.aiMsgs = [];
+    await aiLoadModels(); await aiLoadSessions(gid);
+  }
   /* 钉住的节点：随消息发给服务端（它会把这些节点和它们的子节点清单写进提示词，并落库到会话上）。
      指到别的目标去的一律作废，免得改错地方。 */
   const rawNodes = Array.isArray(o.nodeIds) ? o.nodeIds : [];
@@ -4234,7 +6087,11 @@ async function aiSendText(msg, opts) {
   state.aiHostId = o.hostId || 'adMsgs';
   if (ta) { ta.value = ''; state.aiDraft = ''; ta.style.height = 'auto'; }
   state.aiMsgs = state.aiMsgs || [];
-  state.aiMsgs.push({ id: 0, role: 'user', content: msg, ops: '[]', created_at: new Date().toISOString() });
+  state.aiMsgs.push({ id: 0, role: 'user', content: msg, ops: '[]', images: pendingImgs.map(function (x) { return x.thumb; }), created_at: new Date().toISOString() });
+  /* 当前页面内容：随这条消息一起发给服务端（提示词里会拼成【用户当前正在看的页面】）。
+     在**清空输入框之前**采集，用户还能看到页面上是什么；采集失败就当没有，不影响发消息。 */
+  let pageCtx = null;
+  try { pageCtx = collectPageContext(); } catch (e) { pageCtx = null; }
   state.aiBusy = true;
   state.aiAbort = new AbortController();
   state.aiStream = { text: '', thinking: '正在理解你的要求…', steps: [], t0: Date.now() };
@@ -4243,8 +6100,18 @@ async function aiSendText(msg, opts) {
   if (state.aiTick) clearInterval(state.aiTick);
   state.aiTick = setInterval(() => { if (state.aiStream) chatRenderStream(); }, 1000);
   try {
-    const resp = await fetch('/api/chat-sessions/' + state.aiSessionId + '/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: msg, mode: state.aiMode === 'ask' ? 'ask' : 'agent', tutorial_id: onTut ? Number(rrTut.id) : 0, node_ids: onTut ? [] : focusNodes }), signal: state.aiAbort.signal });
+    const reqBody = {
+      message: msg, mode: ['ask', 'agent', 'create'].indexOf(state.aiMode) >= 0 ? state.aiMode : 'agent',
+      tutorial_id: onTut ? Number(rrTut.id) : 0, node_ids: onTut ? [] : focusNodes,
+      page_context: pageCtx, edit_scope: aiScopeGet()
+    };
+    if (pendingImgs.length) {
+      reqBody.images = pendingImgs.map(function (x) { return x.data; });
+      reqBody.image_thumbs = pendingImgs.map(function (x) { return x.thumb; });
+    }
+    const resp = await fetch('/api/chat-sessions/' + state.aiSessionId + '/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reqBody), signal: state.aiAbort.signal });
     if (!resp.ok || !resp.body) throw new Error('无法连接对话服务');
+    if (pendingImgs.length) aiImgsClear();   /* 已经发出去了：清掉输入区的缩略图（消息气泡里还在） */
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
     let buf = '', finished = false;
@@ -4279,11 +6146,17 @@ async function aiSendText(msg, opts) {
             state.aiTraceOpenIds = state.aiTraceOpenIds || new Set();
             state.aiTraceOpenIds.add(Number(d.id));
           }
-          state.aiMsgs.push({ id: d.id, role: 'assistant', content: d.reply, ops: JSON.stringify(d.applied || []), version_id: d.versionId || 0, trace: JSON.stringify(steps), created_at: new Date().toISOString() });
+          state.aiMsgs.push({ id: d.id, role: 'assistant', content: d.reply, ops: JSON.stringify(d.applied || []), version_id: d.versionId || 0, trace: JSON.stringify(steps), create: (d.create && d.create.changeId) ? d.create : null, created_at: new Date().toISOString() });
+          if (d.create && d.create.changeId) toast('🎨 已生成「' + d.create.name + '」：确认没问题就点「安装并查看」');
           if (d.applied && d.applied.length) {
             const starts = d.applied.filter(x => x && x.op === 'start');
             const others = d.applied.filter(x => x && x.op !== 'start');
-            if (others.length) toast('已执行 ' + others.length + ' 项操作，可在目标页查看');
+            if (others.length) {
+              const condOps = others.filter(x => x && String(x.op || '').indexOf('condition') === 0).length;
+              toast(condOps && condOps === others.length
+                ? '达成条件已更新（' + condOps + ' 项）'
+                : '已执行 ' + others.length + ' 项操作，可在目标页查看');
+            }
             for (const st of starts) {
               setTimeout(() => {
                 if (st.action === 'digest') startDigest(state.goal.id);
@@ -4316,6 +6189,11 @@ async function aiSendText(msg, opts) {
       try { await loadGoal(state.goal.id); } catch (e) {}
       if (rr.view === 'library') renderLibraryPage();
       else rerenderCurrent();
+    }
+    /* 达成条件页是插件页：对话里用 condition_* ops 改了条件 / 归属后，这一页要重画，
+       否则用户看到的是"AI 说改了、页面上还是旧的"（真实踩过同类问题）。 */
+    else if (rr.view === 'plugin' && rr.pluginId === 'conditions' && rr.route && typeof rr.route.render === 'function') {
+      try { await rr.route.render(rr.match, window.SiErXing); } catch (e) {}
     }
   }
 }
@@ -6323,6 +8201,12 @@ function tutViewInit() {
   });
 }
 async function renderTutorialPage(tid, keepPos) {
+  /* Vue 模式下（默认）所有 "改完重绘教程" 的旧流程（手动保存 / 历史版本恢复 / AI 改版）
+     都统一重绘 Vue 阅读页；只有显式回退时才走旧渲染。 */
+  if (tutorialVueEnabled() && !window.__sxTutForceLegacy) {
+    try { if (await renderTutorialVue(tid)) return; } catch (e) { console.warn('[tutorial] Vue 重绘失败，回退旧版', e); }
+  }
+  window.__sxTutForceLegacy = false;
   if (mdInlineActive()) mdInlineClose(false);   // 换了页/重画整页：就地编辑框随之作废
   /* 同一个教程的**整页重画**（🕘 历史版本恢复、AI 改版、任务轮询）：先记下当前锚点，
      渲染完再对回去。否则正文被整段换掉时文档先变短，浏览器把滚动夹回顶部 ——
@@ -6343,6 +8227,7 @@ async function renderTutorialPage(tid, keepPos) {
   const r = await api('/api/tutorials/' + tid);
   const t = r.tutorial, node = r.node, goal = r.goal;
   state.tutGoalId = t ? t.goal_id : 0;   // 侧边栏绑定到该目标的会话（刷新也不丢记录）
+  state.tutGoalTid = t ? t.id : 0;       // 当前教程 id（左栏「路线图」按它认目标）
   state.tutGoal = goal || null;          // 教程语境目标：组件开关按它判定，不串到别的目标
   state.tutUpdatedAt = t ? (t.updated_at || '') : '';   // 任务轮询用它判断内容是否真变了
   await ensureCiteCache(t ? t.goal_id : 0);   // 正文里的 [id] 引用要能解释成节点/资料
@@ -6469,6 +8354,39 @@ async function renderTutorialPage(tid, keepPos) {
   try { window.__tutRenderedTid = Number(tid); } catch (e) {}
 }
 
+/* ---------- 版本对比图 Vue 版 ---------- */
+let diffVueUnmount = null;
+function diffVueEnabled() {
+  try {
+    const q = new URLSearchParams(location.search).get('ui');
+    if (q === 'legacy') return false;
+    if (q === 'vue') return true;
+    const saved = localStorage.getItem('sierxing-ui-diff');
+    if (saved === 'legacy') return false;
+    if (saved === 'vue') return true;
+  } catch (e) {}
+  return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+}
+async function renderDiffVue(gid, vid) {
+  const root = document.getElementById('app');
+  if (!root) return false;
+  if (diffVueUnmount) { try { diffVueUnmount(); } catch (e) {} diffVueUnmount = null; }
+  if (!document.querySelector('link[data-ui-page="diff"]')) {
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/diff.css'; l.setAttribute('data-ui-page', 'diff');
+    document.head.appendChild(l);
+  }
+  const mod = await import('/ui-dist/diff.js?v=' + Date.now());
+  if (!mod || typeof mod.mountDiffPage !== 'function') throw new Error('UI 插件没有导出 mountDiffPage');
+  diffVueUnmount = mod.mountDiffPage(root, { api: api, toast: toast, fmtDate: fmtDate, mdToHTML: mdToHTML, goalId: Number(gid) || 0, versionId: Number(vid) || 0 });
+  return true;
+}
+window.addEventListener('hashchange', function () {
+  if (diffVueUnmount && !/^#\/g\/\d+\/diff\/\d+/.test(location.hash)) {
+    try { diffVueUnmount(); } catch (e) {}
+    diffVueUnmount = null;
+  }
+});
 async function renderDiffPage(vid) {
   app.innerHTML = '<p class="muted">加载中…</p>';
   const data = await api('/api/versions/' + vid);
@@ -6567,6 +8485,39 @@ function bindVersionItems(root, goalId, after) {
   }));
 }
 /* 版本管理独立页：全部版本 + 筛选（收藏/手动保存） */
+/* ---------- 版本管理页 Vue 版（对比图仍走旧版） ---------- */
+let versionsVueUnmount = null;
+function versionsVueEnabled() {
+  try {
+    const q = new URLSearchParams(location.search).get('ui');
+    if (q === 'legacy') return false;
+    if (q === 'vue') return true;
+    const saved = localStorage.getItem('sierxing-ui-versions');
+    if (saved === 'legacy') return false;
+    if (saved === 'vue') return true;
+  } catch (e) {}
+  return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+}
+async function renderVersionsVue(gid) {
+  const root = document.getElementById('app');
+  if (!root) return false;
+  if (versionsVueUnmount) { try { versionsVueUnmount(); } catch (e) {} versionsVueUnmount = null; }
+  if (!document.querySelector('link[data-ui-page="versions"]')) {
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/versions.css'; l.setAttribute('data-ui-page', 'versions');
+    document.head.appendChild(l);
+  }
+  const mod = await import('/ui-dist/versions.js?v=' + Date.now());
+  if (!mod || typeof mod.mountVersionsPage !== 'function') throw new Error('UI 插件没有导出 mountVersionsPage');
+  versionsVueUnmount = mod.mountVersionsPage(root, { api: api, toast: toast, goalId: Number(gid) || 0, goalTitle: String((state.goal && state.goal.title) || '') });
+  return true;
+}
+window.addEventListener('hashchange', function () {
+  if (versionsVueUnmount && !/^#\/g\/\d+\/versions/.test(location.hash)) {
+    try { versionsVueUnmount(); } catch (e) {}
+    versionsVueUnmount = null;
+  }
+});
 async function renderVersionsPage(gid) {
   const g = state.goal;
   app.innerHTML = '<p class="muted">加载版本历史…</p>';
@@ -7317,6 +9268,8 @@ async function startExpand(id, feedback, answers) {
           state.expanded['t' + id] = true;
           state.expanded['g' + id] = true;
           state.expanded['s' + id] = true;
+          /* 刚拆出来的子任务在清单视图里默认收起，拆完要直接展开给人看 */
+          try { const fm = cardFoldState(d.goal.id); delete fm['tl-t' + id]; cardFoldSave(d.goal.id, fm); } catch (e) {}
           if (d.report) state.lastReport = { text: d.report, versionId: d.versionId, goalId: d.goal.id };
           toast('拆分完成：新增 ' + d.added + ' 个细任务');
         }
@@ -7765,11 +9718,19 @@ function filterTree(stages) {
 function listTaskHTML(t) {
   const st = ST_LABEL[t.status] ? t.status : 'todo';
   const srcN = (t.sourcesArr || []).length;
-  const kids = (t.children && t.children.length)
-    ? `<div class="tlKids">${t.children.map(listTaskHTML).join('')}</div>`
+  const gid = (state.goal && state.goal.id) || 0;
+  const hasKids = !!(t.children && t.children.length);
+  /* 折叠必须是**任意有子节点的任务**都能用，不能只有阶段/小目标能折。
+     深度拆分出来的子任务经常一个父节点挂十几个，全摊开会把页面撑爆，
+     所以任务层默认**收起**（点箭头才展开），状态跟其它折叠一起按目标记住。 */
+  const tKey = 'tl-t' + t.id;
+  const tClosed = hasKids ? foldClosed(gid, tKey, false) : false;
+  const kids = hasKids
+    ? `<div class="tlKids" data-foldbody="${tKey}"${tClosed ? ' hidden' : ''}>${t.children.map(listTaskHTML).join('')}</div>`
     : '';
   return `<div class="tlTaskWrap">
-    <div class="tlTask ${st}" data-node-id="${t.id}" data-detail="${t.id}" title="点击查看详情 · 右键打开菜单">
+    <div class="tlTask ${st}${hasKids ? ' hasKids' : ''}" data-node-id="${t.id}" data-detail="${t.id}" title="点击查看详情 · 右键打开菜单">
+      ${hasKids ? foldBtn(tKey, tClosed) : ''}
       <button class="stDot ${st}" data-cycle="${t.id}" title="点击切换状态">${st === 'done' ? '✓' : ''}</button>
       <span class="tlTaskTitle">${esc(t.title)}</span>
       ${t.artifact ? `<span class="tlArtifact" title="产出物：${esc(t.artifact)}">📦</span>` : ''}
@@ -7860,6 +9821,15 @@ async function renderContinueCard(gid) {
   </div>`;
 }
 function renderGoal() {
+  /* Vue 模式下所有 "改完重绘目标页" 的旧流程都重绘 Vue 概览；显式回退才走旧渲染。 */
+  try {
+    const rr = parseRoute();
+    if (rr.view === 'goal' && goalVueEnabled() && !window.__sxGoalForceLegacy) {
+      renderGoalVue(rr.id);
+      return;
+    }
+  } catch (e) {}
+  window.__sxGoalForceLegacy = false;
   const g = state.goal;
   if (!g) { app.innerHTML = '<p class="muted">目标不存在</p>'; return; }
   if (!state.aiStatus) {
@@ -8170,6 +10140,10 @@ function bindTreeEvents(rerender) {
     if (nd) nd.classList.toggle('open', open);
     state.expanded[key] = open;
     drawMapLines();
+    /* 展开/收起会改变树的可视尺寸（实测 1190 → 817），必须重新"适应屏幕"，
+       否则树贴到左边、右侧留一大片灰底（用户反馈的"右侧多一坨灰色空白"）。
+       延后一帧等布局完成再算，避免量到旧尺寸。 */
+    requestAnimationFrame(function () { try { mapFit(); } catch (e) {} });
   }));
   app.querySelectorAll('[data-expand]').forEach(btn => btn.addEventListener('click', e => {
     e.stopPropagation();
@@ -8188,6 +10162,8 @@ function bindTreeEvents(rerender) {
     if (arrow) arrow.textContent = open ? '▾' : '▸';
     state.expanded[key] = open;
     drawMapLines();
+    /* 同上：折叠/展开后重新适应屏幕，保持树居中 */
+    requestAnimationFrame(function () { try { mapFit(); } catch (e) {} });
   }));
   app.querySelectorAll('[data-detail]').forEach(el => el.addEventListener('click', e => {
     if (e.target.closest('button') || e.target.closest('[data-cycle]') || e.target.closest('.nodeOps')) return;
@@ -8664,7 +10640,7 @@ const GUIDE_STEPS = [
     <div class="gmCaption">填一个你自己的 Git 仓库地址即可，多台设备自动同步</div>`,
     html: `<p class="gdP">想让家里/公司两台电脑的数据自动同步？把<b>你自己的 Git 仓库</b>填进来就行（建议用私有仓库）：</p>
       <div class="gdSyncForm" id="gdSyncForm">
-        <input id="gdSyncRepo" placeholder="仓库地址，如 https://atomgit.com/你的用户名/sierxing-data.git">
+        <input id="gdSyncRepo" placeholder="${esc(tr('仓库地址，如 {0}', 'https://atomgit.com/your-username/sierxing-data.git'))}">
         <div class="gdSyncRow2">
           <input id="gdSyncUser" placeholder="用户名（可选，默认 oauth2）">
           <input id="gdSyncToken" type="password" placeholder="密码 / 访问令牌（私有仓库需要）">
@@ -8877,6 +10853,10 @@ function goalCtx() {
 }
 /* 按目标的组件开关（目标之间彻底隔离）：目标显式值 > 全局开关 > 默认值 */
 function goalCompOn(goal, id) {
+  /* 核心组件（AI 助手等）永远可用：旧目标里可能还存着当年关掉的 plugins.chat=false，
+     不能让它把核心能力挡住（这也是"不可关闭"的第三层保障）。 */
+  const meta = (state.componentList || []).find(x => x.id === id);
+  if (meta && meta.scope === 'core') return true;
   let obj = null;
   try { obj = JSON.parse((goal && goal.plugins) || '{}'); } catch (e) {}
   if (obj && obj[id] != null) return !!obj[id];
@@ -8952,7 +10932,49 @@ function libSourcesOfNode(n) {
   const list = safeParse(n.sources, []);
   return Array.isArray(list) ? list : [];
 }
+/* 资源库 Vue 只读版：默认启用；?ui=legacy 或 localStorage=sierxing-ui-library:legacy 回退旧版。
+   动作类（导入/清洗/补抓/提炼/索引）暂时留在旧版入口。 */
+let libraryVueUnmount = null;
+function libraryVueEnabled() {
+  try {
+    const q = new URLSearchParams(location.search).get('ui');
+    if (q === 'legacy') return false;
+    if (q === 'vue') return true;
+    const saved = localStorage.getItem('sierxing-ui-library');
+    if (saved === 'legacy') return false;
+    if (saved === 'vue') return true;
+  } catch (e) {}
+  return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+}
+function ensureLibraryVueCss() {
+  if (document.querySelector('link[data-ui-page="library"]')) return;
+  const l = document.createElement('link');
+  l.rel = 'stylesheet';
+  l.href = '/ui-dist/library.css';
+  l.setAttribute('data-ui-page', 'library');
+  document.head.appendChild(l);
+}
+async function renderLibraryPageVue() {
+  const root = document.getElementById('app');
+  if (!root) throw new Error('页面容器不存在');
+  if (libraryVueUnmount) { try { libraryVueUnmount(); } catch (e) {} libraryVueUnmount = null; }
+  ensureLibraryVueCss();
+  const mod = await import('/ui-dist/library.js?v=' + Date.now());
+  if (!mod || typeof mod.mountLibraryPage !== 'function') throw new Error('UI 插件没有导出 mountLibraryPage');
+  libraryVueUnmount = mod.mountLibraryPage(root, { api: api, toast: toast, mdToHTML: mdToHTML, fmtDate: fmtDate, safeParse: safeParse, goalId: state.goal ? state.goal.id : 0 });
+  return true;
+}
+window.addEventListener('hashchange', function () {
+  if (libraryVueUnmount && !/^#\/library/.test(location.hash)) {
+    try { libraryVueUnmount(); } catch (e) {}
+    libraryVueUnmount = null;
+  }
+});
 async function renderLibraryPage() {
+  if (libraryVueEnabled()) {
+    try { if (await renderLibraryPageVue()) return; }
+    catch (e) { console.warn('[library] Vue 页加载失败，回退旧版：', e && e.message); }
+  }
   app.innerHTML = '<p class="muted">加载资源库…</p>';
   if (!state.goals || !state.goals.length) { try { state.goals = (await api('/api/goals')).goals || []; } catch (e) {} }
   let g = state.goal && state.goal.nodes ? state.goal : null;
@@ -8995,7 +11017,7 @@ async function renderLibraryPage() {
         <span class="libStat">${sxi('book', 14)} 提炼汇总 <b>${digests.length}</b></span>
       </div>
       <div class="spacer"></div>
-      <select id="libGoal" class="libGoalSel sxi-sel">${goalOptions}</select>
+      ${sxiGoalPickHTML('libGoal', { value: g.id, goals: state.goals || [], compact: true, cls: 'libGoalPick' })}
       <button class="btn small" id="libRagBuild" title="把资料切片（配了向量模型则一并向量化）：规划/对话时按问题检索最相关片段">${sxi('spark')}检索索引</button>
       <button class="btn small" id="libDigest">${sxi('spark')}${digests.length ? '重新提炼' : '信息提炼'}</button>
       <button class="btn small" id="libClean" title="把抓网页时混进来的导航/推荐位/页脚/公众号引导这类垃圾文字从正文里去掉（原文会备份，可反复跑）">${sxi('sweep')}清洗资料</button>
@@ -9054,8 +11076,8 @@ async function renderLibraryPage() {
   h += `</div></div>`;
   app.innerHTML = h;
 
-  const gsel = document.getElementById('libGoal');
-  if (gsel) gsel.addEventListener('change', async () => { try { await loadGoal(Number(gsel.value)); } catch (e) {} renderLibraryPage(); });
+  /* 选目标：可搜索（目标一多，原生 select 展开是系统菜单、没法搜） */
+  sxiGoalPickBind('libGoal', { onPick: async function (gid) { if (!gid) return; try { await loadGoal(gid); } catch (e) {} renderLibraryPage(); } });
   /* 检索索引：状态 + 一键建立（切片/向量化，规划与对话会按问题检索它） */
   const lrb = document.getElementById('libRagBuild');
   if (lrb) lrb.addEventListener('click', async () => {
@@ -9070,7 +11092,7 @@ async function renderLibraryPage() {
     try {
       const st = await api('/api/rag/status?goalId=' + g.id);
       box.textContent = st.enabled
-        ? ('· 检索索引：' + st.embedded + '/' + st.chunks + ' 段已向量化' + (st.embConfigured ? '' : '（未配向量模型，按关键词检索）'))
+        ? (tr('· 检索索引：{0}/{1} 段已向量化', st.embedded, st.chunks) + (st.embConfigured ? '' : tr('（未配向量模型，按关键词检索）')))
         : '· 检索增强已关闭（设置 → 检索增强）';
     } catch (e) {}
   })();
@@ -9264,41 +11286,89 @@ async function renderLibraryPage() {
   }));
 }
 
-async function renderComponentsPage() {
-  const scrollY = window.scrollY || 0;          // 记住滚动位置，重渲染后恢复
-  app.innerHTML = '<p class="muted">加载组件…</p>';
-  const [r, catsRes, goalsRes] = await Promise.all([
-    api('/api/components'),
-    api('/api/component-categories').catch(() => ({ categories: [], used: {}, map: {} })),
-    api('/api/goals').catch(() => ({ goals: [] }))
-  ]);
-  const scopeGoals = (goalsRes.goals || []).map(g => ({ id: g.id, title: g.title }));
-  if (!state.compScope) state.compScope = 'global';
-  const scope = state.compScope;
-  const scopeGid = String(scope).startsWith('goal:') ? Number(String(scope).slice(5)) : 0;
-  const scopeGoal = scopeGoals.find(g => g.id === scopeGid) || null;
-  if (scopeGid && !scopeGoal) state.compScope = 'global';
-  // 目标范围内的各组件开关（只读本目标、不写别处）
-  let scopeEnabled = null, scopeConfig = null;
-  if (scopeGoal) {
-    try {
-      const pr = await api('/api/goals/' + scopeGoal.id + '/plugins');
-      scopeEnabled = pr.enabled || {}; scopeConfig = pr.config || {};
-    } catch (e) { scopeEnabled = {}; scopeConfig = {}; }
+/* ---------- 组件管理页 Vue 版（导入弹窗 / 卸载仍可回旧版） ---------- */
+let componentsVueUnmount = null;
+function componentsVueEnabled() {
+  try {
+    const q = new URLSearchParams(location.search).get('ui');
+    if (q === 'legacy') return false;
+    if (q === 'vue') return true;
+    const saved = localStorage.getItem('sierxing-ui-components');
+    if (saved === 'legacy') return false;
+    if (saved === 'vue') return true;
+  } catch (e) {}
+  return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+}
+function ensureComponentsVueCss() {
+  if (document.querySelector('link[data-ui-page="components"]')) return;
+  const l = document.createElement('link');
+  l.rel = 'stylesheet'; l.href = '/ui-dist/components.css'; l.setAttribute('data-ui-page', 'components');
+  document.head.appendChild(l);
+}
+async function renderComponentsVue() {
+  const root = document.getElementById('app');
+  if (!root) return false;
+  if (componentsVueUnmount) { try { componentsVueUnmount(); } catch (e) {} componentsVueUnmount = null; }
+  ensureComponentsVueCss();
+  const mod = await import('/ui-dist/components.js?v=' + Date.now());
+  if (!mod || typeof mod.mountComponentsPage !== 'function') throw new Error('UI 插件没有导出 mountComponentsPage');
+  componentsVueUnmount = mod.mountComponentsPage(root, { api: api, toast: toast });
+  return true;
+}
+window.addEventListener('hashchange', function () {
+  if (componentsVueUnmount && !/^#\/components/.test(location.hash)) {
+    try { componentsVueUnmount(); } catch (e) {}
+    componentsVueUnmount = null;
   }
-  state.components = r.enabled || {};
-  state.componentList = r.components || [];
-  state.componentPins = r.pins || state.componentPins || [];
-  state.componentCats = catsRes;                 // 分类实时刷新（新建后立即出现）
-  applyComponentStyles(r.styles || []);
-  const comps = r.components || [];
-  // 按分类分组：每个分类是一个模块，卡片放在所属模块里；改分类后卡片会真正搬过去
-  const groups = {};
-  for (const c of comps) { const k = c.category || '其它'; (groups[k] = groups[k] || []).push(c); }
-  const customOrder = (state.componentCats && state.componentCats.categories) || [];
-  const catRank = k => k === '核心组件' ? 0 : k === '基础功能组件' ? 1 : 99;
-  const catOrder = Object.keys(groups).concat(customOrder.filter(k => !groups[k])).filter((k, i, a) => a.indexOf(k) === i).sort((a, b) => {
-    const ra = catRank(a), rb = catRank(b);
+});
+/* ---------- 组件管理页（分类折叠 + 搜索） ---------- */
+/* ============================================================================
+ * 组件管理页（#/components）
+ * ----------------------------------------------------------------------------
+ * 两套视图共用同一套「按分类折叠 + 搜索」：
+ *   ① 全局默认（管所有目标）—— 分类模块 + 组件卡片；
+ *   ② 某个目标（只改本目标）—— 同样是「分类模块 + 组件卡片」，只是开关写 goals.plugins。
+ * 分类默认全部收起（只留标题行：图标 + 分类名 + 数量 + 展开按钮），
+ * 组件再多也不会铺满整屏；顶部搜索框按 名字/说明/id/分类/作者 过滤。
+ *
+ * 折叠状态与搜索词存 localStorage（本机显示偏好，不做多端同步）。
+ * ========================================================================== */
+
+/** 组件页显示偏好：折叠状态 + 搜索词（本机） */
+function cmpPrefs() {
+  const d = { collapsed: {}, q: '', goalCollapsed: {}, goalQ: '' };
+  try {
+    const raw = localStorage.getItem('sierxing-cmp-prefs');
+    if (raw) {
+      const o = JSON.parse(raw);
+      if (o && typeof o === 'object') {
+        if (o.collapsed && typeof o.collapsed === 'object') d.collapsed = o.collapsed;
+        if (o.goalCollapsed && typeof o.goalCollapsed === 'object') d.goalCollapsed = o.goalCollapsed;
+        d.q = typeof o.q === 'string' ? o.q : '';
+        d.goalQ = typeof o.goalQ === 'string' ? o.goalQ : '';
+      }
+    }
+  } catch (e) {}
+  return d;
+}
+function cmpPrefsSave(p) {
+  try { localStorage.setItem('sierxing-cmp-prefs', JSON.stringify(p || {})); } catch (e) {}
+}
+
+/** 组件是否命中搜索词（名字 / 说明 / id / 分类 / 作者 / 版本，空格分隔多个关键词） */
+function cmpMatchComponent(c, q) {
+  const kw = String(q || '').trim().toLowerCase();
+  if (!kw) return true;
+  const hay = [c.name, c.desc, c.id, c.category, c.author, c.version].filter(Boolean).join(' ').toLowerCase();
+  return kw.split(/\s+/).every(function (w) { return hay.indexOf(w) >= 0; });
+}
+
+/** 分类排序：核心、基础、用户自定义顺序、其它垫底 */
+function cmpSortCats(keys, cats) {
+  const customOrder = (cats && cats.categories) || [];
+  const rank = function (k) { return k === '核心组件' ? 0 : (k === '基础功能组件' ? 1 : 99); };
+  return keys.filter(function (k, i, a) { return a.indexOf(k) === i; }).sort(function (a, b) {
+    const ra = rank(a), rb = rank(b);
     if (ra !== rb) return ra - rb;
     const ia = customOrder.indexOf(a), ib = customOrder.indexOf(b);
     const na = ia < 0 ? 999 : ia, nb = ib < 0 ? 999 : ib;
@@ -9307,213 +11377,520 @@ async function renderComponentsPage() {
     if (b === '其它') return -1;
     return String(a).localeCompare(String(b), 'zh');
   });
-  const sw = (c) => `<label class="cmpSwitch" title="${c.scope === 'core' ? '核心组件不可关闭' : '开启 / 关闭'}">
-      <input type="checkbox" data-cmp="${esc(c.id)}" ${state.components[c.id] !== false ? 'checked' : ''} ${c.scope === 'core' ? 'disabled' : ''}>
-      <span class="cmpSlider"></span>
-    </label>`;
-  const catOptions = [...new Set([...customOrder, ...Object.keys(groups), '其它'])];
-const card = (c) => `<div class="cmpCard ${c.scope === 'core' ? 'isCore' : ''}">
-    <div class="cmpCardTop">
-      <span class="cmpIcon">${c.icon || '✨'}</span>
-      <div class="cmpName">${esc(c.name)}
-        ${c.scope === 'core' ? '<span class="chip gray">核心 · 不可关闭</span>' : ''}
-        ${c.kind === 'theme' ? '<span class="chip gray">主题皮肤</span>' : ''}
-        ${c.builtin ? '' : '<span class="chip">第三方组件</span>'}
-        ${c.goalToggle && c.scope !== 'core' ? '<span class="chip gray" title="可在新建目标时勾选；各目标也可单独开关、互不干扰">按目标启用</span>' : ''}
-        ${c.version ? `<span class="cmpVer">v${esc(c.version)}</span>` : ''}
-        ${c.author ? `<span class="cmpAuthor">by ${esc(c.author)}</span>` : ''}
-      </div>
-      <div class="cmpOps">
-        ${(c.kind === 'theme' || c.scope === 'theme') ? '<a class="btn tiny" href="#/settings/theme">去设置里选</a>' : sw(c)}</div>
-    </div>
-    <div class="cmpDesc">${esc(c.desc || '')}</div>
-    <div class="cmpCatRow">
-      <span class="cmpCatLabel">分类</span>
-      <select class="cmpCatSel" data-comp-cat="${esc(c.id)}">
-        ${catOptions.map(k => `<option value="${esc(k)}" ${k === (c.category || '其它') ? 'selected' : ''}>${esc(k)}</option>`).join('')}
-      </select>
-    </div>
-    ${c.builtin ? '' : `<div class="cmpCardOps">
-      <a class="btn tiny" href="/api/components/${esc(c.id)}/export">导出</a>
-      <button class="btn tiny danger" data-cmp-del="${esc(c.id)}">卸载</button>
-    </div>
-    <div class="cmpFiles">服务端 server/plugins/${esc(c.id)}.js${c.client ? ` · 前端 public/plugins/${esc(c.id)}.js` : ''}${c.hasStyle ? ` · 样式 public/plugins/${esc(c.id)}.css` : ''}</div>`}
-  </div>`;
-const modHint = (k, list) => {
+}
+
+/**
+ * 把组件按分类分组，并按当前搜索词过滤。
+ * @returns [{ key, items, total, empty }]  （搜索时没命中的分类整个不返回；空分类只在无搜索时返回）
+ */
+function cmpGroupComponents(items, cats, q) {
+  const groups = {};
+  for (const c of items) {
+    const k = c.category || '其它';
+    (groups[k] = groups[k] || []).push(c);
+  }
+  const customOrder = (cats && cats.categories) || [];
+  const keys = cmpSortCats(Object.keys(groups).concat(customOrder), cats);
+  const out = [];
+  for (const key of keys) {
+    const all = groups[key] || [];
+    const hit = q ? all.filter(function (c) { return cmpMatchComponent(c, q); }) : all;
+    if (q && !hit.length) continue;
+    out.push({ key: key, items: hit, total: all.length, empty: all.length === 0 });
+  }
+  return out;
+}
+
+/** 分类标题的小图标（纯观感：不同类别给个能认的图标，别让一坨字糊在一起） */
+function cmpCatIcon(key) {
+  const map = {
+    '核心组件': '🧭', '基础功能组件': '🧩', '主题与样式': '🎨', '外观主题': '🎨',
+    '学习与练习': '📚', '界面插件': '🖥', '效率工具': '⚡', '其它': '📦'
+  };
+  return map[key] || '🏷';
+}
+
+/** 分类模块的说明文字（按分类给不同提示，保留原有语义） */
+function cmpCatHint(key, list) {
   const hints = [];
-  if (k === '核心组件') hints.push('应用的基础能力，无法关闭。');
-  if (list.some(c => c.kind === 'theme')) hints.push('主题皮肤在「设置 → 外观主题」里分别为亮色 / 暗色模式选择；这里的开关对它不再生效。');
-  if (list.some(c => !c.builtin)) hints.push('独立文件组件，可以导出分享给别人，也可以卸载。带「按目标启用」的组件可在新建目标时勾选。');
-  if (!hints.length) hints.push('全局开关 = 新目标的默认值；已在目标里单独设置过的，以目标自己的设置为准、互不干扰。');
-  return `<p class="hint" style="margin:0 0 8px;">${hints.join('')}</p>`;
-};
-  let html = `<div class="page wide cmpPage">
-    <div class="pageHead">
-      <button class="back js-back" data-back="#/">← 返回</button>
-      <h2 class="title" style="margin-left:10px;">🧩 组件</h2>
-      <span class="hint" style="margin-left:10px;">功能与界面样式都由组件提供，可自由开关、导入分享</span>
-      <div class="spacer"></div>
-      <button class="btn small" id="cmpReload">↻ 重新加载</button>
-      <label class="btn small primary">⬆ 导入组件（可多选）<input type="file" id="cmpImport" accept=".json,application/json" multiple hidden></label>
-    </div>
-    <div class="sec">
-      <div class="secTitle">管理范围</div>
-      <div class="ppCats" id="cmpScopeBar">
-        <button type="button" class="ppCat ${scope === 'global' ? 'active' : ''}" data-scope="global">🌍 全局默认</button>
-        ${scopeGoals.map(g => `<button type="button" class="ppCat ${scope === 'goal:' + g.id ? 'active' : ''}" data-scope="goal:${g.id}">🎯 ${esc(g.title)}</button>`).join('')}
-      </div>
-      <p class="hint" style="margin:8px 0 0;">${scopeGoal
-        ? `正在管理「${esc(scopeGoal.title)}」：这里的开关只改这个目标，别的目标不受影响。`
-        : '全局开关 = 新目标的默认值，也管应用级组件（番茄钟浮窗、笔记面板等）；已经单独设置过的目标不受影响。'}</p>
-    </div>
-    ${scopeGoal ? `<div class="sec"><div class="secTitle">🎯 ${esc(scopeGoal.title)} 的组件（只改本目标）</div>
-      <p class="hint" style="margin:0 0 10px;">这里的开关<b>只写这一个目标</b>，其它目标完全不受影响。没单独设置过的组件，仍按🌍 全局默认走。</p>
-      <div class="cmpGrid">${goalManageableEntries({ id: scopeGoal.id, plugins: JSON.stringify(scopeConfig || {}) }).map(e => {
-        const on = SiErXing.pluginEnabled({ id: scopeGoal.id, plugins: JSON.stringify(scopeConfig || {}) }, e.id);
-        return `<div class="cmpCard"><div class="cmpCardTop">
-          <span class="cmpIcon">${e.icon || '🧩'}</span>
-          <div class="cmpName">${esc(e.name)}${e.desc ? `<div class="cmpDesc" style="margin-top:4px;">${esc(e.desc)}</div>` : ''}</div>
-          <div class="cmpOps"><label class="cmpSwitch" title="只改本目标">
-            <input type="checkbox" data-gcmp="${esc(e.id)}" ${on ? 'checked' : ''}><span class="cmpSlider"></span>
-          </label></div>
-        </div></div>`; }).join('')}</div>
-    </div>` : ''}
-    ${(() => {
-      // 选了某个目标时，下面的全局开关会"看起来"也属于这个目标，很容易误改到所有目标。
-      // 所以把它们整体折叠起来，并明确标注作用域。
-      const inner = `
-      <div class="sec">
-        <div class="secTitle">分类管理</div>
-        <p class="hint" style="margin:0 0 10px;">分类用于整理组件，也可以在「新建目标」时<b>按分类批量选择</b>组件。可以新建/重命名/删除分类，并把任意组件移动到别的分类。</p>
-        <div class="catList" id="catList"></div>
-        <div class="consAdd" style="margin-top:10px;">
-          <input type="text" id="catNewName" placeholder="新建分类，例如：学习成长 / 效率工具 / 我的收藏">
-          <button class="btn small primary" id="catAddBtn">新建分类</button>
-        </div>
-      </div>
-      <div class="cmpCols">${catOrder.map(k => `<div class="sec" data-catmod="${esc(k)}"><div class="secTitle">${esc(k)}<span class="muted" style="font-weight:400;font-size:12px;">（${(groups[k] || []).length}）</span></div>
-        ${modHint(k, groups[k] || [])}
-        ${(groups[k] || []).length ? `<div class="cmpGrid">${groups[k].map(c => card(c)).join('')}</div>` : '<div class="muted" style="font-size:13px;">（空分类：把某个组件的分类改到这里，它就会搬过来）</div>'}
-      </div>`).join('')}</div>
-      <div class="sec"><div class="secTitle">分享组件</div>
-        <p class="hint" style="line-height:1.9;">
-          · 导出：点组件的「导出」得到 <code>*.component.json</code> 文件（含服务端代码、前端代码与样式），发给别人即可<br>
-          · 导入：点右上「导入组件」选择该文件，组件会立刻装好并可开关<br>
-          · 自己写一个：把 <code>server/plugins/xxx.js</code>（声明元数据 + 接口 + 建表）和 <code>public/plugins/xxx.js</code>（界面）、<code>public/plugins/xxx.css</code>（样式）放进去即可，详见 README「插件开发」
-        </p>
-      </div>`;
-      if (!scopeGoal) return inner;
-      return `<details class="cmpGlobalFold"><summary>🌍 全局组件与分类（下面的开关影响<b>所有</b>目标，别在这里改单个目标）</summary>${inner}</details>`;
-    })()}
-  </div>`;
+  if (key === '核心组件') hints.push(tr('应用的基础能力，无法关闭。'));
+  if ((list || []).some(function (c) { return c.kind === 'theme' || c.scope === 'theme'; })) {
+    hints.push(tr('主题皮肤在「设置 → 外观主题」里分别为亮色 / 暗色模式选择；这里的开关对它不生效。'));
+  }
+  if ((list || []).some(function (c) { return !c.builtin; })) {
+    hints.push(tr('独立文件组件可以导出分享或卸载；带「按目标启用」的组件可在新建目标时勾选。'));
+  }
+  return hints.join('');
+}
+
+/** 一个可折叠的分类模块（标题行整行可点） */
+function cmpCatSectionHTML(o) {
+  // o: key, total, hit, collapsed, bodyHTML, hint
+  const folded = !!o.collapsed;
+  const cnt = o.hit != null && o.hit !== o.total ? tr('{0} 个 · 命中 {1}', o.total, o.hit) : tr('{0} 个', o.total);
+  return '<section class="cmpCatMod' + (folded ? ' isFolded' : '') + '" data-cmp-cat="' + esc(o.key) + '">' +
+    '<button type="button" class="cmpCatHead" data-cmp-fold="' + esc(o.key) + '" aria-expanded="' + (folded ? 'false' : 'true') + '">' +
+      '<span class="cmpCatFold" aria-hidden="true">' + (folded ? '▸' : '▾') + '</span>' +
+      '<span class="cmpCatIcon" aria-hidden="true">' + cmpCatIcon(o.key) + '</span>' +
+      '<span class="cmpCatName">' + esc(tr(o.key)) + '</span>' +
+      '<span class="cmpCatBadge">' + cnt + '</span>' +
+      '<span class="spacer"></span>' +
+      '<span class="cmpCatAct">' + esc(folded ? tr('展开') : tr('收起')) + '</span>' +
+    '</button>' +
+    '<div class="cmpCatBody"' + (folded ? ' hidden' : '') + '>' +
+      (o.hint ? '<p class="hint cmpCatHint">' + o.hint + '</p>' : '') +
+      (o.bodyHTML || '<div class="cmpEmpty">（这个分类里还没有组件 —— 把某个组件的「分类」改成它，就会搬过来）</div>') +
+    '</div>' +
+  '</section>';
+}
+
+/** 顶部搜索框 */
+function cmpSearchHTML(o) {
+  const q = String(o.value || '');
+  return '<div class="cmpSearch">' +
+    '<span class="cmpSearchIcon" aria-hidden="true">🔍</span>' +
+    '<input type="search" id="' + esc(o.id) + '" class="cmpSearchInput" value="' + esc(q) + '" placeholder="' + esc(tr(o.placeholder || '搜索组件：名字 / 说明 / id / 分类')) + '" autocomplete="off" spellcheck="false" aria-label="' + esc(tr('搜索组件')) + '">' +
+    (q ? '<button type="button" class="cmpSearchClear" data-cmp-search-clear="' + esc(o.id) + '" title="清空搜索">×</button>' : '') +
+    '<span class="cmpSearchCount">' + (q ? tr('命中 {0} / {1}', o.hit, o.total) : tr('共 {0} 个组件', o.total)) + '</span>' +
+  '</div>';
+}
+
+/** 全局组件卡片 */
+function cmpCardHTML(c, catOptions, enabled) {
+  const on = enabled[c.id] !== false;
+  const isTheme = (c.kind === 'theme' || c.scope === 'theme');
+  const chips = [];
+  if (c.scope === 'core') chips.push('<span class="chip gray">核心 · 不可关闭</span>');
+  if (isTheme) chips.push('<span class="chip gray">主题皮肤</span>');
+  if (!c.builtin) chips.push('<span class="chip">第三方组件</span>');
+  if (c.goalToggle && c.scope !== 'core' && !isTheme) chips.push('<span class="chip gray" title="可在新建目标时勾选；各目标也可单独开关">按目标启用</span>');
+  if (c.version) chips.push('<span class="cmpVer">v' + esc(c.version) + '</span>');
+  if (c.author) chips.push('<span class="cmpAuthor">' + esc(tr('by {0}', tr(c.author))) + '</span>');
+  return '<div class="cmpCard' + (c.scope === 'core' ? ' isCore' : '') + (on ? '' : ' isOff') + '">' +
+    '<div class="cmpCardTop">' +
+      '<span class="cmpIcon">' + (c.icon || '✨') + '</span>' +
+      '<div class="cmpName">' + esc(tr(c.name)) + chips.join('') + '</div>' +
+      '<div class="cmpOps">' + (isTheme
+        ? '<a class="btn tiny" href="#/settings/theme">去设置里选</a>'
+        : '<label class="cmpSwitch" title="' + esc(tr(c.scope === 'core' ? '核心组件不可关闭' : '开启 / 关闭')) + '">' +
+            '<input type="checkbox" data-cmp="' + esc(c.id) + '"' + (on ? ' checked' : '') + (c.scope === 'core' ? ' disabled' : '') + '>' +
+            '<span class="cmpSlider"></span>' +
+          '</label>') +
+      '</div>' +
+    '</div>' +
+    (c.desc ? '<div class="cmpDesc">' + esc(tr(c.desc)) + '</div>' : '') +
+    '<div class="cmpCatRow">' +
+      '<span class="cmpCatLabel">分类</span>' +
+      '<select class="cmpCatSel sxi-sel sxi-sel-sm" data-comp-cat="' + esc(c.id) + '" title="选择其它分类，卡片会立刻搬过去">' +
+        catOptions.map(function (k) { return '<option value="' + esc(k) + '"' + (k === (c.category || '其它') ? ' selected' : '') + '>' + esc(tr(k)) + '</option>'; }).join('') +
+      '</select>' +
+      (!c.builtin ? '<span class="cmpCardLinks">' +
+        '<a class="btn tiny" href="/api/components/' + esc(c.id) + '/export">导出</a>' +
+        '<button class="btn tiny danger" data-cmp-del="' + esc(c.id) + '">卸载</button>' +
+      '</span>' : '') +
+    '</div>' +
+    (!c.builtin ? '<div class="cmpFiles">' + esc(tr('服务端')) + ' server/plugins/' + esc(c.id) + '.js' +
+      (c.client ? ' · ' + esc(tr('前端')) + ' public/plugins/' + esc(c.id) + '.js' : '') +
+      (c.hasStyle ? ' · ' + esc(tr('样式')) + ' public/plugins/' + esc(c.id) + '.css' : '') + '</div>' : '') +
+  '</div>';
+}
+
+/** 按目标组件卡片（只改本目标） */
+function cmpGoalCardHTML(e, on) {
+  return '<div class="cmpCard' + (on ? '' : ' isOff') + '">' +
+    '<div class="cmpCardTop">' +
+      '<span class="cmpIcon">' + (e.icon || '🧩') + '</span>' +
+      '<div class="cmpName">' + esc(e.name) + (e.desc ? '<div class="cmpDesc">' + esc(e.desc) + '</div>' : '') + '</div>' +
+      '<div class="cmpOps"><label class="cmpSwitch" title="只改本目标（其它目标不受影响）">' +
+        '<input type="checkbox" data-gcmp="' + esc(e.id) + '"' + (on ? ' checked' : '') + '><span class="cmpSlider"></span>' +
+      '</label></div>' +
+    '</div>' +
+  '</div>';
+}
+
+/** 分类管理块（新建 / 重命名 / 删除） */
+function cmpCatManageHTML(catsInfo) {
+  const cats = (catsInfo && catsInfo.categories) || [];
+  const used = (catsInfo && catsInfo.used) || {};
+  return '<div class="sec cmpCatManage">' +
+    '<p class="hint" style="margin:0 0 10px;">分类用于整理组件，也可以在「新建目标」时<b>按分类批量选择</b>组件。</p>' +
+    '<div class="catList" id="catList">' + (cats.length
+      ? cats.map(function (c) {
+          return '<span class="catItem">' +
+            '<span class="catName">' + esc(c) + '</span>' +
+            '<span class="catCount">' + (used[c] || 0) + '</span>' +
+            '<button class="catOp" data-cat-rename="' + esc(c) + '" title="重命名">✎</button>' +
+            '<button class="catOp danger" data-cat-del="' + esc(c) + '" title="删除（组件回到「其它」）">×</button>' +
+          '</span>';
+        }).join('')
+      : '<span class="muted" style="font-size:12.5px;">还没有自定义分类（组件使用插件自带的分类）</span>') +
+    '</div>' +
+    '<div class="consAdd" style="margin-top:10px;">' +
+      '<input type="text" id="catNewName" placeholder="新建分类，例如：学习成长 / 效率工具 / 我的收藏">' +
+      '<button class="btn small primary" id="catAddBtn">新建分类</button>' +
+    '</div>' +
+  '</div>';
+}
+
+async function renderComponentsPage() {
+  const scrollY = window.scrollY || 0;          // 记住滚动位置，重渲染后恢复
+  const prefs = cmpPrefs();
+  app.innerHTML = '<p class="muted">加载组件…</p>';
+  const [r, catsRes, goalsRes] = await Promise.all([
+    api('/api/components'),
+    api('/api/component-categories').catch(function () { return { categories: [], used: {}, map: {} }; }),
+    api('/api/goals').catch(function () { return { goals: [] }; })
+  ]);
+  const scopeGoals = (goalsRes.goals || []).map(function (g) { return { id: g.id, title: g.title }; });
+  if (!state.compScope) state.compScope = 'global';
+  const scope = state.compScope;
+  const scopeGid = String(scope).startsWith('goal:') ? Number(String(scope).slice(5)) : 0;
+  const scopeGoal = scopeGoals.find(function (g) { return g.id === scopeGid; }) || null;
+  if (scopeGid && !scopeGoal) state.compScope = 'global';
+  // 目标范围内的各组件开关（只读本目标、不写别处）
+  let scopeConfig = null;
+  if (scopeGoal) {
+    try {
+      const pr = await api('/api/goals/' + scopeGoal.id + '/plugins');
+      scopeConfig = pr.config || {};
+    } catch (e) { scopeConfig = {}; }
+  }
+  state.components = r.enabled || {};
+  state.componentList = r.components || [];
+  state.componentPins = r.pins || state.componentPins || [];
+  state.componentCats = catsRes;                 // 分类实时刷新（新建后立即出现）
+  applyComponentStyles(r.styles || []);
+  const comps = r.components || [];
+  const catsInfo = state.componentCats || { categories: [], used: {} };
+  // 分类下拉的可选项：自定义分类 + 现有分类 + 兜底「其它」
+  const catOptions = [];
+  for (const k of [].concat((catsInfo.categories || []), comps.map(function (c) { return c.category || '其它'; }), ['其它'])) {
+    if (catOptions.indexOf(k) < 0) catOptions.push(k);
+  }
+  // 目标视图的条目（只读本目标 + 附带分类/图标/说明）
+  const goalItems = scopeGoal ? goalManageableEntries({ id: scopeGoal.id, plugins: JSON.stringify(scopeConfig || {}) }).map(function (e) {
+    const meta = comps.find(function (c) { return c.id === e.id; }) || {};
+    return {
+      id: e.id,
+      name: e.name || e.id,
+      icon: e.icon || meta.icon || '🧩',
+      desc: e.desc || meta.desc || '',
+      category: meta.category || '其它'
+    };
+  }) : [];
+  const goalOn = function (id) { return SiErXing.pluginEnabled({ id: scopeGoal.id, plugins: JSON.stringify(scopeConfig || {}) }, id); };
+
+  /* ---------- 局部重绘：只重画分类列表，保住搜索框焦点与折叠状态 ---------- */
+  function paintGlobalList() {
+    const box = document.getElementById('cmpCatList');
+    if (!box) return;
+    const groups = cmpGroupComponents(comps, catsInfo, prefs.q);
+    box.innerHTML = groups.length ? groups.map(function (g) {
+      const body = g.items.length ? '<div class="cmpGrid">' + g.items.map(function (c) { return cmpCardHTML(c, catOptions, state.components); }).join('') + '</div>' : '';
+      return cmpCatSectionHTML({ key: g.key, total: g.total, hit: g.items.length, collapsed: cmpFolded('collapsed', g.key), bodyHTML: body, hint: cmpCatHint(g.key, g.items) });
+    }).join('') : '<div class="cmpEmpty">' + (prefs.q ? ('没有匹配「' + esc(prefs.q) + '」的组件') : '还没有组件') + '</div>';
+    bindCatFold(box, 'collapsed');
+    bindCardOps(box);
+    try { sxiSelify(box); } catch (e) {}
+    paintSearchCount('cmpSearch', groups);
+  }
+  function paintGoalList() {
+    const box = document.getElementById('cmpGoalCatList');
+    if (!box) return;
+    const groups = cmpGroupComponents(goalItems, catsInfo, prefs.goalQ);
+    box.innerHTML = groups.length ? groups.map(function (g) {
+      const body = g.items.length ? '<div class="cmpGrid">' + g.items.map(function (e) { return cmpGoalCardHTML(e, goalOn(e.id)); }).join('') + '</div>' : '';
+      return cmpCatSectionHTML({ key: g.key, total: g.total, hit: g.items.length, collapsed: cmpFolded('goalCollapsed', g.key), bodyHTML: body, hint: cmpCatHint(g.key, g.items) });
+    }).join('') : '<div class="cmpEmpty">' + (prefs.goalQ ? ('没有匹配「' + esc(prefs.goalQ) + '」的组件') : '这个目标还没有可单独开关的组件') + '</div>';
+    bindCatFold(box, 'goalCollapsed');
+    bindGoalToggles(box);
+    paintSearchCount('cmpGoalSearch', groups);
+  }
+  /** 折叠状态：默认全收起；用户在本次会话/本机展开过就按记录来 */
+  function cmpFolded(key, cat) {
+    const o = prefs[key] || {};
+    return o[cat] === undefined ? true : !!o[cat];
+  }
+  function paintSearchCount(id, groups) {
+    const input = document.getElementById(id);
+    const wrap = input && input.closest('.cmpSearch');
+    const cnt = wrap && wrap.querySelector('.cmpSearchCount');
+    if (!cnt) return;
+    const isGoal = id === 'cmpGoalSearch';
+    const q = isGoal ? prefs.goalQ : prefs.q;
+    const total = isGoal ? goalItems.length : comps.length;
+    const hit = groups.reduce(function (n, g) { return n + g.items.length; }, 0);
+    cnt.textContent = q ? ('命中 ' + hit + ' / ' + total) : ('共 ' + total + ' 个组件');
+  }
+
+  /* ---------- 事件绑定 ---------- */
+  /** 分类标题：展开 / 收起（记住状态） */
+  function bindCatFold(root, prefKey) {
+    root.querySelectorAll('[data-cmp-fold]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const key = btn.getAttribute('data-cmp-fold');
+        const mod = btn.closest('.cmpCatMod');
+        if (!mod) return;
+        const folded = !mod.classList.contains('isFolded');
+        mod.classList.toggle('isFolded', folded);
+        btn.setAttribute('aria-expanded', folded ? 'false' : 'true');
+        const body = mod.querySelector('.cmpCatBody');
+        if (body) body.hidden = folded;
+        const icon = btn.querySelector('.cmpCatFold');
+        if (icon) icon.textContent = folded ? '▸' : '▾';
+        const act = btn.querySelector('.cmpCatAct');
+        if (act) act.textContent = folded ? '展开' : '收起';
+        if (!prefs[prefKey] || typeof prefs[prefKey] !== 'object') prefs[prefKey] = {};
+        prefs[prefKey][key] = folded;
+        cmpPrefsSave(prefs);
+      });
+    });
+  }
+  /** 全局卡片上的开关 / 卸载 / 分类下拉 */
+  function bindCardOps(root) {
+    root.querySelectorAll('[data-cmp]').forEach(function (inp) {
+      inp.addEventListener('change', async function () {
+        const id = inp.getAttribute('data-cmp');
+        const enabled = inp.checked;
+        try {
+          const res = await api('/api/components/' + encodeURIComponent(id) + '/toggle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabled }) });
+          state.components = res.enabled || state.components;
+          toast(enabled ? '已开启组件' : '已关闭组件');
+          const card = inp.closest('.cmpCard');
+          if (card) card.classList.toggle('isOff', !enabled);
+          renderRail();
+        } catch (e) { toast(e.message); inp.checked = !enabled; }
+      });
+    });
+    root.querySelectorAll('[data-cmp-del]').forEach(function (b) {
+      b.addEventListener('click', async function () {
+        const id = b.getAttribute('data-cmp-del');
+        if (!confirm('卸载组件「' + id + '」？相关文件会被删除（数据表保留）。')) return;
+        try {
+          await api('/api/components/' + encodeURIComponent(id), { method: 'DELETE' });
+          toast('已卸载');
+          await loadComponents();
+          location.reload();
+        } catch (e) { toast(e.message); }
+      });
+    });
+    /* 分类下拉：接口成功后就地重画分类列表（卡片真正搬过去，且不丢搜索 / 滚动位置） */
+    root.querySelectorAll('[data-comp-cat]').forEach(function (sel) {
+      sel.addEventListener('change', async function () {
+        const id = sel.getAttribute('data-comp-cat');
+        const to = sel.value;
+        try {
+          await api('/api/components/' + encodeURIComponent(id) + '/category', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ category: to }) });
+          const item = comps.find(function (c) { return c.id === id; });
+          if (item) item.category = to;
+          toast('已移动到「' + to + '」');
+          paintGlobalList();
+          renderRail();
+        } catch (e) {
+          toast(e.message);
+          const item = comps.find(function (c) { return c.id === id; });
+          if (item) sel.value = item.category || '其它';
+        }
+      });
+    });
+  }
+  /** 目标卡片上的开关（只写本目标） */
+  function bindGoalToggles(root) {
+    root.querySelectorAll('[data-gcmp]').forEach(function (inp) {
+      inp.addEventListener('change', async function () {
+        const pid = inp.getAttribute('data-gcmp');
+        const gid = scopeGoal ? scopeGoal.id : 0;
+        if (!gid) return;
+        try {
+          await api('/api/goals/' + gid + '/plugins', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ plugin_id: pid, enabled: inp.checked }) });
+          scopeConfig = scopeConfig || {};
+          scopeConfig[pid] = inp.checked;
+          toast(inp.checked ? '已为本目标启用（别的不受影响）' : '已为本目标关闭（别的不受影响）');
+          const card = inp.closest('.cmpCard');
+          if (card) card.classList.toggle('isOff', !inp.checked);
+          if (state.goal && state.goal.id === gid) { try { await loadGoal(gid); } catch (e) {} }
+        } catch (e) { toast(e.message); inp.checked = !inp.checked; }
+      });
+    });
+  }
+  /** 搜索框：输入即过滤（120ms 防抖）；Esc / × 一键清空 */
+  function bindSearch(id, prefKey, paint) {
+    const input = document.getElementById(id);
+    if (!input) return;
+    let timer = null;
+    let wrap = input.closest('.cmpSearch');
+    function syncClearBtn() {
+      wrap = input.closest('.cmpSearch');
+      if (!wrap) return;
+      let btn = wrap.querySelector('.cmpSearchClear');
+      const has = !!input.value;
+      if (has && !btn) {
+        btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'cmpSearchClear';
+        btn.title = '清空搜索';
+        btn.textContent = '×';
+        btn.addEventListener('click', function () { input.value = ''; input.dispatchEvent(new Event('input')); input.focus(); });
+        wrap.insertBefore(btn, wrap.querySelector('.cmpSearchCount'));
+      } else if (!has && btn) { btn.remove(); }
+    }
+    input.addEventListener('input', function () {
+      clearTimeout(timer);
+      timer = setTimeout(function () {
+        prefs[prefKey] = input.value || '';
+        cmpPrefsSave(prefs);
+        syncClearBtn();
+        paint();
+      }, 120);
+    });
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && input.value) { e.stopPropagation(); input.value = ''; input.dispatchEvent(new Event('input')); }
+    });
+  }
+  /** 全部展开 / 全部收起 */
+  function bindExpandAll(btnId, prefKey, paint) {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      const wantFold = btn.getAttribute('data-act') === 'fold';
+      const groups = prefKey === 'goalCollapsed' ? cmpGroupComponents(goalItems, catsInfo, prefs.goalQ) : cmpGroupComponents(comps, catsInfo, prefs.q);
+      prefs[prefKey] = {};
+      groups.forEach(function (g) { prefs[prefKey][g.key] = wantFold; });
+      cmpPrefsSave(prefs);
+      paint();
+    });
+  }
+
+  /* ---------- 页面骨架 ---------- */
+  const globalPanelHTML =
+    cmpSearchHTML({ id: 'cmpSearch', value: prefs.q, hit: comps.filter(function (c) { return cmpMatchComponent(c, prefs.q); }).length, total: comps.length }) +
+    '<div class="cmpCatToolbar">' +
+      '<button type="button" class="btn tiny" id="cmpExpandAll" data-act="expand">▾ 全部展开</button>' +
+      '<button type="button" class="btn tiny" id="cmpFoldAll" data-act="fold">▸ 全部收起</button>' +
+      '<span class="hint" style="margin-left:auto;">点分类标题可单独展开 / 收起</span>' +
+    '</div>' +
+    '<div class="cmpCatList" id="cmpCatList"></div>';
+  const goalPanelHTML =
+    cmpSearchHTML({ id: 'cmpGoalSearch', value: prefs.goalQ, hit: goalItems.filter(function (e) { return cmpMatchComponent(e, prefs.goalQ); }).length, total: goalItems.length }) +
+    '<div class="cmpCatToolbar">' +
+      '<button type="button" class="btn tiny" id="cmpGoalExpandAll" data-act="expand">▾ 全部展开</button>' +
+      '<button type="button" class="btn tiny" id="cmpGoalFoldAll" data-act="fold">▸ 全部收起</button>' +
+      '<span class="hint" style="margin-left:auto;">只改本目标；没设置过的仍按全局默认</span>' +
+    '</div>' +
+    '<div class="cmpCatList" id="cmpGoalCatList"></div>';
+
+  let html = '<div class="page wide cmpPage">' +
+    '<div class="pageHead cmpPageHead">' +
+      '<button class="back js-back" data-back="#/">← 返回</button>' +
+      '<div class="cmpHeadText">' +
+        '<h2 class="title" style="margin-left:10px;">🧩 组件</h2>' +
+        '<span class="hint cmpHeadHint">功能与界面样式都由组件提供，可自由开关、导入分享</span>' +
+      '</div>' +
+      '<div class="spacer"></div>' +
+      '<button class="btn small" id="cmpReload">↻ 重新加载</button>' +
+      '<label class="btn small primary">⬆ 导入组件（可多选）<input type="file" id="cmpImport" accept=".json,application/json" multiple hidden></label>' +
+    '</div>' +
+    '<div class="cmpPanel cmpPanelScope">' +
+      '<div class="cmpScopeRow">' +
+        cmpScopePickHTML(scope, scopeGoals) +
+      '</div>' +
+      '<p class="hint cmpScopeHint">' + (scopeGoal
+        ? '正在管理「' + esc(scopeGoal.title) + '」：本页的开关只改这个目标，别的目标不受影响。'
+        : '全局开关 = 新目标的默认值，也管应用级组件（番茄钟浮窗、笔记面板等）；已经单独设置过的目标不受影响。') + '</p>' +
+    '</div>' +
+    (scopeGoal
+      ? '<div class="cmpPanel">' +
+          '<div class="cmpPanelHead">' +
+            '<h3 class="cmpPanelTitle">🎯 ' + esc(scopeGoal.title) + ' 的组件</h3>' +
+            '<span class="chip gray">只改本目标</span>' +
+            '<span class="hint cmpPanelHint">这里的开关<b>只写这一个目标</b>，其它目标完全不受影响。</span>' +
+          '</div>' +
+          goalPanelHTML +
+        '</div>'
+      : '') +
+    (scopeGoal
+      ? '<details class="cmpGlobalFold"><summary>🌍 全局组件与分类（下面的开关影响<b>所有</b>目标，别在这里改单个目标）</summary>' +
+          '<details class="cmpCatManageFold"><summary>🏷 分类管理（新建 / 重命名 / 删除分类）</summary>' + cmpCatManageHTML(catsInfo) + '</details>' +
+          '<div class="cmpPanel"><div class="cmpPanelHead"><h3 class="cmpPanelTitle">🌍 全局组件</h3><span class="chip warn">开关影响所有目标</span></div>' + globalPanelHTML + '</div>' +
+          '<details class="cmpShareFold"><summary>📦 分享与开发组件</summary>' + cmpShareHTML() + '</details>' +
+        '</details>'
+      : '<details class="cmpCatManageFold"><summary>🏷 分类管理（新建 / 重命名 / 删除分类）</summary>' + cmpCatManageHTML(catsInfo) + '</details>' +
+        '<div class="cmpPanel"><div class="cmpPanelHead"><h3 class="cmpPanelTitle">🧩 全部组件</h3><span class="hint cmpPanelHint">按分类收起 / 展开，顶部可搜索</span></div>' + globalPanelHTML + '</div>' +
+        '<details class="cmpShareFold"><summary>📦 分享与开发组件</summary>' + cmpShareHTML() + '</details>') +
+  '</div>';
   app.innerHTML = html;
 
-  /* ---- 管理范围切换 ---- */
-  app.querySelectorAll('#cmpScopeBar [data-scope]').forEach(b => b.addEventListener('click', async () => {
-    state.compScope = b.getAttribute('data-scope');
-    await renderComponentsPage();
-  }));
-  /* ---- 目标范围内的开关：只写本目标 ---- */
-  app.querySelectorAll('[data-gcmp]').forEach(inp => inp.addEventListener('change', async () => {
-    const pid = inp.getAttribute('data-gcmp');
-    const gid = scopeGoal ? scopeGoal.id : 0;
-    if (!gid) return;
-    try {
-      await api('/api/goals/' + gid + '/plugins', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ plugin_id: pid, enabled: inp.checked }) });
-      toast(inp.checked ? '已为本目标启用（别的不受影响）' : '已为本目标关闭（别的不受影响）');
-      if (state.goal && state.goal.id === gid) { try { await loadGoal(gid); } catch (e) {} }
-      await renderComponentsPage();
-      renderRail();
-    } catch (e) { toast(e.message); inp.checked = !inp.checked; }
-  }));
+  /* ---------- 首屏与事件 ---------- */
+  paintGlobalList();
+  if (scopeGoal) paintGoalList();
+  if (scopeGoal) {
+    bindGoalToggles(document);
+    bindSearch('cmpGoalSearch', 'goalQ', paintGoalList);
+    bindExpandAll('cmpGoalExpandAll', 'goalCollapsed', paintGoalList);
+    bindExpandAll('cmpGoalFoldAll', 'goalCollapsed', paintGoalList);
+  }
+  bindSearch('cmpSearch', 'q', paintGlobalList);
+  bindExpandAll('cmpExpandAll', 'collapsed', paintGlobalList);
+  bindExpandAll('cmpFoldAll', 'collapsed', paintGlobalList);
 
-  /* ---- 分类管理 ---- */
-  const catsInfo = state.componentCats || { categories: [], used: {} };
-  const cats = (catsInfo.categories || []);
+  /* 管理范围：一个按钮 + 可搜索弹层（目标多的时候不用在几十个按钮里找） */
+  cmpScopePickBind();
+
+  /* 分类管理：新建 / 重命名 / 删除 */
   const catListEl = document.getElementById('catList');
   if (catListEl) {
-    catListEl.innerHTML = cats.length ? cats.map(c => `<span class="catItem">
-        <span class="catName">${esc(c)}</span><span class="catCount">${(catsInfo.used || {})[c] || 0}</span>
-        <button class="catOp" data-cat-rename="${esc(c)}" title="重命名">✎</button>
-        <button class="catOp danger" data-cat-del="${esc(c)}" title="删除（组件回到原分类）">×</button>
-      </span>`).join('') : '<span class="muted" style="font-size:12.5px;">还没有自定义分类（组件使用插件自带的分类）</span>';
-    catListEl.querySelectorAll('[data-cat-rename]').forEach(b => b.addEventListener('click', async () => {
-      const from = b.getAttribute('data-cat-rename');
-      const name = prompt('重命名分类：', from);
-      if (name == null || !name.trim() || name.trim() === from) return;
-      try {
-        await api('/api/component-categories', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from, name: name.trim() }) });
-        toast('已重命名');
-        await renderComponentsPage();
-        renderRail();
-      } catch (e) { toast(e.message); }
-    }));
-    catListEl.querySelectorAll('[data-cat-del]').forEach(b => b.addEventListener('click', async () => {
-      const name = b.getAttribute('data-cat-del');
-      if (!confirm('删除分类「' + name + '」？该分类下的组件会回到它们原本的分类。')) return;
-      try {
-        await api('/api/component-categories/' + encodeURIComponent(name), { method: 'DELETE' });
-        toast('已删除分类');
-        await renderComponentsPage();
-        renderRail();
-      } catch (e) { toast(e.message); }
-    }));
+    catListEl.querySelectorAll('[data-cat-rename]').forEach(function (b) {
+      b.addEventListener('click', async function () {
+        const from = b.getAttribute('data-cat-rename');
+        const name = prompt('重命名分类：', from);
+        if (name == null || !name.trim() || name.trim() === from) return;
+        try {
+          await api('/api/component-categories', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: from, name: name.trim() }) });
+          toast('已重命名');
+          await renderComponentsPage();
+          renderRail();
+        } catch (e) { toast(e.message); }
+      });
+    });
+    catListEl.querySelectorAll('[data-cat-del]').forEach(function (b) {
+      b.addEventListener('click', async function () {
+        const name = b.getAttribute('data-cat-del');
+        if (!confirm('删除分类「' + name + '」？该分类下的组件会回到「其它」。')) return;
+        try {
+          await api('/api/component-categories/' + encodeURIComponent(name), { method: 'DELETE' });
+          toast('已删除分类');
+          await renderComponentsPage();
+          renderRail();
+        } catch (e) { toast(e.message); }
+      });
+    });
   }
   const catAddBtn = document.getElementById('catAddBtn');
-  if (catAddBtn) catAddBtn.addEventListener('click', async () => {
+  if (catAddBtn) catAddBtn.addEventListener('click', async function () {
     const inp = document.getElementById('catNewName');
-    const name = (inp.value || '').trim();
+    const name = (inp && inp.value || '').trim();
     if (!name) return toast('请输入分类名');
     try {
-      await api('/api/component-categories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+      await api('/api/component-categories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name }) });
       toast('已新建分类「' + name + '」');
-await renderComponentsPage();
-renderRail();
-        await loadComponents();
-    } catch (e) { toast(e.message); }
-  });
-  /* 组件移动分类 */
-  app.querySelectorAll('[data-comp-cat]').forEach(sel => sel.addEventListener('change', async () => {
-    const id = sel.getAttribute('data-comp-cat');
-    try {
-      await api('/api/components/' + encodeURIComponent(id) + '/category', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ category: sel.value }) });
-      toast('已移动到「' + sel.value + '」');
       await renderComponentsPage();
       renderRail();
+      await loadComponents();
     } catch (e) { toast(e.message); }
-  }));
+  });
 
-  app.querySelectorAll('[data-cmp]').forEach(inp => inp.addEventListener('change', async () => {
-    const id = inp.getAttribute('data-cmp');
-    const enabled = inp.checked;
+  /* 重新加载 / 导入 */
+  const reloadBtn = document.getElementById('cmpReload');
+  if (reloadBtn) reloadBtn.addEventListener('click', async function () {
     try {
-      const r = await api('/api/components/' + encodeURIComponent(id) + '/toggle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) });
-      state.components = r.enabled || state.components;
-      toast(enabled ? '已开启组件' : '已关闭组件');
-      await renderComponentsPage();
-      renderRail();
-    } catch (e) { toast(e.message); inp.checked = !enabled; }
-  }));
-  app.querySelectorAll('[data-cmp-del]').forEach(b => b.addEventListener('click', async () => {
-    const id = b.getAttribute('data-cmp-del');
-    if (!confirm('卸载组件「' + id + '」？相关文件会被删除（数据表保留）。')) return;
-    try {
-      await api('/api/components/' + encodeURIComponent(id), { method: 'DELETE' });
-      toast('已卸载');
-      await loadComponents();
-      location.reload();
-    } catch (e) { toast(e.message); }
-  }));
-  document.getElementById('cmpReload').addEventListener('click', async () => {
-    try {
-      const r = await api('/api/components/reload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-      toast('已重新加载 ' + r.loaded + ' 个文件组件');
+      const res = await api('/api/components/reload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      toast('已重新加载 ' + res.loaded + ' 个文件组件');
       await loadComponents();
       location.reload();
     } catch (e) { toast(e.message); }
   });
-  window.scrollTo(0, scrollY);                   // 恢复滚动位置
-  document.getElementById('cmpImport').addEventListener('change', async e => {
+  const impInput = document.getElementById('cmpImport');
+  if (impInput) impInput.addEventListener('change', async function (e) {
     const files = Array.from(e.target.files || []);
     e.target.value = '';
     if (!files.length) return;
@@ -9527,6 +11904,224 @@ renderRail();
       }
     }
     showImportDialog(parsed);
+  });
+
+  window.scrollTo(0, scrollY);                   // 恢复滚动位置
+}
+
+/** 「分享与开发组件」的说明（两侧视图共用） */
+function cmpShareHTML() {
+  return '<p class="hint" style="line-height:1.9;margin:8px 0 0;">' +
+    '· 导出：点组件的「导出」得到 <code>*.component.json</code> 文件（含服务端代码、前端代码与样式），发给别人即可<br>' +
+    '· 导入：点右上「导入组件」选择该文件，组件会立刻装好并可开关<br>' +
+    '· 自己写一个：把 <code>server/plugins/xxx.js</code>（声明元数据 + 接口 + 建表）和 <code>public/plugins/xxx.js</code>（界面）、<code>public/plugins/xxx.css</code>（样式）放进去即可，详见 README「插件开发」' +
+  '</p>';
+}
+
+/* ============================================================================
+ * 目标选择器（全站唯一的「选目标」入口）
+ * ----------------------------------------------------------------------------
+ * 用户原话：组件管理的「管理范围」把全部目标铺满了一行，应该收成一个按钮，
+ * 点开再列出全部目标、并且能**按名字搜索**；产出库 / 资源库 / AI 任务里
+ * 「选目标」也都要能搜，目标一多不用在几十个按钮里找。
+ *
+ * 做法：一个按钮（显示当前选中的目标）+ 一个可搜索的弹层。
+ *   · 数据来源统一走 /api/goals（不带参只返回标题等轻量字段）；
+ *   · 弹层挂 body、点外面 / Esc / 滚动即关；搜索框自动聚焦；
+ *   · 「全部目标 / 全局默认」这类无目标选项用 value = 0 表示。
+ * ========================================================================== */
+
+/** 目标列表缓存（同一页多次渲染不重复请求；30 秒后自动失效） */
+let SXI_GOALS_CACHE = { at: 0, list: [] };
+let sxiGoalPopEl = null;
+async function sxiGoals(force) {
+  const now = Date.now();
+  if (!force && SXI_GOALS_CACHE.list.length && now - SXI_GOALS_CACHE.at < 30000) return SXI_GOALS_CACHE.list;
+  try {
+    const r = await api('/api/goals');
+    SXI_GOALS_CACHE = { at: now, list: (r && r.goals) || [] };
+  } catch (e) { SXI_GOALS_CACHE = { at: now, list: SXI_GOALS_CACHE.list || [] }; }
+  return SXI_GOALS_CACHE.list;
+}
+/** 同步取上一轮缓存（渲染时用）；没有就返回空数组，之后 await sxiGoals() 补 */
+function sxiGoalsSync() { return (SXI_GOALS_CACHE && SXI_GOALS_CACHE.list) || []; }
+
+/** 把「🌍 某某」这种自带 emoji 的文案拆成 { icon, text }；没有 emoji 时用 dfltIcon。 */
+function sxiGoalSplitIcon(text, dfltIcon) {
+  const raw = String(text == null ? '' : text);
+  /* 匹配开头的 emoji（含变体选择符 / 零宽连接符序列），后面允许跟一个空格 */
+  const m = raw.match(/^(\p{Extended_Pictographic}\uFE0F?(?:\u200D\p{Extended_Pictographic}\uFE0F?)*)\s*/u);
+  if (m && m[1]) return { icon: m[1], text: raw.slice(m[0].length) };
+  return { icon: dfltIcon || '🎯', text: raw };
+}
+
+/**
+ * 「选目标」按钮的 HTML。
+ * @param id             按钮容器 id（同一个页面里多个选择器用不同 id）
+ * @param opts.value     当前选中的目标 id（0 = 无目标项）
+ * @param opts.allLabel  「无目标项」的文案（不传就没有这一项）；value=0 且没传时显示「选择目标」
+ * @param opts.label     按钮左侧小标题（如「管理范围」），不传就只有按钮
+ * @param opts.compact   true = 小按钮（页面头部工具条里用）
+ * @param opts.cls       额外 class
+ */
+function sxiGoalPickHTML(id, opts) {
+  const o = opts || {};
+  const goals = o.goals || sxiGoalsSync();
+  const gid = Number(o.value || 0);
+  const cur = goals.find(function (g) { return Number(g.id) === gid; }) || null;
+  /* allLabel 可能自带 emoji（如「🌍 全局默认」）：拆出来当图标，正文去掉，避免出现两个地球 */
+  const allSplit = sxiGoalSplitIcon(o.allLabel || '选择目标', '🌍');
+  const text = cur ? cur.title : (gid ? '（目标已删除）' : allSplit.text);
+  const icon = cur ? '🎯' : (o.allLabel ? allSplit.icon : '🎯');
+  return '<div class="sxiGoalPick' + (o.compact ? ' sm' : '') + (o.cls ? ' ' + o.cls : '') + '" id="' + esc(id) + '"' +
+      ' data-goal-pick="' + esc(id) + '" data-value="' + gid + '" data-all-label="' + esc(o.allLabel || '') + '"' +
+      ' data-goals="' + esc(JSON.stringify(goals.map(function (g) { return { id: g.id, title: g.title }; }))) + '">' +
+    (o.label ? '<span class="sgpLabel">' + esc(o.label) + '</span>' : '') +
+    '<button type="button" class="sgpBtn" data-sgp-open title="' + esc(text) + '">' +
+      '<span class="sgpIcon">' + icon + '</span>' +
+      '<span class="sgpText">' + esc(text) + '</span>' +
+      '<span class="sgpCaret" aria-hidden="true">▾</span>' +
+    '</button>' +
+  '</div>';
+}
+
+/**
+ * 把「选目标」按钮绑上弹层。
+ * @param id           sxiGoalPickHTML 的 id
+ * @param opts.onPick  (gid) => void，选中后回调（含 value=0 的「全部目标」）
+ */
+function sxiGoalPickBind(id, opts) {
+  const wrap = document.getElementById(id);
+  if (!wrap) return null;
+  const o = opts || {};
+  const btn = wrap.querySelector('[data-sgp-open]');
+  if (!btn) return null;
+  const paintBtn = function (gid) {
+    let goals = [];
+    try { goals = JSON.parse(wrap.getAttribute('data-goals') || '[]'); } catch (e) {}
+    const allLabel = wrap.getAttribute('data-all-label') || '';
+    const cur = goals.find(function (g) { return Number(g.id) === Number(gid); }) || null;
+    const allSplit = sxiGoalSplitIcon(allLabel || '选择目标', '🌍');
+    const text = cur ? cur.title : (Number(gid) ? '（目标已删除）' : allSplit.text);
+    wrap.setAttribute('data-value', String(gid));
+    const t = btn.querySelector('.sgpText'); if (t) t.textContent = text;
+    const ic = btn.querySelector('.sgpIcon'); if (ic) ic.textContent = cur ? '🎯' : (allLabel ? allSplit.icon : '🎯');
+    btn.title = text;
+  };
+  btn.addEventListener('click', function (ev) {
+    ev.stopPropagation();
+    sxiGoalPickOpen(wrap, {
+      onPick: function (gid) { paintBtn(gid); if (o.onPick) o.onPick(gid); }
+    });
+  });
+  return { paint: paintBtn, wrap: wrap };
+}
+
+/** 打开「选目标」弹层（带搜索框） */
+function sxiGoalPickOpen(wrap, opts) {
+  sxiGoalPickClose();
+  const o = opts || {};
+  let goals = [];
+  try { goals = JSON.parse(wrap.getAttribute('data-goals') || '[]'); } catch (e) {}
+  const allLabel = wrap.getAttribute('data-all-label') || '';
+  const cur = Number(wrap.getAttribute('data-value') || 0);
+  const d = document.createElement('div');
+  d.className = 'sxiGoalPop';
+  d.innerHTML =
+    '<div class="sgpSearchWrap">' +
+      '<span class="sgpSearchIcon" aria-hidden="true">🔍</span>' +
+      '<input type="search" class="sgpSearch" placeholder="搜索目标名称…" autocomplete="off" spellcheck="false">' +
+      '<span class="sgpCount"></span>' +
+    '</div>' +
+    '<div class="sgpList" role="listbox"></div>';
+  document.body.appendChild(d);
+  const input = d.querySelector('.sgpSearch');
+  const listEl = d.querySelector('.sgpList');
+  const countEl = d.querySelector('.sgpCount');
+  const list = goals.slice();
+  if (allLabel) {
+    const allSplit2 = sxiGoalSplitIcon(allLabel, '🌍');
+    list.unshift({ id: 0, title: allSplit2.text, icon: allSplit2.icon, all: true });
+  }
+  const paint = function (q) {
+    const kw = String(q || '').trim().toLowerCase();
+    const hit = !kw ? list : list.filter(function (g) { return String(g.title || '').toLowerCase().indexOf(kw) >= 0; });
+    countEl.textContent = kw ? ('命中 ' + hit.length) : (list.length + ' 个');
+    listEl.innerHTML = hit.length
+      ? hit.map(function (g) {
+          const on = Number(g.id) === cur;
+          return '<button type="button" class="sgpOpt' + (on ? ' on' : '') + '" data-sgp-pick="' + Number(g.id) + '" title="' + esc(g.title) + '">' +
+            '<span class="sgpOptIcon">' + esc(g.icon || (g.all ? '🌍' : '🎯')) + '</span>' +
+            '<span class="sgpOptText">' + esc(g.title) + '</span>' +
+            (on ? '<span class="sgpTick">✓</span>' : '') +
+          '</button>';
+        }).join('')
+      : '<div class="sgpEmpty">没有匹配「' + esc(kw) + '」的目标</div>';
+  };
+  paint('');
+  listEl.addEventListener('click', function (e) {
+    const b = e.target.closest && e.target.closest('[data-sgp-pick]');
+    if (!b) return;
+    const gid = Number(b.getAttribute('data-sgp-pick')) || 0;
+    sxiGoalPickClose();
+    if (o.onPick) o.onPick(gid);
+  });
+  input.addEventListener('input', function () { paint(input.value); });
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { e.stopPropagation(); sxiGoalPickClose(); return; }
+    if (e.key === 'Enter') {
+      const first = listEl.querySelector('[data-sgp-pick]');
+      if (first) { const gid = Number(first.getAttribute('data-sgp-pick')) || 0; sxiGoalPickClose(); if (o.onPick) o.onPick(gid); }
+    }
+  });
+  const r = wrap.querySelector('[data-sgp-open]').getBoundingClientRect();
+  d.style.minWidth = Math.max(260, r.width) + 'px';
+  d.style.top = (r.bottom + 6) + 'px';
+  d.style.left = Math.max(8, Math.min(r.left, window.innerWidth - d.offsetWidth - 10)) + 'px';
+  requestAnimationFrame(function () {
+    const rr = d.getBoundingClientRect();
+    if (rr.bottom > window.innerHeight - 8) d.style.top = Math.max(8, r.top - rr.height - 6) + 'px';
+  });
+  sxiGoalPopEl = d;
+  setTimeout(function () { try { input.focus(); } catch (e) {} }, 30);
+}
+function sxiGoalPickClose() { if (sxiGoalPopEl) { try { sxiGoalPopEl.remove(); } catch (e) {} sxiGoalPopEl = null; } }
+if (!window.__sxiGoalPopBound) {
+  window.__sxiGoalPopBound = true;
+  document.addEventListener('click', function (e) {
+    if (!sxiGoalPopEl) return;
+    const t = e.target;
+    if (t && t.closest && (t.closest('.sxiGoalPop') || t.closest('.sxiGoalPick'))) return;
+    sxiGoalPickClose();
+  }, true);
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') sxiGoalPickClose(); });
+  window.addEventListener('scroll', function () { sxiGoalPickClose(); }, true);
+  window.addEventListener('resize', function () { sxiGoalPickClose(); });
+}
+
+/* ============================================================================
+ * 组件管理页「管理范围」：一个按钮 + 可搜索弹层
+ * ========================================================================== */
+/** 管理范围按钮的 HTML（全局默认是 value=0 的那一项） */
+function cmpScopePickHTML(scope, goals) {
+  const gid = String(scope || '').startsWith('goal:') ? Number(String(scope).slice(5)) : 0;
+  return sxiGoalPickHTML('cmpScopePick', {
+    value: gid,
+    goals: goals || [],
+    allLabel: tr('🌍 全局默认（新目标的默认值）'),
+    label: '管理范围',
+    cls: 'cmpScopePick',
+  });
+}
+/** 绑管理范围的弹层：选中就切 state.compScope 再整页重画 */
+function cmpScopePickBind() {
+  if (!document.getElementById('cmpScopePick')) return;
+  sxiGoalPickBind('cmpScopePick', {
+    onPick: async function (gid) {
+      state.compScope = gid ? ('goal:' + gid) : 'global';
+      await renderComponentsPage();
+      try { renderRail(); } catch (e) {}
+    }
   });
 }
 
@@ -9686,7 +12281,7 @@ async function updateSectionHTML() {
           ? '<b style="color:var(--accent)">有新版本 v' + esc(u.latestShort || '') + '</b> · 只下载程序文件 ' + (updSizeText() || '') + '，不会重下整个 exe · ' + esc(u.latestSubject || '')
             + (u.exeRequired ? '<br><span style="color:var(--warn)">本次含启动器修复：功能照常更新，但之后请去发布页下载完整 exe 替换一次，否则自动重启仍需手动重开。</span>' + (u.releasesUrl ? ` <a href="${esc(u.releasesUrl)}" target="_blank" rel="noopener">去发布页 →</a>` : '') : '')
           : '<b style="color:var(--accent)">有 ' + u.behind + ' 个新提交</b> · 最新：' + esc(u.latestSubject || ''))
-        : (isPay ? '已是最新版本' : '已是最新版本' + (u.dirty ? ' · 本地有 ' + u.dirty + ' 个改动文件（更新时会自动暂存）' : ''))));
+        : (isPay ? tr('已是最新版本') : tr('已是最新版本') + (u.dirty ? ' · ' + tr('本地有 {0} 个改动文件（更新时会自动暂存）', u.dirty) : ''))));
   return `<div class="sec" id="set-update">
       <div class="secTitle">版本与更新</div>
       <div class="svcRow">
@@ -9757,7 +12352,7 @@ async function serviceSectionHTML() {
       <p class="hint" style="margin-top:8px; line-height:1.8;">
         · 桌面图标：双击启动并在浏览器打开（Windows 为桌面快捷方式，Linux/macOS 为桌面启动器）<br>
         · 终端命令：安装后在终端输入 <code>sierxing</code> 即可启动（Linux/macOS 在 <code>~/.local/bin</code>）<br>
-        · 开机自启：${esc(a.mechanism || '按平台自动选择机制')}${a.hint ? ' · ' + esc(a.hint) : ''}<br>
+        · ${esc(tr('开机自启：{0}', tr(a.mechanism || '按平台自动选择机制')))}${a.hint ? ' · ' + esc(tr(a.hint)) : ''}<br>
         · 所有操作只写入当前用户目录，不需要管理员权限；端口 ${st.port || ''}
       </p>
     </div>`;
@@ -9818,7 +12413,7 @@ async function syncSectionHTML() {
         <span class="svcVal">${st.hasGit ? '✓ 检测到 git' : '⚠ 未检测到 git 命令'}</span>
       </div>
       <div class="field"><label>仓库地址</label>
-        <input id="syncRepo" value="${esc(st.repo || '')}" placeholder="https://atomgit.com/你的用户名/sierxing-data.git">
+        <input id="syncRepo" value="${esc(st.repo || '')}" placeholder="https://atomgit.com/your-username/sierxing-data.git">
       </div>
       <div class="grid2">
         <div class="field"><label>分支</label><input id="syncBranch" value="${esc(st.branch || 'main')}" placeholder="main"></div>
@@ -10238,10 +12833,14 @@ function themeSettingsHTML() {
   const comps = (state.componentList || []).filter(c => c.kind === 'theme' || c.scope === 'theme');
   const optsFor = mode => {
     const cur = themeFor(mode);
-    const head = `<option value="" ${cur ? '' : 'selected'}>默认（内置${mode === 'light' ? '亮色' : '暗色'}）</option>`;
+    /* tr() 组合：主题名/亮暗标签是界面文字，皮肤名来自组件元数据，
+       中文用源语言显示，其它语言走语言包（没有译文的用户自定义皮肤原样保留）。 */
+    const head = `<option value="" ${cur ? '' : 'selected'}>${esc(tr('默认（内置{0}）', tr(mode === 'light' ? '亮色' : '暗色')))}</option>`;
     return head + comps.map(c => {
-      const tag = c.mode === 'dark' ? '深色' : c.mode === 'light' ? '浅色' : '';
-      return `<option value="${esc(c.id)}" ${cur === c.id ? 'selected' : ''}>${esc((c.icon || '🎨') + ' ' + c.name + (tag ? '（' + tag + '）' : ''))}</option>`;
+      const tag = c.mode === 'dark' ? tr('深色') : c.mode === 'light' ? tr('浅色') : '';
+      const nm = tr(c.name);
+      const label = tag ? tr('{0} {1}（{2}）', c.icon || '🎨', nm, tag) : ((c.icon || '🎨') + ' ' + nm);
+      return `<option value="${esc(c.id)}" ${cur === c.id ? 'selected' : ''}>${esc(label)}</option>`;
     }).join('');
   };
   return `<p class="hint" style="margin:-4px 0 12px;">只是换颜色（字体、布局不动）：白天挑一个柔和的浅色主题，晚上挑一个不那么黑的深色主题。选择立即生效，只影响这台设备。</p>
@@ -10310,6 +12909,1340 @@ function ragSettingsHTML(s) {
     <div id="ragHits" style="margin-top:8px;"></div>
   </div>`;
 }
+/* ---------- 设置页「外观主题」子路由 Vue 版（其余设置仍旧版） ---------- */
+let settingsThemeVueUnmount = null;
+function settingsThemeVueEnabled() {
+  try {
+    const q = new URLSearchParams(location.search).get('ui');
+    if (q === 'legacy') return false;
+    if (q === 'vue') return true;
+    const saved = localStorage.getItem('sierxing-ui-settings-theme');
+    if (saved === 'legacy') return false;
+    if (saved === 'vue') return true;
+  } catch (e) {}
+  return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+}
+async function renderSettingsThemeVue() {
+  const root = document.getElementById('app');
+  if (!root) return false;
+  if (settingsThemeVueUnmount) { try { settingsThemeVueUnmount(); } catch (e) {} settingsThemeVueUnmount = null; }
+  if (!document.querySelector('link[data-ui-page="settings-theme"]')) {
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/settingstheme.css'; l.setAttribute('data-ui-page', 'settings-theme');
+    document.head.appendChild(l);
+  }
+  const mod = await import('/ui-dist/settingstheme.js?v=' + Date.now());
+  if (!mod || typeof mod.mountSettingsThemePage !== 'function') throw new Error('UI 插件没有导出 mountSettingsThemePage');
+  settingsThemeVueUnmount = mod.mountSettingsThemePage(root, {
+    api: api, toast: toast,
+    currentThemeEff: currentThemeEff,
+    themeFor: themeFor,
+    setThemeFor: setThemeFor,
+    setThemeMode: function (m) { try { localStorage.setItem('sierxing-theme', m === 'auto' ? 'auto' : (m === 'dark' ? 'dark' : 'light')); } catch (e) {} applyTheme(); }
+  });
+  return true;
+}
+window.addEventListener('hashchange', function () {
+  if (settingsThemeVueUnmount && !/^#\/settings\/theme/.test(location.hash)) {
+    try { settingsThemeVueUnmount(); } catch (e) {}
+    settingsThemeVueUnmount = null;
+  }
+});
+/* ---------- 设置概览页 Vue 版（编辑仍可进旧版） ---------- */
+let settingsVueUnmount = null;
+function settingsVueEnabled() {
+  try {
+    const q = new URLSearchParams(location.search).get('ui');
+    if (q === 'legacy') return false;
+    if (q === 'vue') return true;
+    const saved = localStorage.getItem('sierxing-ui-settings');
+    if (saved === 'legacy') return false;
+    if (saved === 'vue') return true;
+  } catch (e) {}
+  return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+}
+async function renderSettingsVue() {
+  const root = document.getElementById('app');
+  if (!root) return false;
+  if (settingsVueUnmount) { try { settingsVueUnmount(); } catch (e) {} settingsVueUnmount = null; }
+  if (!document.querySelector('link[data-ui-page="settings"]')) {
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/settings.css'; l.setAttribute('data-ui-page', 'settings');
+    document.head.appendChild(l);
+  }
+  const mod = await import('/ui-dist/settings.js?v=' + Date.now());
+  if (!mod || typeof mod.mountSettingsPage !== 'function') throw new Error('UI 插件没有导出 mountSettingsPage');
+  settingsVueUnmount = mod.mountSettingsPage(root, { api: api, toast: toast, fmtDate: fmtDate, currentThemeEff: currentThemeEff, themeFor: themeFor });
+  return true;
+}
+window.addEventListener('hashchange', function () {
+  if (settingsVueUnmount && !/^#\/settings(?:\.|$)/.test(location.hash)) {
+    try { settingsVueUnmount(); } catch (e) {}
+    settingsVueUnmount = null;
+  }
+});
+/* ---------- 设置 → AI 连接 Vue 版 ---------- */
+let settingsAiVueUnmount = null;
+function settingsAiVueEnabled() {
+  try {
+    const q = new URLSearchParams(location.search).get('ui');
+    if (q === 'legacy') return false;
+    if (q === 'vue') return true;
+    const saved = localStorage.getItem('sierxing-ui-settings-ai');
+    if (saved === 'legacy') return false;
+    if (saved === 'vue') return true;
+  } catch (e) {}
+  return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+}
+async function renderSettingsAiVue() {
+  const root = document.getElementById('app');
+  if (!root) return false;
+  if (settingsAiVueUnmount) { try { settingsAiVueUnmount(); } catch (e) {} settingsAiVueUnmount = null; }
+  if (!document.querySelector('link[data-ui-page="settings-ai"]')) {
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/settingsai.css'; l.setAttribute('data-ui-page', 'settings-ai');
+    document.head.appendChild(l);
+  }
+  const mod = await import('/ui-dist/settingsai.js?v=' + Date.now());
+  if (!mod || typeof mod.mountSettingsAiPage !== 'function') throw new Error('UI 插件没有导出 mountSettingsAiPage');
+  settingsAiVueUnmount = mod.mountSettingsAiPage(root, { api: api, toast: toast });
+  return true;
+}
+window.addEventListener('hashchange', function () {
+  if (settingsAiVueUnmount && !/^#\/settings\/ai/.test(location.hash)) {
+    try { settingsAiVueUnmount(); } catch (e) {}
+    settingsAiVueUnmount = null;
+  }
+});
+/* ---------- 设置 → 数据备份 Vue 版 ---------- */
+let settingsDataVueUnmount = null;
+function settingsDataVueEnabled() {
+  try {
+    const q = new URLSearchParams(location.search).get('ui');
+    if (q === 'legacy') return false;
+    if (q === 'vue') return true;
+    const saved = localStorage.getItem('sierxing-ui-settings-data');
+    if (saved === 'legacy') return false;
+    if (saved === 'vue') return true;
+  } catch (e) {}
+  return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+}
+async function renderSettingsDataVue() {
+  const root = document.getElementById('app');
+  if (!root) return false;
+  if (settingsDataVueUnmount) { try { settingsDataVueUnmount(); } catch (e) {} settingsDataVueUnmount = null; }
+  if (!document.querySelector('link[data-ui-page="settings-data"]')) {
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/settingsdata.css'; l.setAttribute('data-ui-page', 'settings-data');
+    document.head.appendChild(l);
+  }
+  const mod = await import('/ui-dist/settingsdata.js?v=' + Date.now());
+  if (!mod || typeof mod.mountSettingsDataPage !== 'function') throw new Error('UI 插件没有导出 mountSettingsDataPage');
+  settingsDataVueUnmount = mod.mountSettingsDataPage(root, { api: api, toast: toast });
+  return true;
+}
+window.addEventListener('hashchange', function () {
+  if (settingsDataVueUnmount && !/^#\/settings\/data/.test(location.hash)) {
+    try { settingsDataVueUnmount(); } catch (e) {}
+    settingsDataVueUnmount = null;
+  }
+});
+/* ---------- 设置 → 多端同步 Vue 版 ---------- */
+let settingsSyncVueUnmount = null;
+function settingsSyncVueEnabled() {
+  try {
+    const q = new URLSearchParams(location.search).get('ui');
+    if (q === 'legacy') return false;
+    if (q === 'vue') return true;
+    const saved = localStorage.getItem('sierxing-ui-settings-sync');
+    if (saved === 'legacy') return false;
+    if (saved === 'vue') return true;
+  } catch (e) {}
+  return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+}
+async function renderSettingsSyncVue() {
+  const root = document.getElementById('app');
+  if (!root) return false;
+  if (settingsSyncVueUnmount) { try { settingsSyncVueUnmount(); } catch (e) {} settingsSyncVueUnmount = null; }
+  if (!document.querySelector('link[data-ui-page="settings-sync"]')) {
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/settingssync.css'; l.setAttribute('data-ui-page', 'settings-sync');
+    document.head.appendChild(l);
+  }
+  const mod = await import('/ui-dist/settingssync.js?v=' + Date.now());
+  if (!mod || typeof mod.mountSettingsSyncPage !== 'function') throw new Error('UI 插件没有导出 mountSettingsSyncPage');
+  settingsSyncVueUnmount = mod.mountSettingsSyncPage(root, { api: api, toast: toast, fmtDate: fmtDate });
+  return true;
+}
+window.addEventListener('hashchange', function () {
+  if (settingsSyncVueUnmount && !/^#\/settings\/sync/.test(location.hash)) {
+    try { settingsSyncVueUnmount(); } catch (e) {}
+    settingsSyncVueUnmount = null;
+  }
+});
+/* ---------- 设置 → 检索增强 Vue 版 ---------- */
+let settingsRagVueUnmount = null;
+function settingsRagVueEnabled() {
+  try {
+    const q = new URLSearchParams(location.search).get('ui');
+    if (q === 'legacy') return false;
+    if (q === 'vue') return true;
+    const saved = localStorage.getItem('sierxing-ui-settings-rag');
+    if (saved === 'legacy') return false;
+    if (saved === 'vue') return true;
+  } catch (e) {}
+  return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+}
+async function renderSettingsRagVue() {
+  const root = document.getElementById('app');
+  if (!root) return false;
+  if (settingsRagVueUnmount) { try { settingsRagVueUnmount(); } catch (e) {} settingsRagVueUnmount = null; }
+  if (!document.querySelector('link[data-ui-page="settings-rag"]')) {
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/settingsrag.css'; l.setAttribute('data-ui-page', 'settings-rag');
+    document.head.appendChild(l);
+  }
+  const mod = await import('/ui-dist/settingsrag.js?v=' + Date.now());
+  if (!mod || typeof mod.mountSettingsRagPage !== 'function') throw new Error('UI 插件没有导出 mountSettingsRagPage');
+  settingsRagVueUnmount = mod.mountSettingsRagPage(root, { api: api, toast: toast });
+  return true;
+}
+window.addEventListener('hashchange', function () {
+  if (settingsRagVueUnmount && !/^#\/settings\/rag/.test(location.hash)) {
+    try { settingsRagVueUnmount(); } catch (e) {}
+    settingsRagVueUnmount = null;
+  }
+});
+/* ---------- 设置 → 服务与启动 Vue 版 ---------- */
+let settingsServiceVueUnmount = null;
+function settingsServiceVueEnabled() {
+  try {
+    const q = new URLSearchParams(location.search).get('ui');
+    if (q === 'legacy') return false;
+    if (q === 'vue') return true;
+    const saved = localStorage.getItem('sierxing-ui-settings-service');
+    if (saved === 'legacy') return false;
+    if (saved === 'vue') return true;
+  } catch (e) {}
+  return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+}
+async function renderSettingsServiceVue() {
+  const root = document.getElementById('app');
+  if (!root) return false;
+  if (settingsServiceVueUnmount) { try { settingsServiceVueUnmount(); } catch (e) {} settingsServiceVueUnmount = null; }
+  if (!document.querySelector('link[data-ui-page="settings-service"]')) {
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/settingsservice.css'; l.setAttribute('data-ui-page', 'settings-service');
+    document.head.appendChild(l);
+  }
+  const mod = await import('/ui-dist/settingsservice.js?v=' + Date.now());
+  if (!mod || typeof mod.mountSettingsServicePage !== 'function') throw new Error('UI 插件没有导出 mountSettingsServicePage');
+  settingsServiceVueUnmount = mod.mountSettingsServicePage(root, { api: api, toast: toast });
+  return true;
+}
+window.addEventListener('hashchange', function () {
+  if (settingsServiceVueUnmount && !/^#\/settings\/service/.test(location.hash)) {
+    try { settingsServiceVueUnmount(); } catch (e) {}
+    settingsServiceVueUnmount = null;
+  }
+});
+/* ---------- 设置 → 版本与更新 Vue 版 ---------- */
+let settingsUpdateVueUnmount = null;
+function settingsUpdateVueEnabled() {
+  try {
+    const q = new URLSearchParams(location.search).get('ui');
+    if (q === 'legacy') return false;
+    if (q === 'vue') return true;
+    const saved = localStorage.getItem('sierxing-ui-settings-update');
+    if (saved === 'legacy') return false;
+    if (saved === 'vue') return true;
+  } catch (e) {}
+  return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+}
+async function renderSettingsUpdateVue() {
+  const root = document.getElementById('app');
+  if (!root) return false;
+  if (settingsUpdateVueUnmount) { try { settingsUpdateVueUnmount(); } catch (e) {} settingsUpdateVueUnmount = null; }
+  if (!document.querySelector('link[data-ui-page="settings-update"]')) {
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/settingsupdate.css'; l.setAttribute('data-ui-page', 'settings-update');
+    document.head.appendChild(l);
+  }
+  const mod = await import('/ui-dist/settingsupdate.js?v=' + Date.now());
+  if (!mod || typeof mod.mountSettingsUpdatePage !== 'function') throw new Error('UI 插件没有导出 mountSettingsUpdatePage');
+  settingsUpdateVueUnmount = mod.mountSettingsUpdatePage(root, { api: api, toast: toast, fmtDate: fmtDate });
+  return true;
+}
+window.addEventListener('hashchange', function () {
+  if (settingsUpdateVueUnmount && !/^#\/settings\/update/.test(location.hash)) {
+    try { settingsUpdateVueUnmount(); } catch (e) {}
+    settingsUpdateVueUnmount = null;
+  }
+});
+/* ---------- 设置 → 系统信息 Vue 版 ---------- */
+let settingsSystemVueUnmount = null;
+function settingsSystemVueEnabled() {
+  try {
+    const q = new URLSearchParams(location.search).get('ui');
+    if (q === 'legacy') return false;
+    if (q === 'vue') return true;
+    const saved = localStorage.getItem('sierxing-ui-settings-system');
+    if (saved === 'legacy') return false;
+    if (saved === 'vue') return true;
+  } catch (e) {}
+  return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+}
+async function renderSettingsSystemVue() {
+  const root = document.getElementById('app');
+  if (!root) return false;
+  if (settingsSystemVueUnmount) { try { settingsSystemVueUnmount(); } catch (e) {} settingsSystemVueUnmount = null; }
+  if (!document.querySelector('link[data-ui-page="settings-system"]')) {
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/settingssystem.css'; l.setAttribute('data-ui-page', 'settings-system');
+    document.head.appendChild(l);
+  }
+  const mod = await import('/ui-dist/settingssystem.js?v=' + Date.now());
+  if (!mod || typeof mod.mountSettingsSystemPage !== 'function') throw new Error('UI 插件没有导出 mountSettingsSystemPage');
+  settingsSystemVueUnmount = mod.mountSettingsSystemPage(root, { api: api, toast: toast, showGuide: showGuide });
+  return true;
+}
+window.addEventListener('hashchange', function () {
+  if (settingsSystemVueUnmount && !/^#\/settings\/system/.test(location.hash)) {
+    try { settingsSystemVueUnmount(); } catch (e) {}
+    settingsSystemVueUnmount = null;
+  }
+});
+/* ---------- 使用引导页 Vue 版（#/guide/:step） ---------- */
+let guideVueUnmount = null;
+function guideVueEnabled() {
+  try {
+    const q = new URLSearchParams(location.search).get('ui');
+    if (q === 'legacy') return false;
+    if (q === 'vue') return true;
+    const saved = localStorage.getItem('sierxing-ui-guide');
+    if (saved === 'legacy') return false;
+    if (saved === 'vue') return true;
+  } catch (e) {}
+  return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+}
+async function renderGuideVue() {
+  const root = document.getElementById('app');
+  if (!root) return false;
+  if (guideVueUnmount) { try { guideVueUnmount(); } catch (e) {} guideVueUnmount = null; }
+  if (!document.querySelector('link[data-ui-page="guide"]')) {
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/guide.css'; l.setAttribute('data-ui-page', 'guide');
+    document.head.appendChild(l);
+  }
+  const mod = await import('/ui-dist/guide.js?v=' + Date.now());
+  if (!mod || typeof mod.mountGuidePage !== 'function') throw new Error('UI 插件没有导出 mountGuidePage');
+  guideVueUnmount = mod.mountGuidePage(root, { api: api, toast: toast });
+  return true;
+}
+window.addEventListener('hashchange', function () {
+  if (guideVueUnmount && !/^#\/guide\//.test(location.hash)) {
+    try { guideVueUnmount(); } catch (e) {}
+    guideVueUnmount = null;
+  }
+});
+/* ---------- 教程阅读页 Vue 版（#/t/:id） ---------- */
+let tutorialVueUnmount = null;
+function tutorialVueEnabled() {
+  try {
+    const q = new URLSearchParams(location.search).get('ui');
+    if (q === 'legacy') return false;
+    if (q === 'vue') return true;
+    const saved = localStorage.getItem('sierxing-ui-tutorial');
+    if (saved === 'legacy') return false;
+    if (saved === 'vue') return true;
+  } catch (e) {}
+  return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+}
+async function renderTutorialVue(tid) {
+  const root = document.getElementById('app');
+  if (!root) return false;
+  if (tutorialVueUnmount) { try { tutorialVueUnmount(); } catch (e) {} tutorialVueUnmount = null; }
+  if (!document.querySelector('link[data-ui-page="tutorial"]')) {
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/tutorial.css'; l.setAttribute('data-ui-page', 'tutorial');
+    document.head.appendChild(l);
+  }
+  const mod = await import('/ui-dist/tutorial.js?v=' + Date.now());
+  if (!mod || typeof mod.mountTutorialPage !== 'function') throw new Error('UI 插件没有导出 mountTutorialPage');
+  try { window.__sxTutVueActive = true; } catch (e) {}
+  tutorialVueUnmount = mod.mountTutorialPage(root, {
+    tid: Number(tid), api: api, toast: toast, fmtDate: fmtDate,
+    mdToHTML: mdToHTML,
+    frameHtml: function (content) { return withCiteHook(tutThemedHTML(rewriteCites(cleanHtmlForFrame(content)))); },
+    goalCompOn: function (id) { return goalCompOn(state.tutGoal, id); },
+    setupContext: function (t, node, goal) {
+      state.tutGoalId = t ? t.goal_id : 0;
+      state.tutGoalTid = t ? t.id : 0;
+      state.tutGoal = goal || null;
+      state.tutUpdatedAt = t ? (t.updated_at || '') : '';
+      state.tutFmt = t ? t.format : 'md';
+      state.tutNodeId = node ? node.id : 0;
+      tutRenderedSrc = (t && t.format !== 'html') ? (t.content || '') : '';
+      try { window.__tutRenderedTid = Number(t ? t.id : tid); window.__tutCur = null; } catch (e) {}
+      try { ensureCiteCache(t ? t.goal_id : 0); } catch (e) {}
+      try { aiBindGoal(t ? t.goal_id : 0); } catch (e) {}
+    },
+    tutTocBuild: function (id) { try { tutTocBuild(Number(id)); } catch (e) {} },
+    tutViewInit: function () { try { tutViewInit(); } catch (e) {} },
+    applyBarOverflow: function (ns) { try { applyBarOverflow(ns); } catch (e) {} }
+  });
+  return true;
+}
+window.addEventListener('hashchange', function () {
+  if (tutorialVueUnmount && !/^#\/t\/\d+$/.test(location.hash)) {
+    try { tutorialVueUnmount(); } catch (e) {}
+    tutorialVueUnmount = null;
+    try { window.__sxTutVueActive = false; } catch (e) {}
+  }
+});
+/* ---------- 路线图页 Vue 版（#/g/:id/map） ---------- */
+let mapVueUnmount = null;
+function mapVueEnabled() {
+  try {
+    const q = new URLSearchParams(location.search).get('ui');
+    if (q === 'legacy') return false;
+    if (q === 'vue') return true;
+    const saved = localStorage.getItem('sierxing-ui-map');
+    if (saved === 'legacy') return false;
+    if (saved === 'vue') return true;
+  } catch (e) {}
+  return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+}
+/* ============================================================================
+ * 页面插件化 · 通用加载器
+ * ----------------------------------------------------------------------------
+ * 目标：**所有页面都以插件形式存在**，且外观与原版像素级一致。
+ * 做法：把原版 render* 的实现原样搬进 ui/plugins/builtin/<page>/，
+ *       这里只负责 ① 判断走不走插件 ② 注入原版依赖(host) ③ 渲染到 #app。
+ *
+ * 插件侧约定：
+ *   window.SXUIPlugin.<page> = { id: '<page>', mount(host) -> { render(), unmount?() } }
+ *
+ * 覆盖优先级：用户插件 DATA_DIR/ui-plugins/<page>/  >  内置 ui/plugins/builtin/<page>/
+ *             >  原版 render* 函数（兜底，保证永远能渲染出来）
+ * 回退开关：?ui=legacy 或 localStorage.sierxing-ui-<uiKey>=legacy
+ * ========================================================================== */
+const PAGE_PLUGINS = ['roadmap', 'diff', 'versions', 'aitasks', 'guide', 'home',
+  'library', 'components', 'tutorial', 'chat', 'goal', 'settings'];
+/* 页面 id → localStorage 键后缀（沿用既有 sierxing-ui-* 习惯） */
+const PAGE_PLUGIN_UIKEY = {
+  roadmap: 'map', diff: 'diff', versions: 'versions', aitasks: 'aitasks', guide: 'guide',
+  home: 'home', library: 'library', components: 'components', tutorial: 'tutorial',
+  chat: 'chat', goal: 'goal', settings: 'settings'
+};
+const pagePluginUnmount = {};   /* page -> 上一次挂载的实例 */
+const pagePluginIsUser = {};    /* page -> 是否是用户插件（只有用户插件需要在离开页面时自动卸载） */
+
+/** 这个页面是否走插件（默认走；?ui=legacy / localStorage 可强制回退原版） */
+function pagePluginEnabled(page) {
+  /* 分层配置（P3）：DATA_DIR/config/user.json 写 { "ui": { "pagePlugins": false } }
+     就是「完全不用我们这套插件界面」的总开关（回到原版渲染）。 */
+  if (sxCfg('ui.pagePlugins', true) === false) return false;
+  try {
+    const q = new URLSearchParams(location.search).get('ui');
+    if (q === 'legacy') return false;
+    if (q === 'vue') return true;
+    const saved = localStorage.getItem('sierxing-ui-' + (PAGE_PLUGIN_UIKEY[page] || page));
+    if (saved === 'legacy') return false;
+    if (saved === 'vue') return true;
+  } catch (e) {}
+  return true;
+}
+
+/**
+ * 原版依赖注入：插件里对原版全局的引用都从这里拿。
+ * ⚠️ 新增依赖只在这里加一行，所有插件统一可用 —— 不要让插件去猜 window 上有什么。
+ */
+/* <sx-host-map:begin> 自动生成，勿手改（scripts/gen-host-map.js） */
+let _sxPageHostMap = null;
+/**
+ * 插件可用的原版依赖表（app.js 真实顶层声明）。首次渲染时惰性构建，避开 TDZ。
+ * let/var 用取值器/设值器：插件里 H.AI_PROVIDERS = x 要真正写回原版全局变量。
+ */
+function sxPageHostMap() {
+  if (_sxPageHostMap) return _sxPageHostMap;
+  const h = {
+    app, AI_PRESETS, AI_MODES, AI_SCOPES, state, currentThemeEff, themeMap, themeFor,
+    setThemeFor, applyUserSkin, sxCfg, loadKernelConfig, applyThemeStyles, applyTheme, toggleTheme, mdOneLine,
+    SXI_PATHS, sxi, esc, fmtDate, safeParse, api, toast, parseRoute,
+    NavHist, navCurHash, navTrack, goBack, openMoreMenu, setHeader, route, homeVueEnabled,
+    ensureHomeVueCss, renderHomeVue, HOME_LAYOUT_KEY, HOME_RECENT_KEY, HOME_RECENT_MAX, HOME_RECENT_SHOW, HOME_TILE_SIZES, HOME_SIZE_NAME,
+    HOME_SIZE_DESC, HOME_TILE_DEFAULT_SIZE, HOME_CHIP_SLOP_X, HOME_CHIP_SLOP_Y, homeRecentRead, homeRecentTouch, homeLauncherSize, homeLauncherStatus,
+    homeLauncherLoad, homeLauncherSave, homeLauncherNewFolderId, homeLauncherFind, homeLauncherFolderName, homeLauncherGoalHTML, homeLauncherFolderMiniHTML, homeLauncherFolderHTML,
+    homeLauncherRecentHTML, homeLauncherDeskHTML, bindHomeLauncher, homeLauncherOpenMenu, homeLauncherDissolveFolder, homeLauncherCloseFolder, homeLauncherFolderCardHTML, homeLauncherFolderMenu,
+    homeLauncherOpenFolder, homeLauncherBeginPress, homeLauncherStartDrag, homeLauncherDragMove, homeLauncherHitTest, homeLauncherMergeChipText, homeLauncherPaintDrop, homeLauncherPaintChipHover,
+    homeLauncherChipHit, homeLauncherDragDrop, homeLauncherMerge, homeLauncherAbortDrag, renderHome, newGoalHTML, go, loadGoal,
+    buildTree, subtreeProgress, sourcesHTML, ST_LABEL, ST_NEXT, nodeProgressHTML, LEVEL_NAME, nodeOpen,
+    taskNodeHTML, subgoalNodeHTML, stageNodeHTML, drawMapLines, applyCanvasTransform, zoomBy, mapFit, bindMapTools,
+    renderMapPage, findLibSource, splitSteps, WHY_MARK, HOW_MARK, splitDetailRationale, splitPlain, showNodePanel,
+    reportCardHTML, bindReportCard, keyOfNode, nodeChanged, diffColumnHTML, constraintsList, constraintsCardHTML, bindConstraints,
+    TASK_META, taskActive, TASK_STALL_HINT_MS, taskIdleText, taskBarEnsure, taskProgressHTML, taskBarRender, taskMarkNodes,
+    refreshTutorialIfUpdated, taskPoll, taskElapsedTick, taskStart, tutThemedHTML, cleanHtmlForFrame, selNodesList, selBarRender,
+    selAct, selBoxInit, TUTMANUAL_BOUND, tutEditPos, tutClickRoot, mdPickTarget, mdLineOff, mdPickOffset,
+    mdPickHoverBind, editKeysBind, mdSrcRange, mdSliceLines, mdSpliceLines, mdInlineActive, mdInlineValue, mdInlineOpen,
+    mdInlineClose, mdInlineSave, tutTextAnchor, tutAnchorOff, tutManualEnter, tutPutContent, tutRawCachePut, refreshTutUpdatedAt,
+    tutManualSave, tutManualCancel, tutInlineEnter, tutRerenderBody, tutBindClickEdit, tutFrameEl, tutDoc, tutWin,
+    tutRoot, tutHeadEl, tutAnchorLine, tutAnchorElOf, tutAnchorNow, tutAnchorTarget, tutRestoreSettled, tutBodyAnchors,
+    tutTruncNotice, tutFmtOf, tutScrollRatio, tutTocOpen, tutTocWidth, tutTocShowTab, tutTocBuild, tutProgressSave,
+    tutProgressFlush, TUTEDIT_BOUND, lineDiff, diffHTML, openTutVersions, openTutRename, PAGE_LABELS, pageLabelOf,
+    pageTitleOf, pageTextFromDom, pageTextForTutorial, collectPageContext, aiRouteHasGoal, _aiTutGoalCache, aiResolveRouteGoal, aiGid,
+    aiSyncRoute, aiPaintPageChip, chShortPath, chShortUrl, chStepSay, chTraceSummary, chStepsHTML, chTraceHTML,
+    chTraceIsOpen, chTraceToggle, opChipHTML, pendingEditHTML, CREATE_KIND_LABEL, chatCreateHTML, chatCreateInstalledHTML, chatCreateAct,
+    chatBubbleHTML, trimOpsForStream, chatStreamHTML, chatRenderStream, chatRenderStreamSoon, toggleChatDiff, aiEnsureDOM, aiToggleLegacy,
+    aiToggle, aiAutoGrow, aiApplyWidth, aiApplyInputH, aiBindResize, aiFocusInput, aiNodesParse, aiNodeOf,
+    aiNodeLabel, aiSessionObj, aiNodesPersist, aiAttachNode, aiDetachNode, aiPaintNodes, aiApplyPicker, aiOpenNodeChat,
+    aiFnTargetNode, aiPaintFnBtn, aiPaintFnPop, PICK_MAX, showNodePicker, aiBindGoal, aiLoadSessions, aiLoadMsgs,
+    aiSwitchSession, aiNewSession, aiRenameSession, aiDeleteSession, aiSetModel, aiLoadModels, aiHostEl, aiRenderMsgs,
+    aiRender, AI_IMG_MAX, aiImgs, aiImgFit, aiImgFromFile, aiImgAddFiles, aiImgsClear, aiImgsRender,
+    aiImgWarnCheck, aiBindImageInput, aiUpdateSendBtn, aiModeGet, aiScopeDef, aiScopeGet, aiScopeSet, aiScopeAutoSuggest,
+    aiScopePopOpen, aiScopeRender, aiModeSet, aiModePopOpen, aiRenderMode, submitTutorialEdit, aiSend, aiSendText,
+    tutorialsOfNode, showShareDialog, showFolderDialog, showTutorialDialog, startTutorial, tutProgressHTML, tutorialCardHTML, bindTutorialCard,
+    mdEscape, CALL_LABELS, calloutNorm, PRIMARY_KINDS, calloutOf, tutSplitBlocks, tutGroupCallouts, HL_LANGS,
+    HL_ALIAS, hlGuessLang, hlEscape, hlCode, mdEscapeAttr, vizSrcdoc, MD_TAGS, MD_STYLE_OK,
+    MD_COLOR_MAP, mdUnescHtml, mdSafeStyle, mdTags, mdInline, normalizeFences, mdToHTML, citeCacheUpdate,
+    ensureCiteCache, rewriteCites, citeChain, citeResolve, srcKind, srcCardHTML, openAllSrcPop, citePopClose,
+    citePopOpen, withCiteHook, BAR_NS, barNs, barStrs, barTok, barFolderOf, barState,
+    barSave, barNorm, barOrderMove, barVisibleItems, barDropMarkShow, barDropMarkHide, barDropIndex, barItemLabel,
+    barFolderChip, applyBarOverflow, bindBarDnD, openBarFolderPanel, openBarEditor, tutView, tutViewSave, tutViewApply,
+    tutZoomBy, tutWheelBind, tutViewInit, renderTutorialPage, diffVueEnabled, renderDiffVue, renderDiffPage, showVersionsPanel,
+    versionItemHTML, bindVersionItems, versionsVueEnabled, renderVersionsVue, renderVersionsPage, rerenderCurrent, setNodeStatus, editNode,
+    delNode, db2Kids, showCtxMenu, askMeta, looksLikeMd, mdMaybe, questionHTML, askPanelHTML,
+    bindQuizFeedback, bindDrillButtons, saveQuestionNote, drillQuestion, clarifyPanelHTML, goalPendingAsk, submitAsk, collectClarifyAnswers,
+    planPanelHTML, adjustPanelHTML, bindPlanPanel, renderPlanLive, bindPlanningPanel, streamSSE, startClarify, startPlanning,
+    planResumeCheck, startPlanResume, startPlanTasks, startPlanRefine, expandPanelHTML, startExpand, collectPrefHint, sourceItemHTML,
+    srcPanelHTML, startDigest, startCollect, collectPlanSummary, ensureCollectSetup, showCollectSetupDialog, nextCardHTML, viewBarHTML,
+    filterTree, listTaskHTML, listViewHTML, cardFoldState, cardFoldSave, foldClosed, foldBtn, renderContinueCard,
+    renderGoal, bindTreeEvents, editGoalHTML, fmtBytes, storeSectionLoad, openStoreDialog, pathTail, maybeAskDataDir,
+    markAsked, doStoreApply, GUIDE_STEPS, gdInline, guideDone, showGuide, closeGuide, drawGuide,
+    compOn, goalCtx, goalCompOn, assetUrl, applyComponentStyles, seedThemeMapOnce, loadComponents, kwScore,
+    libSourcesOfNode, libraryVueEnabled, ensureLibraryVueCss, renderLibraryPageVue, renderLibraryPage, componentsVueEnabled, ensureComponentsVueCss, renderComponentsVue,
+    cmpPrefs, cmpPrefsSave, cmpMatchComponent, cmpSortCats, cmpGroupComponents, cmpCatIcon, cmpCatHint, cmpCatSectionHTML,
+    cmpSearchHTML, cmpCardHTML, cmpGoalCardHTML, cmpCatManageHTML, renderComponentsPage, cmpShareHTML, sxiGoals, sxiGoalsSync,
+    sxiGoalSplitIcon, sxiGoalPickHTML, sxiGoalPickBind, sxiGoalPickOpen, sxiGoalPickClose, cmpScopePickHTML, cmpScopePickBind, updSkipHash,
+    updLaterUntil, fmtUpdTime, updHasUpdate, updIsPayload, updSizeText, updWhereText, checkUpdateOnBoot, renderUpdateBanner,
+    updMaskShow, updMaskSub, waitServerBack, applyUpdate, updateSectionHTML, bindUpdateSection, serviceSectionHTML, bindServiceSection,
+    syncSwitch, syncSectionHTML, bindSyncSection, openSyncConflictDialog, AI_PROVIDERS_FALLBACK, AI_AGENTS_FALLBACK, providerButtonsHTML, modelButtonsHTML,
+    testedOf, paintBtn, chosenChipsHTML, shortHost, connFolded, agentButtonsHTML, connCardHTML, agentCardHTML,
+    aiStatusBoxHTML, themeSettingsHTML, themeMsgText, ragSettingsHTML, settingsThemeVueEnabled, renderSettingsThemeVue, settingsVueEnabled, renderSettingsVue,
+    settingsAiVueEnabled, renderSettingsAiVue, settingsDataVueEnabled, renderSettingsDataVue, settingsSyncVueEnabled, renderSettingsSyncVue, settingsRagVueEnabled, renderSettingsRagVue,
+    settingsServiceVueEnabled, renderSettingsServiceVue, settingsUpdateVueEnabled, renderSettingsUpdateVue, settingsSystemVueEnabled, renderSettingsSystemVue, guideVueEnabled, renderGuideVue,
+    tutorialVueEnabled, renderTutorialVue, mapVueEnabled, pagePluginIsUser, ensureBuiltinPageStyle, removeBuiltinPageStyle, findUserUiPlugin, loadUiHostBridge,
+    loadClassicScript, mountUserUiPage, markPagePlugin, currentPagePlugin, renderMapVue, chatVueEnabled, renderChatVue, goalVueEnabled,
+    renderGoalVue, renderSettings, showImportDialog, setupCardHTML, ensureAIConfigured, PLUGIN_BTNS_VISIBLE, pluginEntriesVisible, pluginButtonsHTML,
+    goalPluginsHTML, goalManageableEntries, showGoalPluginsMenu, pluginPickerHTML, bindPluginPicker, AITASK_ST, AIT_PAGE_OPTS, aitPageSize,
+    aiTasksStopPoll, aitTypeMeta, aitDur, aitWhen, aitS, aitQuery, sxiSelText, sxiSelPaint,
+    sxiSelify, aitGoalLabel, aitStatusLabel, aitShortDate, aitShortDT, aitTimeLabel, aitTimeOn, aitDayISO,
+    aitHoursISO, aitApplyPreset, aitApplyCustom, aitLocalDT, bindAitFillBtns, aitPaintFilterBtns, sxiPopClose, sxiPopShow,
+    aitAfterFilterChange, aitRunningCard, aitRunHTML, aitGrpHTML, aitHistRowHTML, aitRowHeadHTML, aitRowsHTML, aitPaintRun,
+    aitPaintHist, aitLoadRows, aitReloadAll, aitToggle, aitVueEnabled, ensureAitVueCss, renderAiTasksPageVue, renderAiTasksPage,
+    bindAiTasks, RAIL_LOGO_SVG, _railTutGoal, _railTutPending, railTutGoalAsync, railGoalId, RAIL_ORDER_KEY, RAIL_ORDER_HINT_KEY,
+    railOrderLoad, railOrderSave, railOrderApply, railBindDnD, railDnDMove, railDnDEnd, railOrderHinted, railItemsHTML,
+    renderRail, loadFrontendPlugins, ensureGoal, pluginGoButtonsBind
+  };
+  Object.defineProperty(h, "mdInlineSt", {
+    get: function () { return mdInlineSt; },
+    set: function (v) { mdInlineSt = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "homeVueUnmount", {
+    get: function () { return homeVueUnmount; },
+    set: function (v) { homeVueUnmount = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "homeLauncherDrag", {
+    get: function () { return homeLauncherDrag; },
+    set: function (v) { homeLauncherDrag = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "homeLauncherNoClickUntil", {
+    get: function () { return homeLauncherNoClickUntil; },
+    set: function (v) { homeLauncherNoClickUntil = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "homeFolderDialog", {
+    get: function () { return homeFolderDialog; },
+    set: function (v) { homeFolderDialog = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "homeFolderDialogOnKey", {
+    get: function () { return homeFolderDialogOnKey; },
+    set: function (v) { homeFolderDialogOnKey = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "homeFolderDialogOnHash", {
+    get: function () { return homeFolderDialogOnHash; },
+    set: function (v) { homeFolderDialogOnHash = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "homeFolderDirty", {
+    get: function () { return homeFolderDirty; },
+    set: function (v) { homeFolderDirty = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "homeFolderCancelDrag", {
+    get: function () { return homeFolderCancelDrag; },
+    set: function (v) { homeFolderCancelDrag = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "taskTimer", {
+    get: function () { return taskTimer; },
+    set: function (v) { taskTimer = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "taskElapsedTimer", {
+    get: function () { return taskElapsedTimer; },
+    set: function (v) { taskElapsedTimer = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "tutEditing", {
+    get: function () { return tutEditing; },
+    set: function (v) { tutEditing = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "tutRenderedSrc", {
+    get: function () { return tutRenderedSrc; },
+    set: function (v) { tutRenderedSrc = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "tutManualUnbind", {
+    get: function () { return tutManualUnbind; },
+    set: function (v) { tutManualUnbind = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "tutProgSent", {
+    get: function () { return tutProgSent; },
+    set: function (v) { tutProgSent = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "_aiSyncToken", {
+    get: function () { return _aiSyncToken; },
+    set: function (v) { _aiSyncToken = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "_streamLastDraw", {
+    get: function () { return _streamLastDraw; },
+    set: function (v) { _streamLastDraw = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "_aiNodesSaving", {
+    get: function () { return _aiNodesSaving; },
+    set: function (v) { _aiNodesSaving = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "_aiImgWarnSeq", {
+    get: function () { return _aiImgWarnSeq; },
+    set: function (v) { _aiImgWarnSeq = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "BAR_DRAG", {
+    get: function () { return BAR_DRAG; },
+    set: function (v) { BAR_DRAG = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "BAR_DROP_MARK", {
+    get: function () { return BAR_DROP_MARK; },
+    set: function (v) { BAR_DROP_MARK = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "diffVueUnmount", {
+    get: function () { return diffVueUnmount; },
+    set: function (v) { diffVueUnmount = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "versionsVueUnmount", {
+    get: function () { return versionsVueUnmount; },
+    set: function (v) { versionsVueUnmount = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "planTimer", {
+    get: function () { return planTimer; },
+    set: function (v) { planTimer = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "_storeState", {
+    get: function () { return _storeState; },
+    set: function (v) { _storeState = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "libraryVueUnmount", {
+    get: function () { return libraryVueUnmount; },
+    set: function (v) { libraryVueUnmount = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "componentsVueUnmount", {
+    get: function () { return componentsVueUnmount; },
+    set: function (v) { componentsVueUnmount = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "SXI_GOALS_CACHE", {
+    get: function () { return SXI_GOALS_CACHE; },
+    set: function (v) { SXI_GOALS_CACHE = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "sxiGoalPopEl", {
+    get: function () { return sxiGoalPopEl; },
+    set: function (v) { sxiGoalPopEl = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "AI_PROVIDERS", {
+    get: function () { return AI_PROVIDERS; },
+    set: function (v) { AI_PROVIDERS = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "AI_AGENTS", {
+    get: function () { return AI_AGENTS; },
+    set: function (v) { AI_AGENTS = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "settingsThemeVueUnmount", {
+    get: function () { return settingsThemeVueUnmount; },
+    set: function (v) { settingsThemeVueUnmount = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "settingsVueUnmount", {
+    get: function () { return settingsVueUnmount; },
+    set: function (v) { settingsVueUnmount = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "settingsAiVueUnmount", {
+    get: function () { return settingsAiVueUnmount; },
+    set: function (v) { settingsAiVueUnmount = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "settingsDataVueUnmount", {
+    get: function () { return settingsDataVueUnmount; },
+    set: function (v) { settingsDataVueUnmount = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "settingsSyncVueUnmount", {
+    get: function () { return settingsSyncVueUnmount; },
+    set: function (v) { settingsSyncVueUnmount = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "settingsRagVueUnmount", {
+    get: function () { return settingsRagVueUnmount; },
+    set: function (v) { settingsRagVueUnmount = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "settingsServiceVueUnmount", {
+    get: function () { return settingsServiceVueUnmount; },
+    set: function (v) { settingsServiceVueUnmount = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "settingsUpdateVueUnmount", {
+    get: function () { return settingsUpdateVueUnmount; },
+    set: function (v) { settingsUpdateVueUnmount = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "settingsSystemVueUnmount", {
+    get: function () { return settingsSystemVueUnmount; },
+    set: function (v) { settingsSystemVueUnmount = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "guideVueUnmount", {
+    get: function () { return guideVueUnmount; },
+    set: function (v) { guideVueUnmount = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "tutorialVueUnmount", {
+    get: function () { return tutorialVueUnmount; },
+    set: function (v) { tutorialVueUnmount = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "mapVueUnmount", {
+    get: function () { return mapVueUnmount; },
+    set: function (v) { mapVueUnmount = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "chatVueUnmount", {
+    get: function () { return chatVueUnmount; },
+    set: function (v) { chatVueUnmount = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "goalVueUnmount", {
+    get: function () { return goalVueUnmount; },
+    set: function (v) { goalVueUnmount = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "BOOTED", {
+    get: function () { return BOOTED; },
+    set: function (v) { BOOTED = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "aiTasksTimer", {
+    get: function () { return aiTasksTimer; },
+    set: function (v) { aiTasksTimer = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "sxiPopEl", {
+    get: function () { return sxiPopEl; },
+    set: function (v) { sxiPopEl = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "aitVueUnmount", {
+    get: function () { return aitVueUnmount; },
+    set: function (v) { aitVueUnmount = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "railDrag", {
+    get: function () { return railDrag; },
+    set: function (v) { railDrag = v; },
+    enumerable: true, configurable: true
+  });
+  Object.defineProperty(h, "railJustDragged", {
+    get: function () { return railJustDragged; },
+    set: function (v) { railJustDragged = v; },
+    enumerable: true, configurable: true
+  });
+  _sxPageHostMap = h;
+  return _sxPageHostMap;
+}
+/* <sx-host-map:end> */
+function pagePluginHost(extra) {
+  /* host = app.js 全部顶层声明（自动生成表，见 sxPageHostMap）+ 本页专用依赖。
+     ⚠️ 不要在这里手工逐个列函数：漏一个就是插件里的 ReferenceError，
+        node --check 查不出来（AGENTS.md 坑 #9）。新增全局函数后跑
+        node scripts/gen-host-map.js 重新生成即可。 */
+  const h = Object.assign({}, sxPageHostMap());
+  /* 特殊包装：不是 app.js 顶层函数、需要转一手的能力 */
+  h.pluginEnabled = function (g, id) { try { return SiErXing.pluginEnabled(g, id); } catch (e) { return false; } };
+  return Object.assign(h, extra || {});
+}
+
+/**
+ * 通用插件渲染。
+ * @param {string} page  页面 id（'roadmap' / 'diff' / 'goal' / 'settings' …）
+ * @param {object} extra 页面专用依赖（如 { gid } / { vid }）
+ * @returns {Promise<boolean>} true=插件渲染成功；false=未启用或加载失败（调用方回退原版）
+ */
+/* ---------- 用户 UI 插件（P2）：ESM / Vue 组件优先，经典脚本兜底 ---------- */
+
+/** 内置页面样式：standalone 用户插件不注入（我们不该把自家样式压到用户界面上） */
+function ensureBuiltinPageStyle(page) {
+  if (document.querySelector('link[data-ui-plugin-style="' + page + '"]')) return;
+  const l = document.createElement('link');
+  l.rel = 'stylesheet';
+  l.href = '/ui/plugins/builtin/' + page + '/style.css?v=' + Date.now();
+  l.setAttribute('data-ui-plugin-style', page);
+  l.onerror = function () { try { l.remove(); } catch (e) {} };
+  document.head.appendChild(l);
+}
+function removeBuiltinPageStyle(page) {
+  const l = document.querySelector('link[data-ui-plugin-style="' + page + '"]');
+  if (l) { try { l.remove(); } catch (e) {} }
+}
+
+/** 只找「用户插件」且未停用；内置 manifest 也在这份列表里（source='builtin'），必须按 source 过滤 */
+async function findUserUiPlugin(page) {
+  if (sxCfg('ui.userPlugins', true) === false) return null;
+  try {
+    const r = await api('/api/ui/plugins');
+    return ((r && r.plugins) || []).find(function (p) {
+      return p && p.id === page && p.source === 'user' && p.enabled !== false;
+    }) || null;
+  } catch (e) { return null; }
+}
+
+/** 按需加载 Vue 宿主桥：只有用户真的装了 Vue 页面插件才会下载这个 chunk */
+async function loadUiHostBridge() {
+  if (!window.__sxUiHostBridge) window.__sxUiHostBridge = await import('/ui-dist/uihost.js?v=' + Date.now());
+  return window.__sxUiHostBridge;
+}
+
+function loadClassicScript(src) {
+  return new Promise(function (res, rej) {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = res;
+    s.onerror = function () { rej(new Error('插件脚本加载失败：' + src)); };
+    document.head.appendChild(s);
+  });
+}
+
+/**
+ * 挂载用户页面插件，三种契约都认：
+ *   ① ESM + Vue：export default defineComponent({...})   ← 推荐（用户可写 .vue 构建后放进来）
+ *   ② ESM + mount：export function mount(root, ctx)       ← 自己接管 DOM（返回 unmount 函数也行）
+ *   ③ 经典脚本：window.SXUIPlugin[page] = { mount(host) } ← 老契约，继续支持
+ * @returns {Promise<string>} 实际用的契约：'esm-vue' | 'esm-mount' | 'classic'
+ */
+async function mountUserUiPage(page, manifest, extra) {
+  const root = document.getElementById('app');
+  let mod = null;
+  try { mod = await import('/api/ui/plugins/' + page + '/entry?v=' + Date.now()); } catch (e) { mod = null; }
+  const ctx = {
+    page: page, manifest: manifest, host: pagePluginHost(extra),
+    api: api, toast: toast, esc: esc, go: go, state: state,
+    fmtDate: fmtDate, mdToHTML: mdToHTML, safeParse: safeParse
+  };
+  if (mod && (typeof mod.mount === 'function' || mod.default)) {
+    const host = await loadUiHostBridge();
+    host.installHost({ page: page, manifest: manifest, host: ctx.host });
+    ctx.vue = host.vue;
+    if (typeof mod.mount === 'function') {
+      const ret = await mod.mount(root, ctx);
+      pagePluginUnmount[page] = (ret && typeof ret === 'object') ? ret
+        : { unmount: typeof ret === 'function' ? ret : null };
+      return 'esm-mount';
+    }
+    pagePluginUnmount[page] = host.mountVuePage(mod.default, root, ctx);
+    await host.nextTick();
+    return 'esm-vue';
+  }
+  /* 极端情况：入口其实是经典脚本，但被 import() 当模块执行过了（IIFE 会设置 window.SXUIPlugin） */
+  if (!(window.SXUIPlugin && window.SXUIPlugin[page])) {
+    await loadClassicScript('/api/ui/plugins/' + page + '/entry?v=' + Date.now());
+  }
+  const plugin = window.SXUIPlugin && window.SXUIPlugin[page];
+  if (!plugin || typeof plugin.mount !== 'function') throw new Error('用户 UI 插件没有可用的导出（default/mount/SXUIPlugin）');
+  const inst = plugin.mount(pagePluginHost(extra));
+  pagePluginUnmount[page] = inst;
+  if (inst && typeof inst.render === 'function') await inst.render();
+  return 'classic';
+}
+
+/** 埋点：这一页由谁渲染（内置 / 用户插件 / 原版回退）。测试与 DIY 管理页都靠它 */
+function markPagePlugin(page, source, how) {
+  window.__sxPluginUsed = window.__sxPluginUsed || {};
+  window.__sxPluginUsed[page] = true;
+  window.__sxPluginSource = window.__sxPluginSource || {};
+  window.__sxPluginSource[page] = source === 'user' ? ('user:' + how) : 'builtin';
+}
+
+/**
+ * 通用插件渲染。
+ * @param {string} page  页面 id（'roadmap' / 'diff' / 'goal' / 'settings' …）
+ * @param {object} extra 页面专用依赖（如 { gid } / { vid }）
+ * @returns {Promise<boolean>} true=插件渲染成功；false=未启用或加载失败（调用方回退原版）
+ */
+async function renderPagePlugin(page, extra) {
+  if (!PAGE_PLUGINS.includes(page)) return false;
+  if (!pagePluginEnabled(page)) return false;
+  const root = document.getElementById('app');
+  if (!root) return false;
+
+  /* 卸载上一实例，避免监听/定时器泄漏 */
+  const prev = pagePluginUnmount[page];
+  if (prev) { try { prev.unmount && prev.unmount(); } catch (e) {} delete pagePluginUnmount[page]; }
+
+  /* 用户插件优先：找到就先试 ESM/Vue，失败再回退内置（保证任何情况都能显示） */
+  const userPlugin = await findUserUiPlugin(page);
+  if (userPlugin && userPlugin.standalone) removeBuiltinPageStyle(page);
+  else ensureBuiltinPageStyle(page);
+
+  if (userPlugin) {
+    try {
+      const how = await mountUserUiPage(page, userPlugin, extra);
+      pagePluginIsUser[page] = true;
+      markPagePlugin(page, 'user', how);
+      return true;
+    } catch (e) {
+      try { console.warn('[SiErXing] 用户 UI 插件加载失败，回退内置界面：', page, e); } catch (e2) {}
+      try {
+        const bad = pagePluginUnmount[page];
+        if (bad && bad.unmount) bad.unmount();
+      } catch (e2) {}
+      delete pagePluginUnmount[page];
+      delete pagePluginIsUser[page];
+      if (userPlugin.standalone) ensureBuiltinPageStyle(page);
+    }
+  }
+
+  /* 内置页面插件（经典脚本 + window.SXUIPlugin[page]） */
+  await loadClassicScript('/ui/plugins/builtin/' + page + '/index.js?v=' + Date.now());
+  const plugin = window.SXUIPlugin && window.SXUIPlugin[page];
+  if (!plugin || typeof plugin.mount !== 'function') throw new Error('页面插件未注册：' + page);
+  const inst = plugin.mount(pagePluginHost(extra));
+  pagePluginUnmount[page] = inst;
+  /* ⚠️ 必须 await：内置插件的 render() 大多是 async（先画「正在读取…」再 await 数据、再整体重绘）。
+     不 await 的话 `route()` 会以为"已渲染完"、立刻往下走 sxiSelify(document) —— 那时插件还没画出
+     带 .sxi-sel 的 <select>，下拉框就没被换成自画样式（实测：同一条 /aitasks，原版那侧换上了、
+     插件这侧还是原生 select，像素差 5000+，且与我的改动无关）。 */
+  if (inst && typeof inst.render === 'function') await inst.render();
+  /* 埋点：标记"这一页确实由插件渲染"。
+     ⚠️ 没有它就没法验收插件化 —— 插件抛错时路由会**静默回退原版**，
+        像素对比当然一致（两边都是原版），看起来"全都通过"，其实插件根本没跑。
+        冒烟测试断言 window.__sxPluginUsed[page] === true 才算真接管。 */
+  markPagePlugin(page, 'builtin', 'classic');
+  return true;
+}
+
+/** 当前路由对应哪个页面插件（'' = 不是页面插件路由） */
+function currentPagePlugin() {
+  const r = parseRoute();
+  if (r.view === 'chat') return 'goal';       /* 对话页复用 goal 插件 + AI 抽屉 */
+  if (r.view === 'map') return 'roadmap';
+  return PAGE_PLUGINS.includes(r.view) ? r.view : '';
+}
+/* 用户插件是「整页接管」，离开页面必须卸载（内置插件的历史行为不由这里改，避免影响既有页面） */
+window.addEventListener('hashchange', function () {
+  const active = currentPagePlugin();
+  for (const page of Object.keys(pagePluginIsUser)) {
+    if (page === active) continue;
+    const inst = pagePluginUnmount[page];
+    if (inst) { try { inst.unmount && inst.unmount(); } catch (e) {} }
+    delete pagePluginUnmount[page];
+    delete pagePluginIsUser[page];
+  }
+});
+
+/* 兼容旧调用点：路线图页包装 */
+async function renderRoadmapPlugin(gid) {
+  return renderPagePlugin('roadmap', { gid: Number(gid) });
+}
+async function renderMapVue(gid) {
+  const root = document.getElementById('app');
+  if (!root) return false;
+  if (mapVueUnmount) { try { mapVueUnmount(); } catch (e) {} mapVueUnmount = null; }
+  if (!document.querySelector('link[data-ui-page="map"]')) {
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/map.css'; l.setAttribute('data-ui-page', 'map');
+    document.head.appendChild(l);
+  }
+  const mod = await import('/ui-dist/map.js?v=' + Date.now());
+  if (!mod || typeof mod.mountMapPage !== 'function') throw new Error('UI 插件没有导出 mountMapPage');
+  mapVueUnmount = mod.mountMapPage(root, { api: api, toast: toast, gid: Number(gid) });
+  return true;
+}
+window.addEventListener('hashchange', function () {
+  if (mapVueUnmount && !/^#\/g\/\d+\/map$/.test(location.hash)) {
+    try { mapVueUnmount(); } catch (e) {}
+    mapVueUnmount = null;
+  }
+});
+/* ---------- 对话页 Vue 版（#/g/:id/chat） ---------- */
+let chatVueUnmount = null;
+function chatVueEnabled() {
+  try {
+    const q = new URLSearchParams(location.search).get('ui');
+    if (q === 'legacy') return false;
+    if (q === 'vue') return true;
+    const saved = localStorage.getItem('sierxing-ui-chat');
+    if (saved === 'legacy') return false;
+    if (saved === 'vue') return true;
+  } catch (e) {}
+  return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+}
+async function renderChatVue(gid, tut, node) {
+  const root = document.getElementById('app');
+  if (!root) return false;
+  if (chatVueUnmount) { try { chatVueUnmount(); } catch (e) {} chatVueUnmount = null; }
+  if (!document.querySelector('link[data-ui-page="chat"]')) {
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/chat.css'; l.setAttribute('data-ui-page', 'chat');
+    document.head.appendChild(l);
+  }
+  const mod = await import('/ui-dist/chat.js?v=' + Date.now());
+  if (!mod || typeof mod.mountChatPage !== 'function') throw new Error('UI 插件没有导出 mountChatPage');
+  chatVueUnmount = mod.mountChatPage(root, { api: api, toast: toast, fmtDate: fmtDate, gid: Number(gid), tutorialId: Number(tut) || 0, nodeId: Number(node) || 0, mdToHTML: mdToHTML });
+  return true;
+}
+window.addEventListener('hashchange', function () {
+  if (chatVueUnmount && !/^#\/(?:g\/\d+\/chat(?:\?.*)?|chat\/?)$/.test(location.hash)) {
+    try { chatVueUnmount(); } catch (e) {}
+    chatVueUnmount = null;
+  }
+});
+/* ---------- 目标概览页 Vue 版（#/g/:id，只读） ---------- */
+let goalVueUnmount = null;
+function goalVueEnabled() {
+  try {
+    const q = new URLSearchParams(location.search).get('ui');
+    if (q === 'legacy') return false;
+    if (q === 'vue') return true;
+    const saved = localStorage.getItem('sierxing-ui-goal');
+    if (saved === 'legacy') return false;
+    if (saved === 'vue') return true;
+  } catch (e) {}
+  return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+}
+async function renderGoalVue(gid, open, node) {
+  const root = document.getElementById('app');
+  if (!root) return false;
+  if (goalVueUnmount) { try { goalVueUnmount(); } catch (e) {} goalVueUnmount = null; }
+  if (!document.querySelector('link[data-ui-page="goal"]')) {
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/goal.css'; l.setAttribute('data-ui-page', 'goal');
+    document.head.appendChild(l);
+  }
+  const mod = await import('/ui-dist/goal.js?v=' + Date.now());
+  if (!mod || typeof mod.mountGoalPage !== 'function') throw new Error('UI 插件没有导出 mountGoalPage');
+  goalVueUnmount = mod.mountGoalPage(root, {
+    api: api, toast: toast, fmtDate: fmtDate, gid: Number(gid),
+    openAi: function () { try { aiToggle(true); } catch (e) { try { toast('AI 助手打开失败：' + e.message); } catch (e2) {} } },
+    openAction: String(open || ''), openNode: Number(node) || 0,
+    openChat: function () {
+      try { if (chatVueEnabled()) { location.hash = '#/g/' + gid + '/chat'; return; } } catch (e) {}
+      try { aiToggle(true); } catch (e) { try { toast('AI 助手打开失败：' + e.message); } catch (e2) {} }
+    }
+  });
+  return true;
+}
+window.addEventListener('hashchange', function () {
+  if (goalVueUnmount && !/^#\/g\/\d+$/.test(location.hash)) {
+    try { goalVueUnmount(); } catch (e) {}
+    goalVueUnmount = null;
+  }
+});
+/* ============ 设置 · 语言（界面语言 / AI 生成新语言） ============
+   架构规则见 AGENTS.md §8 与 language/README.md：
+   · 界面文字全部来自 language/ 语言包；新代码用 tr('原文') 取；
+   · 旧界面的文字由 public/i18n.js 的运行时字典层兜底翻译；
+   · 语言清单在 language/languages.json：设置页直接从清单出可选语言（不用用户打字）；
+     任意语言 = 让 AI 把整套语言包翻译一遍，落 DATA_DIR/language/<code>.json。 */
+const LANG_FALLBACK_LOCALES = [
+  { code: 'zh-CN', name: '中文', nativeName: '中文', englishName: 'Chinese', builtin: true, generated: false, entries: 0, translated: 0 },
+  { code: 'en-US', name: 'English', nativeName: 'English', englishName: 'English', builtin: true, generated: false, entries: 0, translated: 0 }
+];
+/* 语言代码徽章：取地区码（zh-CN → CN、ja-JP → JP）。不用国旗 emoji：
+   部分 Linux/Edge 没有国旗字形，会显示成 "CN"/"GB" 字母，不同系统差异很大。 */
+function langCodeBadge(code) {
+  const parts = String(code || '').split('-');
+  const region = (parts[1] || parts[0] || '').toUpperCase();
+  if (region && region.length <= 3) return region;
+  return String(code || '?').toUpperCase().slice(0, 2);
+}
+function langLocaleList(st) {
+  st = st || {};
+  const list = (st.locales && st.locales.length) ? st.locales.slice() : LANG_FALLBACK_LOCALES.slice();
+  return { locales: list, source: st.source || 'zh-CN', saved: st.saved || '', catalog: st.catalog || [] };
+}
+function langCurrentLabel(st) {
+  const { locales } = langLocaleList(st);
+  const cur = locales.find(L => L.code === (st && st.active)) || locales[0] || {};
+  return cur.nativeName || cur.name || '';
+}
+function languageBodyHTML(st) {
+  const { locales, source, saved, catalog } = langLocaleList(st);
+  const active = (st && st.active) || (saved || source);
+  const cards = locales.map(L => {
+    const isOn = L.code === active;
+    const badges = [];
+    if (L.code === source) badges.push(tr('源语言'));
+    else if (L.generated) badges.push(tr('AI 生成'));
+    else badges.push(tr('内置'));
+    if (L.code !== source && L.entries) badges.push(`${L.translated}/${L.entries}`);
+    return `<div class="langCard ${isOn ? 'on' : ''}" data-lang="${esc(L.code)}" role="button" tabindex="0">
+      <span class="langCodeBadge" data-i18n-skip>${esc(langCodeBadge(L.code))}</span>
+      <span class="langCardBody">
+        <b data-i18n-skip>${esc(L.nativeName || L.name)}</b>
+        <span>${esc(L.englishName || L.name)} · ${esc(badges.join(' · '))}</span>
+      </span>
+      ${isOn ? `<span class="langCardTick">✓</span>` : ''}
+      ${L.generated ? `<button type="button" class="langCardDel" data-lang-del="${esc(L.code)}" title="${esc(tr('删除这个 AI 生成的语言包'))}">✕</button>` : ''}
+    </div>`;
+  }).join('');
+  /* 清单里"还没安装"的语言：点一下就直接生成 */
+  const installed = {};
+  for (const L of locales) installed[String(L.code).toLowerCase()] = 1;
+  const todo = catalog.filter(c => !installed[String(c.code).toLowerCase()]);
+  const chips = todo.map(c => `<button type="button" class="langChip" data-lang-gen="${esc(c.code)}" data-lang-name="${esc(c.nativeName)}">
+      <span class="langChipBadge" data-i18n-skip>${esc(langCodeBadge(c.code))}</span>
+      <b data-i18n-skip>${esc(c.nativeName)}</b>
+      <span>${esc(c.englishName)}</span>
+    </button>`).join('');
+  return `<div class="langTop">
+      <div class="langNow">
+        <span class="langCodeBadge big" data-i18n-skip>${esc(langCodeBadge(active))}</span>
+        <span class="langNowText">
+          <span class="langNowSub">${esc(tr('当前界面语言'))}</span>
+          <b data-i18n-skip>${esc(langCurrentLabel(st))}</b>
+        </span>
+      </div>
+      <label class="langFollow" title="${esc(tr('按浏览器语言自动选择（中文浏览器用中文，其他用英文）'))}">
+        <input type="checkbox" id="langFollowChk" ${saved ? '' : 'checked'}>
+        <span>${esc(tr('跟随浏览器'))}</span>
+      </label>
+      <button class="btn tiny" id="langReloadBtn" type="button" title="${esc(tr('刷新语言列表'))}">↻</button>
+    </div>
+    <div class="langGrid" id="langList">${cards}</div>
+    <div class="langAddSec">
+      <div class="langAddHead">🪄 ${esc(tr('让 AI 生成一种新语言'))}</div>
+      <p class="hint" style="margin:2px 0 10px;">${esc(tr('从下面挑一种语言，AI 会把全部界面文案翻译成它并保存下来，之后可以随时切回；生成会调用你配置的 AI 模型。'))}</p>
+      <div class="langChips" id="langChips">${chips || `<span class="hint">${esc(tr('清单里的语言都已生成。'))}</span>`}</div>
+      <details class="langCustomFold" style="margin:4px 0 0;">
+        <summary class="hint" style="cursor:pointer;">${esc(tr('清单里没有？手动输入语言名称'))}</summary>
+        <div class="langCustom" style="margin-top:8px;">
+          <input id="langNewName" placeholder="${esc(tr('例如：日本語 / Français / Türkçe / 한국어 / العربية'))}">
+          <button class="btn primary" id="langGenBtn" type="button">${esc(tr('AI 生成界面语言'))}</button>
+        </div>
+      </details>
+      <div class="hint" id="langGenMsg" style="margin-top:8px;">${esc(tr('生成可能需要几分钟，进度可在左下角任务中心查看；生成完自动切过去。'))}</div>
+    </div>
+    <div class="langProgress" id="langProgress" hidden>
+      <div class="langProgBar"><i id="langProgFill"></i></div>
+      <div class="hint" id="langProgMsg"></div>
+    </div>
+    <details style="margin-top:16px;"><summary class="hint" style="cursor:pointer;">${esc(tr('语言包在哪里？怎么手动改文案？'))}</summary>
+      <p class="hint" style="margin:8px 0 0;">${esc(tr('内置语言在 language/locales/ 下（中文是源语言，英文在 en-US）；AI 生成的语言在数据目录 language/ 下。改了 language/ 里的文字，刷新即生效，不用改代码。新增界面文字请用 tr() 包起来（见 language/README.md）。'))}</p>
+    </details>`;
+}
+function languageSectionHTML(st) {
+  return `<div class="sec" id="set-lang">
+      <div class="secTitle">🌐 ${esc(tr('语言 Language'))} <span class="secSub">${esc(tr('界面上的所有文字都可以切换语言'))}</span></div>
+      <div id="langBody">${languageBodyHTML(st)}</div>
+    </div>`;
+}
+async function langRefreshBody() {
+  const box = document.getElementById('langBody');
+  if (!box) return;
+  const st = await api('/api/language/state').catch(() => null);
+  if (!st) return;
+  box.innerHTML = languageBodyHTML(st);
+  bindLanguageBody();
+}
+function langSay(text) {
+  const el = document.getElementById('langGenMsg');
+  if (el) el.innerHTML = text;
+}
+function langProgressShow(on) {
+  const box = document.getElementById('langProgress');
+  if (box) box.hidden = !on;
+  if (!on) {
+    const fill = document.getElementById('langProgFill');
+    if (fill) fill.style.width = '0%';
+  }
+}
+function langProgressPaint(pct, msg) {
+  const fill = document.getElementById('langProgFill');
+  const m = document.getElementById('langProgMsg');
+  if (fill) fill.style.width = Math.max(0, Math.min(100, Number(pct) || 0)) + '%';
+  if (m) m.innerHTML = msg || '';
+}
+function langDisableGen(disabled) {
+  const box = document.getElementById('langBody');
+  if (!box) return;
+  box.querySelectorAll('[data-lang-gen], #langGenBtn').forEach(el => { el.disabled = !!disabled; });
+}
+function langWatchTask(taskId) {
+  if (window.__langPoll) { try { clearInterval(window.__langPoll); } catch (e) {} window.__langPoll = null; }
+  const started = Date.now();
+  langProgressShow(true);
+  langDisableGen(true);
+  window.__langPoll = setInterval(async () => {
+    let list = [];
+    try { list = (await api('/api/tasks')).tasks || []; } catch (e) { return; }
+    const t = list.find(x => Number(x.id) === Number(taskId));
+    if (!t) {
+      if (Date.now() - started > 10 * 60 * 1000) {
+        clearInterval(window.__langPoll); window.__langPoll = null;
+        langProgressShow(false); langDisableGen(false);
+        langSay(esc(tr('任务好像丢了，刷新页面重试。')));
+      }
+      return;
+    }
+    const pct = Number(t.progress || 0);
+    const phase = t.phaseLabel ? esc(t.phaseLabel) + ' · ' : '';
+    langProgressPaint(pct, esc(t.message || tr('生成中…')) + '　<span class="muted">' + phase + pct + '%</span>');
+    if (t.status === 'done') {
+      clearInterval(window.__langPoll); window.__langPoll = null;
+      const r = t.result || {};
+      langProgressPaint(100, '✅ ' + esc(tr('已生成')) + ' <b>' + esc(r.name || r.code || '') + '</b>（' + Number(r.entries || 0) + ' ' + esc(tr('条译文')) + '）' + esc(tr('，正在切换…')));
+      if (r.code && window.SXI18N) {
+        try { await window.SXI18N.setLanguage(r.code); return; } catch (e) {
+          langSay(esc(tr('切换失败：')) + esc(e.message));
+          langDisableGen(false);
+        }
+      }
+      setTimeout(() => { langRefreshBody(); }, 600);
+    } else if (t.status === 'failed' || t.status === 'cancelled') {
+      clearInterval(window.__langPoll); window.__langPoll = null;
+      const msg = t.error || t.message || '';
+      langProgressPaint(0, '❌ ' + esc(t.status === 'cancelled' ? tr('已停止') : (tr('生成失败：') + msg)));
+      langDisableGen(false);
+    }
+  }, 2000);
+}
+function langStartGenerate(body) {
+  return api('/api/language/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(r => {
+      if (!r.ok) throw new Error(r.error || tr('提交失败'));
+      langSay(esc(tr('生成中…（进度见下方进度条与任务中心）')));
+      langWatchTask(r.taskId);
+      return r;
+    });
+}
+function bindLanguageBody() {
+  const box = document.getElementById('langBody');
+  if (!box || box.dataset.langBound === '1') return;   /* 容器不销毁、只换 innerHTML：监听只绑一次 */
+  box.dataset.langBound = '1';
+  box.addEventListener('keydown', (e) => {
+    const card = e.target.closest && e.target.closest('[data-lang]');
+    if (card && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); card.click(); }
+  });
+  box.addEventListener('click', async (e) => {
+    const pick = e.target.closest('[data-lang]');
+    if (pick && !e.target.closest('[data-lang-del]')) {
+      const code = pick.getAttribute('data-lang') || '';
+      const st = await api('/api/language/state').catch(() => ({}));
+      if (String(st.saved || '') === code) return;
+      langSay(esc(tr('正在切换语言…')));
+      try { await window.SXI18N.setLanguage(code); }
+      catch (err) { langSay('❌ ' + esc(err.message || tr('切换失败'))); }
+      return;
+    }
+    const del = e.target.closest('[data-lang-del]');
+    if (del) {
+      e.stopPropagation();
+      const code = del.getAttribute('data-lang-del');
+      if (!confirm(tr('删除这个 AI 生成的语言包？删除后界面上会回退到其它语言。'))) return;
+      try {
+        const r = await api('/api/language/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) });
+        if (!r.ok) throw new Error(r.error || tr('删除失败'));
+        toast(tr('已删除语言包'));
+        if (r.resetActive) { window.SXI18N.setLanguage(''); return; }
+        langRefreshBody();
+      } catch (err) { toast(err.message || tr('删除失败')); }
+      return;
+    }
+    const chip = e.target.closest('[data-lang-gen]');
+    if (chip) {
+      const code = chip.getAttribute('data-lang-gen');
+      const name = chip.getAttribute('data-lang-name') || code;
+      chip.disabled = true;
+      langSay(esc(tr('正在提交生成任务…')));
+      try { await langStartGenerate({ name }); }
+      catch (err) { chip.disabled = false; langSay('❌ ' + esc(err.message || tr('提交失败'))); }
+      return;
+    }
+    if (e.target.closest('#langReloadBtn')) { langRefreshBody(); return; }
+    if (e.target.closest('#langGenBtn')) {
+      const input = document.getElementById('langNewName');
+      const name = String((input && input.value) || '').trim();
+      if (!name) { toast(tr('先输入语言名称，例如：日本語')); if (input) input.focus(); return; }
+      const btn = document.getElementById('langGenBtn');
+      if (btn) btn.disabled = true;
+      langSay(esc(tr('正在提交生成任务…')));
+      try {
+        await langStartGenerate({ name });
+      } catch (err) {
+        langDisableGen(false);
+        langSay('❌ ' + esc(err.message || tr('提交失败')));
+      }
+      return;
+    }
+  });
+  box.addEventListener('change', async (e) => {
+    if (e.target && e.target.id === 'langFollowChk') {
+      if (!e.target.checked) return;   /* 取消勾选不代表选了哪个语言：让用户点下面的语言卡片 */
+      try {
+        langSay(esc(tr('正在切换语言…')));
+        await window.SXI18N.setLanguage('');
+      } catch (err) { langSay('❌ ' + esc(err.message || tr('切换失败'))); }
+    }
+  });
+}
+function bindLanguageSection(st) {
+  const sec = document.getElementById('set-lang');
+  if (!sec) return;
+  bindLanguageBody();
+}
+
 async function renderSettings() {
   app.innerHTML = '<p class="muted">加载中…</p>';
   if (!state.componentList || !state.componentList.length) { try { await loadComponents(); } catch (e) {} }
@@ -10335,6 +14268,8 @@ async function renderSettings() {
      不用等他自己去点「检测」。 */
   const ocState = await api('/api/ai/opencode-status').catch(() => null);
   const aiCtx = { ocState, avail: {}, agent: s.ai_opencode_agent || 'NoTools' };
+  /* 界面语言：可用语言（内置 + AI 生成）+ 当前生效语言 */
+  const langState = await api('/api/language/state').catch(() => ({ locales: [] }));
 
   let html = `<div class="page settingsPage">
     <div class="pageHead"><button class="back js-back" data-back="#/">← 返回</button><h2 class="title" style="margin-left:10px;">设置</h2>
@@ -10362,6 +14297,7 @@ async function renderSettings() {
     ['set-ai', '🔌 AI 接入方式'],
     ['set-rag', '🔍 检索增强'],
     ['set-theme', '🎨 外观主题'],
+    ['set-lang', '🌐 语言 Language'],
     ['set-sync', '🔄 多端同步'],
     ['set-service', '🖥 服务与启动'],
     ['set-update', '⬆ 版本与更新'],
@@ -10373,6 +14309,7 @@ async function renderSettings() {
   html += `<div class="setTabs" id="setTabs" role="tablist">${SET_TABS.map(([id, label]) =>
     `<button type="button" class="setTab" data-tab="${id}" role="tab">${label}</button>`).join('')}</div>`;
   state._setTabs = SET_TABS.map(([id]) => id);
+  html += languageSectionHTML(langState);
   html += `<div class="sec aiSec" id="set-ai">
       <div class="secTitle">AI 接入方式 <span class="secSub">选服务商 → 填密钥 → 点模型按钮加入</span></div>
       <p class="hint" style="margin:-4px 0 10px;">对话时在 💬 AI 助手的模型下拉里选具体用哪个 —— 可以是不同服务商、不同模型。识图走下面单独配置，不用再加连接。</p>
@@ -11093,6 +15030,7 @@ async function renderSettings() {
   bindServiceSection();
   bindUpdateSection();
   bindSyncSection();
+  bindLanguageSection(langState);
 
   /* 顶栏页签：一次只显示一块，整页切换，不再全挤在一起。
      切页签只做 hidden 显隐 —— 输入框里的未保存内容不会丢，各区块的监听也都在，
@@ -11130,7 +15068,9 @@ async function renderSettings() {
     el.addEventListener('change', () => {
       setThemeFor(mode, el.value);
       const now = currentThemeEff() === mode;
-      toast(now ? ('已应用' + label + '主题') : ('已设置' + label + '主题（切到' + (mode === 'dark' ? '暗色' : '亮色') + '模式时生效）'));
+      toast(now
+        ? tr('已应用{0}主题', label)
+        : tr('已设置{0}主题（切到{1}模式时生效）', label, tr(mode === 'dark' ? '暗色' : '亮色')));
       const msg = document.getElementById('themeMsg');
       if (msg) msg.innerHTML = themeMsgText();
     });
@@ -11993,9 +15933,31 @@ function sxiPopShow(btn, kind) {
   const opt = (pick, label, on, title) =>
     `<button class="sxiOpt ${on ? 'on' : ''}" data-ait-pick="${pick}"${title ? ' title="' + esc(title) + '"' : ''}>${esc(label)}</button>`;
   if (kind === 'goal') {
+    /* 目标多时要能搜：弹层里放一个搜索框，输入即过滤（只重画列表，不动搜索框焦点） */
+    const goalList = (data.goals || []).map(g => ({ id: g.id, title: g.title || ('目标 ' + g.id) }));
     d.innerHTML = '<div class="sxiPopT">按目标筛选</div>'
-      + opt('goal:0', '全部目标', !f.goal)
-      + ((data.goals || []).map(g => opt('goal:' + g.id, g.title, Number(f.goal) === Number(g.id), g.title)).join(''));
+      + '<div class="sxiPopSearch"><input type="search" class="sxiPopSearchInput" placeholder="搜索目标名称…" autocomplete="off" spellcheck="false"><span class="sxiPopSearchCount"></span></div>'
+      + '<div class="sxiPopGoalList"></div>';
+    d.__paintGoals = function (kw) {
+      const k = String(kw || '').trim().toLowerCase();
+      const hit = !k ? goalList : goalList.filter(function (g) { return String(g.title).toLowerCase().indexOf(k) >= 0; });
+      const listBox = d.querySelector('.sxiPopGoalList');
+      const cntEl = d.querySelector('.sxiPopSearchCount');
+      if (cntEl) cntEl.textContent = k ? ('命中 ' + hit.length) : (goalList.length + ' 个');
+      if (listBox) listBox.innerHTML = opt('goal:0', '全部目标', !f.goal)
+        + (hit.length ? hit.map(function (g) { return opt('goal:' + g.id, g.title, Number(f.goal) === Number(g.id), g.title); }).join('') : '<div class="sxiOptEmpty">没有匹配「' + esc(k) + '」的目标</div>');
+    };
+    d.__paintGoals('');
+    setTimeout(function () {
+      const inp = d.querySelector('.sxiPopSearchInput');
+      if (!inp) return;
+      inp.addEventListener('input', function () { d.__paintGoals(inp.value); });
+      inp.addEventListener('keydown', function (e2) {
+        if (e2.key === 'Escape') { e2.stopPropagation(); sxiPopClose(); return; }
+        if (e2.key === 'Enter') { const first = d.querySelector('[data-ait-pick]'); if (first) first.click(); }
+      });
+      try { inp.focus(); } catch (e2) {}
+    }, 30);
   } else if (kind === 'status') {
     d.innerHTML = '<div class="sxiPopT">按状态筛选</div>'
       + opt('status:', '全部状态', !f.status)
@@ -12085,18 +16047,25 @@ function aitRunHTML(data) {
 /* 一个目标的汇总行：折叠时只有这一行 —— 1000 条记录压成 10 行，靠的就是它 */
 function aitGrpHTML(g) {
   const open = !!aitS().open[g.goalId];
+  /* 目标已被删除的那一组：给一个「清理历史」（只删 task_runs 行）。 */
+  const cleanup = g.goalMissing
+    ? '<button type="button" class="btn tiny aitGrpClean" data-ait-clean="' + Number(g.goalId) + '" title="删掉这个已删除目标的全部任务历史（只删历史记录，不碰其它数据）">🧹 清理历史</button>'
+    : '';
   return `<div class="aitGrp ${open ? 'open' : ''}" data-ait-grpbox="${g.goalId}">
-    <button class="aitGrpHd" data-ait-grp="${g.goalId}" aria-expanded="${open ? 'true' : 'false'}">
-      <span class="aitGrpCaret">${open ? '▾' : '▸'}</span>
-      <span class="aitGrpName" title="${esc(g.goalTitle)}">${esc(g.goalTitle)}</span>
-      <span class="aitGrpNums">
-        <span class="aitSt done">✓ ${g.done}</span>
-        ${g.failed ? `<span class="aitSt failed">✗ ${g.failed}</span>` : ''}
-        ${g.cancelled ? `<span class="aitSt cancelled">⏹ ${g.cancelled}</span>` : ''}
-        <span class="aitGrpTotal">共 ${g.total}</span>
-      </span>
-      <span class="aitGrpLast">${g.lastAt ? '最近 ' + aitWhen(g.lastAt) : ''}</span>
-    </button>
+    <div class="aitGrpHd">
+      <button type="button" class="aitGrpOpen" data-ait-grp="${g.goalId}" aria-expanded="${open ? 'true' : 'false'}">
+        <span class="aitGrpCaret">${open ? '▾' : '▸'}</span>
+        <span class="aitGrpName" title="${esc(g.goalTitle)}">${esc(g.goalTitle)}</span>
+        <span class="aitGrpNums">
+          <span class="aitSt done">✓ ${g.done}</span>
+          ${g.failed ? `<span class="aitSt failed">✗ ${g.failed}</span>` : ''}
+          ${g.cancelled ? `<span class="aitSt cancelled">⏹ ${g.cancelled}</span>` : ''}
+          <span class="aitGrpTotal">共 ${g.total}</span>
+        </span>
+        <span class="aitGrpLast">${g.lastAt ? '最近 ' + aitWhen(g.lastAt) : ''}</span>
+      </button>
+      ${cleanup}
+    </div>
     <div class="aitGrpBody" ${open ? '' : 'hidden'}>${open ? aitRowsHTML(g.goalId) : ''}</div>
   </div>`;
 }
@@ -12113,6 +16082,7 @@ function aitHistRowHTML(r) {
       <span class="aitSt ${st.cls}">${st.text}</span>
       <span class="aitRowMeta">${aitWhen(r.createdAt)}${r.costMs ? ' · ' + aitDur(r.costMs) : ''}</span>
       <button class="btn tiny aitRowErrBtn" data-ait-err="1"${r.error ? '' : ' tabindex="-1" aria-hidden="true"'}>看原因</button>
+      <button class="btn tiny danger aitRowDelBtn" data-ait-del="${r.runId}" title="删掉这一条任务历史（只删历史记录）">删除</button>
     </div>
     ${r.error ? `<div class="aitErrBox" hidden>${esc(r.error)}</div>` : ''}
   </div>`;
@@ -12121,7 +16091,7 @@ function aitHistRowHTML(r) {
    直接按**和数据行同一套网格列**摆，不再套一层子 grid ——
    套一层的话外层列宽和内层对不齐，"时间"会飘到右边去（实测过）。 */
 function aitRowHeadHTML() {
-  return `<div class="aitRowHead"><span></span><span></span><span>状态</span><span>时间</span><span>原因</span></div>`;
+  return `<div class="aitRowHead"><span></span><span></span><span>状态</span><span>时间</span><span>原因</span><span></span></div>`;
 }
 /* 某一组已经加载出来的记录 + 「再看 N 条」 */
 function aitRowsHTML(goalId) {
@@ -12172,7 +16142,8 @@ async function aitLoadRows(goalId, more) {
   cur.loading = true; st.rows[goalId] = cur;
   if (more) { const box = document.querySelector('[data-ait-grpbox="' + goalId + '"] .aitGrpBody'); if (box) box.innerHTML = aitRowsHTML(goalId); }
   try {
-    const r = await api('/api/ai-tasks/history' + aitQuery({ goal: goalId, limit: aitPageSize(), offset: more ? cur.rows.length : 0 }));
+    /* goalId=0 是「未关联目标」的真实分组，但 0 会被 aitQuery 的 if(f.goal) 跳过，显式补 goalExp=zero */
+    const r = await api('/api/ai-tasks/history' + aitQuery({ goal: goalId || '', goalExp: goalId ? '' : 'zero', limit: aitPageSize(), offset: more ? cur.rows.length : 0 }));
     cur.rows = more ? cur.rows.concat(r.rows || []) : (r.rows || []);
     cur.total = r.total || 0;
     cur.hasMore = !!r.hasMore;
@@ -12183,7 +16154,25 @@ async function aitLoadRows(goalId, more) {
   const box = document.querySelector('[data-ait-grpbox="' + goalId + '"] .aitGrpBody');
   if (box) box.innerHTML = aitRowsHTML(goalId);
 }
+/* 删完历史后统一收尾：重拉总览（分组计数/汇总）+ 作废已加载的行，再重画。
+   不这么做的话，删掉一条后「共 N」和「再看 N 条」全是旧数（服务端才有真数据）。 */
+async function aitReloadAll() {
+  try { state.aitData = await api('/api/ai-tasks' + aitQuery()); } catch (e) {}
+  /* 没有「已删除目标」之后，标题旁那个一键清理按钮也要跟着收掉（它内联在标题区，只重画 aitHist 不会重算） */
+  const cleanAllBtn = document.getElementById('aitCleanAll');
+  if (cleanAllBtn && !((state.aitData || {}).groups || []).some(function (g) { return g.goalMissing; })) cleanAllBtn.remove();
+  aitPaintRun(state.aitData || {});
+  aitPaintHist();
+  const st = aitS();
+  for (const k of Object.keys(st.open)) {
+    if (st.open[k]) { st.rows[k] = null; await aitLoadRows(Number(k), false); }
+  }
+  aitPaintHist();
+}
 async function aitToggle(goalId, force) {
+  /* 用户手动点分组 = 取消进行中的「展开全部」循环（那个循环每组 await 拉数据，
+     要好几秒；不取消的话它会在后面把我们刚收起的组又设回展开，看起来像点了没反应）。 */
+  aitS().expandToken = (aitS().expandToken || 0) + 1;
   const st = aitS();
   const open = force != null ? force : !st.open[goalId];
   st.open[goalId] = open;
@@ -12204,7 +16193,48 @@ async function aitToggle(goalId, force) {
     allBtn.textContent = gs.some(g => !aitS().open[g.goalId]) ? '展开全部' : '收起全部';
   }
 }
+/* 任务中心 Vue 版：默认启用；?ui=legacy 或 localStorage=sierxing-ui-aitasks:legacy 回退旧版。 */
+let aitVueUnmount = null;
+function aitVueEnabled() {
+  try {
+    const q = new URLSearchParams(location.search).get('ui');
+    if (q === 'legacy') return false;
+    if (q === 'vue') return true;
+    const saved = localStorage.getItem('sierxing-ui-aitasks');
+    if (saved === 'legacy') return false;
+    if (saved === 'vue') return true;
+  } catch (e) {}
+  return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+}
+function ensureAitVueCss() {
+  if (document.querySelector('link[data-ui-page="aitasks"]')) return;
+  const l = document.createElement('link');
+  l.rel = 'stylesheet';
+  l.href = '/ui-dist/aitasks.css';
+  l.setAttribute('data-ui-page', 'aitasks');
+  document.head.appendChild(l);
+}
+async function renderAiTasksPageVue() {
+  const root = document.getElementById('app');
+  if (!root) throw new Error('页面容器不存在');
+  if (aitVueUnmount) { try { aitVueUnmount(); } catch (e) {} aitVueUnmount = null; }
+  ensureAitVueCss();
+  const mod = await import('/ui-dist/aitasks.js?v=' + Date.now());
+  if (!mod || typeof mod.mountAiTasksPage !== 'function') throw new Error('UI 插件没有导出 mountAiTasksPage');
+  aitVueUnmount = mod.mountAiTasksPage(root, { api: api, toast: toast, go: go });
+  return true;
+}
+window.addEventListener('hashchange', function () {
+  if (aitVueUnmount && !/^#\/aitasks/.test(location.hash)) {
+    try { aitVueUnmount(); } catch (e) {}
+    aitVueUnmount = null;
+  }
+});
 async function renderAiTasksPage() {
+  if (aitVueEnabled()) {
+    try { if (await renderAiTasksPageVue()) return; }
+    catch (e) { console.warn('[aitasks] Vue 页加载失败，回退旧版：', e && e.message); }
+  }
   aiTasksStopPoll();
   aitS();
   app.innerHTML = '<p class="muted">正在读取 AI 任务…</p>';
@@ -12224,7 +16254,11 @@ async function renderAiTasksPage() {
     </div>
     <div id="aitRun"></div>
     <div class="aitSec">
-      <div class="aitSecT">历史记录<span class="aitSecN">${(data.summary || {}).total || 0}</span></div>
+      <div class="aitSecT">历史记录<span class="aitSecN">${(data.summary || {}).total || 0}</span>
+        ${(data.groups || []).some(function (g) { return g.goalMissing; })
+          ? '<button type="button" class="btn tiny aitCleanAll" id="aitCleanAll" title="一次性删掉所有「目标已删除」的任务历史（只删历史记录）">🧹 清理已删除目标</button>'
+          : ''}</div>
+      <div class="aitFilters" id="aitFilters">
       <div class="aitFilters" id="aitFilters">
         <input id="aitQ" class="aitQ" placeholder="搜任务标题…" value="${esc(f.q)}">
         <button class="aitFbtn" data-ait-open="goal"><span class="aitFLabel">${esc(aitGoalLabel())}</span><span class="aitFCaret">▾</span></button>
@@ -12313,14 +16347,53 @@ function bindAiTasks() {
     let gs = data.groups || [];
     if (f.goal) gs = gs.filter(g => Number(g.goalId) === Number(f.goal));
     const anyClosed = gs.some(g => !aitS().open[g.goalId]);
-    for (const g of gs) {
-      aitS().open[g.goalId] = anyClosed;
-      if (anyClosed && !aitS().rows[g.goalId]) await aitLoadRows(g.goalId, false);
-    }
+    /* ⚠️ 先把所有组的 open 一次性设好、**立刻重画**，再去逐组拉数据。
+       曾经是「循环里逐组改状态 → await 拉数据 → 最后才重画」：跑到一半时 state 说已展开、
+       DOM 还是收起；此时点某个组头，aitToggle 按 state 算出「展开中 → 该收起」，
+       于是一个本来就收起的组被「关」了一下 —— 界面纹丝不动，看起来点了没反应
+       （控件审计在「（未关联目标）」那一组上稳定复现）。 */
+    const token = (aitS().expandToken || 0) + 1;
+    aitS().expandToken = token;
+    for (const g of gs) aitS().open[g.goalId] = anyClosed;
     aitPaintHist();
+    if (!anyClosed) return;                        /* 收起：状态和 DOM 已一致，不用拉数据 */
+    for (const g of gs) {
+      if (aitS().expandToken !== token) return;    /* 用户中途手动点了 → 放弃这个循环 */
+      if (aitS().rows[g.goalId]) continue;
+      await aitLoadRows(g.goalId, false);
+    }
   });
   const body = document.getElementById('aitHist');
   if (body) body.addEventListener('click', async e => {
+    /* ① 清理「已删除目标」的全部历史（只删 task_runs） */
+    const cl = e.target.closest('[data-ait-clean]');
+    if (cl) {
+      e.stopPropagation();
+      const gid2 = Number(cl.getAttribute('data-ait-clean')) || 0;
+      if (!gid2) return;
+      if (!confirm('清理这个已删除目标的全部任务历史？\n\n只会删掉任务中心的这几行记录，不影响任何目标和数据。')) return;
+      try {
+        const r2 = await api('/api/ai-tasks/history?goal=' + gid2, { method: 'DELETE' });
+        toast('已清理 ' + (r2.deleted || 0) + ' 条历史');
+        aitS().open[gid2] = false; if (aitS().rows) delete aitS().rows[gid2];
+        await aitReloadAll();
+      } catch (err) { toast(err.message); }
+      return;
+    }
+    /* ② 删单条历史 */
+    const dl = e.target.closest('[data-ait-del]');
+    if (dl) {
+      e.stopPropagation();
+      const rid2 = Number(dl.getAttribute('data-ait-del')) || 0;
+      if (!rid2) return;
+      if (!confirm('删掉这一条任务历史？\n\n只删任务中心里的这一行记录，不影响任何目标和数据。')) return;
+      try {
+        await api('/api/ai-tasks/history/' + rid2, { method: 'DELETE' });
+        toast('已删除这条历史');
+        await aitReloadAll();
+      } catch (err) { toast(err.message); }
+      return;
+    }
     const hd = e.target.closest('[data-ait-grp]');
     if (hd) { await aitToggle(Number(hd.getAttribute('data-ait-grp'))); return; }
     const more = e.target.closest('[data-ait-more]');
@@ -12333,6 +16406,17 @@ function bindAiTasks() {
     }
     const goEl = e.target.closest('[data-ait-go]');
     if (goEl) { const id = Number(goEl.getAttribute('data-ait-go')); if (id) go('#/g/' + id); }
+  });
+  /* 一键清理所有已删除目标的残留历史（只在真有的时候才渲染这个按钮） */
+  const cleanAll = document.getElementById('aitCleanAll');
+  if (cleanAll) cleanAll.addEventListener('click', async () => {
+    if (!confirm('清理所有「目标已删除」的任务历史？\n\n只会删任务中心里的这些记录，不影响任何目标和数据。')) return;
+    try {
+      const r = await api('/api/ai-tasks/history/orphans', { method: 'DELETE' });
+      toast('已清理 ' + (r.deleted || 0) + ' 条历史');
+      aitS().open = {}; aitS().rows = {};
+      await aitReloadAll();
+    } catch (err) { toast(err.message); }
   });
   const runBox = document.getElementById('aitRun');
   if (runBox) runBox.addEventListener('click', async e => {
@@ -12361,30 +16445,176 @@ const RAIL_LOGO_SVG = `<svg viewBox="0 0 64 64" width="46" height="46" aria-hidd
 </svg>`;
 /* 左栏主导航。左栏原有的「📦 组件」分组（含常用置顶、组件入口、教程书签）已下线：
    组件入口改为放进各页面顶栏的标签栏（收藏栏），组件管理保留下面这个 🧩 入口。 */
+/* 左栏「路线图」要跳哪个目标：**只看当前路由**，不依赖 state.goal 是否刚好加载过。
+   这就是以前按钮"时有时无"的根因——state.goal 在插件页/版本页/教程页不一定在，
+   于是同一个按钮在不同页面晃动。目标 id 只从 hash 里认：
+   #/g/<id>/… 直接认；#/t/<tid>/… 用教程所属目标（教程页渲染时已写 state.tutGoalId）。 */
+const _railTutGoal = new Map();      // 教程 id → 所属目标 id（左栏用）
+const _railTutPending = new Set();
+function railTutGoalAsync(tid) {
+  if (_railTutGoal.has(tid) || _railTutPending.has(tid)) return;
+  _railTutPending.add(tid);
+  api('/api/tutorials/' + tid).then(res => {
+    const gid = Number((res && res.tutorial && res.tutorial.goal_id) || 0);
+    _railTutGoal.set(tid, gid);
+    try { _aiTutGoalCache.set(tid, gid); } catch (e) {}
+    try { renderRail(); } catch (e) {}   // 拿到目标后把按钮从禁用切成可用
+  }).catch(() => {}).finally(() => { _railTutPending.delete(tid); });
+}
+function railGoalId() {
+  try {
+    const h = location.hash || '';
+    let m = h.match(/^#\/g\/(\d+)(?:\/|$)/);
+    if (m) return Number(m[1]);
+    /* 教程页 & 教程内插件页（#/t/<tid>/quiz、/explain…）：目标是教程的 goal_id。
+       state.tutGoalId 只覆盖"刚渲染完教程主页面"的情况；插件页/刷新进来时用缓存 +
+       异步补一次（拿到后 renderRail 重画，不会先显示成别的目标）。 */
+    m = h.match(/^#\/t\/(\d+)(?:\/|$)/);
+    if (m) {
+      const tid = Number(m[1]);
+      if (Number(state.tutGoalTid) === tid && state.tutGoalId) return Number(state.tutGoalId) || 0;
+      if (_railTutGoal.has(tid)) return Number(_railTutGoal.get(tid)) || 0;
+      if (_aiTutGoalCache.has(tid)) return Number(_aiTutGoalCache.get(tid)) || 0;
+      railTutGoalAsync(tid);
+      return 0;
+    }
+    const r = parseRoute();
+    if (r && r.view === 'chat' && r.id) return Number(r.id);
+    if (r && (r.view === 'versions' || r.view === 'diff') && r.id) return Number(r.id);
+  } catch (e) {}
+  return 0;
+}
+/* ===== 左栏功能按钮：用户拖动排序 =====
+   顺序只存本机 localStorage（跟 sierxing-*-bar、主题映射同属显示偏好，不做多端同步）；
+   新版本新加的按钮追加在用户排好的顺序后面，不冲乱版式。 */
+const RAIL_ORDER_KEY = 'sierxing-rail-order-v1';
+const RAIL_ORDER_HINT_KEY = 'sierxing-rail-order-hinted';
+let railDrag = null;          // 拖动中的手势 { key, el, nav, startY, moved, dropEl, after, pid }
+let railJustDragged = false;  // 刚拖完：拦掉松手后追上来的一次 click（否则会误跳页面）
+function railOrderLoad() {
+  try {
+    const a = JSON.parse(localStorage.getItem(RAIL_ORDER_KEY) || '[]');
+    return Array.isArray(a) ? a.filter(k => typeof k === 'string') : [];
+  } catch (e) { return []; }
+}
+function railOrderSave(keys) {
+  try { localStorage.setItem(RAIL_ORDER_KEY, JSON.stringify(keys)); } catch (e) {}
+}
+/* 已保存的顺序优先；没记录过的（新加的按钮）按默认顺序排在后面 */
+function railOrderApply(items) {
+  const saved = railOrderLoad();
+  if (!saved.length) return items;
+  const rank = new Map(saved.map((k, i) => [k, i]));
+  return items.map((it, i) => ({ it, i }))
+    .sort((a, b) => {
+      const ra = rank.has(a.it.key) ? rank.get(a.it.key) : Infinity;
+      const rb = rank.has(b.it.key) ? rank.get(b.it.key) : Infinity;
+      return ra !== rb ? ra - rb : a.i - b.i;
+    }).map(x => x.it);
+}
+function railBindDnD(el) {
+  const nav = el.querySelector('.railNav');
+  if (!nav) return;
+  /* 链接默认是 HTML5 可拖拽：不拦掉会触发浏览器自带的"拖链接"，把 pointer 手势搅乱 */
+  nav.addEventListener('dragstart', ev => { if (ev.target.closest('.railItem')) ev.preventDefault(); });
+  nav.addEventListener('pointerdown', ev => {
+    if (ev.button !== 0 && ev.pointerType === 'mouse') return;
+    const it = ev.target.closest('.railItem');
+    if (!it || !nav.contains(it) || !it.getAttribute('data-rail-item')) return;
+    const kids = nav.querySelectorAll('.railItem[data-rail-item]');
+    if (kids.length < 2) return;   // 只有一个按钮时没必要拖
+    railDrag = { key: it.getAttribute('data-rail-item'), el: it, nav, startY: ev.clientY, moved: false, dropEl: null, after: false, pid: ev.pointerId };
+    document.addEventListener('pointermove', railDnDMove, { passive: false });
+    document.addEventListener('pointerup', railDnDEnd);
+    document.addEventListener('pointercancel', railDnDEnd);
+    window.addEventListener('blur', railDnDEnd);   // 拖到一半窗口失焦：别把手势卡死
+  });
+  /* 松手后的 click 会跟在 pointerup 后面：刚拖完必须拦掉，别让它触发跳转 */
+  nav.addEventListener('click', ev => {
+    if (!railJustDragged) return;
+    ev.preventDefault(); ev.stopPropagation();
+  }, true);
+}
+function railDnDMove(ev) {
+  const d = railDrag;
+  if (!d || ev.pointerId !== d.pid) return;
+  if (!d.moved) {
+    if (Math.abs(ev.clientY - d.startY) < 5) return;   // 小于 5px 当点击，不打断
+    d.moved = true;
+    d.el.classList.add('railDragging');
+    document.body.classList.add('railSorting');
+  }
+  ev.preventDefault();
+  const siblings = Array.from(d.nav.querySelectorAll('.railItem[data-rail-item]')).filter(x => x !== d.el);
+  let dropEl = null, after = false;
+  for (const s of siblings) {
+    const rect = s.getBoundingClientRect();
+    if (ev.clientY < rect.top + rect.height / 2) { dropEl = s; after = false; break; }
+  }
+  if (!dropEl) { dropEl = siblings.length ? siblings[siblings.length - 1] : null; after = true; }
+  if (d.dropEl !== dropEl || d.after !== after) {
+    if (d.dropEl) d.dropEl.classList.remove('railDropBefore', 'railDropAfter');
+    d.dropEl = dropEl; d.after = after;
+    if (dropEl) dropEl.classList.add(after ? 'railDropAfter' : 'railDropBefore');
+  }
+}
+function railDnDEnd(ev) {
+  const d = railDrag;
+  if (!d) return;
+  document.removeEventListener('pointermove', railDnDMove, { passive: false });
+  document.removeEventListener('pointerup', railDnDEnd);
+  document.removeEventListener('pointercancel', railDnDEnd);
+  window.removeEventListener('blur', railDnDEnd);
+  railDrag = null;
+  if (!d.moved) {
+    if (d.el) d.el.classList.remove('railDragging');
+    if (d.dropEl) d.dropEl.classList.remove('railDropBefore', 'railDropAfter');
+    return;
+  }
+  /* 落点 = 不含自己的列表里，插到「目标按钮之前」或末尾 */
+  const siblings = Array.from(d.nav.querySelectorAll('.railItem[data-rail-item]')).filter(x => x !== d.el);
+  const keys = siblings.map(x => x.getAttribute('data-rail-item'));
+  const targetKey = d.dropEl && d.dropEl.getAttribute('data-rail-item');
+  let at = targetKey ? keys.indexOf(targetKey) : keys.length;
+  if (at < 0) at = keys.length;
+  if (d.after) at = Math.min(at + 1, keys.length);
+  keys.splice(at, 0, d.key);
+  railOrderSave(keys);
+  if (!railOrderHinted()) { try { localStorage.setItem(RAIL_ORDER_HINT_KEY, '1'); } catch (e) {} toast('已保存左栏顺序 · 之后一直按你排的来'); }
+  railJustDragged = true;
+  setTimeout(() => { railJustDragged = false; }, 400);
+  renderRail();
+}
+function railOrderHinted() { try { return !!localStorage.getItem(RAIL_ORDER_HINT_KEY); } catch (e) { return true; } }
 function railItemsHTML() {
   const r = parseRoute();
-  const g = state.goal;
   const themeIcon = currentThemeEff() === 'dark' ? '☀️' : '🌙';
-  const inGoal = !!(g && (r.view === 'goal' || r.view === 'map' || r.view === 'plugin'));
+  const gid = railGoalId();
   /* 左栏「AI 任务」上的小红点 = 有任务正在跑（数字由 taskPoll 维护） */
   const runningN = Number(state.taskRunning || 0);
-  const items = [{ icon: '🏠', label: '目标', hash: '#/', active: r.view === 'home' }];
-  if (inGoal) items.push({ icon: '🗺', label: '路线图', hash: '#/g/' + g.id, active: r.view === 'goal' });
+  const items = [{ key: 'home', icon: '🏠', label: '目标', hash: '#/', active: r.view === 'home' }];
+  /* 「路线图」**常驻左栏**：在目标上下文里 → 跳该目标的规划页（目标概览里有完整规划）；
+     不在任何目标页面 → 按钮保留但禁用（灰掉、点不动），避免"这里有一点那里没有"。 */
+  if (gid) items.push({ key: 'roadmap', icon: '🗺', label: '路线图', hash: '#/g/' + gid, active: r.view === 'goal' || r.view === 'map' });
+  else items.push({ key: 'roadmap', icon: '🗺', label: '路线图', disabled: true, title: '先打开一个目标，才能查看它的路线图' });
   const hasUpd = !!(state.update && state.update.supported && state.update.behind > 0 && state.update.latestShort !== updSkipHash());
-  items.push({ icon: '⚙', label: '设置', hash: '#/settings', active: r.view === 'settings', dot: hasUpd });
-  items.push({ icon: '📚', label: '资源库', hash: '#/library', active: r.view === 'library' });
-  items.push({ icon: '📦', label: '产出库', hash: '#/outlib', active: r.pluginId === 'outlib' });
-  items.push({ icon: '🧩', label: '组件管理', hash: '#/components', active: r.view === 'components' });
-  items.push({ icon: '🤖', label: 'AI 任务', hash: '#/aitasks', active: r.view === 'aitasks',
+  items.push({ key: 'settings', icon: '⚙', label: '设置', hash: '#/settings', active: r.view === 'settings', dot: hasUpd });
+  items.push({ key: 'library', icon: '📚', label: '资源库', hash: '#/library', active: r.view === 'library' });
+  items.push({ key: 'outlib', icon: '📦', label: '产出库', hash: '#/outlib', active: r.pluginId === 'outlib' });
+  items.push({ key: 'components', icon: '🧩', label: '组件管理', hash: '#/components', active: r.view === 'components' });
+  items.push({ key: 'uimanager', icon: '🧱', label: '界面管理', hash: '#/ui-plugins', active: r.pluginId === 'uimanager' });
+  items.push({ key: 'aitasks', icon: '🤖', label: 'AI 任务', hash: '#/aitasks', active: r.view === 'aitasks',
     dot: runningN > 0, dotTitle: runningN + ' 个任务正在执行' });
-  const head = items.slice(0, inGoal ? 2 : 1);
-  const tail = items.slice(inGoal ? 2 : 1);
-  const row = i => `<a class="railItem ${i.active ? 'active' : ''}" href="${i.hash}" title="${esc(i.label)}${i.dot ? ' · ' + esc(i.dotTitle || '有新版本') : ''}">
+  /* 顺序由用户按住拖动决定：存本机 localStorage（显示偏好，不做多端同步）；新按钮追加在最后 */
+  const ordered = railOrderApply(items);
+  const row = i => i.disabled
+    ? `<span class="railItem disabled" data-rail-item="${i.key}" role="link" aria-disabled="true" title="${esc(i.title || i.label)} · 可拖动排序">
+        <span class="railIcon">${i.icon}</span><span class="railLabel">${esc(i.label)}</span></span>`
+    : `<a class="railItem ${i.active ? 'active' : ''}" draggable="false" data-rail-item="${i.key}" href="${i.hash}" title="${esc(i.label)}${i.dot ? ' · ' + esc(i.dotTitle || '有新版本') : ''} · 可拖动排序">
         <span class="railIcon">${i.icon}${i.dot ? '<i class="railDot"></i>' : ''}</span><span class="railLabel">${esc(i.label)}</span></a>`;
   return `<a class="railLogo" href="#/" title="思而行 · 返回目标列表">${RAIL_LOGO_SVG}</a>
     <div class="railNav">
-      ${head.map(row).join('')}
-      ${tail.map(row).join('')}
+      ${ordered.map(row).join('')}
     </div>
     <div class="railBottom">
       <button class="railItem" id="railTheme" title="切换白天 / 黑夜模式">
@@ -12393,6 +16623,7 @@ function railItemsHTML() {
     </div>`;
 }
 function renderRail() {
+  if (railDrag) return;   // 拖动中别重画：一 innerHTML 就把手里拖着的元素换掉了
   let el = document.getElementById('rail');
   const r = parseRoute();
   const show = r.view !== 'map';
@@ -12404,6 +16635,7 @@ function renderRail() {
   }
   el.style.display = '';
   el.innerHTML = railItemsHTML();
+  railBindDnD(el);
   const th = document.getElementById('railTheme');
   if (th) th.addEventListener('click', toggleTheme);
   document.body.classList.add('hasRail');
@@ -12441,9 +16673,13 @@ function pluginGoButtonsBind() {
   SiErXing.provide({
     app, api, esc, toast, go, state, mdToHTML, fmtDate, safeParse, parseRoute,
     rerender: rerenderCurrent, loadGoal, ensureGoal, aiToggle, mdPickOffset,
+    /* AI 助手就地打开 / 绑目标 / 切模式：组件引导用户"和 AI 聊着改"时用（不要自建对话） */
+    aiToggleLegacy, aiBindGoal, aiModeSet, aiModeGet, aiFocusInput,
     /* 语法高亮给组件用（「看懂代码」左侧代码面板要自己上色，直接复用宿主这套） */
     hlCode, hlGuessLang,
     mdPickTarget, mdSrcRange, editKeysBind,
+    /* 选目标共用件：产出库 / 资源库 / 任务中心这类页面都要「目标多时能搜」 */
+    sxiGoals, sxiGoalsSync, sxiGoalPickHTML, sxiGoalPickBind, sxiGoalPickOpen, sxiGoalPickClose,
     mdInlineEdit: { open: mdInlineOpen, close: mdInlineClose, active: mdInlineActive, value: mdInlineValue, range: mdSrcRange, slice: mdSliceLines, splice: mdSpliceLines },
     mount: () => { if (BOOTED) pluginGoButtonsBind(); },
     ready: false
@@ -12454,19 +16690,31 @@ function pluginGoButtonsBind() {
   SiErXing.provide({
     app, api, esc, toast, go, state, mdToHTML, fmtDate, safeParse, parseRoute,
     rerender: rerenderCurrent, loadGoal, ensureGoal, aiToggle, mdPickOffset,
+    /* AI 助手就地打开 / 绑目标 / 切模式：组件引导用户"和 AI 聊着改"时用（不要自建对话） */
+    aiToggleLegacy, aiBindGoal, aiModeSet, aiModeGet, aiFocusInput,
     /* 语法高亮给组件用（「看懂代码」左侧代码面板要自己上色，直接复用宿主这套） */
     hlCode, hlGuessLang,
     mdPickTarget, mdSrcRange, editKeysBind,
+    sxiGoals, sxiGoalsSync, sxiGoalPickHTML, sxiGoalPickBind, sxiGoalPickOpen, sxiGoalPickClose,
     mdInlineEdit: { open: mdInlineOpen, close: mdInlineClose, active: mdInlineActive, value: mdInlineValue, range: mdSrcRange, slice: mdSliceLines, splice: mdSpliceLines },
     mount: () => { if (BOOTED) { route(); } },
     ready: true
   });
+  /* 读内核分层配置（页面插件总开关 / 用户插件开关 / 皮肤开关都从这里来） */
+  await loadKernelConfig();
   BOOTED = true;
   route();
   taskStart();
   checkUpdateOnBoot();
-  if (!guideDone()) {
-    setTimeout(() => { if (!document.getElementById('guideMask')) showGuide(0); }, 500);
+  /* 首次运行：只有在首页（#/ 或空 hash）才自动进引导，深链接不能被劫持；
+     旧版回退才弹覆盖层。 */
+  if (!guideDone() && !/^#\/guide(?:\/|$)/.test(location.hash || '') && (location.hash === '' || location.hash === '#/')) {
+    setTimeout(() => {
+      if (guideDone()) return;
+      if (!(location.hash === '' || location.hash === '#/')) return;
+      if (guideVueEnabled()) { location.hash = '#/guide/1'; return; }
+      if (!document.getElementById('guideMask')) showGuide(0);
+    }, 500);
   }
   /* 首次运行时问一句「数据存哪」。
      Windows 上程序默认装在 C 盘，目标信息源、作答记录、备份都会堆进系统盘 ——

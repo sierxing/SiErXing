@@ -1,0 +1,8 @@
+{
+  "id": "goal",
+  "name": "目标执行页（内置）",
+  "apiVersion": "sierxing.ui/1",
+  "version": "1.0.0",
+  "description": "目标执行页：原版实现的插件化版本（#/g/:id）。",
+  "entry": "index.js"
+}

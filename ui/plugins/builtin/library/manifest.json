@@ -1,0 +1,8 @@
+{
+  "id": "library",
+  "name": "资源库（内置）",
+  "apiVersion": "sierxing.ui/1",
+  "version": "1.0.0",
+  "description": "资源库：原版实现的插件化版本（#/library）。",
+  "entry": "index.js"
+}

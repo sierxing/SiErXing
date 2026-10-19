@@ -13,12 +13,50 @@
 | 产品 / 目录名 | 思而行 / `SiErXing` |
 | 形态 | 本地单进程 Web 应用，`localhost:3213` |
 | 后端 | Node 内置 `http` + `node:sqlite`，**零第三方依赖** |
-| 前端 | 原生 JS（无框架、**无构建步骤**），改完刷新即生效 |
+| 前端 | legacy 原生 JS（无框架、无构建）；UI 插件层 Vue 3 + Vite（构建后产物进 public/ui-dist，见 §3.4） |
 | Node 要求 | ≥ 22.5（旧版需 `--experimental-sqlite`），推荐 24 LTS |
 | 端口 | 3211 / 3212 / 3213，历史遗留，**不要改** |
 | 协议 | MIT（见 `LICENSE`） |
 
 **代码量**（改动前先有个规模概念）：`public/app.js` ≈ 6600 行、`server/server.js` ≈ 4600 行、`server/ai.js` ≈ 540 行、`public/sdk.js` ≈ 110 行。核心逻辑**高度集中在两个大文件**里，没有按模块拆分。
+
+---
+
+## 0.1 文案硬规则（写任何代码之前先读这一节）
+
+> 一句话：**代码里不写死任何"给用户看的字"；文案统一由 `language/` 管理。**
+> 这条是项目的**架构规则**，不是建议。详细操作手册在 [`language/README.md`](language/README.md)。
+
+**必须遵守的 6 条：**
+
+1. **用户可见文字一律走 `tr()`**：按钮、标题、标签、提示、toast、报错、空状态、`placeholder`、
+   `title`、`aria-label`、`alt`……代码里写的是**源语言（中文）原文作为 key**，译文在语言包里：
+   ```js
+   button.textContent = tr('保存');                    // ✅
+   button.textContent = '保存';                        // ❌ 守卫会失败
+   ```
+2. **带变量必须用占位符整句翻译**，不要自己拼字符串：
+   ```js
+   toast(tr('已删除 {0} 份', n));                       // ✅
+   toast('已删除 ' + n + ' 份');                        // ❌ 英文语序/量词不同，拆出来是散装英文
+   ```
+3. **提示词正文不许写死在业务代码里**：模板放 `language/prompts/zh-CN/packs.json`
+   （经 `server/prompts/*` 的 loader / 注册表读取）；新增提示词要先加模板，再在 builder 里引用。
+4. **新增/修改文案后必须收进源语言目录**：`npm run build:lang`，否则 `npm run check:i18n` 会红。
+5. **不许绕过守卫**：因为中文原文就是 key，**新增文案 = 新增词条**；`language/legacy-baseline.json`
+   是旧代码的"硬编码预算"，只许降不许升（`node scripts/check-i18n.js --update` 只能用来收紧）。
+6. **不等于"所有字符串都翻译"**：逻辑判断、数据库值、API 合同/字段名、解析标记（如 `### 第 N 行`）、
+   文件路径、测试夹具**不是文案**，不要包 `tr()`、也不要进语言目录。
+
+**AI / 开发者的收尾清单（每次改完代码）：**
+
+```bash
+npm run check:i18n     # 目录同步 / 语言包完整 / 占位符 / 英文残留中文 / 新增硬编码
+npm run test:i18n      # 语言引擎 + AI 生成流程（假 AI，不花钱）
+```
+新增了文案却没跑 `build:lang` / 没补英文译文，这两条会直接报错——**不允许跳过**。
+`node scripts/install-git-hooks.js` 可以装一个 pre-commit 钩子自动挡（可选）。
+界面改动还要刷新页面用无头浏览器点一遍（`npm run test:i18n-ui`），`node --check` 证明不了运行时问题。
 
 ---
 
@@ -37,6 +75,7 @@ SiErXing/
 │   ├── code-store.js  ★ 导入代码库的完整快照存取 + 对话检索挑选（供 AI 助手查代码）
 │   ├── rag.js         ★ 检索增强：资料切片 / 向量 / 混合检索（规划与对话按问题取片段）
 │   ├── explain-chunk.js 看懂代码的纯文本部分（切段 + 解析模型输出 + 语言判断，有 scripts/test-explain.js）
+│   ├── prompts/page-context.js ★「AI 助手能读到当前页面」的提示词块（纯函数：清洗 + 限量 + 拼块，有 scripts/test-page-context.js）
 │   └── plugins/       ★ 服务端组件（自动加载）
 │       ├── index.js         加载器 + 接口约定（改组件先读这个）
 │       ├── lib/             组件内部共享库（如 ebook-parse.js 零依赖电子书解析）
@@ -48,6 +87,8 @@ SiErXing/
 │       ├── notes.js / tutbookmark.js / studystats.js / hot100.js
 │       ├── pomodoro.js / aiprompts.js
 │       └── theme-carbon.js / theme-paper.js   （只声明元数据，样式在前端）
+├── ui/                ★ Vue UI 插件层：lab/ 验证页、sdk/ 宿主契约、plugins/builtin/ 内置 UI
+│   └── （构建产物进 public/ui-dist/；用户插件在 DATA_DIR/ui-plugins/）
 ├── public/
 │   ├── index.html     页面骨架（body 里只有 3 个元素：nav#rail / main#app / div#toast + 2 个 script）
 │   ├── app.js         ★ 前端核心（原生 JS，含导图、对话、Markdown、收藏栏）
@@ -59,7 +100,7 @@ SiErXing/
 ├── examples/          示例组件包，可在「组件」页导入体验
 ├── docs/              开发期文档（如有）
 ├── data/              ★ 运行时生成（数据库/备份/上传），已 gitignore
-└── package.json       没有 dependencies，scripts 只有 start / start:sqlite / start:port
+└── package.json       运行时无 dependencies；Vue/Vite 只在 devDependencies（构建 UI 用）
 ```
 
 ---
@@ -84,6 +125,8 @@ sleep 6
 curl -s http://localhost:3213/api/health          # {"ok":true}
 curl -s http://localhost:3213/api/plugins | head  # 组件是否都加载上了
 ```
+
+> ⚠️ **本机 3213 目前由 systemd 用户服务托管**（`systemctl --user status sierxing.service`，`Restart=always` + `RestartSec=3`）。重启请用 `systemctl --user restart sierxing.service`；直接 kill 会被 3 秒后自动拉起，于是 `ss` 会看到 `STILL_HELD`、手动 nohup 的新实例反而报「端口已被占用」——**那不是 kill 没生效**，别再反复 kill/起实例。判断新代码有没有生效看 `systemctl --user show sierxing.service -p ActiveEnterTimestamp` 与首页资源戳 `app.js?v=…`。
 
 ### ⚠️ 起测试实例 / 无头浏览器时的两条铁律
 
@@ -118,6 +161,18 @@ try { /* …CDP 交互… */ } finally { try { ed.kill('SIGKILL'); } catch (e) {
 # ③ 兜底：随手清一遍（默认只清"父进程已死"的孤儿，不会打断正在跑的测试）
 bash scripts/kill-test-browsers.sh          # --dry 只看 / --all 连在跑的一起清 / --servers 顺带停沙箱服务
 ```
+
+⚠️ **用 `timeout` 包住浏览器时，`kill` 的是 timeout，不是 msedge。** 给 timeout 发 SIGKILL 不会转发给子进程，浏览器照样变孤儿（2026-10-17 真实踩到：三份测试脚本各自留了一棵 msedge 进程树）。收尾必须**按 profile 杀整棵树**，并在脚本里放：
+
+```js
+finally {
+  try { execFileSync('pkill', ['-9', '-f', '--', '--user-data-dir=' + profile], { stdio: 'ignore' }); } catch (e) {}
+  try { edge.kill('SIGKILL'); } catch (e) {}       // 再收 timeout 包装器
+  rmSync(profile, { recursive: true, force: true });
+}
+```
+
+杀完要**当场验证**，别只看脚本退出码：`pgrep -af 'user-data-dir=<profile>'` 应为空、`ss -ltn | grep :<CDP端口>` 应无监听、profile 目录应已删除。发现漏网的再跑 `bash scripts/kill-test-browsers.sh`。
 
 另外：每次测试一个新 `--user-data-dir=/tmp/…/cdp-<pid>` 会**攒 profile 目录**（实测一个沙箱目录 2.4GB、29 个 profile），收尾要连目录一起删。
 
@@ -182,6 +237,82 @@ SDK（`public/sdk.js`，全部接口就这些）：`registerPlugin / getPlugins 
 
 ---
 
+### 3.4 命令总线与 Agent 接入
+
+- 命令注册/执行：server/commands/bus.js；命令实现：server/commands/index.js；审批页：server/approvals-page.js。
+- 风险规则：read 直接执行；write 直接执行但写审计；destructive/admin 必须带用户批准的 approvalId（一次性、绑定命令与入参哈希、30 分钟过期）。
+- HTTP：GET /api/commands、GET /api/commands/manifest、GET /api/manifest（增强版插件 manifest）、GET /api/commands/:name、POST /api/commands/run；
+  GET /api/approvals/:id、GET /api/approvals/:id/page（用户审批页）、POST /api/approvals/:id/approve|reject；GET /api/audit。
+- CLI：node scripts/sierxing.js ...（或 npm run cli），默认连 127.0.0.1:3213，可用 SIERXING_URL 覆盖；approve/reject 是用户动作，Agent 只轮询并转交 approveUrl。
+- 本机表 approvals / command_audit / command_events 由 commands/index.js 幂等创建；故意不进 SYNC_TABLES（不跨设备同步）。
+- commands 不 require server.js；db / getGoal / goalWithStats / nowISO 由 server.js 启动时注入，避免循环依赖。
+- 语义洞察：server/insights.js（确定性规则，不调 AI、不写库）；命令 insight.list；brief.goal / brief.user / goal.list 已带 health / momentum / insights / nextAction。第一批信号：goal_health、stall、momentum、milestone、empty_goal；第二批：friction（friction_reports）、constraint_conflict（周可投入 × 期限 vs 剩余 hours）、goal_drift（goal_field_events 最近 14 天字段变更）。friction_reports / goal_field_events 都是本机表，不同步。
+- 摩擦：friction.report/list/update（write/read）；表 friction_reports 由 commands/index.js 幂等创建，本机不同步；insights 查询时 try/catch 兼容没有表的旧库/单测。
+- 提示词包：server/prompts/packs.js（静态包：资料提炼 + chat.ask_rules/chat.agent_rules） + chat-packs.js（对话静态规则块，从 buildChatPrompt 原样提取） + plan-packs.js（规划问卷/骨架） + sources-packs.js（搜集方案/书单/清洗） + tutorial-packs.js（教程生成） + tutorial-rules.js（篇幅/格式动态片段） + registry.js（本机覆盖/版本/校验/动态注册）；server.js 启动时创建 promptPacks、注册 6 个动态包并传给 commands（共 10 个可编辑包）。
+- 规划类提示词是异步的：registry 提供 renderAsync（有覆盖走模板，没覆盖 await builtinRender）和 hasOverride；server.js 只在 hasOverride 时组装模板上下文，没覆盖时仍直接调用原函数（行为/开销都不变）。
+- prompt.* 命令：list/get/preview/history/validate 是 read；update/reset 是 admin（必须用户批准）；覆盖存 prompt_packs，历史存 prompt_pack_versions（本机，不进 SYNC_TABLES）。
+- 删除：goal.delete / node.delete 是 destructive（审批后执行）；服务端 deleteGoalData() / deleteNodeData() 与 HTTP DELETE 路由共用，node 删除会先存版本快照。
+- 资料/教程：tutorial.list/rename/delete、source.add/update/delete；写操作审计、delete destructive（审批）；资料变更后经注入的 onSourceChanged(goalId, action, sourceId) 重建检索索引（删除时 rag.dropSource）。
+- 长任务入口：tutorial.generate 通过注入的 startTutorialGeneration（复用 streamTutorial + 假 res，不挂 SSE）后台启动；tutorial.edit 通过 startTutorialEdit 调本机现有修改接口（结构守卫/版本快照不复制）；source.collect 通过 startSourceCollect 复用 streamCollect + 假 res；source.digest 通过 startSourceDigest 复用 streamDigest（已包 tasks.begin）+ 假 res；plan.generate 通过 startGoalPlan 复用 streamPlan（已包 tasks.begin）+ 假 res。五者都立即返回 taskId，进度在任务中心；规划问卷分支会把 questions 写进任务结果。
+- 组件：component.list/describe（read）、component.toggle（write，核心 scope=core 不可关，主题互斥）；元数据来自 allComponents()/setComponent()。
+- 组件自改：component.export/validate（read）、component.stage（write，只写本机 component_staging）、component.install（admin，失败自动回滚旧文件）、component.uninstall（destructive）；server/component-pipeline.js 纯校验，server/component-preview-page.js 预览页，HTTP /api/component-staging/:id/preview；只支持 file 插件，core/base 内置不走此路；组件 JS 在进程内运行，必须用户批准。
+- 设置：setting.list/get（read）、setting.set（admin，审批）；只暴露 SAFE_SETTINGS 白名单（备份/搜集/清洗/检索/AI 模型/讲解风格），AI key / sync token 永不进白名单。
+- MCP：scripts/sierxing-mcp.js（stdio JSON-RPC，零依赖）；工具名点号→下划线（goal.create → goal_create）；admin 首次返回 approval_required；stdout 只走协议，调试走 stderr（SIERXING_MCP_DEBUG=1）。
+- 多宿主 skill：scripts/install-skills.js（claude / cursor / generic）+ mcp-config；配置说明在 docs/agent-plugin/mcp.md。回归：node scripts/test-mcp.js（需服务在跑）、node scripts/test-skills-install.js。
+- **app.open（2026-10-19）**：让宿主 Agent 在用户本机浏览器打开思而行，可带 `route`（`#/g/12`、`#/t/3`、`#/settings`；留空=首页），MCP 工具名 `app_open`，risk=write（写审计）。实现在 `server/commands/index.js` → 注入的 `openApp` → `service.openBrowser(route)`（`server/service.js`）：服务端从 systemd 用户服务起来时没有 DISPLAY，靠 `server/gui-env.js` 的 `guiEnv()` 补 X11/Wayland 环境；测试实例 `NO_OPEN=1` 时**只返回** `{ok:false, reason:'NO_OPEN', url}`、不弹窗（回归依赖这条）。路由只收 `/` 或 `#` 开头、无空白、≤300 字（防 `javascript:` 之类）。
+- **宿主 Agent 自动接入（2026-10-19）**：思而行作为某 Agent 插件时，宿主往 `DATA_DIR/host-agent.json`（或 `SIERXING_HOST_AGENT_*` 环境变量）写 `{name,url,key?,models,vision?}`，启动时 `ai.mountHostAgent()` 自动登记成服务商 `host` + 连接 `host-agent`（普通 api 连接，模型进 `modelPool` 直接可选）；`POST /api/host-agent/refresh` 可免重启刷新，`GET /api/host-agent` 看状态。重复刷新只更新不重复；用户手动关掉的不强行打开；缺 url 或 models 视为没接。**边界**：MCP 是宿主→思而行单向，思而行要用这些模型，宿主必须真提供 OpenAI 兼容 `/chat/completions`（本地网关），只登记列表不提供执行会报连接错误，别用假地址。配置文件被删/插件卸载后 refresh 会撤掉自动创建的 host 服务商与连接（不碰用户连接）。文档 `docs/agent-plugin/host-agent.md`，回归 `node scripts/test-host-agent.js`（8 项）。
+- **DSH 桥适配器（2026-10-19）**：`integrations/dsh-bridge/` 是 host 侧参考实现（ESM，独立包 `sierxing-dsh-bridge`，peer 依赖 `@deepseek-ai/dsh-llm`/`dsh-host-webserver` 0.2.0-rc.2 + cordis）：注入 `ctx.llm`/`ctx.webServer`，在 DSH webServer 注册 `/sierxing/v1/models` 与 `/sierxing/v1/chat/completions`（随机 Bearer token、仅回环、支持 stream SSE），模型调用走 `ctx.llm.stream()`；启动写 `DATA_DIR/host-agent.json` + POST refresh，dispose 删文件并撤连接。安装：`dsh plugin --profile web add <路径>` + profile `cordis.patch.yml` 加 `- name: sierxing-dsh-bridge`。回归 `npm run test:dsh-bridge`（8 项，假 ctx+假 llm+真 http server，不需要 DSH 运行时）。
+- 多形态打包：GET /api/manifest 返回 schema sierxing.plugin/1 + commands/prompts/components/surfaces/capabilities；node scripts/build-plugin.js（npm run build:plugin）生成 manifest.json + mcp/ + skills/ + mcp.json + README；回归 node --no-warnings scripts/test-plugin-package.js。
+- 提示词：server/prompts/context.js、digest.js、page-context.js 是纯函数；server.js 只留取数据的薄适配层。新增提示词优先放 server/prompts/ 或 server/features/<id>/prompts.js，不要再塞回 server.js。
+- **AI 助手是「唯一的一套 AI 问答」**（2026-10-18 用户定调：一百个组件各实现一套 AI 问答，效果一定参差不齐）。组件**不要**再自己写「问 AI」输入框 + 自己的提示词：
+  * 前端：`public/app.js` 的 `aiSyncRoute()` 在每个"有目标上下文"的页面渲染完后摆出入口（悬浮 💬 + 右侧抽屉），抽屉跨页保持；路由 → 目标用 `aiResolveRouteGoal()` 解析（`#/g/<gid>/…` 直接认；`#/t/<tid>/…` 查一次教程的 goal_id 并缓存）。
+  * 上下文：发消息时 `collectPageContext()` 抓当前页面的文字（剔掉工具栏/页头，`innerText` 靠临时离屏容器量，别对游离节点读 innerText），随 `page_context` 发给服务端；`server/prompts/page-context.js` 清洗 + 9000 字预算（掐中间留头尾）后拼成【用户当前正在看的页面】，并在「它做了什么」里记一条「你当前页面上的内容」。教程页不重复带（正文已由教程块带上）。
+  * 新组件只要保证**渲染出来的 DOM 就是内容**（题目/选项/代码/列表都正常渲染），AI 就能读到，不用再接任何东西。随堂测验原来的 `POST /api/quiz-session/:id/chat` 与界面追问框已按此删除（旧 `quiz_records.kind='chat'` 记录留在库里、不再显示）。
+- 领域拆分：server/domains/backups.js（createBackupDomain 注入 dbPath/backupDir/getSetting/nowStamp/onDataChange；backup/backupList/pruneBackups/backupDiff）+ server/domains/versions.js（createVersionDomain 注入 db/nowISO/safeParse/goalCompOn/aiText/currentModel；beginVersion/diffVersions/templateReport/buildReportPrompt/finishVersion）+ server/domains/goals.js（createGoalDomain 注入 db；orderedLeaves/goalWithStats/getGoal/roadmapOutline）+ server/domains/sources.js（createSourceDomain 注入 db/cleanText/nowISO；sourcesOf/digestsOf/digestBatches/buildLibraryMarkdown）；server.js 只做组装，回归 test-backup-domain / test-versions-domain / test-goals-domain / test-sources-domain。
+  - ⚠️ goal domain 必须在插件加载（reloadPlugins → pluginCtx 引用 getGoal）之前初始化；当前放在 const PLUGIN_DIR 之前，否则启动时报 Cannot access 'getGoal' before initialization。
+- **达成条件（目标推进进度）组件**（2026-10-19）：
+  - 领域 `server/conditions.js`：`goal_conditions`（含 `jd_ref` = 对应 JD 原文/条款）+ `nodes.condition_id`（0=未归属，继承父节点）；API saveFromPlan/list/assign/saveManual/remove/generateFromNodes；server.js 在 `reloadPlugins()` 前建域，`pluginCtx()` 注入。
+  - 条件 ≠ 阶段，且**必须是 JD 岗位要求**（禁止拿项目/节点名当条件，按 JD 维度去重；求职类 8-12 条最多 14，非求职写具体依据）；生成超长会二次重试、像节点名会给 warning。四套提示词 + `buildPrompt` 都要求 `jd` 字段；`saveFromPlan` **只删 `source='plan'`**。
+  - 组件：`server/plugins/conditions.js`（`scope:'base'`、`builtin:true`、默认开）+ `public/plugins/conditions.js/.css`，页 `#/g/:id/conditions`。列表默认全收起，「详情」展开说明 + **对应 JD** + 达成标准 + 节点；有全部展开/收起、调归属、「💬 让 AI 调整条件」。
+  - **AI 改条件 + 「🎯 只改」范围**：`buildChatPrompt` 带【当前达成条件】(id/优先级/JD/达成标准)+未归属节点；ops `condition_add/update/delete/assign/unassign/condition_replace`（整批换 JD 条件）。对话栏上方「只改」→ `edit_scope`：`chatScopePromptBlock` 进提示词 + `chatScopeFilterOps` **服务端硬拦**越界 op 并告知用户。前端用 SDK 的 `aiToggleLegacy/aiBindGoal/aiModeSet/aiScopeSet`；`aiSendText` finally 只重画 goal/map/library，**插件页要单独加 conditions 分支**。
+  - 进度按末端节点；导出/导入/分享都带条件。⚠️ `H.loadGoal(gid)` 无返回值，要 `await H.loadGoal(gid); goal = H.state.goal`。
+  - 回归：`test-conditions-{domain,ui}.js`、`test-chat-conditions.js`（含 edit_scope 硬拦）、`test-conditions-chat-ui.js`（含只改范围 + JD 显示）。
+- UI 插件化（**进行中 · 已覆盖全部自研页面**）：
+  - **默认界面 = 插件界面**。每个页面在 `ui/plugins/builtin/<page>/` 下（`index.js` + `manifest.json`，可选 `style.css`），宿主 `public/app.js` 的 `renderPagePlugin(page, extra)` 负责注入依赖并渲染；失败**静默回退**原版 `render*`（保证任何情况都能显示）。
+  - **已插件化页面**（全部 11 个自研页 + 引导层）：`home` `#/`、`guide` `#/guide/:step`（= 首页 + 蒙层，两段都走插件）、`settings` `#/settings`（含 ai/data/sync/rag/service/update/system/theme 全部子页）、`components` `#/components`、`library` `#/library`、`aitasks` `#/aitasks`、`versions` `#/g/:id/versions`、`diff` `#/g/:id/diff/:vid`、`roadmap` `#/g/:id/map`、`tutorial` `#/t/:id`、`goal` `#/g/:id`（`chat` `#/g/:id/chat` 复用 goal 插件 + AI 抽屉）。
+  - `r.view === 'plugin'` 的页面（学习统计 / 今日任务 / 随堂测验 / 看懂代码 / 刷题 / 产出库 …）本来就走 `public/plugins/*.js` 组件体系，不在这套页面插件里。
+- **页面插件怎么生成**：不要手抄原版代码。`node scripts/build-page-plugin.js --all` 会从 `public/app.js` 按**依赖闭包**提取原版实现（根函数 → 递归收集它引用的顶层声明），只把「跨页渲染器 / 路由 / Vue 旧实现 / AI / 主题 / md / tut / sxi / task」这类全局基建留给 host 注入，其余逐字搬进插件 —— 所以 DOM 结构与原版完全一致。
+  - 加/改一个页面：先在 `build-page-plugin.js` 的 `PAGES` 里写 `{ roots: ['renderXxx'], render: 'renderXxx()' }`，再 `--all` 重建；**改渲染逻辑仍改 app.js**，插件是生成物，别直接改。
+  - `public/app.js` 里 `sxPageHostMap()`（由 `scripts/gen-host-map.js` 生成）暴露全部顶层声明给插件；`let/var` 用 getter/setter（设置页会写 `AI_PROVIDERS`/`AI_AGENTS`，插件里 `H.AI_PROVIDERS = x` 要能真正写回全局）。
+  - ⚠️ 三个已经踩过的坑：① 索引**不能按行首正则**扫（模板字符串里的示例代码 `const card = ...` 会被当成真声明 → host 表里多一个不存在的名字 → 每次插件渲染 `ReferenceError: card is not defined`），必须用字面扫描（跳过字符串/注释/正则 + 括号深度）；② 改写外部依赖**只改调用位置 `name(` 与属性位置 `name.`/`name[`**（裸名字全替换会把参数 `state` 改成 `H.state`、把函数声明名改成 `function H.xxx`）；③ 插件 `render()` 必须 `return` Promise，宿主必须 `await`（否则页面收尾 `sxiSelify` 跑在内容画出之前）。
+  - **内核 / 服务化 / 用户插件（P0–P3，已落地）**：`server/kernel.js`（provide/get/effect/plugin/loadPlugins/dispose/迁移/状态）、`server/kernel-services.js`（25 个服务）、`server/kernel-config.js`（分层配置 builtin < profile < user）。契约文档 `docs/ui-plugin/kernel-contract.md`；实时状态 `GET /api/kernel`（服务清单 + 插件 loaded/skipped/failed + 配置来源/告警/升级差异）。**P4（内核瘦身）不做**：server.js / app.js 仍是单体，内核只是容器 + 启动器。
+  - **用户页面插件**：`DATA_DIR/ui-plugins/<page>/`（manifest 含 apiVersion/entry/format/standalone；id 必须等于目录名）。三种入口：ESM Vue 组件 / ESM `mount(root, ctx)` / 经典 `SXUIPlugin[page]`；Vue 必须从 `window.SiErXingUI.vue` 取，宿主桥 `/ui-dist/uihost.js` 按需加载（改 ui/sdk 后要 `npx vite build`）；实例在离开路由时自动卸载；任何异常静默回退内置页面。管理页 `#/ui-plugins`（显示名「🧱 界面管理」，服务端 `server/plugins/uimanager.js` + 前端 `public/plugins/uimanager.js`；**id 仍是 `uimanager`、路由仍是 `#/ui-plugins`，别跟着显示名改**，否则旧链接/设置/测试全断）。它是 `scope:'core'` 核心组件：用户关不掉（这是装坏插件后唯一的恢复入口）。
+  - **分层配置**：`config/kernel.schema.json`（默认值）+ `DATA_DIR/config/profile.json` / `user.json`。只写要改的键；写 null 恢复默认；未知键/类型错只告警不阻断；`ui.pagePlugins` / `ui.userPlugins` / `ui.skins` 是前端总开关；升级差异存 `DATA_DIR/kernel/builtin-snapshot.json`；CLI `node scripts/kernel-config.js --dump|--diff|--explain|--init`。
+  - **新验收**：`npm run test:kernel`（22 项）、`npm run test:kernel-config`（16 项）、`node scripts/test-user-vue-page.js`（23 项，用户 Vue/mount/停用回退/管理页）、`node scripts/test-kernel-live.js`（16 项，配置总开关/皮肤/快照/二次启动）。用户插件不参与像素回归。
+  - **界面管理 = 核心组件**：`npm run test:core`（10 项）钉住：左栏「🧱 界面管理」对应的 `uimanager` 是 `scope:'core'`（归「核心组件」、removable=false），全局/目标级开关接口都拒绝关闭它；显示名可从「界面插件」改成「界面管理」，但 **id `uimanager` 与路由 `#/ui-plugins` 不许动**（旧链接/设置/测试都靠它）。
+  - **创造模式（仿 DSH Creator，已落地）**：AI 助手第三种模式 `create`（`AI_MODES` 加一条即可；服务端 `mode:'create'`）。`server/create-mode.js` 负责：解析 create 围栏块 → 静态校验（页面白名单 / 三种插件契约 / 禁网络·子进程·eval / `node --check` / 体积上限）→ 暂存 `DATA_DIR/agent-changes/<id>/`；**用户点卡片按钮才安装**（`POST /api/create/changes/:id/install` 必须 `confirm:true`），装前快照旧版本、失败自动回滚、成功后「撤销安装」可恢复。产物落点：ui-page / skin → `DATA_DIR/ui-plugins/<id>/`；component → `DATA_DIR/plugins/<id>.js` + `DATA_DIR/plugins-client/<id>.{js,css}`（loader 第二目录 + `serveStatic` 对 `/plugins/*` 兜底；同名时用户版本优先，core/base 组件不可覆盖）。卡片信息随 `chats.trace` 的 `kind:'create'` 步骤落库，刷新/重开对话后卡片还在，装失败也在。⚠️ 别再让 AI 直接写 `server/plugins`/`public/plugins`：用户组件必须进数据目录，否则升级覆盖。回归：`npm run test:create`（17 项纯函数+HTTP e2e + 20 项假 AI 前端闭环，不花钱）；文档 `docs/creation-mode.md`。
+- **左栏功能按钮可拖动排序**（用户 2026-10-19 要求）：`public/app.js` 的 `railOrderLoad/Save/Apply` + `railBindDnD`，顺序存本机 `localStorage.sierxing-rail-order-v1`（显示偏好、不做多端同步；新加的按钮追加在末尾，不冲乱用户版式）。拖动用 pointer 事件：>5px 才算拖（否则当点击）；**松手后的 click 必须拦掉**（`railJustDragged`），否则拖完会误跳页面；`renderRail()` 在 `railDrag` 期间直接 return —— 轮询/路由重画会把手里拖着的元素换掉，手势就断了。底部「主题」和左上 logo 不参与排序。回归：`npm run test:rail`（路线图按钮 10 项 + 拖动排序 13 项；两个脚本同跑默认抢 3329/9804 端口，和别的回归并发时给 `APP_PORT`/`CDP_PORT` 各换一套）。
+- **验收（发布前必须全绿）**：
+  - `npm run test:mount` —— 断言每页确实**由插件接管**（`window.__sxPluginUsed[page] === true`）。没有这条就验不出插件化：插件抛错时路由静默回退原版，像素对比两边都是原版、照样全绿。（当前 13/13）
+  - `npm run test:parity` —— 逐路由像素一致性（21 条路由，`?ui=legacy` 对照，带 `-fuzz`）。（当前 21/21）
+  - `node scripts/test-plugin-func.js` —— 只读交互冒烟（节点折叠、设置子页切换、筛选、教程目录、路线图展开）。
+  - `npm run test:ui` —— 既有 UI 单测（204 项）。
+  - `npm run test:dom` —— **DOM 结构骨架对比**（插件版 vs `?ui=legacy`，逐元素比标签 + class + data-* 属性名，12 条路由）。（当前 12/12）
+    像素一致看不出「属性名被改坏」：`data-go=` 变成 `data-H.go=` 时外观分毫不变，但事件委托全部失配、控件点不动。
+  - `npm run test:audit` —— **控件级功能审计**：逐页逐控件真点，捕获 JS 异常并判断有无反应（弹层/抽屉/toast/状态变化都算）。（当前 13 条路由 / 105 点 / 0 异常）
+    危险控件（删除/清空/更新/生成/导入/保存/分享…）默认跳过，原生 confirm 自动拒绝，不写库。
+  - 回退开关：`?ui=legacy` 或 `localStorage.sierxing-ui-<page>=legacy`。用户插件放 `DATA_DIR/ui-plugins/<id>/` 可整页覆盖内置。
+  - ⚠️ 插件**不要复制全局 style.css 的规则**（加载顺序会覆盖原值、像素差反而变大），只放全局没有的样式；`mapFit()` 要在 rAF 里等布局稳定。测试沙箱可用 `SIERXING_DATA_DIR=/tmp/...`。详见 docs/ui-plugin/README.md。
+- **首页目标桌面（最近目标 / 收藏夹 / 三档大小 / 拖拽排序）**：`renderHome` 不再平铺 `.goalCard`，而是渲染顶部「最近目标」栏 + `所有目标` 桌面（`.homeDeskGrid` 里的 `.homeTile`，手机桌面式）。实现全在 `public/app.js` 的 `homeLauncher*` 一段，改完必须 `node scripts/build-page-plugin.js home` 重建 `ui/plugins/builtin/home/index.js`（生成器会按闭包把这一整段搬进插件；`homeRecentTouch` 只被 `route()` 用，不会进插件）。
+  - 布局模型 `{items:[{type:'goal',id,size} | {type:'folder',id,name,size,goals:[id]}]}`，**只存本机 `localStorage`**（键 `sierxing-home-layout-v1`，属显示偏好、跟 `sierxing-*-bar` 同类，不做多端同步）。每次渲染 `homeLauncherLoad(goals)` 都跟当前目标列表**对账**：删掉已删除的目标、只剩 1 个目标的收藏夹自动摊平、**新目标一律追加到末尾**（顺序完全由用户拖动决定，绝不能把新目标插到最前面冲乱用户排好的版式）。
+  - 「最近目标」栏：`homeRecentTouch(gid)` 在 `route()` 里对 `goal / map / chat / versions / diff` 路由记一笔（本机 `sierxing-home-recent-v1`，最多 12 条、前台展示 8 条、去重后最近在前）；`homeLauncherRecentHTML()` 只展示当前还存在且非空的目标，没有任何记录时整块不渲染。这是「最近**使用**」（打开过），不是「最近更新」，别拿 `updated_at` 排序来替代。
+  - 桌面交互：`pointerdown` 后鼠标（`pointerType==='mouse'`）**一动（>5px）就拖**，触摸/笔先 **300ms 长按**（否则会和页面滚动抢手势；移动 >10px 放弃）。**排序是主手势**：拖动时按 rect 算插入位置、用 `.htDropBefore/.htDropAfter` 竖线标出，松手即 `items` 重排（拖到哪就是第几个）。**合并是显式按钮手势**：拖动压在另一张卡片上时，目标卡片底部长出「📁 收进收藏夹」（`.htMergeChip`，文案会区分「收进收藏夹 / 收进「收藏夹 1」/ 并入「收藏夹 2」」），**松手落在按钮上**才调 `homeLauncherMerge()`。按钮必须**做满卡片宽度**（左右各留 8px）+ 高度约 30px，判定用 `homeLauncherChipHit()` 再向**左右**外扩 `HOME_CHIP_SLOP_X=12`（用户反馈过「拖进收藏夹的区域太小、要对准很难受」）；但**纵向只留 2px**——小卡片高度才 82px，上下外扩会把「拖到卡片中间 = 排序」的区域吃掉，出现想排序却被融合；指针压在按钮上时按钮 `.on` 高亮、插入竖线隐去（`.htChipHover`）。**绝不要再退回「停 N 毫秒自动进合并态」**——用户反馈拖拽时手一慢就被误判成想合并，排序和融合的边界必须看得见、摸得着，不能依赖计时器。所有拖拽反馈统一走 `homeLauncherPaintDrop()`（按钮的增删与搬移也在这里，由 `homeLauncherMergeChipText()` 出文案），别在 hitTest 里散着加 class / 建节点。拖拽监听是**临时**挂到 document、结束必删（`homeLauncherAbortDrag`）—— 插件每次进首页都会重新执行一遍，**不能留常驻 window 监听**。
+  - 收藏夹弹层（`.homeFolderMask` 挂 body，Esc / 点背景 / hashchange 关闭）：**里面也能拖拽排序**（同一套鼠标/触摸规则，`.hfcGhost` + `.hfcDropBefore/After`，松手写回 `folder.goals`）；**右键卡片**弹 `.ctxMenu`（打开目标 / 移出收藏夹），「移出」把目标作为普通卡片放回桌面**紧挨收藏夹的位置**；收藏夹只剩 1 个目标时连它一起摊平（单目标收藏夹没意义，渲染时本来也会摊平）。弹层内改动会置 `homeFolderDirty`，正常关闭时 `renderHome()` 重画；点卡片进目标页 / 路由变化用 `close({keepHome:true})`（路由自己会渲染，别在这里抢渲染）。
+  - 三档尺寸 `s/m/l` = `.homeDeskGrid` 的 1/2/3 列（基准 6 列，≤959px 4 列，≤660px 2 列；⚠️ **别改回 `auto-fill`**，5 列时中卡会在右边空出半格）。小卡只留标题+进度、中卡加简介与关键信息、大卡再加「下一步 / 更新时间」。收藏夹卡片露 4/6/9 个迷你图标（`homeLauncherFolderMiniHTML`），预览网格必须**顶部对齐**（`.htFolderMini` 别加 `margin-top:auto`：卡片被同行更高卡片拉伸后，底部对齐会让第一行贴底、新增行往上叠，看起来是「从下往上排列」）。
+  - 卡片右上角 `⋯` 菜单复用 `.ctxMenu`，按钮上必须带 `data-morebtn`（坑 #2：否则点开就被全局「点别处关闭」收掉）。
+  - 回归：`npm run test:home`（沙箱实例 + 6 个目标 + CDP 真鼠标，覆盖：默认桌/批量大小/**按下即拖排序**/**停顿不自动融合**/**松在「📁」按钮上才合并**/弹层内拖拽排序/右键移出/最近目标栏/新目标追加到末尾/刷新持久化/恢复默认，不碰真实数据）。改这块**至少跑它** —— `node --check` 证明不了拖拽链路。
+- 验收：docs/agent-plugin/acceptance.md（目标交付物矩阵 + 实跑证据 + 已知边界）；回归：node scripts/test-commands.js（总线/审批）、node --no-warnings scripts/test-commands-write.js（内存库写命令/组件/摩擦）、node --no-warnings scripts/test-backup-domain.js（备份领域）、node --no-warnings scripts/test-versions-domain.js（版本领域）、node --no-warnings scripts/test-goals-domain.js（目标读取领域）、node --no-warnings scripts/test-sources-domain.js（资料/提炼领域）、node --no-warnings scripts/test-component-pipeline.js（组件校验）、node --no-warnings scripts/test-insights.js（健康度/卡点/动量）、node --no-warnings scripts/test-prompt-packs.js（模板=原函数/覆盖/reset/校验）、node --no-warnings scripts/test-plugin-package.js（插件包）、test-prompt-context.js、test-prompt-context-data.js、test-prompt-digest.js。
+
 ## 4. 组件开关「按目标隔离」——最容易搞错的地方
 
 判定链路是**三层**，三层必须一致，否则会出现「界面关了但接口还能调」：
@@ -201,6 +332,38 @@ SDK（`public/sdk.js`，全部接口就这些）：`registerPlugin / getPlugins 
 
 **界面陷阱**：组件管理页选中某个目标时，下面那一大堆分类卡片里的开关**仍然是全局开关**。所以已把它们整体折叠进 `details.cmpGlobalFold` 并标注「影响所有目标」。**新增任何按目标生效的开关时，务必确认它在目标范围区块内、且用的是 `data-gcmp` 而不是 `data-cmp`。**
 
+### 4.1 组件管理页（#/components，2026-10-19 重做）
+
+改这块之前先读这段 —— 这里是用户投诉最集中的一页（「切换分类不生效」「组件全铺一屏找不动」「分类名一坨字很难看」）。
+
+- **分类必须真生效**（曾经三处 bug 叠加，现在都有回归）：
+  * `effectiveCategory(id, declared)`：`component_category_map` 里**有 key 就认**（空串 = 用户明确归到「其它」），没 key 才回落到插件声明。早期写的是 `(map[id]) || declared`，于是「移回其它」永远被插件声明抢回去；另外后端写「其它」时曾 `delete map[cid]`，等于「从没设过」，下次读又回落 —— 现在写 `map[cid] = ''`。
+  * **内置组件（plan/chat/clarify/constraints/sources/versions/tutorial/jdfile）也必须走 `effectiveCategory`**。早期 `allComponents()` 对 `BUILTIN_COMPONENTS` 直接用自己的 `b.category`，用户在界面上给它们换分类是「保存成功、刷新就跳回去」。
+  * 删除分类时把该分类下的组件写成显式空串（不是字符串 `'其它'`），否则它们会回落到插件声明分类、被自动检测重新加回这个已删分类。
+  * 回归：`npm run test:components`（14 项）。
+- **分类可折叠 + 顶部搜索**：每个分类 = 一个 `.cmpCatMod`，标题行整行可点（`.cmpCatHead` / `data-cmp-fold`），**默认全部收起**；状态存本机 `localStorage.sierxing-cmp-prefs`（`collapsed` / `goalCollapsed` / `q` / `goalQ`，显示偏好、不做多端同步）。搜索按 名字/说明/id/分类/作者 过滤，命中的分类自动展开、没命中的整块不显示。改分类后**只就地重画组件列表**（`paintGlobalList()`），不整页重画 —— 否则刚展开的分类会全部收起。
+- **全局视图和目标视图长同一个样**（都是「分类折叠 + 搜索」），区别只在开关写哪：目标视图用 `data-gcmp`（只写 `goals.plugins`），全局视图用 `data-cmp`（写 `settings.components`）。选了目标时全局那块仍然折叠进 `details.cmpGlobalFold` 并标注「影响所有目标」。
+- **「管理范围」是一个可搜索按钮**（不是一排目标按钮）：`cmpScopePickHTML()` + `cmpScopePickBind()`，弹层由通用件 `sxiGoalPick*` 提供。
+
+### 4.2 「选目标」统一件（全站共用）
+
+目标一多，原生的 `<select>` / 一排按钮都没法找。统一用 `public/app.js` 里的：
+
+```
+sxiGoalPickHTML(id, { value, goals, allLabel, label, compact })
+sxiGoalPickBind(id, { onPick(gid) })          // gid=0 表示 allLabel 那一项
+sxiGoalPickOpen/Close                         // 需要自己控制时用
+sxiGoals() / sxiGoalsSync()                   // 目标列表（30s 缓存）
+```
+
+按钮显示当前目标，点开是**带搜索框的弹层**（输入即过滤、Esc 关、点外面关、视口下方放不下自动上翻）。用它的地方：组件管理「管理范围」、资源库页头、产出库页头（`public/plugins/outlib.js`，经典组件通过 `SiErXing.sxiGoalPickHTML` 拿）、AI 任务中心「按目标筛选」（`sxiPopShow` 的 goal 分支，弹层里嵌 `.sxiPopSearch`）。
+
+⚠️ 经典组件（`public/plugins/*.js` 那种 IIFE）要用这些必须**同时**加进两处白名单：`public/app.js` 的 `SiErXing.provide({...})` 与 `public/sdk.js` 的 `HOST_KEYS`。只加 provide 的话，组件里 `SiErXing.sxiGoalPickHTML` 是 `undefined`（`bridge()` 只拷贝 HOST_KEYS 里的键），表现是「产出库页头空了一截、不报错」。
+
+⚠️ **文案里别再自带图标**：`allLabel` 传「🌍 全局默认」这类带 emoji 的文案时，通用件会用 `sxiGoalSplitIcon()` 把开头 emoji **抽出来当图标、并从文案里去掉** —— 否则「图标一个地球 + 文案又一个地球」会在界面上出现两个（真实反馈）。以后加新的 `allLabel` 照常写 emoji 即可，不用自己两边都写、也不用为了避重而删掉 emoji。
+
+回归：`npm run test:goal-picker`（12 项，覆盖四处 + 分类修复不回归 + 「全局默认只出现一个地球」）。
+
 ---
 
 ## 5. 前端顶栏「收藏栏」
@@ -217,7 +380,7 @@ SDK（`public/sdk.js`，全部接口就这些）：`registerPlugin / getPlugins 
 
 ## 6. 数据表
 
-`goals / nodes / plan_drafts / goal_versions / tutorials / sources / source_digests / chats / chat_sessions / settings / code_repo_files`，以及各组件自建表（`quiz_*` 等，已加入 `sync.js` 的 `SYNC_TABLES`）。
+`goals / nodes / goal_conditions / plan_drafts / goal_versions / tutorials / sources / source_digests / chats / chat_sessions / settings / code_repo_files`，以及各组件自建表（`quiz_*` 等，已加入 `sync.js` 的 `SYNC_TABLES`）。
 
 - `code_repo_files` 存「导入代码库」的完整文件快照（只读、脱敏），供 AI 助手对话时按问题检索（`server/code-store.js`）。**它故意不进 `SYNC_TABLES`**：路径与内容跟设备绑定、体积大，各设备自己导入一份即可，同步互相覆盖没意义（同 `review_plans` 的理由）。
 - `source_chunks` 是「检索增强（RAG）」的知识库索引：资料按 ~750 字切块（`server/rag.js`），配了向量模型（设置 → 检索增强，独立于对话连接）时再批量向量化；检索 = 余弦相似度与关键词打分取较大值，**没配向量模型也能用**（退化词面检索）。派生数据、可随时重建，同样不进 `SYNC_TABLES`。规划/对话的提示词注入见 `libraryBlock()` / `ragAugment()`。
@@ -321,6 +484,13 @@ SDK（`public/sdk.js`，全部接口就这些）：`registerPlugin / getPlugins 
       * 讲代码的提示词要带上"他已经补过的小课"（一句话带过、别重讲）—— ⚠️ 必须读**库里最新**的 `prereqs`，`startJob` 开头那份 `s0` 是快照，那会儿小课还没写出来（真实踩到过，于是那行提示没进去）。
       * 「按新风格重讲」时把 `done` 的小课打回 `unknown` 重写（风格也要跟着变），但"知不知道"的判断留着。
       * 一个前置都不需要的代码（AI 返回空数组）→ 不停，直接讲。
+    - **讲解记录按教程 / 任务节点隔离**（用户要求：别把一百个教程、五百段代码全摞在一个列表里）：
+      * 从教程页进来（`#/t/:id/explain`）→ 列表只查 `?tutorial_id=<id>`，**切教程看不到别的教程的记录**；从目标页进来 → 查 `?goal_id=<id>`，界面**按教程/任务节点分组**（`.exGroupHead`，默认收起、只有一组时展开）。
+      * 列表 SQL 要带 `tut_title` / `node_title`（前端分组标题用它，不然只有 id）；「＋ 贴一段新代码」在教程里进来自动带上 `tutorial_id`，在目标页进来说 `tutorial_id=0`（归到"没挂任务节点的代码"那一组）。
+    - **前置知识的界面**（用户要求）：列表在**左边代码栏上方**（`.exPre` 在 `.exSide` 里、代码上方），**只列知识点名字**（左栏不许出现讲解正文）；点某一条 → 右边显示它的**讲解**（`renderPreThread`）+ 同一个追问框（`POST /prereq/:pid/ask`，记在 `prereqs[i].chat`）；选中时左边把它 `why` 里提到的行（`第 N 行`）轻轻标出来（`.exLine.exRef`）—— 这样就不用把代码在右边再贴一遍。
+      * 「你说知道、其实想听」：`POST /prereq/:pid/teach` 把这一条打回 `unknown` 再跑一次（已讲好的逐行讲解不动）。
+      * ⚠️ `startJob` 的"都讲完了 → 直接 done"短路**必须连前置小课一起看**（`prereqs` 里有 `unknown` 且没 `lesson` 就不许短路），否则 `teach` 会返回 `started:false`、那一课永远写不出来（真实踩到过）。
+    - **右边不再重复显示"当前选中的这段代码"**（用户要求）：左边已经高亮着"在看哪儿"，右上再贴一遍只会挤压对话栏 —— 线程头只留 `第 N-M 行 · 模块名` 一行，`.exSnippet` 已删（连样式一起）。
     - 追问只挂在**被点开的那一行所属的模块**上（`coveredBy()`）；没讲到的行不给追问。
     - 数据 `explain_sessions` / `explain_turns` 已进 `SYNC_TABLES`。它替换掉了早先的「带练」（coach_* 表在 `init()` 里一次性 DROP，组件 id 也从 `coach` 改成 `explain`）。
     - **教程页的代码块编号与右键入口也在这个组件里**（用户明确要求：别做成 app.js 原生功能）。组件自己靠 `hashchange` + `MutationObserver` + `load`（iframe）认领教程页，给渲染出来的 `pre` 挂 `#N` 徽标并接管右键（菜单：「🔍 看不懂？添加到「看懂代码」」/「⧉ 复制代码」）。三条不能破：
@@ -335,171 +505,153 @@ SDK（`public/sdk.js`，全部接口就这些）：`registerPlugin / getPlugins 
       * 宽度用**比例**（%）、高度用**像素**、总宽用**像素**，都是本机显示偏好（不同步）。文档级监听只绑一次（`document.__exSplitBound`），容器引用每次渲染更新（`splitWrap`）——别再退回"只给分隔条本身绑 mousedown"，那样用户抓面板边缘就没反应（真实反馈）。
       * **最外两条边**（代码栏左边框 / 对话栏右边框）拖的是**整体宽度** `--exW`（超过页面容器时左右对称溢出，跟教程正文宽度同一套 `margin-left:calc((100% - w)/2)` 算法）；⚠️ 方向必须按抓的是哪条边分开算：抓左边往右拖是**变窄**（`-2×dx`），抓右边往右拖才是变宽（`+2×dx`）——两边都用 +2× 会出现"边不跟手、越拖越反"。
       * **别每次轮询都重画回答区**（`renderAsk()` 有签名判断，`askSig()` 没变就直接跳过）：每 2.6 秒重建一次 `<textarea>` 会把用户的**焦点**和他手动拖高的**输入框高度**一起丢掉 —— 用户报的"调节高度后立刻变回去"就是这个。输入框高度记在 `localStorage.sierxing-explain-tah`（`bindTaHeight()` 在 mouseup/pointerup/input 时存，重画时 `ta.style.height` 还原）。
-    - 回归方法（不花钱）：`node scripts/test-explain.js`（39 项：切段首尾相接 / 漏行补洞 / 越界钳制 / **模块大纲规范化（含"只有 `}` 的模块被并掉"、巨块细拆）** / 批次边界 / `clarify_answers` 两种形状 / **`numCode` 传数组也要按行**）。端到端用假 AI（`fake-ai-explain.mjs`：先回一份**故意不老实**的大纲 —— 有洞、越界、把 `}` 当模块 —— 再按模块回讲解；另按提示词里的标记回「前置知识清单 / 前置小课」）跑：断言模块首尾相接、每一行都有讲解、没有"只有收尾符号"的块、每块都带模块名、`[[NAME]]` 没泄漏、**并发 ≥ 2 且 ≤ 3**、子任务带 `parentId` 且不落 `task_runs`、停止主任务时子任务一起停；前置知识那条链路单独跑（列出来就停住不偷讲 → 点"不知道"只给那个补课、"知道"的不写课 → 跳过 → 无前置直接讲 → 提示词里带"他已补过的小课"且代码是**按行**给的）。前端真点一遍：`#exProgTxt` 写"已讲 x/y 个模块"、代码栏有 `.exModStart` 分隔线、表头带模块名、任务栏里「▸ N 个模块」默认收起点开才展开、左侧代码有 `.tk-*` 上色、拖分隔条能改宽度且刷新后记得；教程页那条链路单独验（看编号 → 右键 → 添加到看懂代码 → 讲解页已经在讲；HTML 教程走 iframe 那条），并顺带验「选中文字后右键仍是划线菜单」「正文纯文本没被徽标污染」「下拉列表条数与编号上限一致」。
-      * ⚠️ 无头浏览器（microsoft-edge + CDP）在这台机器上**偶尔会卡**：`Runtime.evaluate` 超时、甚至整个浏览器进程消失。写测试时每个 evaluate 都要能重试（别一次超时就当失败），而且**同一时刻只跑一个 CDP 脚本**（两个脚本共用一个浏览器会互相打架、日志交错，看起来像产品 bug）。
 
-21. **长教程的修改走「分节改写」，别再退回"整篇重写"**（`server/tut-seg.js` + `server.js` 里那段 `tutSeg.shouldSegment`）：
-    - 全文重写要求模型把整篇重新吐一遍：8 万字就要 4~6 轮续写（实测常撞"AI 输出过长"），9 万字以上被 `TUT_EDIT_MAX` 直接拒收 —— 用户根本改不了自己那份越来越长的教程（真实反馈）。
-    - 现在的规则：正文 > `SEG_MIN`(28000) 且意见点名了范围（`parseEditScope` 的 range/all）→ 按标题边界切块（每块 `SEG_CHUNK`≈14000 字）→ 逐块让 AI「只改这一段」→ `tutSeg.splice` 拼回整篇。**范围外的正文逐字拼回**，所以结构守卫的"范围外不许少"天然满足，输出量只跟要改的那几节有关。
-    - 三处不能错：① 切块必须首尾相接、不重不漏（`splitScopeChunks` 有单测）；② 模型多吐了下一段要在下一段标题处截断、段首标题被吃掉要补回（`cleanSegment`）；③ 拼装前校验块数与结果数一致（对不上就报错，宁可失败也不能拼错位）。
-    - 分段没成/某块写坏了 → **自动回退全文重写**；这时若正文超上限，错误消息要能照做（"点名到某一节就能改"），别只说"请把意见拆小"。
-    - `buildTutorialEditPrompt` 必须**懒构造**（`editBase()`）：它内部有 9 万字上限的拒收，提前拼会让长教程连分节改写的门都进不去。
-    - 回归方法（不花钱）：`node scripts/test-tut-seg.js`（12 项，纯文本）；端到端用假 AI 回"分段"（`<<<SEGMENT_START>>>` 那段），断言"范围外逐字未变 + 只调了分段 + 输出量远小于整篇"。
+21. **页面插件的 `render()` 必须 `await`，插件也要 `return` 那个 Promise**（`public/app.js` 的 `renderPagePlugin()` + `scripts/build-page-plugin.js`）：
+    - 原版 `render*` 大多是 **async**（先画「正在读取…」→ `await api(...)` → 整体重绘，见 `renderAiTasksPage` / `renderVersionsPage` / `renderDiffPage`）。宿主渲染完还要跑 `sxiSelify(document)` 之类的"页面收尾"，**不等它就会收尾在插件画出内容之前**。
+    - 实测：`#/aitasks` 的「每页」下拉在插件版是**原生 `<select>`**、原版是自画下拉，像素差 5000+（`test:parity` 报 `/aitasks` 不一致）。这条跟"AI 助手常驻"改动无关，是插件化时期就埋下的。
+    - 两侧都要改，缺一不可：宿主 `await inst.render()`；生成器把包装器写成 `render: function () { return renderXxxPage(); }`（生成的 4 个内置插件已重跑构建，手写的 `roadmap` 也补了 `return`）。
+    - 回归：`scripts/test-ui-lab.js` 有 3 条纯文件断言（宿主 await / 内置插件 return / 构建器 return），不需要服务。
 
-22. **搜集信息源必须"AI 把关"，本地只挡一眼假广告**（`server/collect-screen.js` + `collectSources`）：
-    - 用户的定调（原话）："先大量检索，然后 AI 审查这批信息源内容质量如何；字数限制太死板了，应该由 AI 判读，一个高质量的信息被截断了应该继续把全部内容导入进来。"
-    - 流程：广撒网（每条 query 30 条，不再按 kind 配额先到先得）→ 候选池（站点优先 + 单站上限 + 总量上限，**只防一家刷屏，不做质量判断**）→ 抓 3,500 字探测正文 → 本地硬闸门（正文太短 / 标题跑题 / 广告词 / 超期）→ **AI 判读**（≤18 条一批：相关度 0~5、有没有实质内容、是不是营销水文、主题、一句话摘要、要不要抓全文）→ 达标入库 → **达标且被截断的回抓全文**（单条 `collect_full_max` 60k 字、整次预算 160 万字）。
-    - ⚠️ 别再退回"按 kind 的先到先得配额 + 面经必须是真人分享"那套：那是求职模板时代的启发式，实测那个目标 218 条网络资料里 56% 是空壳（知乎/招聘站抓不到正文）、最多的一类 CSDN 71 条水文，抽样还有"软考三件套""网络工程师学习路线"这种完全跑题的内容。
-    - 判读结果落库（`sources.quality_score / ai_summary / topic / review / content_full`）：资源库列表显示"AI n/5 · 主题 · 一句话摘要"，对话的【资料库清单】也带上（模型据此决定要不要展开读）。`quality`（人工★）与 `quality_score`（AI 分）是两件事，别混。
-    - 设置：`collect_review`（开关）/`collect_min_score`（严格 4 / 标准 3 / 宽松 2）/`collect_candidates`/`collect_per_site`/`collect_full`/`collect_full_max` —— 在「搜集设置」弹窗里改（存本机、下次沿用）。**这几个键必须同时在 `/api/settings` 的 GET 回显与 POST 白名单里**，否则前端发了也会被静默丢掉。
-    - 判读失败不影响主流程：按"未审"处理（宁缺勿滥，不收）；用户点停止要能中止（`signal` 一路透传）。
-    - 回归方法（不花钱）：`node scripts/test-collect-screen.js`（17 项，纯文本）；端到端用 `SX_SEARCH_BAIDU=<假结果页>` 把搜索引擎指到本地假世界（`fake-world.mjs`：结果页 + 文章页 + 判读接口），断言"跑题的软考 / 广告 / 没正文 / AI 判低分"都被挡下、高质量长文补抓到全文、stats 漏斗如实记数。
+22. **`test:parity` 的像素比较必须对等取图 + 带 `-fuzz`**（`scripts/test-ui-parity.js`）：
+    - **两种模式都要整页导航**。曾把"默认"那侧写成 `location.hash = …`（不重载）：上一轮停在 `?ui=legacy`，这侧其实还是原版渲染，外加残留的 AI 抽屉/引导蒙层 —— 会得到几万像素假差异，且**每次失败的路线都不一样**（13/20 完全不可复现）。
+    - **取图前必须显式关掉常驻 AI 抽屉**（`localStorage.sierxing-ai-open`）：抽屉跨页保持，一旦某页被拉开，后面每页都带右侧栏截图。
+    - **比较要 `-fuzz`**：`compare -metric AE` 连"差 1 个色阶"的像素也算。番茄钟浮窗用分数坐标（`y=249.828125`），不同渲染轮次落成相邻像素 → 同一路由反复跑得到 97/1052/1149/2347 等噪声数字。实测 `/guide/1` 两模式**最大单通道差仅 4/255（1.6%）**；默认 `-fuzz 2%`，真正换页仍有 40 万+ 像素（反向验证过：故意把对照 URL 指错 → 438452 判"不一致"）。
+    - ⚠️ `compare` **差异为 0 时退出码 0、stdout 是空串**（不是 `"0"`）：`parseInt("")` = NaN，别让它退回"逐字节比 MD5"（同图两次编码会被误判不一致）。
+23. **改写插件代码只能动「代码区」，绝不能碰字符串/模板字面量**（`scripts/build-page-plugin.js` 的 `rewriteCode()`）：
+    - 真实翻车：为让设置页能写全局 `AI_PROVIDERS`，给适配器加了「赋值目标改写 `name =` → `H.name =`」。它不区分字面量，于是 HTML 里的
+      `data-go="#/g/166"` 被改成 `data-H.go="#/g/166"` —— 属性名坏了，`app.addEventListener('click')` 里的 `e.target.closest('[data-go]')` 全部失配，
+      **首页目标卡片、返回按钮一类全点不动**。而 `test:parity` 21/21、`test:mount` 13/13 依然全绿（外观没变、插件也确实接管了）。
+    - 正确做法：用一个「代码区遍历器」——跳过 `'…'` / `"…"` / 注释 / 正则字面量，模板字符串只对 `${…}` 里的**表达式**递归改写，字面量部分原样保留。
+    - 另一条边界：`app.` / `state.` 这类前缀替换同样只能作用在代码区（营销文案里出现 `app.js` 不该变成 `H.app.js`）。
+    - **回归工具**：`npm run test:dom` 直接比 DOM 骨架（属性名差异会被抓出来）；`npm run test:audit` 真点控件（点不动会被标 NOOP，需人工甄别）。
+    - 判断 NOOP 是「真坏」还是「测量盲区」的方法：看它是否只改了**body 级浮层**（`.sxiPop`/`.moreMenu`/AI 抽屉）、只弹了 **toast**、或点的是**已经是激活态的页签**——
+      这几种在审计签名里要额外计入（body 元素数 / toast 文本长度 / 激活态），否则会误报。
+    - 已定案的「看起来没反应、其实不是 bug」四类（见 `scripts/test-plugin-audit.js` 首部注释）：
+      ① 勾选框类按钮（`全选当前结果`）只改 `input.checked` 属性，DOM 骨架/文本都不变；
+      ② `<details>` 折叠只改 `open` 属性（已单独计入 `details[open]` 数量）；
+      ③ 占位按钮：任务中心每行的「看原因」**永远渲染**，没有失败任务时是 `aria-hidden` 隐形占位（设计如此，不该有反应）；
+      ④ 已经处于激活态的页签 / 已经适配过的「适应屏幕」——点了本来就无事发生。
 
-23. **抓下来的正文要清洗，别让"网页牛皮癣"进库**（`server/text-clean.js`）：
-    - 原来抓网页正文是"把 HTML 标签全删掉"，于是每条资料都混着导航菜单、面包屑、`相关阅读/猜你喜欢`的链接清单、关注公众号与加群引导、版权/免责/ICP 页脚、评论区、页码——实测抓 3,500 字里常有一多半是这种垃圾，还会被切成检索片段把真内容挤下去。
-    - 两层：① **本地**（免费、确定性）`dropJunkBlocks`（按标签与 class/id 丢整块）→ `pickMain`（`<article>` / class 像正文的容器里挑最长的一块）→ `cleanLines`（逐行丢：垃圾词行、纯链接行、面包屑、连续三行以上的短菜单、重复≥3 次的行、页码行、英文页脚…）；② **可选 AI**（`buildCleanPrompt`）：只删不改，契约写死"一个字都不许改写/不许新增/代码原样保留"，并有**两道保险**——输出必须能在原文里找到（否则判为改写，拒收）且不许比原文长。
-    - 接入点：`fetchPage()` 抓完立刻清洗（搜集/补全文都走它）；`jdfile` 的电子书/PDF 提取后过一遍 `cleanLines`（去页眉页脚）；**已有的老资料**走 `POST /api/goals/:id/sources/clean`（资源库页「🧹 清洗资料」按钮）。原文在首次清洗时备份进 `sources.content_raw`，可反复对照/重跑。
-    - **弹窗只负责"看得见进度"，停止归左下角任务中心**（用户原话："用户要停掉任务完全可以到 AI 任务里面或者左下角的卡片里停掉，没必要在这个弹窗里操作；关掉弹窗不等于停止 AI 清洗任务"）。所以：弹窗里**只留「×」和「关掉，后台继续」，不放停止按钮**；关掉只是不再挡页面，服务端任务照跑（`tasks.begin` 的那条）。
-    - 进度要回答"**已经清洗了多少篇**"，不是只转圈：服务端每处理完一条就推 `{done,total,pct,title,removed,aiCalls}`，弹窗画成「已清洗 5 / 27 篇（19%）+ 正在处理《标题》+ 已去掉 X 字」；任务卡片那行也带上篇数与百分比（`cSend` 同时调 `tk.progress(pct, status)`，别只传文案，否则卡片进度条恒 0%）。
-    - AI 那遍很慢（一条十几秒）：`clean_ai_max`（默认 40）限制单次运行的 AI 处理条数，跑完如实报"还有 N 条没轮到 AI，可再跑一次"；否则一次点下去要等一小时，用户只会以为卡死了。
-    - ⚠️ 前端这块踩过：删掉 AbortController 后残留了 `signal: ac.signal`，进 try 就 ReferenceError、被 catch 吞掉后立刻关弹窗 —— 表现成"点了按钮什么都没发生"。改这块要真在浏览器里点一遍（无头 CDP：点按钮 → 看是否有弹窗/进度 → 点 × 关掉 → 确认任务还在跑）。
-    - ⚠️ 两个门槛别乱改：`cleanLines` 的"洗太狠就退回基本清洗"（防把正文洗没）；服务端的"洗成空壳就保留原样"按**原文相对比例**判（`newLen < 30` 或 `rawLen ≥ 400 且 newLen < 15%`）—— 用绝对字数会把一二百字的短资料全 skip 掉（实测踩到）。AI 只对清洗后 ≥400 字的资料跑（短文不值得花调用）。
-    - 回归方法（不花钱）：`node scripts/test-text-clean.js`（27 项：垃圾必须走、正文必须留、实体解码、反爬挑战页、AI 契约与两道保险）；端到端用假世界（文章页故意包上导航/推荐位/页脚/软广）验"采集时就干净"+"清洗接口对老数据有效"。
+24. **用户页面插件别在模块顶层取 `window.SiErXingUI`**：宿主桥是渲染时才 import 安装的，顶层取值会 undefined 崩溃（`examples/ui-plugins/home` 在 setup 里取）。ESM 入口由 `/api/ui/plugins/:id/entry` 直接加载，失败会被静默回退内置页面——「装完看起来没变化」时先看 `window.__sxPluginSource[page]`、`window.__sxPluginUsed[page]` 和控制台 warn。
+25. **`loadKernelConfig()` 必须在 `route()` 之前 await**：`pagePluginEnabled()` 是同步函数、读 `window.__sxKernelConfig`；早渲染会按内置默认走，`ui.pagePlugins=false` 的总开关就失效。配置改 `DATA_DIR/config/user.json`，重启生效；`/api/kernel` 可看每项来源（provenance）、告警与升级差异。
 
-24. **抓不到正文 ≠ 反爬，多半是"当初没重试"**（`fetchPage` 的三档重试 + 镜像 + 补抓）：
-    - 真实体感来源：库里 908 条网络资料有 483 条（53%）正文为空（知乎 95% / BOSS 直聘 100% / CSDN 70% / 51CTO 94%），它们照样各占一个检索切片。而随机抽 24 条重抓，**14 条（58%）当场就抓回来了**，全是 CSDN / 51CTO / 公众号 —— 大头不是反爬，是当初批量采集时的限流/超时**没有重试**。
-    - `fetchPage` 现在按「直连 → 补全浏览器头（Referer/Accept/Upgrade-Insecure-Requests）→ 手机 UA」三档换招，每档之间退避 0.6~1.8s；`opts.attempts` 控制试几档（采集默认 2、补抓/补全文 3），`opts.retry=false` 关掉。**404 只跳过同一个地址剩下的档**（`skipUrl`），别把后面的镜像一起掐掉。
-    - GitHub 在这台机器**完全不可达**（raw.githubusercontent.com 会挂到超时），所以补一条 jsdelivr 镜像（`mirrorUrls()`：`github.com/u/r/blob/ref/path` → `cdn.jsdelivr.net/gh/u/r@ref/path`；仓库首页退而求其次试 `@main/README.md`、`@master/README.md`）。**只做"多给一条路"，绝不改写原地址** —— 换台能上 GitHub 的机器时原路照样优先。r.jina.ai 这类云阅读器在本机**不可达**，别往那上面设计。
-    - 抓失败要**如实归因**（`fetchOnce` 的 `why`：HTTP 403 / 正文只剩 N 字 / 页面太大 / 反爬挑战页 / 超时）。补抓的进度里"抓回"和"删掉"必须分开记。
-    - **反爬挑战页要当"没抓到"**：51CTO 给非浏览器请求回 988 字节的纯 `<script>` 混淆代码，而 `htmlToText` 原来只删标签、**不删 script 内容** —— 那段混淆 JS 就成了"正文"进库（实测）。现在 `htmlToText` 开头整块丢 `script/style/noscript/svg/iframe/template/canvas`（顺序要在实体解码**之前**，否则 `&lt;script&gt;` 这种文字会被误删），并用 `looksLikeChallenge()`（`_0x` 混淆标识符 ≥3 次）兜底判"这是挑战页"。
-    - **实体解码必须支持十六进制**，且顺序是「数字实体 → 命名实体 → `&amp;` 放最后」：CSDN 把全角标点写成 `&#xff0c;`（=「，」），只认十进制会让整篇正文变成乱码（库里曾有 69 条被污染，`&#xff0c;` 一路混进检索切片和提示词）。`&amp;` 放最后是因为 `&amp;lt;` 里作者本意是**显示文字** `&lt;`（讲 HTML 转义的教程到处都是），先解会连解两层把讲解内容改坏。存量被污染的资料点一次「🧹 清洗资料」（**取消 AI** 那档，纯本地、免费）就能修好。
-    - **同一家站连着抓不到就不再试**（采集时的 `hostFails`，阈值 `DEAD_AFTER=4` 条）：知乎/BOSS 这类要登录态的站，候选择里可能有十来条，抓一条废一条、每条还要走三档重试。只做**本轮内**的学习，不落库、不影响下次 —— 哪天站点放开或换了抓法，下一轮自然重试，不需要用户去某个设置里解封。只有 `hardGate` 的 `no-body` 才算连坐，跑题/广告是**这条**的问题。
-    - 补抓接口 `POST /api/sources/refetch`（**全部目标**，资源库页「🔄 补抓正文」）：门槛与硬闸门一致（正文 <260 字算空壳）→ 逐条重抓（4 并发、`bytes` 上限放到 6MB，因为公众号/B站页面本身就有 1~3MB）→ 抓到的写回正文并补 `published_at`，**抓不到的直接删**（用户原话"抓不到就删"：留个空壳更糟，它占检索位、还会让 AI 以为"这条我读过"）。删除要照抄既有语义：`DELETE FROM sources` + `code_repo_files` + `rag.dropSource()`，并 `rag.autoIndex()` + `backup()`。
-    - 全量实测（489 条空壳）：**抓回 206 条（+268 万字），删掉 283 条，用时 4.5 分钟**。删掉的分布就是硬墙清单：知乎 136（HTTP 403）、BOSS 直聘 46（跳 security 页）、51CTO 17、php.cn 13（登录墙）、GitHub 12（仓库已删/404）。
-    - ⚠️ 建测试沙箱时**必须 `NO_OPEN=1`**：`server.listen` 回调里会 `xdg-open` 打开浏览器（`NO_OPEN` 是唯一的开关），否则会在用户桌面上弹出窗口，窗口里的操作会写进沙箱库、把"实验数据"和"真实数据"混在一起。另外沙箱里要**先把 `sync_enabled`/`sync_auto_push` 置 0**，否则沙箱会连上用户的真实同步仓库。
-    - 回归方法（不花钱）：`node scripts/test-text-clean.js`；端到端在**隔离沙箱**上跑 `POST /api/sources/refetch`，断言"空壳清零、删掉的都是硬墙站、抓回的正文没有混淆脚本、状态真落库"。
-    - ⚠️ 无头浏览器做前端回归时：新版 Chrome/Edge 必须加 `--remote-allow-origins=*` 才能收 CDP 命令（否则连上了也不回）；**直连一个已经存在的老标签页的 WS 常常压根不回命令**，要用 `PUT /json/new?<url>` 开一个干净标签页；`Runtime.evaluate` 里做 `location.href=...` 会让这次调用的响应永远丢失（导航销毁执行上下文），要导航就在启动参数里给 URL；也不需要 `Page.enable` / `Runtime.enable`，`Runtime.evaluate` 直接可用；`--headless=new` 下原生 `confirm()` 会被自动关掉（返回 false），测按钮要先把 `window.confirm` 换成 `()=>true` 并把参数记下来，否则测试是假通过。
-
-25. **所有 AI 任务的进度都必须走同一套模型**（`server/task-progress.js` + `server/tasks.js` + `taskProgressHTML`）：
-    - 改前的现状（真实踩到的三种不一致）：① `1 - Math.exp(-秒/18)` 这套时间曲线被**抄了 5 份**（interview / quests / restate / jdfile / explain），常数还各不相同（封 93% / 95%）；② 有的任务**压根不推百分比**（收集资料、识别图片只推文案），卡片上只有一条不动的走马灯；③ 有的推了计数却忘了推百分比，用户最想知道的"已处理 3/9"根本不显示。
-    - **进度只有四种来源，优先级从高到低**：`set(pct)` 任务自己算的真实值 → `count(done,total)` 可数的活儿 → `phase(i)` 阶段推进 → `time`（都没有时按时间平滑）。每个快照都带 `source`，前端据此把 `time` 标成"**估算**"——**绝不把估算冒充真实数字**。
-    - **四条防假进度的铁律**（`scripts/test-task-progress.js` 全部钉住）：① 百分比**单调不减**，任何情况下不倒退；② 时间曲线只在**一个阶段内部**爬，到边界就停住等真实推进；③ 最后一个阶段封在 93%，**100% 只由 `finalize(done)` 给出**；④ 阶段内取「真实下界」与「时间曲线」的**较大者**（很多阶段是"每 8 条才报一次"，只认地板的话条会长时间一动不动，跟卡死一样）。
-    - ⚠️ **没给 `expectedMs` 时必须用 `null` 而不是算成 1000**：`Math.max(1000, Number(o.expectedMs) || 0) || null` 这种写法在"没给"时得到的是 **1000ms**（不是 null），于是尺度变成 1 秒、条 3 秒冲到 90%（真实任务上抓到，已加回归）。正确写法：`Number(o.expectedMs) > 0 ? Math.max(1000, ...) : null`。
-    - **两条路必须共用同一批方法**：`submit` 的 `run({signal,note,...handle})` 和 `begin()` 的返回值都 spread 同一个 `handle(t)`。以前这两处各写一遍 extra 解析，漏一处就是"某类任务的进度条永远停在 0%"。
-    - 任务侧只声明、不自己算：`tasks.begin({..., phases:['搜索候选','抓取正文','AI 把关','整理入库'], total, expectedMs})` + `job.phase(0,'…')/job.count(3,9,'…')/job.note('模型正在写…')`。SSE 型任务（collect / 清洗 / 补抓 / 识别图片）用 `onProgress({status, prog:{phase, frac}})`，`tkSend` 统一转发。
-    - **零改动也有进度**：`begin`/`submit` 都会建引擎，一句进度都不报的任务也会拿到一条按时间走的条（前端标"估算"）。所以"有的能显示有的不能"从机制上不可能再出现。
-    - `expectedMs` 的默认尺度是 **45 秒/阶段**（`PHASE_MS`）；知道量级的任务（教程生成等）自己传。别把默认值调小，否则条会冲得太快。
-    - 前端**只有一个渲染器** `taskProgressHTML(t)`（左下角任务栏 + `#/aitasks` 页共用）：百分比/条/阶段点/实时思考/用时。`queued` 也要给同一块占位（"排队中 · 等前面腾出并发位"），否则卡片高度和跑着的那些对不上。
-    - ⚠️ **`taskElapsedTick()` 必须在 `taskBarRender()` 里启动**：任务栏有好几条渲染路径（轮询、点开收起、子任务折叠、取消后重绘），只在 `taskPoll` 里启动的话别的路径画出来的卡片**没有计时**（实测那一行是空的）。
-    - ⚠️ 任务卡上说人话的映射表是 `TASK_META`：**加了新任务类型要在这里补一条**（`interview`/`jdfile`/`quests`/`bench` 原来没登记，卡片上显示成"🤖 任务 · interview"这种黑话）。
-    - 回归方法（不花钱）：`node scripts/test-task-progress.js`（21 项，纯计算、秒级）；端到端用无头浏览器**注入受控任务**验渲染——⚠️ 必须把"改 `state.tasks` → `taskBarRender()` → 读 `#taskBar` 的 innerText"放在**同一次 `Runtime.evaluate`** 里：应用每 1.5 秒 `taskPoll` 一次会把 `state.tasks` 覆盖回服务端的真实列表，中间隔一次 sleep 就什么都看不到（第一次就这么假失败过）。真任务用 `POST /api/goals/:id/rag/build`（两阶段、本地、不花 AI 调用）验"服务端真的按阶段推进"最省事。
-
-26. **Markdown 正文要放行"一小撮内联 HTML"，渲染能力必须和提示词对齐**（`public/app.js` 的 `mdTags/mdSafeStyle/mdInline` + `mdToHTML` 的 `<details>` 分支 + `server/server.js` 的 `richMdSpecLines()`）：
-    - 事故原貌（2026-10-15）：用户要"样式更丰富、标红重点"，`tutorial_edit` 照做，写出了 `<span style="color:#dc2626;font-weight:700">…</span>`；而 `mdToHTML` 把所有 `<` 都转义了 —— 教程正文里到处躺着裸标签（用户原话："我想让教程的样式更丰富，结果把 span 都显示出来了"）。**模型写出来的东西，渲染端要么支持、要么不许它写**，不能两边都不知道对方存在。
-    - **白名单**：`span/b/strong/i/em/u/s/del/ins/mark/code/kbd/samp/var/small/big/sub/sup/br/wbr/abbr/cite/q/time/dfn/nobr`。**不在名单里的一律继续按纯文本显示** —— 正文里的 `<PHONE>` 占位符、`<doc id>`、`<stdin>`、`<Object>` 都长着标签的样子，顺手渲染就变成"凭空少了一截字"。
-    - **span 只认 style，且只留排版属性**：值里出现 `url(` / `expression` / `javascript:` / `@import` / `!important` / `var(` / 引号尖括号一律丢。这是唯一的安全边界 —— AI 输出不可信，**别为了"让它更花哨"把 class / href / on* 放进来**。
-    - **颜色映射到主题变量**：`#dc2626`→`var(--danger)`、`#c9701f`→`var(--warn)`、`#16a34a`→`var(--ok)`（只映射 `color`）。写死的红在暗色背景上发闷，而 `--danger` 亮/暗分别是 `#e02424` / `#f87171`。
-    - **`<details><summary>` 走块级分支**（`mdToHTML` 里，不是 `mdInline`）：`<details>`/`</details>` 各占一行、必须找到配对才渲染，找不到就照旧当段落 —— **绝不能把后面整篇吞进一个没关上的块里**；嵌套用深度计数。`<details>`/`</details>` 同时进了 `isBlock()`，因为模型常紧贴上一段/列表写（中间不空行），不隔开就会被并进上一段、折叠块散架。
-    - **行内代码先摘成占位符再做其它规则**（`mdInline` 里 `\u0000C<n>\u0000`）：否则 `` `<span>` `` 这种"讲 HTML 的教程"会被标签还原吃掉，变成正文里凭空少一段。
-    - **与周边功能的契约**：`mdInline` 只加元素、不改字符 → tutnotes 的绝对偏移、`mdPickTarget` 的 `data-src`（`closest` 往上找）都照旧；`viz`/代码块的渲染路径完全不动。改这块要顺带跑一遍：划线笔记还在、双击能进就地编辑、目录/代码块编号正常。
-    - **提示词侧**：`richMdSpecLines()` 三处共用（`buildTutorialPrompt` / `buildTutorialEditPrompt` / `buildSegmentPrompt`），写明"只这几样、每节最多 3 处标红、其余 HTML 一律不要写、讲 `<stdin>` 这类要用反引号包起来"。
-    - 回归方法（不花钱）：起一个 `NO_OPEN=1` 的沙箱实例（数据目录拷一份真库的 `VACUUM INTO` 快照，`sync_enabled/sync_auto_push` 先置 0），无头 Edge + CDP 里直接调 `mdToHTML(...)` 断言输出，再打开真教程（`#/t/142` 有标红 span、`#/t/102` 有 details 与表格里的 `<br>`）读 DOM：正文里**不许再出现** `&lt;span`、`<details` 字样，`getComputedStyle(span).color` 是主题红。
-
-27. **从应用里拉起 GUI 程序（VSCode / 浏览器）必须先补显示环境**（`server/gui-env.js` 的 `guiEnv()`）：
-    - 事故原貌（2026-10-16）：教程页点「💻 写代码」→ 下方提示「已在 VSCode 打开」，**窗口永远不出现**。数据、目录、检测全正常，只有窗口没了。
-    - 根因：应用是**开机自启**的，Linux 上就是 `service.js` 写的那个 systemd 用户服务 —— 它**不在桌面会话里**。`DISPLAY`/`XAUTHORITY` 是**登录之后**才被导入 systemd 用户管理器的（`systemctl --user show-environment`），而开机那一刻起来的实例环境里没有它们（`/proc/<pid>/environ` 里 grep 不到）。于是 spawn 出去的 Electron 只来得及打印 `Missing X server or $DISPLAY` + `The platform failed to initialize.  Exiting.`（exit 133）就自杀。**同一个服务，中途 `systemctl --user restart` 一次就好了**——这就是"以前能用、现在不行"的原因，别去前端找 bug。
-    - ⚠️ **假成功是更坏的那一半**：VSCode 的 `code` 命令是「fork 出主进程、自己立刻 `exit 0`」，spawn 又是 `stdio:'ignore'`，所以后端拿到 0 就回 200 → 前端弹「已在 VSCode 打开」。**凡是"拉起外部程序"的接口，都不能把 spawn 返回当成"已打开"**：探测不到显示环境要如实回 `warn`，前端 `toast(r.warn || '已在…打开')`。别退回只报成功。
-    - 修法：所有拉起 GUI 的地方都带上 `env: guiEnv()`（VSCode 见 `server/plugins/workspace.js`；启动自动开浏览器见 `server/server.js` 的 `listen` 回调；设置页「打开页面」见 `server/service.js` 的 `openBrowser()`）。`guiEnv()` **只补不覆盖**：已有 `DISPLAY`/`WAYLAND_DISPLAY` 原样返回（Windows/macOS 也原样返回）；缺了才扫 `/tmp/.X11-unix/X<N>`（优先本用户会话、其次最新的那个）、`$XDG_RUNTIME_DIR/wayland-*`，`XAUTHORITY` 在几个候选里挑 **mtime 最新**的（gdm 那份是登录时刚写的，家目录 `~/.Xauthority` 常躺着上个月的旧文件；挑不到就别写空值 —— 空 `XAUTHORITY` 会让 Xlib 直接认证失败）。
-    - ⚠️ 别改成「往 systemd unit 里写死 `Environment=DISPLAY=:1`」：那是把某台机器的显示号钉进配置，换机、多屏、Wayland 全会翻车。
-    - 回归方法（不花钱、不动用户桌面）：`env -u DISPLAY -u XAUTHORITY node -e "…guiEnv()…"` 断言补出可用的 `DISPLAY` + 存在的 `XAUTHORITY`，再 spawn 一个**只读的 X 客户端**（`xset q` / `xdpyinfo`）看退出码 —— 用它当判据，**别拿"窗口有没有出现"当唯一判据**（会打断用户正在做的事）。真要端到端验一次：删掉父进程的 `DISPLAY`/`XAUTHORITY` 后再走一遍插件的 `spawn`，然后用 `pgrep -af "/usr/share/code/code"` 确认主进程活着（顺带会真的打开一个窗口，验完记得跟用户打声招呼）。
+26. **目标页清单里「任意有子节点的任务」都必须能折叠**（`public/app.js` 的 `listTaskHTML`）：
+    - 原实现只给阶段（`tl-s`）/小目标（`tl-g`）加 `data-fold`，第三层任务即使被「✨ 深度拆分」拆出子任务也**永远摊开**、没有折叠按钮；一个目标里这种节点一多，整页直接撑爆。
+    - 现在 `listTaskHTML` 对 `t.children.length > 0` 渲染 `data-fold="tl-t<id>"` + `data-foldbody`，**任务层默认收起**（`foldClosed(gid, key, false)`），状态与其它折叠一起存 `sierxing-goal-folds-<gid>`（本机显示偏好）。
+    - 深度拆分完成时（`startExpand` 的 `d.done`）要删掉该节点的 `tl-t<id>` 折叠记录，否则刚拆出来的子任务默认收起、用户以为没成功。
+    - ⚠️ 这是页面插件生成物：改完必须 `node scripts/build-page-plugin.js goal` 重建 `ui/plugins/builtin/goal/index.js`（对话页也复用 goal 插件）。
+    - 回归：`node scripts/test-plugin-func.js` 新增「执行页 有子节点的任务可折叠」（默认收起 → 点开 → 再收起）。
 
 ---
 
-## 8. 打包 exe 与在线更新（`scripts/build-exe.js`）
+## 8. 国际化（界面语言 i18n）—— 架构规则，改任何界面文字前必读
 
-给「不想装 Node 的人」用的单文件 Windows 程序。**运行时依然零第三方依赖**。
+> 一句话：**界面上的每一个字都必须来自 `language/`；新代码用 `tr('中文原文')`，不许再写死文案。**
+> 完整规则与操作手册在 [`language/README.md`](language/README.md)；这里只写 AI 助手最容易搞错的事。
 
-```bash
-node scripts/build-exe.js --skip-exe --notes="修了 XX"   # 只出发布件（更新用，最快）
-node scripts/build-exe.js                                # 再加上 dist/SiErXing.exe（约 89MB）
+### 8.1 目录与数据流
+
+```
+language/
+├── index.js        服务端语言引擎（语言列表/当前语言/语言包/校验/生成包落盘/入口页注入）
+├── extract.js      文案提取器（纯函数；build 脚本和守卫共用）
+├── source-files.js 哪些文件算"有界面文案"（build 与守卫共用同一份清单，别各写一份）
+├── generate.js     AI 生成新语言（识别语言 → 分批翻译 → 校验 → 落 DATA_DIR）
+├── locales/zh-CN/  ★ 源语言：meta.json + ui.json（key=中文原文，value=原文）
+├── locales/en-US/  ★ 英文：meta.json + ui.json（key=中文原文 → 英文）
+├── prompts/        ★ 提示词模板（zh-CN/packs.json）+ 规则 README
+└── legacy-baseline.json  中文硬编码预算（棘轮：只许降不许升）
 ```
 
-产物三样：
+- 当前语言存 `settings.app_language`（`''` = 跟随浏览器：中文浏览器用中文，否则英文）。
+  已加入 `server/sync.js` 的 `SYNC_SETTINGS`（换设备语言一致）。
+- AI 生成的语言包落 `DATA_DIR/language/<code>.json`（**不进仓库**，升级不覆盖）。
+- 入口页注入链路在 `server/server.js` 的 `serveStatic` → `injectLanguageHtml()`：
+  重写 `<html lang>` / `<title>` / meta description，并在 app.js **之前**注入
+  `window.__SX_I18N__` + `/api/language/pack.js` + `/i18n.js`。
+- 前端运行时 `public/i18n.js` 定义 `window.tr` / `window.SXI18N`；`ASSET_V` 的文件清单里
+  必须包含 `i18n.js`（漏了会吃旧缓存）。
 
-| 产物 | 提交？ | 说明 |
-| --- | --- | --- |
-| `release/latest.json` | ✅ 提交 | 清单：版本号、下载地址、sha256、更新说明 |
-| `release/payload-<版本>.sxar` | ✅ 提交 | 程序文件载荷，约 450KB |
-| `dist/SiErXing.exe` | ❌ 只上传附件 | 89MB，其中 88.7MB 是 node 运行时，**永不变** |
+### 8.2 写新代码（强制）
 
-**在线更新为什么成立**：exe 里 99.5% 是不变的 node 运行时，会变的只有那 450KB 的程序文件。
-所以发新版 = 换一个 payload + 改一行 `latest.json`，用户下次启动只下 450KB，**不用重下 89MB**。
-
-### 三种安装形态，`server/update.js` 按 `mode` 分发
-
-| mode | 判定依据 | 更新方式 |
-| --- | --- | --- |
-| `git` | 存在 `.git` | `git pull --ff-only`（原有逻辑） |
-| `payload` | 存在 `.sx-current` | 下载 payload → 校验 sha256 → 解包 |
-| `none` | 两者都没有（zip 解压） | `supported:false` |
-
-`SX_UPDATE=off` 完全关掉；`SX_UPDATE_URL` 可把清单指到自己的地址（离线/内网用）。
-
-### ⚠️ 这里有四个必须记住的坑
-
-1. **解出来的目录里没有 `.git`，而 node.exe 也不带 git** —— 所以打包版的更新**完全不能走 git 那条路**，`update.js` 必须有 payload 后端，否则 exe 用户永远更新不了。
-
-2. **SEA 里不能 `require(绝对路径)`** —— SEA 主脚本的 `require` 是 `embedderRequire`，会把路径当成内置模块名，报 `ERR_UNKNOWN_BUILTIN_MODULE`。必须 `require('node:module').createRequire(...)`。
-
-3. **载荷的版本标记必须按版本号比较，不能按「不相等就解」** —— 在线更新后本地会比 exe 内嵌的还新（exe 本身没换）。若按"不相等"判断，启动时会把**旧的内嵌载荷又铺回去，把刚更新的代码覆盖掉**。
-
-4. **`VER` 必须按文件内容算哈希** —— 早先只 hash 了 `package.json`，改 `public/app.js` 而不动 `package.json` 时哈希不变 → 更新被当成"已是最新"静默跳过。
-
-### 用户数据在任何路径下都不会被覆盖
-
-- `DATA_DIR = APP_DIR/data`，而 `data/` **不在打包清单里**（`collect()` 里显式跳过）
-- `applyPayload()` 解包时逐条 `if (f.p.startsWith('data/')) continue`
-- payload 的 zip-slip 风险已挡：路径只来自自家生成的头部，且都在 `appDir` 下
-
-**测打包版务必用别的端口**（`PORT=3214`）。用默认 3213 会把用户正在用的服务顶掉，
-表现为「数据全都不见了」——其实数据好好地在，只是浏览器连到了空库的新实例。
-
----
-
-## 9. 零依赖纪律
-
-**不要引入任何 npm 依赖。** 这是产品的核心卖点（`git clone` 完直接 `node server/server.js` 就能跑）。
-
-需要什么就自己实现：Markdown 渲染（`app.js` 的 `mdToHTML`）、电子书解析（`server/plugins/lib/ebook-parse.js`，支持 txt GBK / pdf 含 ObjStm+ToUnicode / epub spine / mobi PalmDoc）、测试用的 DOM 桩（直接用无头浏览器）。
-
----
-
-## 10. 前端资源访问约定
-
-**只有两个前端文件**：`app.js`（核心）与 `sdk.js`（组件 SDK）。没有打包器、没有模块系统。
-
-- 组件脚本通过动态 `<script>` 加载，**必须用 `assetUrl()` 追加版本戳**。
-- 全局事件用 `document.addEventListener` 委托；`.moreMenu` 的关闭、`[data-cmd]` 命令分发都是这种模式。
-- Markdown / 代码块渲染走 `mdToHTML`；AI 返回的代码**必须用围栏包裹**（提示词里有这条铁律）。
-
----
-
-## 11. 修改后的自检清单
-
-```bash
-node --check public/app.js && node --check server/server.js     # 语法
-# 重启（务必确认端口释放）→ curl /api/health → curl /api/plugins
-# 无头浏览器逐路由启动，确认无「页面出错」
-# 组件改动：目标内开/关，确认其它目标不受影响
+```js
+tr('保存')                    // 按钮/标题/提示
+tr('已删除 {0} 份', n)        // 带变量一律用 {0} {1} 占位符，别自己拼字符串
+tr('共 {0} 个节点 · {1}')     // 占位符数量/数字必须与译文一致
 ```
 
-- 用了无头浏览器 → **收尾必须确认它真的退出了**（`bash scripts/kill-test-browsers.sh --dry` 看一遍）；测试实例一律 `NO_OPEN=1`，别在用户桌面上弹窗。见 §2 的两条铁律。
-- 改了组件的开关粒度 → **必须**同时改前端显示、后端 403 门控、组件入口三处。
-- 加了新表 → 加进 `server/sync.js` 的 `SYNC_TABLES`。
-- 动了 `public/` 或 `public/plugins/` → 版本戳会变，用户普通刷新即可拿到新文件。
+- 组件（`public/plugins/*.js`、页面插件、Vue 页面）里直接调全局 `tr(...)` 即可。
+- **不要**把 `tr()` 用在逻辑判断 / DB 值 / API 合同 / 解析标记上（那些不是文案）。
+- 新增/修改任何用户可见文字后**必须**跑：`npm run build:lang && npm run check:i18n`。
+- 给新语言包补英文：`language/locales/en-US/ui.json`；占位符必须一一对应。
 
----
+### 8.3 旧界面为什么现在就能切换？（运行时兜底层）
 
-## 12. 许可
+`public/app.js` / `public/plugins/*.js` 里还有大量历史文案没逐条改成 `tr()`。
+`public/i18n.js` 会在渲染后（MutationObserver）按字典替换**文本节点**与
+`title / placeholder / aria-label / aria-placeholder / alt` 属性，并包了
+`confirm/alert/prompt`；带变量的文本用 `{0}` 模式匹配；服务端提示里的动态部分用
+「前缀匹配」兜底（`保存失败：xxx` 只翻前缀）。
 
-MIT。**不要修改 `LICENSE`**。分发时必须保留 `sierxing` 的署名。
+- 兜底层覆盖的区域**不许**当作长期方案；动到哪块旧代码，优先顺手把文字包成 `tr()`。
+- **「文案 + 变量」必须用 `tr('…{0}…', v)` 一整个模板**，不要 `'文案' + v + '文案'` 硬拼：
+  英文语序/量词/标点都不一样，拼接出来的是散装英文（真实改过：宝箱状态行、主题下拉、
+  AI 抽屉页面标签、组件文件清单）。运行时兜底层虽然能按占位符/标点/前后缀拆着兜，但那是
+  兜底，不是写法。
+- **不翻译的区域**（AI 正文 / 教程正文 / 题面 / 代码等）用 `data-i18n-skip` 或
+  `class="no-i18n"` 标出来；新增"内容区"记得标，否则用户数据 / AI 输出可能被误翻。
+- `language/legacy-baseline.json` 记每个文件还剩多少「会显示但没被 tr() 包住」的字面量；
+  `check:i18n` 发现哪个文件超过基线就失败。**下降后用 `--update` 收紧**（别手改）。
+
+### 8.4 提示词（prompt）
+
+- 可编辑提示词包的**正文模板**统一在 `language/prompts/zh-CN/packs.json`
+  （由 `language/prompts/index.js` 读取；`server/prompts/*-packs.js` 只留注册信息与 builtinRender）。
+- 改提示词 → 改 `language/prompts/zh-CN/packs.json`（或走 `prompt.update` 覆盖），
+  再跑 `node --no-warnings scripts/test-prompt-packs.js`（模板与 builtin 行为必须一致）。
+- 新增提示词不许再塞回 `server.js`：模板进 `language/prompts/`，动态逻辑放
+  `server/prompts/*` 或 `server/features/<id>/prompts.js`。
+- AI 生成的内容（问卷/规划/教程/对话）**当前不做语言切换**（2026-10-19 用户定调：
+  只翻界面）。以后要做的话，在 `server/ai.js` 的 `ai.text()` 唯一出口注入"输出语言"
+  指令，语言名从语言包 meta 取。
+
+### 8.5 设置页「语言」
+
+- 位置：设置 → 🌐 语言 Language（`SET_TABS` 里 `set-lang`；UI 在 `public/app.js` 的
+  `languageSectionHTML / bindLanguageSection / languageBodyHTML`）。
+- **这是页面插件生成物**：改完必须 `node scripts/build-page-plugin.js settings` 重建
+  `ui/plugins/builtin/settings/index.js`。
+- 功能：**已安装语言卡片列表（点一下手动切换中文/英文/任意已生成语言）+ 跟随浏览器开关**；
+  **新语言从 `language/languages.json` 清单里选（chip 点一下即生成，不用打字）**，
+  清单里没有再手填；生成有进度条 + 任务中心；生成完自动切换；生成的语言可删除。
+- 生成是后台任务（`tasks.submit({type:'language'})`），服务端 `POST /api/language/generate`；
+  别改成同步长请求（5000+ 条要几分钟）。
+
+### 8.6 守卫 / 回归
+
+```bash
+npm run test:i18n                     # 语言引擎 + 提取器 + AI 生成流程（假 AI，不花钱）
+npm run check:i18n                    # 目录同步 / 语言包完整 / 占位符 / 英文残留中文 / 硬编码预算
+node scripts/build-language-source.js --stats   # 看各文件候选词条数
+node scripts/lang-batch.js status               # 英文本地化进度（开发辅助）
+```
+
+改了 UI 之后至少还要跑：`node --check public/app.js && node --check server/server.js`，
+并用无头浏览器实际切到英文看一遍（`npm run check:i18n` 查不出 DOM 层翻译失败）。
+
+### 8.7 踩坑提示（会再犯的）
+
+1. **`tr` 是全局函数**（`window.tr`），页面插件生成器不会改写它；但**不要**在 app.js
+   顶层声明同名变量 `tr`/`SXI18N`，会在打包进插件时遮蔽全局。
+2. **占位符不同步**：`{0}` 在译文里丢了/多了，语言包校验会失败；同一条文案的中英文
+   占位符必须完全相同。提取器会给带 `${...}` 的模板自动生成 `{0}` 模式，别手改 key。
+3. **别在 `language/locales/zh-CN/ui.json` 里手写新 key**：它由 `npm run build:lang` 生成，
+   手写的会被下次 build 覆盖；要加文案就去代码里写 `tr('…')` 再 build。
+4. **英文包不允许残留中文**（校验会红）；产品名是 `SiErXing`。日文等 CJK 语言在
+   `meta.json` 里写 `"cjk": true` 可豁免这条（AI 生成时会自动判断并写入）。
+5. **`html lang` / `<title>` 是服务端注入的**：改 `language/locales/*/meta.json` 的
+   `documentTitle/documentDescription` 即可，不要改 `public/index.html` 里的静态标题。
+6. **AI 生成语言会花用户的 API 费用**（约 20 批调用），UI 上已提示；测试时用
+   `scripts/test-language.js` 的假 AI，别真调。
+7. **`serveStatic` 注入失败要回退**：`injectLanguageHtml()` 已经 try/catch，失败时
+   不做注入、页面仍可用；别把注入写成抛错。

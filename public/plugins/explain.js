@@ -12,6 +12,45 @@
 (function () {
   const { api, esc, toast, mdToHTML, fmtDate, state } = SiErXing;
   const API = '/api/explain/sessions';
+
+  /* ---------- Vue 版第一段（列表 + 准备页；运行界面仍由旧版接管） ---------- */
+  let explainVueUnmount = null;
+  function explainVueEnabled() {
+    try {
+      const q = new URLSearchParams(location.search).get('ui');
+      if (q === 'legacy') return false;
+      if (q === 'vue') return true;
+      const saved = localStorage.getItem('sierxing-ui-explain');
+      if (saved === 'legacy') return false;
+      if (saved === 'vue') return true;
+    } catch (e) {}
+    return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+  }
+  function ensureExplainVueCss() {
+    if (document.querySelector('link[data-ui-page="explain"]')) return;
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/explain.css'; l.setAttribute('data-ui-page', 'explain');
+    document.head.appendChild(l);
+  }
+  async function renderExplainPageVue(tid0, gid0) {
+    const root = document.getElementById('app');
+    if (!root) throw new Error('页面容器不存在');
+    if (explainVueUnmount) { try { explainVueUnmount(); } catch (e) {} explainVueUnmount = null; }
+    ensureExplainVueCss();
+    const mod = await import('/ui-dist/explain.js?v=' + Date.now());
+    if (!mod || typeof mod.mountExplainPage !== 'function') throw new Error('UI 插件没有导出 mountExplainPage');
+    explainVueUnmount = mod.mountExplainPage(root, { api: api, toast: toast, fmtDate: fmtDate, mdToHTML: mdToHTML, tutorialId: Number(tid0) || 0, goalId: Number(gid0) || 0 });
+    return true;
+  }
+  function takeExplainHandoff() {
+    try { const v = Number(sessionStorage.getItem('sierxing-explain-open') || 0); if (v) sessionStorage.removeItem('sierxing-explain-open'); return v; } catch (e) { return 0; }
+  }
+  window.addEventListener('hashchange', function () {
+    if (explainVueUnmount && !/^#\/(t|g)\/\d+\/explain/.test(location.hash)) {
+      try { explainVueUnmount(); } catch (e) {}
+      explainVueUnmount = null;
+    }
+  });
   /* 语法高亮复用宿主那套（hlCode 返回带 <span class="tk-xx"> 的 HTML；配色跟主题走）。
      拿不到就退回纯转义 —— 老版本 app.js 也不至于白屏。 */
   const hl = (code, lang) => {
@@ -61,6 +100,7 @@
   let view = 'list';                   // list | setup | run
   let sessions = [], session = null, turns = [], tut = null;
   let selLine = 0;                     // 0 = 概览
+  let selPre = '';                     // 当前点开的前置知识 id（非空 = 右边在看这个知识点）
   let follow = true;                   // 停在队尾时跟着新讲完的段落走
   let busy = false, busyMsg = '', busyT0 = 0, busyTimer = null;
   let askDraft = '';
@@ -103,10 +143,12 @@
     tid = Number(tutorialId || 0); gid = 0;
     /* 教程里点了「添加到看懂代码」：直接打开那条（AI 已经在讲了，不用再点一次开始） */
     if (pendingOpenSid) { const sid = pendingOpenSid; pendingOpenSid = 0; return openSession(sid); }
+    const hoT = takeExplainHandoff(); if (hoT) return openSession(hoT);
     app.innerHTML = '<p class="muted">加载…</p>';
     try {
       const r = await api('/api/tutorials/' + tid);
       if (r.goal) gid = Number(r.goal.id || 0);
+      tut = r.tutorial || null;
     } catch (e) {}
     await loadList();
     const live = sessions.find(s => s.status === 'working');
@@ -116,6 +158,7 @@
   }
   async function renderGoalExplainPage(goalId) {
     gid = Number(goalId || 0); tid = 0;
+    const hoG = takeExplainHandoff(); if (hoG) return openSession(hoG);
     app.innerHTML = '<p class="muted">加载…</p>';
     await loadList();
     const live = sessions.find(s => s.status === 'working');
@@ -123,9 +166,23 @@
     if (view === 'run') return openSession(live.id);
     draw();
   }
+  /* 讲解记录是**按教程 / 任务节点隔离**的（用户要求）：
+     从某份教程进来就只看得到这份教程的代码讲解记录 —— 切教程不会看到别的教程攒下的东西；
+     从目标页进来才看整个目标的（那时按任务节点分组显示，免得几百条摞成一坨）。 */
   async function loadList() {
-    try { const r = await api(API + '?goal_id=' + gid); sessions = r.sessions || []; } catch (e) { sessions = []; }
+    const q = tid ? ('?tutorial_id=' + tid) : ('?goal_id=' + gid);
+    try { const r = await api(API + q); sessions = r.sessions || []; } catch (e) { sessions = []; }
   }
+  function groupSessions() {
+    const map = new Map();
+    for (const s of sessions) {
+      const key = s.tutorial_id ? ('t' + s.tutorial_id) : (s.node_id ? ('n' + s.node_id) : 'x');
+      if (!map.has(key)) map.set(key, { key, title: s.tut_title || s.node_title || '（没挂任务节点的代码）', list: [] });
+      map.get(key).list.push(s);
+    }
+    return Array.from(map.values());
+  }
+  let groupOpen = {};
   function draw() {
     stopPoll();
     if (view === 'setup') return drawSetup();
@@ -241,34 +298,51 @@
     if (Number(s.explained) > 0) return { ico: '⏸', txt: '停在第 ' + (Number(s.explained) + 1) + ' 行，可继续' };
     return { ico: '📄', txt: '还没开讲' };
   }
+  function sessionItemHTML(s) {
+    const st = statusOf(s);
+    return `<div class="exItemWrap">
+        <button class="exItem" data-sid="${s.id}">
+          <span class="exItemIco">${st.ico}</span>
+          <span class="exItemBody">
+            <b>${esc(s.title || '一段代码')}</b>
+            <span class="exItemMeta">${st.txt} · ${Number(s.modules_n) ? '已讲 ' + Number(s.modules_done || 0) + '/' + Number(s.modules_n) + ' 个模块' : '已讲 ' + Number(s.explained) + '/' + Number(s.lines) + ' 行'}${Number(s.asks || s.asked) ? ' · ' + (s.asks || s.asked) + ' 条追问' : ''} · ${esc(fmtDate(s.updated_at))}</span>
+            ${s.note ? `<span class="exItemNote">${esc(String(s.note).slice(0, 70))}</span>` : ''}
+          </span>
+        </button>
+        <button class="btn tiny" data-ren="${s.id}" title="改个名字">✎ 改名</button>
+        <button class="btn tiny danger" data-del="${s.id}" title="删掉这条讲解">🗑</button>
+      </div>`;
+  }
   function drawList() {
+    const inTut = !!tid;
+    const groups = groupSessions();
+    if (groups.length === 1 && groupOpen[groups[0].key] == null) groupOpen[groups[0].key] = true;   // 只有一组就不用再点一下
     app.innerHTML = `<div class="jdPage exPage">
       ${head('🔍 看懂代码 · 讲解记录')}
       <div class="exIntro">
-        <p>每一条 = 一段代码 + 它的逐行讲解。点开哪一行就看哪一行，追问也记在那一行下面。</p>
+        ${inTut
+          ? `<p>这里只显示<b>这一份教程</b>的代码讲解记录${tut && tut.title ? '（《' + esc(String(tut.title).slice(0, 30)) + '》）' : ''} —— 点开哪一行就看哪一行，追问也记在那一行下面。</p>`
+          : `<p>这是<b>整个目标</b>的讲解记录，按任务节点分组（点标题展开）。想只看某份教程的，就从教程页里进「看懂代码」。</p>`}
       </div>
       <div class="exStart">
         <button class="btn primary" id="exNew">＋ 贴一段新代码</button>
-        <span class="exHint">共 ${sessions.length} 条</span>
+        <span class="exHint">共 ${sessions.length} 条记录${groups.length > 1 ? ' · ' + groups.length + ' 个节点' : ''}</span>
       </div>
-      ${sessions.length ? `<div class="exList">${sessions.map(s => {
-        const st = statusOf(s);
-        return `<div class="exItemWrap">
-          <button class="exItem" data-sid="${s.id}">
-            <span class="exItemIco">${st.ico}</span>
-            <span class="exItemBody">
-              <b>${esc(s.title || '一段代码')}</b>
-              <span class="exItemMeta">${st.txt} · ${Number(s.modules_n) ? '已讲 ' + Number(s.modules_done || 0) + '/' + Number(s.modules_n) + ' 个模块' : '已讲 ' + Number(s.explained) + '/' + Number(s.lines) + ' 行'}${Number(s.asked) ? ' · ' + s.asked + ' 条追问' : ''} · ${esc(fmtDate(s.updated_at))}</span>
-              ${s.note ? `<span class="exItemNote">${esc(String(s.note).slice(0, 70))}</span>` : ''}
-            </span>
-          </button>
-          <button class="btn tiny" data-ren="${s.id}" title="改个名字">✎ 改名</button>
-          <button class="btn tiny danger" data-del="${s.id}" title="删掉这条讲解">🗑</button>
-        </div>`;
-      }).join('')}</div>` : '<p class="muted">还没有记录。点上面的按钮贴一段代码，AI 会逐行讲明白。</p>'}
+      ${sessions.length ? (inTut
+        ? `<div class="exList">${sessions.map(sessionItemHTML).join('')}</div>`
+        : groups.map(g => `<div class="exGroup">
+            <button class="exGroupHead" data-g="${esc(g.key)}">${groupOpen[g.key] ? '▾' : '▸'} 📚 ${esc(String(g.title).slice(0, 46))}<span class="exGroupN">${g.list.length} 条</span></button>
+            ${groupOpen[g.key] ? `<div class="exList">${g.list.map(sessionItemHTML).join('')}</div>` : ''}
+          </div>`).join(''))
+        : '<p class="muted">还没有记录。点上面的按钮贴一段代码，AI 会逐行讲明白。</p>'}
     </div>`;
     const nb = document.getElementById('exNew');
     if (nb) nb.addEventListener('click', () => { view = 'setup'; draw(); });
+    app.querySelectorAll('[data-g]').forEach(b => b.addEventListener('click', () => {
+      const k = b.getAttribute('data-g');
+      groupOpen[k] = !groupOpen[k];
+      drawList();
+    }));
     app.querySelectorAll('[data-sid]').forEach(b => b.addEventListener('click', () => openSession(Number(b.getAttribute('data-sid')))));
     app.querySelectorAll('[data-ren]').forEach(b => b.addEventListener('click', async ev => {
       ev.stopPropagation();
@@ -386,11 +460,11 @@
             <span class="spacer"></span>
             <span class="exSideCnt">共 ${total} 行${(session.modules || []).length ? ' · ' + session.modules.length + ' 个模块' : ''}</span>
           </div>
+          <div class="exPre" id="exPre" hidden></div>
           <div class="exCode" id="exCode">${codeHTML(lines)}</div>
         </aside>
         <div class="exSplit" id="exSplit" title="按住左右拖动，调整代码栏 / 讲解栏的宽度（双击恢复默认）"></div>
         <section class="exMain">
-          <div class="exPre" id="exPre" hidden></div>
           <div class="exThreadHead" id="exThreadHead"></div>
           <div class="exMsgs" id="exMsgs"></div>
           <div class="exAsk" id="exAsk"></div>
@@ -552,78 +626,129 @@
   let preOpen = true;               // 展开状态（默认展开：他就是来看这些小课的）
   let preUnknown = null;            // 待提交的"不知道"集合（点过之后才有）
   function prereqItems() { return (session && session.prereqs) || []; }
+  function preOf(id) { return prereqItems().find(p => p.id === String(id || '')) || null; }
+  function preIco(p) { return p.state === 'known' ? '✅' : (p.lesson ? '📖' : (p.state === 'unknown' ? '⏳' : '·')); }
   function renderPre() {
     const box = document.getElementById('exPre');
     if (!box || !session) return;
     const list = prereqItems();
     const asking = session.status === 'prereq';
     if (!list.length) {
-      /* 还没有清单：正在列的时候给一句进度，列不出来就别占地方 */
       if (session.status === 'working' && !(session.modules || []).length) {
         box.hidden = false;
-        box.innerHTML = '<div class="exPreHead"><span class="spinner"></span> AI 正在看：看懂这段代码需要先知道哪些东西…</div>';
+        box.innerHTML = '<div class="exPreHead"><span class="spinner"></span> AI 正在看：这段代码需要先知道哪些东西…</div>';
         return;
       }
-      box.hidden = true;
-      box.innerHTML = '';
+      box.hidden = true; box.innerHTML = '';
       return;
     }
     box.hidden = false;
-    if (asking) {
-      if (!preUnknown) preUnknown = new Set(list.filter(p => p.state === 'unknown').map(p => p.id));
-      const unknownN = preUnknown.size;
-      box.innerHTML = `<div class="exPreCard">
-        <div class="exPreTitle">🧩 讲之前先确认一下：看懂这段代码，要先知道这几样</div>
-        <div class="exPreHint">不知道的就点「❓ 不知道」—— 我会先带你过一遍，再逐行讲代码（知道的点「✅ 知道」跳过）。</div>
-        <div class="exPreList">${list.map(p => `
-          <div class="exPreItem ${preUnknown.has(p.id) ? 'unk' : 'know'}" data-pre="${esc(p.id)}">
-            <button class="exPreSeg ${preUnknown.has(p.id) ? '' : 'on'}" data-prek="${esc(p.id)}">✅ 知道</button>
-            <button class="exPreSeg ${preUnknown.has(p.id) ? 'on' : ''}" data-preu="${esc(p.id)}">❓ 不知道</button>
-            <span class="exPreBody"><b>${esc(p.title)}</b>${p.why ? `<span class="exPreWhy">${esc(p.why)}</span>` : ''}</span>
-          </div>`).join('')}</div>
-        <div class="exPreFoot">
-          <button class="btn primary" id="exPreGo">${unknownN ? ('先补 ' + unknownN + ' 个前置知识，再讲代码') : '都知道了，开始讲代码'}</button>
-          <button class="btn" id="exPreSkip" title="都不补，直接讲代码">跳过，直接讲</button>
-          <span class="exHint">补课只讲概念本身，不占逐行讲解的进度</span>
-        </div>
-      </div>`;
-      box.querySelectorAll('[data-prek]').forEach(b => b.addEventListener('click', () => {
-        preUnknown.delete(b.getAttribute('data-prek'));
-        renderPre();
-      }));
-      box.querySelectorAll('[data-preu]').forEach(b => b.addEventListener('click', () => {
-        preUnknown.add(b.getAttribute('data-preu'));
-        renderPre();
-      }));
-      const go = box.querySelector('#exPreGo');
-      if (go) go.addEventListener('click', () => submitPrereqs(false));
-      const sk = box.querySelector('#exPreSkip');
-      if (sk) sk.addEventListener('click', () => submitPrereqs(true));
-      return;
-    }
-    /* 讲代码阶段：摘要 + 可展开读小课 */
+    const nUnk = preUnknown ? preUnknown.size : 0;
     const knownN = list.filter(p => p.state === 'known').length;
     const taughtN = list.filter(p => p.lesson).length;
     const pendingN = list.filter(p => p.state === 'unknown' && !p.lesson).length;
     const bits = [];
-    if (knownN) bits.push(knownN + ' 个你已经知道');
-    if (taughtN) bits.push(taughtN + ' 个补过课');
-    if (pendingN) bits.push(pendingN + ' 个正在补');
+    if (asking) bits.push('不知道的点一下，我先带你过一遍');
+    else {
+      if (knownN) bits.push(knownN + ' 个知道');
+      if (taughtN) bits.push(taughtN + ' 个补过课');
+      if (pendingN) bits.push(pendingN + ' 个正在补');
+    }
     box.innerHTML = `<div class="exPreBar">
-      <button class="exPreToggle" id="exPreT">${preOpen ? '▾' : '▸'} 🧩 前置知识</button>
-      <span class="exPreSum">${esc(bits.join(' · ') || (list.length + ' 个'))}</span>
-      ${pendingN ? '<span class="spinner" style="width:11px;height:11px;border-width:2px;"></span>' : ''}
-    </div>
-    ${preOpen ? `<div class="exPreList open">${list.map(p => `
-      <div class="exPreItem lesson ${p.state === 'known' ? 'know' : (p.lesson ? 'done' : 'doing')}">
-        <span class="exPreMark">${p.state === 'known' ? '✅' : (p.lesson ? '📖' : '⏳')}</span>
-        <span class="exPreBody"><b>${esc(p.title)}</b>${p.why ? `<span class="exPreWhy">${esc(p.why)}</span>` : ''}
-          ${p.state === 'known' ? '<span class="exPreWhy">（你说知道，跳过）</span>' : ''}
-          ${p.lesson ? `<div class="exPreLesson mdBody">${mdToHTML(p.lesson)}</div>` : (p.state === 'unknown' ? '<span class="exPreWhy">正在给你写这一课…</span>' : '')}
-        </span>
-      </div>`).join('')}</div>` : ''}`;
+        <button class="exPreToggle" id="exPreT" title="展开 / 收起前置知识">${preOpen ? '▾' : '▸'} 🧩 前置知识（${list.length}）</button>
+        <span class="exPreSum">${esc(bits.join(' · '))}</span>
+        ${pendingN ? '<span class="spinner" style="width:11px;height:11px;border-width:2px;"></span>' : ''}
+      </div>
+      ${preOpen ? `<div class="exPreRows">${list.map(p => `
+        <div class="exPreRow ${p.state === 'known' ? 'know' : (p.lesson ? 'done' : (p.state === 'unknown' ? 'doing' : 'todo'))} ${selPre === p.id ? 'on' : ''}" data-pre="${esc(p.id)}" title="${esc(p.why || '')}">
+          <i class="exPreIco">${preIco(p)}</i>
+          <span class="exPreName">${esc(p.title)}</span>
+          ${asking ? `<span class="exPreBtns">
+            <button class="exPreSeg ${preUnknown && preUnknown.has(p.id) ? '' : 'on'}" data-prek="${esc(p.id)}">知道</button>
+            <button class="exPreSeg ${preUnknown && preUnknown.has(p.id) ? 'on' : ''}" data-preu="${esc(p.id)}">不知道</button>
+          </span>` : ''}
+        </div>`).join('')}</div>` : ''}
+      ${asking ? `<div class="exPreFoot">
+        <button class="btn primary" id="exPreGo">${nUnk ? ('先补 ' + nUnk + ' 个，再讲代码') : '都知道了，开始讲代码'}</button>
+        <button class="btn" id="exPreSkip" title="都不补，直接讲代码">跳过，直接讲</button>
+      </div>` : ''}`;
     const t = box.querySelector('#exPreT');
     if (t) t.addEventListener('click', () => { preOpen = !preOpen; renderPre(); });
+    box.querySelectorAll('.exPreRow').forEach(row => row.addEventListener('click', e => {
+      if (e.target && e.target.closest && e.target.closest('.exPreSeg')) return;   // 点按钮不算"点开这一条"
+      selectPre(row.getAttribute('data-pre'));
+    }));
+    box.querySelectorAll('[data-prek]').forEach(b => b.addEventListener('click', () => {
+      if (preUnknown) preUnknown.delete(b.getAttribute('data-prek'));
+      renderPre();
+    }));
+    box.querySelectorAll('[data-preu]').forEach(b => b.addEventListener('click', () => {
+      if (!preUnknown) preUnknown = new Set();
+      preUnknown.add(b.getAttribute('data-preu'));
+      renderPre();
+    }));
+    const go = box.querySelector('#exPreGo');
+    if (go) go.addEventListener('click', () => submitPrereqs(false));
+    const sk = box.querySelector('#exPreSkip');
+    if (sk) sk.addEventListener('click', () => submitPrereqs(true));
+  }
+  /** 点开一个前置知识：左边高亮它引用的代码行，右边显示它的讲解与追问 */
+  function selectPre(id) {
+    selPre = String(id || '');
+    if (selPre) follow = false;
+    renderPre();
+    paintLines();
+    renderThread(true);
+    if (selPre) {
+      const box = document.getElementById('exCode');
+      const first = box && box.querySelector('.exLine.exRef');
+      if (first) box.scrollTop = Math.max(0, first.offsetTop - box.clientHeight / 3);
+    }
+  }
+  /** why 里提到的代码行号（"第 2 行 (msg) => {…}" → [2]），用来在左边把相关行标出来 */
+  function preRefLines(p) {
+    const nums = [];
+    const re = /第\s*(\d{1,4})(?:\s*[-–—~至]\s*(\d{1,4}))?\s*行/g;
+    let m;
+    while ((m = re.exec(String((p && p.why) || ''))) && nums.length < 8) {
+      const a = Number(m[1]); const b = Number(m[2] || m[1]);
+      for (let i = a; i <= b && nums.length < 8; i++) if (!nums.includes(i)) nums.push(i);
+    }
+    return nums;
+  }
+  function renderPreThread(p, scroll) {
+    const headEl = document.getElementById('exThreadHead');
+    const msgs = document.getElementById('exMsgs');
+    if (!headEl || !msgs || !p) return;
+    headEl.innerHTML = `<div class="exThTitle">🧩 ${esc(p.title)}${p.why ? ' <span class="exPreWhy">' + esc(p.why) + '</span>' : ''}${p.state === 'known' ? ' <span class="exPendingTag">你说知道 · 跳过</span>' : ''}</div>`;
+    let h = '';
+    if (p.lesson) {
+      h += `<div class="exMsg ai"><div class="exAiHead">📖 前置知识 · ${esc(p.title)}</div><div class="exAiBody mdBody">${mdToHTML(p.lesson)}</div></div>`;
+    } else if (p.state === 'known') {
+      h += '<div class="exMsg ai"><div class="exAiBody">这一条你标了<b>知道</b>，所以没讲。<br><span class="exHint">想听的话，点下面「📖 还是讲一下这个」。</span></div></div>';
+    } else if (p.state === 'unknown') {
+      h += '<div class="exEmpty"><span class="spinner" style="width:12px;height:12px;border-width:2px;"></span> AI 正在给你写这一课…<br><span class="exHint">写完就能在这儿读，也能接着追问。</span></div>';
+    } else {
+      h += '<div class="exEmpty">还没有开始讲这个知识点。</div>';
+    }
+    for (const c of (p.chat || [])) {
+      h += (c.role === 'me')
+        ? `<div class="exMsg me"><div class="exMe">${esc(c.content)}</div></div>`
+        : `<div class="exMsg ai"><div class="exAiHead">💬 回答</div><div class="exAiBody mdBody">${mdToHTML(c.content)}</div></div>`;
+    }
+    msgs.innerHTML = h;
+    renderAsk();
+    if (scroll) msgs.scrollTop = msgs.scrollHeight;
+  }
+  async function teachPre(id) {
+    const p = preOf(id);
+    if (!p) return;
+    try {
+      await api(API + '/' + session.id + '/prereq/' + encodeURIComponent(p.id) + '/teach', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      toast('好，这一课也讲一下');
+      startPoll();
+      renderThread(true);
+    } catch (e) { toast('失败：' + e.message); }
   }
   async function submitPrereqs(skip) {
     if (!session) return;
@@ -636,8 +761,11 @@
       if (r && r.session) session = r.session;
       preUnknown = null;
       preOpen = true;
+      if (!skip && unknown.length) selPre = String(unknown[0]);   // 右边直接停在"正在补的这一课"上
       toast(skip ? '好，直接开始讲代码' : (unknown.length ? ('先补 ' + unknown.length + ' 个前置知识，同时开始讲代码') : '开始逐行讲代码…'));
       renderPre();
+      paintLines();
+      renderThread(true);
       startPoll();
     } catch (e) { toast('提交失败：' + e.message); }
   }
@@ -873,6 +1001,7 @@
   function selectLine(n, byUser) {
     const total = Number(session.lines || 1);
     if (n < 0 || n > total) return;
+    selPre = '';
     /* 点了"已讲到的那一行"= 继续跟随最新；点到别处 = 他自己在看，别再打断他 */
     if (byUser) follow = (n === 0 || n >= Number(session.explained || 0));
     selLine = n;
@@ -897,13 +1026,15 @@
     }
     const ov = hasOverview();
     const selCover = selLine > 0 ? cover.get(selLine) : null;
+    const refSet = new Set(selPre ? preRefLines(preOf(selPre)) : []);
     box.querySelectorAll('.exLine').forEach(row => {
       const n = Number(row.getAttribute('data-line'));
       const isOv = n === 0;
       row.classList.toggle('exDone', isOv ? ov : cover.has(n));
       row.classList.toggle('exAsk', isOv ? false : asked.has(n));
-      row.classList.toggle('exOn', n === selLine);
-      row.classList.toggle('exRng', !!(selCover && !isOv && n >= Number(selCover.line_from) && n <= Number(selCover.line_to)));
+      row.classList.toggle('exOn', !selPre && n === selLine);
+      row.classList.toggle('exRng', !selPre && !!(selCover && !isOv && n >= Number(selCover.line_from) && n <= Number(selCover.line_to)));
+      row.classList.toggle('exRef', !isOv && refSet.has(n));
     });
   }
   function msgHTML(t) {
@@ -918,6 +1049,11 @@
     const headEl = document.getElementById('exThreadHead');
     const msgs = document.getElementById('exMsgs');
     if (!headEl || !msgs || !session) return;
+    if (selPre) {
+      const p = preOf(selPre);
+      if (p) return renderPreThread(p, scroll);
+      selPre = '';
+    }
     const lines = String(session.code || '').split('\n');
     if (selLine === 0) {
       headEl.innerHTML = '<div class="exThTitle">📄 概览 · 这段代码整体在做什么</div>';
@@ -928,8 +1064,9 @@
       const snippet = lines.slice(from - 1, to).join('\n');
       const mtitle = String((cover && cover.title) || '').trim()
         || ((session.modules || []).find(m => Number(m.from) <= from && to <= Number(m.to)) || {}).title || '';
-      headEl.innerHTML = `<div class="exThTitle">第 ${from === to ? from : from + '-' + to} 行${mtitle ? ' · ' + esc(mtitle) : ''}${cover ? '' : ' <span class="exPendingTag">还没讲到</span>'}</div>
-        <pre class="exSnippet">${hl(snippet, session.lang)}</pre>`;
+      /* 不在右边重复显示这一坨代码：左边已经高亮着"你正在看哪儿"了，
+         再贴一遍只会挤压对话栏（用户明确要求去掉了）。 */
+      headEl.innerHTML = `<div class="exThTitle">第 ${from === to ? from : from + '-' + to} 行${mtitle ? ' · ' + esc(mtitle) : ''}${cover ? '' : ' <span class="exPendingTag">还没讲到</span>'}</div>`;
     }
     const th = threadOf(selLine);
     msgs.innerHTML = th.length ? th.map(msgHTML).join('') : emptyThreadHTML();
@@ -969,9 +1106,10 @@
     ta.addEventListener('input', save);
   }
   function askSig() {
-    const canAsk = selLine === 0 ? hasOverview() : !!coverOf(selLine);
+    const canAsk = selPre ? true : (selLine === 0 ? hasOverview() : !!coverOf(selLine));
     const pre = session && session.status === 'prereq' ? 1 : 0;
-    return [Number(session && session.id) || 0, selLine, busy ? 1 : 0, canAsk ? 1 : 0, pre].join('|');
+    const pp = selPre ? (preOf(selPre) || {}).state : '';
+    return [Number(session && session.id) || 0, selLine, selPre, busy ? 1 : 0, canAsk ? 1 : 0, pre, pp].join('|');
   }
   function renderAsk(force) {
     const box = document.getElementById('exAsk');
@@ -990,14 +1128,18 @@
       box.innerHTML = '<div class="exPreWait">🧩 先确认上面的前置知识（点「✅ 知道」或「❓ 不知道」）—— 之后每一行都可以在这里追问。</div>';
       return;
     }
-    const canAsk = selLine === 0 ? hasOverview() : !!coverOf(selLine);
+    const preSel = selPre ? preOf(selPre) : null;
+    const canAsk = preSel ? true : (selLine === 0 ? hasOverview() : !!coverOf(selLine));
+    const ph = preSel ? ('针对「' + preSel.title + '」追问（例：能用生活里的例子再讲一遍吗？）')
+      : (selLine === 0 ? '针对整段代码追问…' : '针对第 ' + selLine + ' 行追问（例：这里为什么不用 const？）');
     box.innerHTML = `<div class="exQuick">
+        ${preSel && preSel.state === 'known' && !preSel.lesson ? '<button class="btn small" data-pq="teach" title="你标了知道，但也可以听一下">📖 还是讲一下这个</button>' : ''}
         <button class="btn small" data-q="redo" ${canAsk ? '' : 'disabled'}>🔁 没看懂，换个说法</button>
         <button class="btn small" data-q="example" ${canAsk ? '' : 'disabled'}>🧩 举个例子</button>
         <button class="btn small" data-q="why" ${canAsk ? '' : 'disabled'}>❓ 为什么必须这么写</button>
       </div>
       <div class="exInputRow">
-        <textarea class="exInput exTa" id="exTa" rows="2" spellcheck="false" placeholder="${canAsk ? (selLine === 0 ? '针对整段代码追问…' : '针对第 ' + selLine + ' 行追问（例：这里为什么不用 const？）') : '这一行还没讲到，先点「继续讲」'}"></textarea>
+        <textarea class="exInput exTa" id="exTa" rows="2" spellcheck="false" placeholder="${canAsk ? ph : '这一行还没讲到，先点「继续讲」'}"></textarea>
         <button class="btn primary" id="exSend" ${canAsk ? '' : 'disabled'}>发送</button>
       </div>`;
     const ta = document.getElementById('exTa');
@@ -1008,6 +1150,7 @@
     ta.addEventListener('keydown', e => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); const s = document.getElementById('exSend'); if (s && !s.disabled) s.click(); }
     });
+    box.querySelectorAll('[data-pq="teach"]').forEach(b => b.addEventListener('click', () => teachPre(selPre)));
     const TXT = { redo: '没看懂，换个更小的说法再讲一遍', example: '举个例子', why: '为什么必须这么写？不这么写会怎样？' };
     app.querySelectorAll('#exAsk [data-q]').forEach(b => b.addEventListener('click', () => {
       const k = b.getAttribute('data-q');
@@ -1025,6 +1168,7 @@
   async function doAsk(text, kind) {
     if (busy || !session) return;
     if (!['redo', 'example', 'why'].includes(kind)) kind = 'ask';
+    if (selPre) return askPre(selPre, text, kind);
     const cover = selLine > 0 ? coverOf(selLine) : null;
     const anchor = cover ? { from: Number(cover.line_from), to: Number(cover.line_to) } : { from: selLine, to: selLine };
     busy = true; busyMsg = 'AI 正在看这一行…'; busyT0 = Date.now();
@@ -1049,6 +1193,33 @@
       paintLines(); renderThread(false); renderAsk();
     }
   }
+  /** 对某个前置知识的追问（挂在这个知识点名下，用同一套右边对话栏） */
+  async function askPre(id, text, kind) {
+    const p = preOf(id);
+    if (!p) return;
+    busy = true; busyMsg = 'AI 正在看这个知识点…'; busyT0 = Date.now();
+    if (busyTimer) clearInterval(busyTimer);
+    busyTimer = setInterval(() => { const el = document.getElementById('exBusy'); if (el) el.textContent = busyText(); }, 1000);
+    const before = (p.chat || []).length;
+    p.chat = (p.chat || []).concat([{ role: 'me', content: text }]);
+    askDraft = '';
+    renderThread(true); renderAsk();
+    try {
+      const r = await api(API + '/' + session.id + '/prereq/' + encodeURIComponent(p.id) + '/ask', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, kind })
+      });
+      stopBusy();
+      if (r && r.prereqs) session.prereqs = r.prereqs;
+      renderThread(true); renderPre();
+    } catch (e) {
+      stopBusy();
+      p.chat = (p.chat || []).slice(0, before);
+      toast('追问失败：' + e.message);
+      renderThread(false); renderAsk();
+    }
+  }
+
   /* 轮询回来的最新状态：只做"增量重画"，不整页重绘（否则会打断正在看的讲解）。
      并行讲解时模块可能乱序完成，所以"跟随最新"跟的是**最新写完的那一块**。 */
   function applyDetail(r) {
@@ -1059,12 +1230,12 @@
     turns = r.turns || [];
     const ex = Number(session.explained || 0);
     const grew = turns.length > prevLen;
-    if (grew && follow) {
+    if (grew && follow && !selPre) {
       const last = turns.filter(t => t.role === 'ai' && t.kind === 'explain').slice(-1)[0];
       const target = last ? Number(last.line_from) : (selLine > 0 ? selLine : 0);
       if (target > 0 && target !== selLine) selectLine(target, false);
       else { paintLines(); renderThread(false); }
-    } else if (ex > prevEx && follow && (selLine === 0 || selLine >= prevEx)) {
+    } else if (ex > prevEx && follow && !selPre && (selLine === 0 || selLine >= prevEx)) {
       selectLine(ex, false);
     } else {
       paintLines(); renderThread(false);
@@ -1342,8 +1513,28 @@
       show: goal => SiErXing.pluginEnabled(goal, 'explain')
     },
     routes: [
-      { match: h => h.match(/^#\/t\/(\d+)\/explain$/), render: async m => { await renderExplainPage(Number(m[1])); } },
-      { match: h => h.match(/^#\/g\/(\d+)\/explain$/), render: async m => { await renderGoalExplainPage(Number(m[1])); } }
+      {
+        match: h => h.match(/^#\/t\/(\d+)\/explain$/),
+        render: async m => {
+          const t = Number(m[1]);
+          if (explainVueEnabled()) {
+            try { if (await renderExplainPageVue(t, 0)) return; }
+            catch (e) { try { toast('看懂代码 Vue 页面加载失败，已回退旧页面'); } catch (e2) {} }
+          }
+          await renderExplainPage(t);
+        }
+      },
+      {
+        match: h => h.match(/^#\/g\/(\d+)\/explain$/),
+        render: async m => {
+          const g = Number(m[1]);
+          if (explainVueEnabled()) {
+            try { if (await renderExplainPageVue(0, g)) return; }
+            catch (e) { try { toast('看懂代码 Vue 页面加载失败，已回退旧页面'); } catch (e2) {} }
+          }
+          await renderGoalExplainPage(g);
+        }
+      }
     ]
   });
 

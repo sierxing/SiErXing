@@ -1,0 +1,130 @@
+/* ============================================================
+ * 思而行 · UI 基础皮肤（SX UI Skin v1）
+ * ------------------------------------------------------------
+ * 定位：**默认外观以组件/皮肤形式存在**，不是写死的界面。
+ *   · 本层只做「版式归一」：把各 Vue 页面插件里各自硬写的容器宽度、
+ *     卡片圆角/内边距/阴影，统一校正到与经典界面一致。
+ *   · 全部数值都是 CSS 变量（--sx-*），用户/主题可整层覆盖。
+ *   · 用 #app 前缀提高特异性，压过 .vue 的 scoped 样式。
+ *
+ * 自定义方式：
+ *   1) 只改页宽/圆角/配色 → 覆盖 :root 的 --sx-* 变量；
+ *   2) 彻底换版式 → 在 DATA_DIR/ui-plugins/<id>/skin.css 里重写选择器
+ *      （用户皮肤最后加载，同名选择器后写的赢）。
+ *
+ * 宽度基准说明：经典界面外层 .wrap 是 max-width:1080px + padding:0 20px，
+ * 所以「1180px 的页面」实际渲染是 1040px，「900px 的页面」就是 900px。
+ * ============================================================ */
+
+:root {
+  /* 页面宽度档位（经典基准） */
+  --sx-page-max: 900px;      /* 普通页 */
+  --sx-page-wide: 1280px;    /* 宽页：组件 / 路线图 */
+  --sx-page-mid: 1180px;     /* 中档：设置全部子页（受 wrap 约束实际 1040px） */
+  --sx-app-max: 1080px;      /* 外层容器（经典 .wrap） */
+
+  /* 卡片 */
+  --sx-card-radius: 14px;
+  --sx-card-pad: 16px 18px;
+  --sx-card-shadow: none;
+  --sx-card-mb: 18px;
+
+  /* 按钮 */
+  --sx-btn-radius: 9px;
+  --sx-btn-pad: 6px 13px;
+}
+
+/* ---------- 0. 外层容器与经典一致（影响所有页面实测宽度） ---------- */
+#app.wrap { max-width: var(--sx-app-max); margin-left: auto; margin-right: auto; padding: 16px 20px 0; }
+body:has(.cmpPage) #app.wrap { max-width: 1460px; }   /* 组件页放宽，同经典 */
+
+/* ---------- 1. 页面容器：按路由档位精确对齐经典宽度 ----------
+   实测基准（经典界面）：
+     /                                   → 900px
+     /g/:id（目标）                       → 900px
+     /g/:id/map（路线图）                 → 1280px
+     /components（组件）                  → 1280px
+     /g/:id/diff/:vid（版本对比）         → 1280px
+     /t/:id（教程）                       → 1280px（受 wrap 约束实际 ~1040）
+     /settings/**（设置全部子页）         → 1180px（实际 1040）
+     /g/:id/versions（版本管理）          → 900px
+     /g/:id/chat（对话）                  → 900px
+     其余（首页/资源库/任务中心/引导…）   → 900px
+*/
+#app .page { max-width: var(--sx-page-max); margin-left: auto; margin-right: auto; }
+#app .page.wide { max-width: var(--sx-page-wide); }
+
+/* 宽档：组件 / 版本对比（普通流式页面） */
+body[data-sx-view="components"] #app .page,
+body[data-sx-view="diff"] #app .page,
+#app .cmpPage,
+#app .diffPage { max-width: var(--sx-page-wide); }
+
+/* ⚠️ .mapPage / .tutPage 是**全屏固定容器**（position:fixed; left:78px; right:0），
+   它们必须铺满视口，不能给 max-width —— 否则右侧会空出一条灰带（用户反馈）。
+   路线图内部宽度由 .mapViewport / .mapCanvas 自己控制。 */
+body[data-sx-view="map"] #app .page,
+body[data-sx-view="tutorial"] #app .page,
+#app .mapPage,
+#app .tutPage { max-width: none; }
+
+/* 中档：设置全部子页（经典 settingsPage = 1180px） */
+body[data-sx-view="settings"] #app .page { max-width: var(--sx-page-mid); }
+
+/* 其余保持经典 900px（首页 / 目标 / 对话 / 版本 / 资源库 / 任务中心 / 引导 / 插件内页） */
+body[data-sx-view="goal"] #app .page,
+body[data-sx-view="chat"] #app .page,
+body[data-sx-view="versions"] #app .page,
+body[data-sx-view="library"] #app .page,
+body[data-sx-view="aitasks"] #app .page,
+body[data-sx-view="home"] #app .page,
+body[data-sx-view="guide"] #app .page,
+#app .goalPage,
+#app .libraryPage,
+#app .libPage,
+#app .aitPage,
+#app .ssPage,
+#app .studystatsPage,
+#app .chatPage,
+#app .jdPage,
+#app .qPage,
+#app .quizPage,
+#app .ivPage,
+#app .rsPage,
+#app .exPage,
+#app .dailyPage { max-width: var(--sx-page-max); }
+
+/* 插件内页（教程内页/目标内页）按经典同样 900px，除非上面已指定 */
+body[data-sx-view="other"] #app .page { max-width: var(--sx-page-max); }
+
+/* ---------- 2. 卡片：精确对齐经典 .goalCard / .secCard ----------
+   经典值（public/style.css）：
+     .goalCard  → border 1px, radius var(--r-lg)=16px, padding 18px 18px 16px, shadow var(--shadow-sm)
+     .secCard   → border 1.5px, radius var(--r-lg)=16px, shadow var(--shadow-sm), 内部 .sec 负责 padding
+*/
+#app .card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-sm);
+  padding: 18px 18px 16px;
+  margin-bottom: var(--sx-card-mb);
+}
+#app .secCard {
+  background: var(--card);
+  border: 1.5px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-sm);
+  margin-bottom: var(--sx-card-mb);
+  padding: 0;
+}
+#app .secCard > .sec { padding: var(--sx-card-pad); }
+
+/* 嵌套卡片不重复加阴影，避免发糊 */
+#app .card .card,
+#app .secCard .secCard { box-shadow: none; }
+
+/* ---------- 3. 按钮 ---------- */
+#app .btn { border-radius: var(--sx-btn-radius); }
+#app .btn:not(.small):not(.tiny) { padding: var(--sx-btn-pad); font-size: 13px; }
+#app .btn.small { padding: 3px 11px; font-size: 12px; border-radius: 8px; }

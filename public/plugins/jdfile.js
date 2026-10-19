@@ -8,6 +8,42 @@
 (function () {
   const { api, esc, toast, go, state, mdToHTML, fmtDate, safeParse } = SiErXing;
 
+  /* ---------- Vue 版页面（渐进迁移；加载失败自动回退旧页面） ---------- */
+  let jdfileVueUnmount = null;
+  function jdfileVueEnabled() {
+    try {
+      const q = new URLSearchParams(location.search).get('ui');
+      if (q === 'legacy') return false;
+      if (q === 'vue') return true;
+      const saved = localStorage.getItem('sierxing-ui-jdfile');
+      if (saved === 'legacy') return false;
+      if (saved === 'vue') return true;
+    } catch (e) {}
+    return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+  }
+  function ensureJdfileVueCss() {
+    if (document.querySelector('link[data-ui-page="jdfile"]')) return;
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/jdfile.css'; l.setAttribute('data-ui-page', 'jdfile');
+    document.head.appendChild(l);
+  }
+  async function renderJDFilePageVue(goalId) {
+    const root = document.getElementById('app');
+    if (!root) throw new Error('页面容器不存在');
+    if (jdfileVueUnmount) { try { jdfileVueUnmount(); } catch (e) {} jdfileVueUnmount = null; }
+    ensureJdfileVueCss();
+    const mod = await import('/ui-dist/jdfile.js?v=' + Date.now());
+    if (!mod || typeof mod.mountJdFilePage !== 'function') throw new Error('UI 插件没有导出 mountJdFilePage');
+    jdfileVueUnmount = mod.mountJdFilePage(root, { api: api, toast: toast, fmtDate: fmtDate, aiToggle: SiErXing.aiToggle, goalId: Number(goalId) || 0 });
+    return true;
+  }
+  window.addEventListener('hashchange', function () {
+    if (jdfileVueUnmount && !/^#\/g\/\d+\/jd/.test(location.hash)) {
+      try { jdfileVueUnmount(); } catch (e) {}
+      jdfileVueUnmount = null;
+    }
+  });
+
 async function renderJDPage() {
   const g = state.goal;
   app.innerHTML = '<p class="muted">加载资料…</p>';
@@ -548,7 +584,15 @@ async function uploadEbookJob(job) {
     routes: [
       {
         match: h => h.match(/^#\/g\/(\d+)\/jd$/),
-        render: async m => { await SiErXing.loadGoal(Number(m[1])); await renderJDPage(); }
+        render: async m => {
+          const gid0 = Number(m[1]);
+          if (jdfileVueEnabled()) {
+            try { if (await renderJDFilePageVue(gid0)) return; }
+            catch (e) { try { toast('信息源导入 Vue 页面加载失败，已回退旧页面'); } catch (e2) {} }
+          }
+          await SiErXing.loadGoal(gid0);
+          await renderJDPage();
+        }
       }
     ]
   });

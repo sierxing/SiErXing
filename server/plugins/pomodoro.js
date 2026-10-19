@@ -11,6 +11,8 @@
  */
 'use strict';
 
+const { guiEnv } = require('../gui-env.js');
+
 const PLATFORM = process.platform;
 
 /* ---------- 当前前台窗口 ---------- */
@@ -23,7 +25,11 @@ function runCapture(cmd, args, timeoutMs) {
     let child;
     try {
       const { spawn } = require('node:child_process');
-      child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+      /* ⚠️ 必须补显示环境：xdotool / wmctrl 是 X 客户端，而本应用常以开机自启的
+         systemd 用户服务身份运行 —— 那个进程的环境里**没有 DISPLAY / XAUTHORITY**。
+         不补的话 xdotool 只会回 "Can't open display: (null)"，接口 ok:false，
+         前端就把「切走」一律当成休息（线上反馈：配了 bilibili，切到任何页面都在休息）。 */
+      child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: guiEnv() });
     } catch (e) { return finish({ ok: false, out: '', err: String(e && e.message || e) }); }
     const t = setTimeout(() => { try { child.kill(); } catch (e) {} finish({ ok: false, out: '', err: 'timeout' }); }, timeoutMs);
     child.stdout.on('data', d => { if (out.length < 800) out += d; });
@@ -143,7 +149,7 @@ module.exports = {
       handler: async (req, res, u, ctx) => {
         if (req.method !== 'GET') return false;
         const v = await activeWindow(0);
-        ctx.sendJSON(res, 200, { platform: PLATFORM, ok: !!v.ok, source: v.source || '', title: v.title || '', app: v.app || '' });
+        ctx.sendJSON(res, 200, { platform: PLATFORM, ok: !!v.ok, source: v.source || '', title: v.title || '', app: v.app || '', err: v.err || '' });
         return true;
       },
     },
@@ -168,6 +174,10 @@ module.exports = {
  *   前端会明确告诉用户，而不是假装检测到了。
  * 各平台实现：macOS 用 osascript 问 System Events；Windows 用 PowerShell 调
  * user32 的 GetForegroundWindow；Linux 用 xdotool（拿不到时退化 wmctrl）。
- * Wayland 下这些通常拿不到（Wayland 有意不暴露前台窗口），此时接口返回 ok:false，
- * 前端退回"切走就算休息"的旧行为，不会把功能弄坏。
+ * Wayland 下这些通常拿不到（Wayland 有意不暴露前台窗口），此时接口返回 ok:false。
+ * ⚠️ 前端**不会**再因此把「切走」一律当成休息：用户既然配了关键词，探测失败就
+ *    不能静默把筛选丢掉（否则「只让 bilibili 算休息」会变成「所有页面都算休息」）。
+ *    前端会继续重试探测，并把"读不到前台窗口"如实告诉用户；没配关键词时才走旧行为。
+ * 另：本进程可能是开机自启的 systemd 服务（不在桌面会话里），所以 spawn 时必须
+ *    带上 gui-env.js 的 guiEnv()，否则 xdotool 连不上 X、接口永远是 ok:false。
  * ========================================================================== */

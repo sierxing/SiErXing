@@ -13,6 +13,47 @@
   const esc = s => (H().esc ? H().esc(s) : String(s == null ? '' : s));
   const toast = m => { try { H().toast(m); } catch (e) { console.log(m); } };
 
+  /* ---------- Vue 版页面（渐进迁移；加载失败自动回退旧页面） ----------
+     默认新页面；?ui=legacy 或 localStorage=sierxing-ui-ragbench:legacy 可回退。 */
+  let ragbenchVueUnmount = null;
+  function ragbenchVueEnabled() {
+    try {
+      const q = new URLSearchParams(location.search).get('ui');
+      if (q === 'legacy') return false;
+      if (q === 'vue') return true;
+      const saved = localStorage.getItem('sierxing-ui-ragbench');
+      if (saved === 'legacy') return false;
+      if (saved === 'vue') return true;
+    } catch (e) {}
+    return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+  }
+  function ensureRagbenchVueCss() {
+    const add = (href, key) => {
+      if (document.querySelector('link[data-ui-page="' + key + '"]')) return;
+      const l = document.createElement('link');
+      l.rel = 'stylesheet'; l.href = href; l.setAttribute('data-ui-page', key);
+      document.head.appendChild(l);
+    };
+    add('/plugins/ragbench.css', 'ragbench-legacy');
+    add('/ui-dist/ragbench.css', 'ragbench-vue');
+  }
+  async function renderPageVue(id) {
+    const root = document.getElementById('app');
+    if (!root) throw new Error('页面容器不存在');
+    if (ragbenchVueUnmount) { try { ragbenchVueUnmount(); } catch (e) {} ragbenchVueUnmount = null; }
+    ensureRagbenchVueCss();
+    const mod = await import('/ui-dist/ragbench.js?v=' + Date.now());
+    if (!mod || typeof mod.mountRagbenchPage !== 'function') throw new Error('UI 插件没有导出 mountRagbenchPage');
+    ragbenchVueUnmount = mod.mountRagbenchPage(root, { api: api, toast: toast, goalId: Number(id) || 0 });
+    return true;
+  }
+  window.addEventListener('hashchange', function () {
+    if (ragbenchVueUnmount && !/^#\/g\/\d+\/ragbench/.test(location.hash)) {
+      try { ragbenchVueUnmount(); } catch (e) {}
+      ragbenchVueUnmount = null;
+    }
+  });
+
   let goal = null, questions = [], runs = [], detail = null, busy = false;
 
   (function injectCss() {
@@ -216,7 +257,17 @@
       show: g => SiErXing.pluginEnabled(g, 'ragbench')
     },
     routes: [
-      { match: h => h.match(/^#\/g\/(\d+)\/ragbench$/), render: async m => { await render(Number(m[1])); } }
+      {
+        match: h => h.match(/^#\/g\/(\d+)\/ragbench$/),
+        render: async m => {
+          const id = Number(m[1]);
+          if (ragbenchVueEnabled()) {
+            try { if (await renderPageVue(id)) return; }
+            catch (e) { try { toast('检索评测 Vue 页面加载失败，已回退旧页面'); } catch (e2) {} }
+          }
+          await render(id);
+        }
+      }
     ]
   });
 })();

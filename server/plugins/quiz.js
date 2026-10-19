@@ -122,19 +122,6 @@ function buildJudgePrompt(point, question, refAnswer, userText) {
     '只输出一个 JSON 对象：{"correct":true,"explain":"一句话点评（含讲对/错在哪）"}（没答对 correct 为 false）'
   ].join('\n');
 }
-function buildChatPrompt(tut, point, recent) {
-  const L = [];
-  L.push('你是耐心严谨的技术导师。用户正在随堂测验中，ta对下面这个知识点有疑问/想深入聊聊，请用 200 字内讲清楚，直接回答。涉及代码必须用 ``` 围栏包裹。');
-  L.push('【知识点】' + String(point.title || '') + '：' + String(point.summary || ''));
-  if (recent && recent.length) {
-    L.push('【本知识点最近的问答（供参考）】');
-    for (const r of recent.slice(-3)) {
-      if (r.kind === 'qa') L.push('- 考过：' + String(r.question || '').slice(0, 100) + ' / 用户答：' + String(r.user_text || '').slice(0, 60));
-      else L.push('- 聊过：' + String(r.user_text || '').slice(0, 80));
-    }
-  }
-  return L.join('\n');
-}
 function extractJSON(text) {
   const t = String(text || '').trim();
   if (!t) return null;
@@ -378,31 +365,11 @@ module.exports = {
         const fresh = db.prepare('SELECT * FROM quiz_records WHERE id = ?').get(r.id);
         return sendJSON(res, 200, { record: fresh });
       }
-    },
-    {
-      // 追问：就本知识点跟 AI 多聊两句（不计对错，只记下来供出题参考）
-      method: 'POST',
-      pattern: /^\/api\/quiz-session\/(\d+)\/chat$/,
-      handler: async (req, res, u, ctx) => {
-        const m = u.pathname.match(/^\/api\/quiz-session\/(\d+)\/chat$/);
-        if (!m || req.method !== 'POST') return false;
-        const s = db.prepare('SELECT * FROM quiz_sessions WHERE id = ?').get(Number(m[1]));
-        if (!s) return sendJSON(res, 404, { error: '会话不存在' });
-        const body = await readBody(req).catch(() => ({}));
-        const text = String((body && body.text) || '').trim().slice(0, 500);
-        if (!text) return sendJSON(res, 400, { error: '先写下你的问题' });
-        const t = tutOf(s.tutorial_id);
-        const outline = outlineOf(s.tutorial_id);
-        const point = outline[s.point_idx] || { title: '' };
-        const recent = recordsOf(s.id).filter(r => r.point_idx === s.point_idx).slice(-6);
-        const model = currentModel();
-        let reply = await aiText(buildChatPrompt(t || { title: '', content: '' }, point, recent), model, 60000);
-        reply = String(reply || '').trim().slice(0, 1200) || '这个问题我暂时答不上来，换个问法试试？';
-        const now = nowISO();
-        const ins = db.prepare('INSERT INTO quiz_records (session_id, point_idx, point, kind, user_text, explain, created_at) VALUES (?,?,?,?,?,?,?)')
-          .run(s.id, s.point_idx, String(point.title || '').slice(0, 60), 'chat', text, reply, now);
-        return sendJSON(res, 200, { record: db.prepare('SELECT * FROM quiz_records WHERE id = ?').get(Number(ins.lastInsertRowid)) });
-      }
     }
+    /* ⚠️ 这里原来还有 `POST /api/quiz-session/:id/chat`（就本知识点追问 AI）。
+       已删除：一百来个组件各写一套 AI 问答，效果一定参差不齐，还各花各的提示词与费用。
+       现在统一走**已有的 AI 助手**（常驻每个页面 + 能读到当前页面内容），
+       测验页只留一个「问 AI」按钮把上下文带过去。
+       历史 `quiz_records` 里 kind='chat' 的旧记录仍留在库里（同步照旧），只是不再显示。 */
   ]
 };

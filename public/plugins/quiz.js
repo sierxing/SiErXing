@@ -7,6 +7,42 @@
 'use strict';
 (function () {
   const { api, esc, toast, go, state, mdToHTML } = SiErXing;
+
+  /* ---------- Vue 版页面（渐进迁移；加载失败自动回退旧页面） ---------- */
+  let quizVueUnmount = null;
+  function quizVueEnabled() {
+    try {
+      const q = new URLSearchParams(location.search).get('ui');
+      if (q === 'legacy') return false;
+      if (q === 'vue') return true;
+      const saved = localStorage.getItem('sierxing-ui-quiz');
+      if (saved === 'legacy') return false;
+      if (saved === 'vue') return true;
+    } catch (e) {}
+    return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+  }
+  function ensureQuizVueCss() {
+    if (document.querySelector('link[data-ui-page="quiz"]')) return;
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/quiz.css'; l.setAttribute('data-ui-page', 'quiz');
+    document.head.appendChild(l);
+  }
+  async function renderQuizPageVue(t) {
+    const root = document.getElementById('app');
+    if (!root) throw new Error('页面容器不存在');
+    if (quizVueUnmount) { try { quizVueUnmount(); } catch (e) {} quizVueUnmount = null; }
+    ensureQuizVueCss();
+    const mod = await import('/ui-dist/quiz.js?v=' + Date.now());
+    if (!mod || typeof mod.mountQuizPage !== 'function') throw new Error('UI 插件没有导出 mountQuizPage');
+    quizVueUnmount = mod.mountQuizPage(root, { api: api, toast: toast, go: go, mdToHTML: mdToHTML, tid: Number(t) || 0 });
+    return true;
+  }
+  window.addEventListener('hashchange', function () {
+    if (quizVueUnmount && !/^#\/t\/\d+\/quiz/.test(location.hash)) {
+      try { quizVueUnmount(); } catch (e) {}
+      quizVueUnmount = null;
+    }
+  });
   const QTYPES = [
     { v: 'single', label: '单选' },
     { v: 'judge', label: '判断' },
@@ -159,8 +195,6 @@
     if (curPoint >= outline.length) curPoint = 0;
     const p = outline[curPoint];
     const mk = pointMark(curPoint);
-    const myRecs = records.filter(r => r.point_idx === curPoint);
-    const answered = curRec && curRec.user_text;
     const dots = pts.map(q => `<span class="quizDot ${q.i === curPoint ? 'cur' : ''} ${pointMark(q.i) === 'done' ? 'ok' : pointMark(q.i) === 'weak' ? 'bad' : pointMark(q.i) === 'fixed' ? 'fix' : ''}" data-qdot="${q.i}" title="${esc(q.title)}（${MARK_TXT[pointMark(q.i)]}）"></span>`).join('');
     app.innerHTML = `<div class="jdPage quizPage">
       ${headHTML('')}
@@ -172,9 +206,6 @@
         <div class="quizQBody" id="quizQBody"><p class="muted">正在出题…</p></div>
         <div id="quizQOps"></div>
       </div>
-      <div class="quizThread" id="quizThread">${myRecs.filter(r => r.kind === 'chat').map(r => `
-        <div class="quizChatQ">💬 ${esc(r.user_text)}</div><div class="quizChatA mdBody">${mdToHTML(r.explain)}</div>`).join('')}
-      </div>
       <div class="toolbarRow" style="margin-top:12px;">
         <button class="btn" id="quizPrev">← 上一个点</button>
         <button class="btn" id="quizNext">下一个点 →</button>
@@ -182,10 +213,7 @@
         <button class="btn" id="quizToReport">看报告</button>
         <button class="btn danger" id="quizFinish">结束本轮</button>
       </div>
-      <div class="quizChatBox">
-        <input id="quizChatIn" placeholder="对这个点有疑问？直接问 AI…" maxlength="200">
-        <button class="btn small" id="quizChatGo">问</button>
-      </div>
+      <p class="quizAskHint">💬 这个点有疑问？点右下角 <b>AI 助手</b> 直接问 —— 它读得到这一页的题目、选项和你的作答，不用再把题目贴一遍。</p>
     </div>`;
     app.querySelectorAll('[data-qdot]').forEach(d => d.addEventListener('click', () => { curPoint = Number(d.getAttribute('data-qdot')); curRec = null; savePoint(); draw(); }));
     document.getElementById('quizPrev').addEventListener('click', () => { if (stepPoint(-1)) { curRec = null; savePoint(); draw(); } });
@@ -196,20 +224,10 @@
       try { await api('/api/quiz-session/' + session.id + '/finish', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch (e) {}
       view = 'report'; draw();
     });
-    const chatGo = async () => {
-      const inp = document.getElementById('quizChatIn');
-      const text = (inp.value || '').trim();
-      if (!text || busy) return;
-      busy = true;
-      try {
-        const r = await api('/api/quiz-session/' + session.id + '/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
-        records.push(r.record);
-        inp.value = '';
-        draw();
-      } catch (e) { toast(e.message); } finally { busy = false; }
-    };
-    document.getElementById('quizChatGo').addEventListener('click', chatGo);
-    document.getElementById('quizChatIn').addEventListener('keydown', e => { if (e.key === 'Enter') chatGo(); });
+    /* ⚠️ 这里原来有一个「对这个点有疑问？直接问 AI」的输入框 + `POST /api/quiz-session/:id/chat`。
+       已删除：每个组件各写一套 AI 问答，效果一定参差不齐（同一件事要维护一百份提示词）。
+       现在统一用**已有的 AI 助手**（常驻每个页面、能读到当前页面内容）——
+       用户点右下角 💬 直接问，助手看得到这一页的题目/选项/作答。 */
     if (!curRec) askQuestion(curPoint);
     else paintRecord(curRec);
   }
@@ -353,7 +371,14 @@
     routes: [
       {
         match: h => h.match(/^#\/t\/(\d+)\/quiz$/),
-        render: async m => { await renderQuizPage(Number(m[1])); }
+        render: async m => {
+          const t = Number(m[1]);
+          if (quizVueEnabled()) {
+            try { if (await renderQuizPageVue(t)) return; }
+            catch (e) { try { toast('随堂测验 Vue 页面加载失败，已回退旧页面'); } catch (e2) {} }
+          }
+          await renderQuizPage(t);
+        }
       }
     ]
   });

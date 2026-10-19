@@ -13,9 +13,14 @@ try {
 }
 
 const ai = require('./ai');
-const { loadPlugins, pluginMeta, matchRoute } = require('./plugins');
+const { loadPlugins, pluginMeta, matchRoute, kernelState } = require('./plugins');
 const createService = require('./service');
 const createSync = require('./sync');
+const { createBackupDomain } = require('./domains/backups');
+const { createVersionDomain } = require('./domains/versions');
+const { createGoalDomain } = require('./domains/goals');
+const { createSourceDomain } = require('./domains/sources');
+const { createConditionsDomain } = require('./conditions');
 const createUpdate = require('./update');
 const createTasks = require('./tasks');
 const metrics = require('./metrics');
@@ -38,6 +43,25 @@ const tutSeg = require('./tut-seg');
 const collectScreen = require('./collect-screen');
 /* 正文清洗：抓下来的网页里混着的导航/推荐/页脚/公众号引导等垃圾文字（本地规则 + 可选 AI 只删不改） */
 const textClean = require('./text-clean');
+/* 提示词上下文块（纯函数）：从 server.js 抽出的共享块，供各提示词复用。
+   ⚠️ 这里只能放纯函数：不查 DB、不读 settings、不 require server.js。 */
+const promptContext = require('./prompts/context');
+const { goalHeader, richMdSpecLines, vizSpecLines, qaRender } = promptContext;
+/* 「当前页面」上下文（纯函数）：AI 助手常驻每个页面后，用户说的"这个/这里"要能对上
+   屏幕上那段内容。前端抓当前页文字随消息上来，这里清洗 + 限量 + 拼成提示词块。 */
+const pageContext = require('./prompts/page-context');
+/* 提示词包注册表：内置模板来自 server/prompts/packs.js，用户覆盖存本机 DB。
+   启动时创建一次；server.js 只负责按 ctx 渲染，不在这里塞提示词正文。 */
+const createPromptRegistry = require('./prompts/registry');
+const tutorialRules = require('./prompts/tutorial-rules');
+const componentPipeline = require('./component-pipeline');
+/* 国际化（界面语言）：language/ 是文案唯一权威来源，见 language/README.md */
+const createLanguage = require('../language');
+const createLanguageGenerator = require('../language/generate');
+const chatPacks = require('./prompts/chat-packs');
+/* 审批页：Agent 发起的危险操作，让用户在浏览器里点批准/拒绝（本机、无外链） */
+const renderApprovalPage = require('./approvals-page');
+const renderComponentPreviewPage = require('./component-preview-page');
 /* 结构改动"挂起等用户点头"的记录：goalId:tutorialId → { feedback, at }。
    ⚠️ 必须放模块级：写到请求处理函数里会每次请求都新建一个，挂起状态当场就丢
    （真实踩到：① 先问用户要不要改结构 ② 用户回"可以" 又变成"先问"，永远点不动）。 */
@@ -54,10 +78,15 @@ const APP_DIR = path.resolve(__dirname, '..');
    改过之后指针写在 APP_DIR/data-location.json（指针不能跟着数据一起挪走）。
    切换/迁移后必须重启 —— DATA_DIR 在启动时被插件、同步、上传按值捕获。 */
 const dataDir = require('./data-dir');
+const { createUiPluginRegistry } = require('./ui-plugins');
+const { createCreateMode } = require('./create-mode');
+const { createKernelConfig } = require('./kernel-config');
 const DATA_DIR = dataDir.readPointer(APP_DIR).dir;
 const BACKUP_DIR = path.join(DATA_DIR, 'backups');
 const DB_PATH = path.join(DATA_DIR, 'sierxing.db');
 const PUBLIC_DIR = path.join(APP_DIR, 'public');
+/* 内置 UI 插件源码目录（页面插件住这里，而不是 public/ 构建产物区） */
+const UI_PLUGIN_DIR_BUILTIN = path.join(APP_DIR, 'ui', 'plugins', 'builtin');
 /* 前端资源版本戳：启动时对 public 下的 js/css 求内容哈希，发版后浏览器必取新文件。
    用内容哈希而不用时间戳：只改后端重启时不打扰前端。必须在 PUBLIC_DIR 之后定义，
    否则会撞 TDZ、哈希恒为空串的 sha256（e3b0c442…），版本戳形同虚设。 */
@@ -65,7 +94,7 @@ const ASSET_V = (() => {
   try {
     const crypto = require('node:crypto');
     const h = crypto.createHash('sha256');
-    const files = ['index.html', 'app.js', 'sdk.js', 'style.css'];
+    const files = ['index.html', 'app.js', 'sdk.js', 'style.css', 'i18n.js'];
     try {
       for (const f of fs.readdirSync(path.join(PUBLIC_DIR, 'plugins'))) {
         if (/\.js$|\.css$/.test(f)) files.push('plugins/' + f);
@@ -98,94 +127,19 @@ const ASSET_V = (() => {
   } catch (e) {}
 })();
 const PORT = Number(process.env.PORT || 3213);
-const KEEP_BACKUPS = 30;          // 默认保留份数（用户可在设置里改，见 keepBackups()）
-
-/** 实际要保留的份数：设置项 backup_keep 可覆盖，非法值回落默认 */
-function keepBackups() {
-  const n = parseInt(getSetting('backup_keep', ''), 10);
-  return (n >= 1 && n <= 500) ? n : KEEP_BACKUPS;
-}
-/** 列出现有备份（新的在前）：{name, time, size} */
-function backupList() {
-  let names = [];
-  try { names = fs.readdirSync(BACKUP_DIR).filter(f => /^sierxing-[0-9]{8}-[0-9]{6}\.db$/.test(f)); } catch (e) { return []; }
-  names.sort().reverse();     // 文件名就是时间戳，字典序倒排 = 由新到旧
-  return names.map(n => {
-    let size = 0, time = '';
-    try { const st = fs.statSync(path.join(BACKUP_DIR, n)); size = st.size; time = st.mtime.toISOString(); } catch (e) {}
-    return { name: n, size, time };
-  });
-}
-/** 按当前保留份数裁掉最旧的 */
-function pruneBackups() {
-  const keep = keepBackups();
-  let files = [];
-  try { files = fs.readdirSync(BACKUP_DIR).filter(f => f.startsWith('sierxing-')).sort(); } catch (e) { return; }
-  while (files.length > keep) { try { fs.unlinkSync(path.join(BACKUP_DIR, files.shift())); } catch (e) {} }
-}
-
-  /* ---- 备份对比：只比「用户看得懂」的核心表，噪音表（分块/向量/统计）不比 ----
-     主键不统一，所以每张表显式指定主键与「代表性字段」用于生成人类可读的摘要。 */
-  const BK_DIFF_TABLES = [
-    { t: 'goals',             pk: 'id',     label: '目标',     title: 'title' },
-    { t: 'nodes',             pk: 'id',     label: '节点',     title: 'title' },
-    { t: 'sources',           pk: 'id',     label: '信息源',   title: 'title' },
-    { t: 'outlib_nodes',      pk: 'id',     label: '产出',     title: 'name' },
-    { t: 'tutorials',         pk: 'id',     label: '教程',     title: 'title' },
-    { t: 'quiz_records',      pk: 'id',     label: '测验记录', title: 'point' },
-    { t: 'interview_sessions',pk: 'id',     label: '模拟面试', title: 'title' },
-    { t: 'chats',             pk: 'id',     label: '对话',     title: 'content' },
-    { t: 'settings',          pk: 'key',    label: '设置',     title: 'key' },
-    { t: 'problems',          pk: 'id',     label: '刷题',     title: 'title' },
-    { t: 'restate_points',    pk: 'tutorial_id', label: '用自己的话', title: 'points' },
-  ];
-  function bkOpen(name) {
-    const f = path.join(BACKUP_DIR, name);
-    if (!/^sierxing-[0-9]{8}-[0-9]{6}\.db$/.test(name)) throw new Error('备份名不合法');
-    if (!fs.existsSync(f)) throw new Error('这份备份已经不在了');
-    return new (require('node:sqlite').DatabaseSync)(f, { readOnly: true });
-  }
-  function bkShort(v) {
-    v = String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
-    return v.length > 40 ? v.slice(0, 40) + '…' : v;
-  }
-  /** 比较两份备份：返回 {from,to,items:[{table,label,added,removed,changed,samples}]} */
-  function backupDiff(fromName, toName) {
-    const A = bkOpen(fromName), B = bkOpen(toName);
-    const items = [];
-    try {
-      for (const cfg of BK_DIFF_TABLES) {
-        const has = d => { try { return !!d.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(cfg.t); } catch (e) { return false; } };
-        if (!has(A) || !has(B)) continue;
-        const ra = A.prepare(`SELECT * FROM ${cfg.t}`).all();
-        const rb = B.prepare(`SELECT * FROM ${cfg.t}`).all();
-        const key = r => String(r[cfg.pk]);
-        const ma = new Map(ra.map(r => [key(r), r]));
-        const mb = new Map(rb.map(r => [key(r), r]));
-        let added = 0, removed = 0, changed = 0;
-        const samples = [];
-        for (const [k, rbw] of mb) {
-          const rao = ma.get(k);
-          if (!rao) { added++; if (samples.length < 5) samples.push({ type: 'add', text: bkShort(rbw[cfg.title]) }); continue; }
-          if (JSON.stringify(rao) !== JSON.stringify(rbw)) {
-            changed++;
-            if (samples.length < 5) {
-              const before = bkShort(rao[cfg.title]), after = bkShort(rbw[cfg.title]);
-              samples.push({ type: 'edit', text: before === after ? after : `${before} → ${after}` });
-            }
-          }
-        }
-        for (const k of ma.keys()) {
-          if (!mb.has(k)) { removed++; if (samples.length < 5) samples.push({ type: 'del', text: bkShort(ma.get(k)[cfg.title]) }); }
-        }
-        if (added || removed || changed) items.push({ table: cfg.t, label: cfg.label, added, removed, changed, samples });
-      }
-    } finally {
-      try { A.close(); } catch (e) {}
-      try { B.close(); } catch (e) {}
-    }
-    return { from: fromName, to: toName, items };
-  }
+/* 备份领域：实现已抽到 server/domains/backups.js；这里只做组装。 */
+const backups = createBackupDomain({
+  dbPath: DB_PATH,
+  backupDir: BACKUP_DIR,
+  getSetting: getSetting,
+  nowStamp: stamp,
+  onDataChange: function () { try { if (sync) sync.schedulePush('数据变更'); } catch (e) {} }
+});
+const keepBackups = backups.keepBackups;
+const backupList = backups.backupList;
+const pruneBackups = backups.pruneBackups;
+const backupDiff = backups.backupDiff;
+const backup = backups.backup;
 const APP_NAME = '思而行';
 
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
@@ -195,6 +149,39 @@ const LEVEL_NAME = { 0: '阶段', 1: '小目标', 2: '任务' };
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) { console.error('数据目录不可用：' + DATA_DIR + '（' + (e.message || e) + '）'); }
 fs.mkdirSync(BACKUP_DIR, { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+/* 用户 UI 插件：放数据目录，程序更新不覆盖；服务端只读 manifest 与入口文件。
+   同时扫描内置页面插件（APP_DIR/ui/plugins/builtin），供 DIY 管理页展示「内置 vs 用户覆盖」。 */
+const uiPlugins = createUiPluginRegistry({ dir: path.join(DATA_DIR, 'ui-plugins'), builtinDir: UI_PLUGIN_DIR_BUILTIN });
+/* 用户级功能组件目录（创造模式 / 用户导入安装）：只写数据目录，升级不冲突。
+   - plugins/ 放服务端组件（server/plugins 同款契约）
+   - plugins-client/ 放前端脚本与样式（等价于 public/plugins，由 serveStatic 兜底路由） */
+const USER_PLUGIN_DIR = path.join(DATA_DIR, 'plugins');
+const USER_PUBLIC_PLUGIN_DIR = path.join(DATA_DIR, 'plugins-client');
+
+/* 分层配置（P3）：builtin(config/kernel.schema.json) < profile < user。
+   用户改 DATA_DIR/config/user.json 即可开关页面插件 / 用户插件 / 皮肤，升级不会覆盖。 */
+let kernelConfig = null;
+try {
+  kernelConfig = createKernelConfig({
+    schemaPath: path.join(APP_DIR, 'config', 'kernel.schema.json'),
+    dataDir: DATA_DIR,
+    log: (...a) => console.log(...a)
+  });
+  for (const w of kernelConfig.warnings()) {
+    console.log('[config] ' + w.level + '：' + (w.key ? w.key + ' — ' : '') + w.message);
+  }
+} catch (e) {
+  console.error('[config] 分层配置校验失败，已忽略严格模式并使用内置默认：' + e.message);
+  try {
+    kernelConfig = createKernelConfig({
+      schemaPath: path.join(APP_DIR, 'config', 'kernel.schema.json'),
+      dataDir: DATA_DIR, ignoreStrict: true, log: (...a) => console.log(...a)
+    });
+  } catch (e2) {
+    console.error('[config] 分层配置加载失败，全部使用内置默认：' + e2.message);
+    kernelConfig = null;
+  }
+}
 
 const db = new DatabaseSync(DB_PATH);
 db.exec(`
@@ -229,6 +216,23 @@ CREATE TABLE IF NOT EXISTS nodes (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+/* 达成条件：阶段 ≠ 条件。一个目标的路线图节点（阶段/小目标/任务）都归到某条条件下面，
+   条件自己带可验收的判定标准；组件页据此看每条条件的推进进度与对应节点。
+   nodes.condition_id 由下面的 migrate 补列（旧库），不在这里重复 ALTER。 */
+CREATE TABLE IF NOT EXISTS goal_conditions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  goal_id INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  acceptance TEXT NOT NULL DEFAULT '',
+  jd_ref TEXT NOT NULL DEFAULT '',
+  priority TEXT NOT NULL DEFAULT 'must',
+  source TEXT NOT NULL DEFAULT 'plan',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_goal_conditions_goal ON goal_conditions(goal_id, sort_order);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS goal_versions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -332,7 +336,15 @@ CREATE TABLE IF NOT EXISTS plan_drafts (
 );
 `);
 /* setSetting 也要给：连接列表存在 settings 表里，ai.js 要能自己写回去 */
-ai.init({ getSetting: (k, d) => getSetting(k, d), setSetting: (k, v) => setSetting(k, v), appDir: APP_DIR });
+ai.init({ getSetting: (k, d) => getSetting(k, d), setSetting: (k, v) => setSetting(k, v), appDir: APP_DIR, dataDir: DATA_DIR });
+/* 宿主 Agent（思而行作为某 Agent 的插件时）：宿主插件往 DATA_DIR/host-agent.json 写
+   { name, url, key?, models:[...], vision? }（或设 SIERXING_HOST_AGENT_* 环境变量），
+   启动时自动登记成「当前宿主 Agent」连接 —— 设置页与对话模型下拉直接可选。
+   写文件后调 POST /api/host-agent/refresh 可免重启刷新。 */
+try {
+  const ha = ai.mountHostAgent();
+  if (ha && ha.mounted) console.log('[host-agent] 已接入「' + ha.name + '」：' + ha.models.length + ' 个模型 · ' + ha.baseUrl);
+} catch (e) { console.warn('[host-agent] 接入失败：' + (e && e.message)); }
 function currentModel() { return getSetting('model', '') || ai.config().model || ''; }
 const DEFAULT_VISION_MODEL = 'opencode-go/deepseek-v4-flash-vision-exp';   // opencode 用户的默认视觉模型（与实习速成一致）
 function currentVisionModel() {
@@ -388,8 +400,10 @@ const BUILTIN_COMPONENTS = [
     desc: '自动检索真实资料（时间筛选 + 广告过滤）作为规划依据，也可手动导入' },
   { id: 'versions',    name: '版本对比与汇报', icon: '📜', scope: 'base', defaultEnabled: true, category: '基础功能组件', order: 13,
     desc: '每次改动保存版本快照，可左右对比差异，并生成 AI 变更汇报' },
-  { id: 'chat',        name: 'AI 助手',   icon: '💬', scope: 'base', defaultEnabled: true, category: '基础功能组件', order: 14,
-    desc: '右侧对话侧边栏：随时用自然语言让 AI 修改路线图（支持多会话与模型切换）' },
+  /* AI 助手是**核心能力**：所有页面常驻、不可关闭（scope=core）；它拥有全局读取权限，
+     目标/资料/条件/教程等页面级修改则按当前页面 + 「只改」范围执行。 */
+  { id: 'chat',        name: 'AI 助手',   icon: '💬', scope: 'core', defaultEnabled: true, category: '核心组件', order: 2,
+    desc: '全局常驻的 AI 助手：能读所有目标与页面内容，在目标/条件/资料/教程页可直接修改对应内容（核心组件，不可关闭）' },
   { id: 'tutorial',    name: '学习教程',     icon: '📘', scope: 'base', defaultEnabled: true, category: '基础功能组件', order: 15,
     desc: '为任意任务点生成“真正学会”的完整教程（HTML / Markdown，含练习与自测）' },
 ];
@@ -431,6 +445,11 @@ function globalCompOn(id) {
   return !!(p && p.defaultEnabled);
 }
 function goalCompOn(goalId, compId) {
+  /* 核心组件不可按目标关闭（旧数据里可能存着 chat:false，必须忽略）。 */
+  try {
+    const c = allComponents().find(x => x.id === compId);
+    if (c && c.scope === 'core') return true;
+  } catch (e) {}
   if (goalId != null) {
     try {
       const g = db.prepare('SELECT plugins FROM goals WHERE id = ?').get(Number(goalId));
@@ -479,11 +498,18 @@ function componentCategoryMap() {
   return (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
 }
 function saveComponentCategoryMap(map) { setSetting('component_category_map', JSON.stringify(map || {})); }
-/** 组件的有效分类：用户指定 > 插件声明 > 其它 */
+/** 组件的有效分类：用户指定 > 插件声明 > 其它
+ *  ⚠️ 用户把组件拖到「其它」时会**显式存空串**（表示：我就是要它归到其它）。
+ *  这里必须认这个空串，不能回落到插件声明 —— 否则「把组件移到『其它』」永远不生效、
+ *  卡片下一次刷新又跳回插件声明的原分类（真实 bug：用户反馈「切分类不生效」就是这个）。
+ *  没有这一条记录（undefined）时才回落到插件声明。 */
 function effectiveCategory(id, declared) {
   const map = componentCategoryMap();
-  const c = map[id];
-  return (c && String(c).trim()) || declared || '其它';
+  if (Object.prototype.hasOwnProperty.call(map, id)) {
+    const c = String(map[id] == null ? '' : map[id]).trim();
+    return c || '其它';
+  }
+  return declared || '其它';
 }
 function allCategoriesWithUsage() {
   const comps = allComponents();
@@ -498,12 +524,17 @@ function allCategoriesWithUsage() {
   return { categories: declared.concat(auto), used };
 }
 function allComponents() {
+  /* ⚠️ 内置组件也必须走 effectiveCategory：用户可以在组件页把「规划前问卷」之类移到别的分类，
+     直接用它声明的 category 就是「在界面上改了、保存了、卡片下一次刷新又跳回去」。 */
   const list = BUILTIN_COMPONENTS.map(b => ({ ...b, builtin: true, removable: b.scope !== 'core', client: b.client || '', kind: 'feature',
-    category: b.category || (b.scope === 'core' ? '核心组件' : (b.scope === 'base' ? '基础功能组件' : '其它')) }));
+    category: effectiveCategory(b.id, b.category || (b.scope === 'core' ? '核心组件' : (b.scope === 'base' ? '基础功能组件' : '其它'))) }));
   for (const p of FILE_PLUGINS) {
     const kind = p.kind === 'theme' ? 'theme' : 'feature';
     let hasStyle = false;
-    try { hasStyle = fs.existsSync(path.join(PUBLIC_DIR, 'plugins', p.id + '.css')); } catch (e) {}
+    try {
+      hasStyle = fs.existsSync(path.join(PUBLIC_DIR, 'plugins', p.id + '.css'))
+        || fs.existsSync(path.join(USER_PUBLIC_PLUGIN_DIR, p.id + '.css'));
+    } catch (e) {}
     list.push({
       id: p.id, name: p.name || p.id, icon: p.icon || '✨', desc: p.desc || '',
       category: effectiveCategory(p.id, p.category || (kind === 'theme' ? '外观主题' : '其它')),
@@ -517,6 +548,130 @@ function allComponents() {
     });
   }
   return list.sort((a, b) => (a.order || 100) - (b.order || 100));
+}
+/* 组件的有效开关（core 永远 true；其余 settings > defaultEnabled） */
+function componentEnabled(id) {
+  const c = allComponents().find(x => x.id === id);
+  if (!c) return false;
+  if (c.scope === 'core') return true;
+  const map = componentSettings();
+  return map[id] != null ? !!map[id] : !!c.defaultEnabled;
+}
+/* 给 Agent 看的组件清单 */
+function agentComponentList() {
+  return allComponents().map(c => ({
+    id: c.id, name: c.name, icon: c.icon, desc: c.desc, category: c.category,
+    scope: c.scope, kind: c.kind, builtin: !!c.builtin, removable: !!c.removable,
+    defaultEnabled: !!c.defaultEnabled, goalToggle: c.goalToggle !== false,
+    version: c.version || '', author: c.author || '',
+    enabled: componentEnabled(c.id), canToggle: c.scope !== 'core'
+  }));
+}
+function agentDescribeComponent(id) {
+  const c = allComponents().find(x => x.id === id);
+  if (!c) return null;
+  return {
+    id: c.id, name: c.name, icon: c.icon, desc: c.desc, category: c.category,
+    scope: c.scope, kind: c.kind, builtin: !!c.builtin, removable: !!c.removable,
+    defaultEnabled: !!c.defaultEnabled, goalToggle: c.goalToggle !== false,
+    version: c.version || '', author: c.author || '', mode: c.mode || '',
+    enabled: componentEnabled(c.id), canToggle: c.scope !== 'core'
+  };
+}
+/* 全局组件开关（写，审计）；core 不可关；主题互斥 */
+function agentToggleComponent(id, enabled) {
+  const c = allComponents().find(x => x.id === id);
+  if (!c) { const e = new Error('组件不存在：' + id); e.code = 'not_found'; throw e; }
+  if (c.scope === 'core') { const e = new Error('核心组件不可关闭：' + id); e.code = 'forbidden'; throw e; }
+  setComponent(id, !!enabled);
+  if (c.kind === 'theme' && enabled) {
+    for (const other of allComponents()) {
+      if (other.id !== id && other.kind === 'theme') setComponent(other.id, false);
+    }
+  }
+  return { id: id, name: c.name, enabled: componentEnabled(id), settings: componentSettings() };
+}
+/* ===== 非核心组件自改：导出 / 校验 / 安装 / 卸载（命令与 HTTP 路由共用） ===== */
+function pipelineError(code, message) {
+  const e = new Error(message);
+  e.code = code;
+  return e;
+}
+function validateComponentBundle(bundle) {
+  return componentPipeline.validateBundle(bundle, { builtinIds: BUILTIN_COMPONENTS.map(function (b) { return b.id; }) });
+}
+function exportComponentBundle(cid) {
+  const comp = allComponents().find(function (c) { return c.id === cid; });
+  if (!comp) throw pipelineError('not_found', '组件不存在：' + cid);
+  if (comp.builtin) throw pipelineError('forbidden', '内置组件不可导出（核心/内置不可改）');
+  let server = '', client = '', style = '';
+  const readFirst = function (file) { try { return fs.readFileSync(file, 'utf8'); } catch (e) { return ''; } };
+  server = readFirst(path.join(PLUGIN_DIR, cid + '.js')) || readFirst(path.join(USER_PLUGIN_DIR, cid + '.js'));
+  client = readFirst(path.join(PUBLIC_DIR, 'plugins', cid + '.js')) || readFirst(path.join(USER_PUBLIC_PLUGIN_DIR, cid + '.js'));
+  style = readFirst(path.join(PUBLIC_DIR, 'plugins', cid + '.css')) || readFirst(path.join(USER_PUBLIC_PLUGIN_DIR, cid + '.css'));
+  return {
+    format: 'sierxing-component', formatVersion: 1,
+    id: comp.id, name: comp.name, icon: comp.icon, desc: comp.desc,
+    version: comp.version, author: comp.author, order: comp.order, kind: comp.kind,
+    goalToggle: comp.goalToggle, defaultEnabled: comp.defaultEnabled,
+    exportedAt: nowISO(), server: server, client: client, style: style
+  };
+}
+function installComponentBundle(bundle) {
+  const summary = validateComponentBundle(bundle);
+  const cid = summary.id;
+  /* 只装到数据目录（USER_PLUGIN_DIR / USER_PUBLIC_PLUGIN_DIR）：程序更新不会覆盖用户功能组件。
+     以前装在程序目录 server/plugins + public/plugins，升级时整目录被替换就丢了。 */
+  const serverPath = path.join(USER_PLUGIN_DIR, cid + '.js');
+  const clientPath = path.join(USER_PUBLIC_PLUGIN_DIR, cid + '.js');
+  const stylePath = path.join(USER_PUBLIC_PLUGIN_DIR, cid + '.css');
+  const paths = [serverPath, clientPath, stylePath];
+  const before = paths.map(function (f) { try { return fs.readFileSync(f, 'utf8'); } catch (e) { return null; } });
+  const fileExisted = before[0] != null;
+  try {
+    backup();
+    fs.mkdirSync(USER_PLUGIN_DIR, { recursive: true });
+    fs.mkdirSync(USER_PUBLIC_PLUGIN_DIR, { recursive: true });
+    fs.writeFileSync(serverPath, bundle.server);
+    if (bundle.client) {
+      fs.writeFileSync(clientPath, bundle.client);
+    } else {
+      try { fs.unlinkSync(clientPath); } catch (e) {}
+    }
+    if (typeof bundle.style === 'string' && bundle.style.trim()) {
+      fs.writeFileSync(stylePath, bundle.style);
+    } else {
+      try { fs.unlinkSync(stylePath); } catch (e) {}
+    }
+    const n = reloadPlugins();
+    const ok = FILE_PLUGINS.some(function (x) { return x.id === cid; });
+    if (!ok) throw new Error('组件已写入但加载失败，请检查服务端代码（查看服务日志）；已自动回滚旧文件');
+    return { id: cid, loaded: n, replaced: fileExisted, summary: summary };
+  } catch (e) {
+    /* 失败回滚：旧文件写回、新文件删除，再 reload 一次 */
+    for (let i = 0; i < paths.length; i++) {
+      try {
+        if (before[i] == null) { try { fs.unlinkSync(paths[i]); } catch (_) {} }
+        else { fs.mkdirSync(path.dirname(paths[i]), { recursive: true }); fs.writeFileSync(paths[i], before[i]); }
+      } catch (_) {}
+    }
+    try { reloadPlugins(); } catch (_) {}
+    throw e;
+  }
+}
+function uninstallComponentBundle(cid) {
+  if (BUILTIN_COMPONENTS.some(function (b) { return b.id === cid; })) throw pipelineError('forbidden', '内置组件不可卸载');
+  if (!FILE_PLUGINS.some(function (x) { return x.id === cid; })) throw pipelineError('not_found', '组件不存在：' + cid);
+  backup();
+  /* 数据目录 + 老版本的“程序目录安装”一起清：否则删掉用户版本后，旧的程序目录文件会重新冒出来 */
+  try { fs.unlinkSync(path.join(USER_PLUGIN_DIR, cid + '.js')); } catch (e) {}
+  try { fs.unlinkSync(path.join(USER_PUBLIC_PLUGIN_DIR, cid + '.js')); } catch (e) {}
+  try { fs.unlinkSync(path.join(USER_PUBLIC_PLUGIN_DIR, cid + '.css')); } catch (e) {}
+  try { fs.unlinkSync(path.join(PLUGIN_DIR, cid + '.js')); } catch (e) {}
+  try { fs.unlinkSync(path.join(PUBLIC_DIR, 'plugins', cid + '.js')); } catch (e) {}
+  try { fs.unlinkSync(path.join(PUBLIC_DIR, 'plugins', cid + '.css')); } catch (e) {}
+  reloadPlugins();
+  return { id: cid, removed: true };
 }
 function goalPlugins(goal) {
   const raw = (goal && goal.plugins) || '{}';
@@ -541,7 +696,8 @@ function pluginCtx() {
     db, nowISO, safeParse, sendJSON, readBody, getSetting, setSetting, backup,
     log: (...a) => console.log(...a),
     fs, path, os, spawn, APP_DIR, DATA_DIR, UPLOAD_DIR, PUBLIC_DIR,
-    getGoal, sourcesOf, aiText, aiTextFiles, currentModel, currentVisionModel, tasks
+    getGoal, sourcesOf, aiText, aiTextFiles, currentModel, currentVisionModel, tasks,
+    conditions: conditionsDomain
   };
 }
 (function migrate() {
@@ -549,6 +705,8 @@ function pluginCtx() {
   if (!cols.includes('artifact')) db.exec("ALTER TABLE nodes ADD COLUMN artifact TEXT NOT NULL DEFAULT '';");
   if (!cols.includes('acceptance')) db.exec("ALTER TABLE nodes ADD COLUMN acceptance TEXT NOT NULL DEFAULT '';");
   if (!cols.includes('hours')) db.exec("ALTER TABLE nodes ADD COLUMN hours TEXT NOT NULL DEFAULT '';");
+  /* 达成条件归属：这个节点主要服务哪条条件（0 = 未归属）。旧库/旧数据补 0，组件页会提示补归属。 */
+  if (!cols.includes('condition_id')) db.exec('ALTER TABLE nodes ADD COLUMN condition_id INTEGER NOT NULL DEFAULT 0;');
   /* 对话绑定节点（2026-10-15）：一个节点的对话要跟别的节点分开。
      以前所有对话都挂在目标上，右键 SKILL 节点打开的是 MCP 节点那轮对话的内容（用户实测）。
      node_id = 这条对话属于哪个节点（0 = 目标级对话）；
@@ -599,6 +757,9 @@ function pluginCtx() {
   const ccols = db.prepare('PRAGMA table_info(chats)').all().map(c => c.name);
   /* 本轮「它做了什么」（看了什么上下文、调了哪些工具）—— JSON 数组，见 streamChat */
   if (!ccols.includes('trace')) db.exec("ALTER TABLE chats ADD COLUMN trace TEXT NOT NULL DEFAULT '[]';");
+  /* 用户发过的图片（只存缩略图 data URL，用于刷新后还能看到自己发了什么；
+     发给 AI 的原图只存在于当次请求，不落库、不参与多端同步）。 */
+  if (!ccols.includes('images')) db.exec("ALTER TABLE chats ADD COLUMN images TEXT NOT NULL DEFAULT '[]';");
   if (!ccols.includes('session_id')) {
     db.exec("ALTER TABLE chats ADD COLUMN session_id INTEGER NOT NULL DEFAULT 0;");
     for (const row of db.prepare('SELECT DISTINCT goal_id FROM chats WHERE session_id = 0').all()) {
@@ -630,20 +791,103 @@ function pluginCtx() {
   } catch (e) {}
 })();
 
+/* 目标读取领域：实现已抽到 server/domains/goals.js；这里只做组装。 */
+const goalDomain = createGoalDomain({ db: db });
+const orderedLeaves = goalDomain.orderedLeaves;
+const goalWithStats = goalDomain.goalWithStats;
+const getGoal = goalDomain.getGoal;
+const roadmapOutline = goalDomain.roadmapOutline;
+
+/* 达成条件领域：实现已抽到 server/conditions.js；这里只做组装。
+   ⚠️ 必须在 reloadPlugins()（组件 init 会拿 pluginCtx）之前初始化 —— 组件页的 API 要用它。 */
+const conditionsDomain = createConditionsDomain({
+  db: db,
+  nowISO: nowISO,
+  safeParse: safeParse,
+  aiText: function () { return aiText.apply(null, arguments); },
+  currentModel: function () { return currentModel(); }
+});
+conditionsDomain.ensureSchema();
+
+/* 资料/提炼领域：实现已抽到 server/domains/sources.js；这里只做组装。 */
+const sourceDomain = createSourceDomain({ db: db, cleanText: cleanText, nowISO: nowISO });
+const sourcesOf = sourceDomain.sourcesOf;
+const digestsOf = sourceDomain.digestsOf;
+const digestBatches = sourceDomain.digestBatches;
+const buildLibraryMarkdown = sourceDomain.buildLibraryMarkdown;
+
 /* 加载组件（server/plugins/*.js）：init 建表 / 注册路由 */
 const PLUGIN_DIR = path.join(__dirname, 'plugins');
 function reloadPlugins() {
+  /* 两个目录：程序自带（server/plugins）+ 用户功能组件（DATA_DIR/plugins）。
+     用户组件只写数据目录，升级不会覆盖；同名时非核心组件允许被用户版本覆盖。 */
+  for (const dir of [PLUGIN_DIR, USER_PLUGIN_DIR]) {
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        if (!f.endsWith('.js') || f === 'index.js') continue;
+        try { delete require.cache[require.resolve(path.join(dir, f))]; } catch (e) {}
+      }
+    } catch (e) {}
+  }
+  const builtinList = loadPlugins(PLUGIN_DIR, pluginCtx());
+  let userList = [];
   try {
-    for (const f of fs.readdirSync(PLUGIN_DIR)) {
-      if (!f.endsWith('.js')) continue;
-      try { delete require.cache[require.resolve(path.join(PLUGIN_DIR, f))]; } catch (e) {}
+    if (fs.existsSync(USER_PLUGIN_DIR)) userList = loadPlugins(USER_PLUGIN_DIR, pluginCtx()) || [];
+  } catch (e) { console.error('[plugin] 用户功能组件加载失败：' + ((e && e.message) || e)); }
+  const byId = new Map();
+  for (const p of builtinList) byId.set(p.id, p);
+  let userCount = 0, shadowed = 0;
+  for (const p of userList) {
+    if (!p || !p.id) continue;
+    const coreIds = BUILTIN_COMPONENTS.map(function (b) { return b.id; });
+    if (byId.has(p.id) && coreIds.indexOf(p.id) >= 0) {
+      console.warn('[plugin] 用户组件与核心/基础组件重名，已跳过：' + p.id + '（请换一个 id）');
+      continue;
     }
-  } catch (e) {}
-  FILE_PLUGINS = loadPlugins(PLUGIN_DIR, pluginCtx());
+    if (byId.has(p.id)) shadowed++;
+    try { Object.defineProperty(p, 'builtin', { value: false, writable: true, configurable: true, enumerable: true }); }
+    catch (e) { try { p.builtin = false; } catch (e2) {} }
+    byId.set(p.id, p);
+    userCount++;
+  }
+  FILE_PLUGINS = Array.from(byId.values());
+  FILE_PLUGINS.sort(function (a, b) {
+    return (Number(a.order) || 100) - (Number(b.order) || 100) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  });
+  if (userCount || shadowed) console.log('[plugin] 用户功能组件 ' + userCount + ' 个' + (shadowed ? '（覆盖同名程序组件 ' + shadowed + ' 个）' : ''));
   PLUGINS = FILE_PLUGINS;
+  /* 升级差异（P3）：每次重载都更新内存里的插件增删；快照只在启动时落盘 */
+  try {
+    if (kernelConfig) kernelConfig.checkUpgrade(FILE_PLUGINS.map(function (p) { return p.id; }));
+  } catch (e) {}
   return FILE_PLUGINS.length;
 }
 reloadPlugins();
+/* 首次启动：把本次的内置配置键 / 插件 id 记成快照，下次升级即可对比出「多了什么、少了什么」 */
+try {
+  if (kernelConfig) kernelConfig.writeSnapshot(FILE_PLUGINS.map(function (p) { return p.id; }));
+} catch (e) { console.log('[config] 写升级快照失败：' + e.message); }
+/* 创造模式（仿 DSH Creator preset）：对话生成 UI 页面插件 / 皮肤 / 功能组件，
+   服务端校验 + 暂存，用户点「安装并查看」才真正落盘（只写数据目录，装前快照、可回滚）。 */
+const createMode = createCreateMode({
+  db: db,
+  dataDir: DATA_DIR,
+  uiDir: path.join(DATA_DIR, 'ui-plugins'),
+  uiPlugins: uiPlugins,
+  styleCssPath: path.join(PUBLIC_DIR, 'style.css'),
+  installComponent: installComponentBundle,
+  uninstallComponent: uninstallComponentBundle,
+  exportComponent: exportComponentBundle,
+  validateComponent: function (bundle) {
+    const dupe = (PLUGINS || []).find(function (p) { return p.id === bundle.id; });
+    if (dupe && dupe.builtin !== false) {
+      throw pipelineError('forbidden', '已经有同名内置组件「' + bundle.id + '」，换一个 id');
+    }
+    return validateComponentBundle(bundle);
+  },
+  reloadPlugins: reloadPlugins,
+  log: function () { console.log.apply(console, arguments); }
+});
 /* 一次性回填：老目标缺的按目标开关 key，按当前有效值补齐（之后全局拨动不再串到已有目标） */
 (function backfillGoalPlugins() {
   try {
@@ -680,15 +924,56 @@ function getSetting(k, d) {
 function setSetting(k, v) {
   db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(k, String(v));
 }
-function backup() {
-  try { if (sync) sync.schedulePush('数据变更'); } catch (e) {}
-  // 注：数据库用 DELETE journal 模式（单文件，无 WAL 旁文件），
-  // 历史上 WAL 旁文件曾被外部删掉导致读写分裂，已不再用 WAL。
+
+/* ---------- 界面语言（i18n） ----------
+   语言包在 language/locales/（内置：zh-CN / en-US）+ DATA_DIR/language/（AI 生成）。
+   ⚠️ 这里创建得比较早（serveStatic 注入 index.html 时会用），不要把它挪到插件加载之后。 */
+const language = createLanguage({
+  appDir: APP_DIR,
+  dataDir: DATA_DIR,
+  getSetting: (k, d) => getSetting(k, d),
+  setSetting: (k, v) => setSetting(k, v),
+  log: (...a) => console.log(...a)
+});
+const languageGenerator = createLanguageGenerator({
+  language: language,
+  aiText: (prompt, o) => ai.text(Object.assign({ prompt: prompt, model: currentModel() }, o || {})),
+  log: (...a) => console.log(...a)
+});
+
+/** 把语言配置/字典/i18n.js 注入入口 HTML（字典在 app.js 之前同步加载） */
+function injectLanguageHtml(html, req) {
   try {
-    fs.copyFileSync(DB_PATH, path.join(BACKUP_DIR, `sierxing-${stamp()}.db`));
-    pruneBackups();
-  } catch (e) { console.error('备份失败:', e.message); }
+    const accept = req && req.headers ? req.headers['accept-language'] : '';
+    const code = language.active(accept);
+    const pack = language.pack(code) || language.pack('zh-CN');
+    const meta = (pack && pack.meta) || {};
+    const title = meta.documentTitle || (APP_NAME + ':您的目标规划助手');
+    const desc = meta.documentDescription || '';
+    html = html.replace(/<html\b[^>]*>/, '<html lang="' + language.escHtml(code) + '"' + (meta.rtl ? ' dir="rtl"' : '') + '>');
+    html = html.replace(/<title>[\s\S]*?<\/title>/, '<title>' + language.escHtml(title) + '</title>');
+    if (desc) {
+      html = html.replace(/<meta name="description" content="[^"]*">/,
+        '<meta name="description" content="' + language.escHtml(desc) + '">');
+    }
+    const tags = [
+      '<script>' + language.cfgJs(code, ASSET_V) + '</script>',
+      '<script src="/api/language/pack.js?code=' + encodeURIComponent(code) + '&v=' + encodeURIComponent(ASSET_V) + '"></script>',
+      '<script src="/i18n.js"></script>'
+    ].join('\n  ');
+    if (html.indexOf('<script src="/i18n.js"></script>') >= 0) {
+      html = html.replace('<script src="/i18n.js"></script>', tags);
+    } else {
+      /* 兜底：入口页里没留占位时，插在 sdk.js 前面 */
+      html = html.replace('<script src="/sdk.js">', tags + '\n  <script src="/sdk.js">');
+    }
+    return html;
+  } catch (e) {
+    console.warn('[language] 注入语言包失败，回退默认：', (e && e.message) || e);
+    return html;
+  }
 }
+
 function sendJSON(res, code, obj) {
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(obj));
@@ -710,42 +995,59 @@ function readBody(req) {
 }
 
 /* ===== 目标与节点 ===== */
-function orderedLeaves(goalId) {
-  const nodes = db.prepare('SELECT id, parent_id, title, status, sort_order FROM nodes WHERE goal_id = ?').all(goalId);
-  const childrenOf = {};
-  for (const n of nodes) (childrenOf[n.parent_id == null ? 'root' : n.parent_id] = childrenOf[n.parent_id == null ? 'root' : n.parent_id] || []).push(n);
-  const sortFn = (a, b) => (a.sort_order - b.sort_order) || (a.id - b.id);
-  const out = [];
-  const walk = key => {
-    for (const k of (childrenOf[key] || []).sort(sortFn)) {
-      const kids = childrenOf[k.id] || [];
-      if (!kids.length) out.push(k);
-      else walk(k.id);
-    }
-  };
-  walk('root');
-  return out;
-}
-function goalWithStats(g) {
-  const leaves = orderedLeaves(g.id);
-  const t = leaves.length;
-  const d = leaves.filter(n => n.status === 'done').length;
-  const next = leaves.find(n => n.status === 'doing') || leaves.find(n => n.status !== 'done');
-  let nextPath = '';
-  if (next && next.parent_id) {
-    const sub = db.prepare('SELECT title, parent_id FROM nodes WHERE id = ?').get(next.parent_id);
-    const stage = sub && sub.parent_id ? db.prepare('SELECT title FROM nodes WHERE id = ?').get(sub.parent_id) : null;
-    nextPath = [stage && stage.title, sub && sub.title].filter(Boolean).join(' / ');
-  }
-  return { ...g, tasks_total: t, tasks_done: d, next_task: next ? next.title : '', next_task_id: next ? next.id : null, next_task_status: next ? next.status : '', next_path: nextPath };
-}
-function getGoal(id) {
-  const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(id);
-  if (!g) return null;
-  const nodes = db.prepare('SELECT * FROM nodes WHERE goal_id = ? ORDER BY level ASC, sort_order ASC, id ASC').all(id);
-  const tutorials = db.prepare('SELECT id, node_id, title, format, created_at FROM tutorials WHERE goal_id = ? ORDER BY id DESC').all(id);
-  return { ...goalWithStats(g), nodes, tutorials };
-}
+
+/* 提示词包：没有用户覆盖时 render 走 builtinRender（行为与重构前一致） */
+const promptPacks = createPromptRegistry({ db, nowISO });
+/* 规划主流程也注册成可编辑包：默认仍调用原函数，覆盖后才走模板 */
+const planPacks = require('./prompts/plan-packs');
+planPacks['plan.clarify'].builtinRender = async function (ctx) { return buildClarifyPrompt(ctx.goal); };
+planPacks['plan.skeleton'].builtinRender = async function (ctx) { return buildSkeletonPrompt(ctx.goal); };
+promptPacks.register(planPacks['plan.clarify']);
+promptPacks.register(planPacks['plan.skeleton']);
+/* 资料类：搜集方案 / 书单 / 清洗，默认仍调用原函数 */
+const sourcePacks = require('./prompts/sources-packs');
+sourcePacks['sources.collect_plan'].builtinRender = function (ctx) { return buildCollectPlanPrompt(ctx.goal); };
+sourcePacks['sources.ebook_recommend'].builtinRender = function (ctx) { return buildEbookRecommendPrompt(ctx.goal); };
+sourcePacks['sources.clean'].builtinRender = function (ctx) { return textClean.buildCleanPrompt(ctx.title, ctx.goalTitle, ctx.text); };
+promptPacks.register(sourcePacks['sources.collect_plan']);
+promptPacks.register(sourcePacks['sources.ebook_recommend']);
+promptPacks.register(sourcePacks['sources.clean']);
+/* 教程生成：默认仍调用 buildTutorialPrompt */
+const tutorialPacks = require('./prompts/tutorial-packs');
+tutorialPacks['tutorial.generate'].builtinRender = function (ctx) {
+  return buildTutorialPrompt(ctx.goal, ctx.node, ctx.format, ctx.note, ctx.codeBlock, ctx.budget);
+};
+promptPacks.register(tutorialPacks['tutorial.generate']);
+/* 命令总线：UI / CLI / Agent 共用的能力入口。
+   read 直接执行；write 执行并审计；destructive/admin 必须带用户批准的 approvalId。 */
+const commandBus = require('./commands')({
+  db,
+  getGoal,
+  goalWithStats,
+  nowISO,
+  promptPacks,
+  getSetting,
+  setSetting,
+  backup,
+  deleteGoal: deleteGoalData,
+  deleteNode: deleteNodeData,
+  listComponents: agentComponentList,
+  describeComponent: agentDescribeComponent,
+  toggleComponent: agentToggleComponent,
+  exportComponent: exportComponentBundle,
+  validateComponent: validateComponentBundle,
+  installComponent: installComponentBundle,
+  uninstallComponent: uninstallComponentBundle,
+  recordGoalChange: recordGoalFieldEvents,
+  onSourceChanged: onSourceChanged,
+  openApp: function (route) { return service.openBrowser(route); },
+  startTutorialGeneration: startTutorialGeneration,
+  startTutorialEdit: startTutorialEditTask,
+  startSourceCollect: startSourceCollect,
+  startSourceDigest: startSourceDigest,
+  startGoalPlan: startGoalPlan,
+  version: require('../package.json').version
+});
 function normalizeSources(arr) {
   if (!Array.isArray(arr)) return '[]';
   const out = [];
@@ -772,10 +1074,19 @@ function normalizeSources(arr) {
 function insertNode(goalId, parentId, level, title, detail, sources, sortOrder, extra) {
   const t = nowISO();
   const ex = extra || {};
-  db.prepare('INSERT INTO nodes (goal_id, parent_id, level, title, detail, artifact, acceptance, hours, sources, status, sort_order, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+  /* 条件归属：显式给了就用；否则继承父节点 —— 这样「小目标下加任务 / AI 细化任务 /
+     对话里加子节点」都不用每条路径各写一遍，任务自动跟着小目标。 */
+  let conditionId = Number(ex.condition_id) || 0;
+  if (!conditionId && parentId) {
+    try {
+      const p = db.prepare('SELECT condition_id FROM nodes WHERE id = ?').get(Number(parentId));
+      conditionId = Number(p && p.condition_id) || 0;
+    } catch (e) {}
+  }
+  db.prepare('INSERT INTO nodes (goal_id, parent_id, level, title, detail, artifact, acceptance, hours, sources, status, condition_id, sort_order, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
     .run(goalId, parentId || null, level, String(title || '').trim().slice(0, 200), String(detail || '').trim().slice(0, 2000),
       String(ex.artifact || '').trim().slice(0, 500), String(ex.acceptance || '').trim().slice(0, 500), String(ex.hours || '').trim().slice(0, 50),
-      normalizeSources(sources), 'todo', sortOrder || 0, t, t);
+      normalizeSources(sources), 'todo', conditionId, sortOrder || 0, t, t);
   /* 建节点即建目录：一个节点对应一个文件夹，子目录嵌在父目录下（失败只记日志，不影响建节点） */
   try {
     const nid = db.prepare('SELECT last_insert_rowid() AS id').get().id;
@@ -788,6 +1099,52 @@ function deleteNodeTree(id) {
   db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
   /* 节点删除时同步删掉目录映射（磁盘文件保留，避免误删代码） */
   try { db.prepare('DELETE FROM node_workspaces WHERE node_id = ?').run(id); } catch (e) {}
+}
+/* 删除一个目标的全部主表数据 + 插件清理；HTTP 路由与命令总线共用。
+   destructive 命令必须用户批准后才会走到这里。 */
+/* 记录目标字段变更（本地表 goal_field_events）：goal_drift 的唯一证据来源。
+   三个写入口都调它：HTTP PUT、Agent 命令、对话 ops 的 update_goal。 */
+/* 资料变更后：重建检索索引；删除时顺手清掉该资料的切片。命令与 HTTP 路由共用。 */
+function onSourceChanged(goalId, action, sourceId) {
+  try { if (action === 'delete' && sourceId) rag.dropSource(sourceId); } catch (e) {}
+  try { rag.autoIndex(goalId); } catch (e) {}
+}
+function recordGoalFieldEvents(goalId, before, after, source) {
+  try {
+    const fields = ['title', 'profile', 'weekly_hours', 'deadline', 'materials'];
+    const at = nowISO();
+    const stmt = db.prepare('INSERT INTO goal_field_events (goal_id, field, old_value, new_value, source, created_at) VALUES (?,?,?,?,?,?)');
+    for (const f of fields) {
+      const a = before && before[f] != null ? String(before[f]) : '';
+      const b = after && after[f] != null ? String(after[f]) : '';
+      if (a !== b) stmt.run(goalId, f, a.slice(0, 500), b.slice(0, 500), String(source || '').slice(0, 40), at);
+    }
+  } catch (e) {}
+}
+function deleteGoalData(id) {
+  db.prepare('DELETE FROM nodes WHERE goal_id = ?').run(id);
+  db.prepare('DELETE FROM sources WHERE goal_id = ?').run(id);
+  db.prepare('DELETE FROM code_repo_files WHERE goal_id = ?').run(id);
+  try { rag.dropGoal(id); } catch (e) { console.error('[rag] dropGoal 失败:', e.message); }
+  db.prepare('DELETE FROM goals WHERE id = ?').run(id);
+  db.prepare('DELETE FROM goal_versions WHERE goal_id = ?').run(id);
+  db.prepare('DELETE FROM tutorials WHERE goal_id = ?').run(id);
+  db.prepare('DELETE FROM chats WHERE goal_id = ?').run(id);
+  db.prepare('DELETE FROM chat_sessions WHERE goal_id = ?').run(id);
+  for (const pl of PLUGINS) { try { if (typeof pl.onGoalDelete === 'function') pl.onGoalDelete(id, pluginCtx()); } catch (e) { console.error('[plugin]', pl.id, '清理失败:', e.message); } }
+  backup();
+}
+/* 删除节点树 + 版本快照；HTTP 路由与命令总线共用。找不到节点返回 null。 */
+async function deleteNodeData(id) {
+  const n = db.prepare('SELECT * FROM nodes WHERE id = ?').get(id);
+  if (!n) return null;
+  const goalRow = db.prepare('SELECT * FROM goals WHERE id = ?').get(n.goal_id);
+  const vidDel = beginVersion(n.goal_id, '手动删除：' + n.title);
+  deleteNodeTree(id);
+  db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), n.goal_id);
+  if (vidDel && goalRow) await finishVersion(goalRow, vidDel, '手动删除：' + n.title, false);
+  backup();
+  return { node: n, goal: getGoal(n.goal_id) };
 }
 
 /* ===== 信息源获取（必应搜索 + 页面抓取） ===== */
@@ -1156,7 +1513,10 @@ function buildCollectPlanPrompt(goal) {
   return L.join('\n');
 }
 async function recommendCollectPlan(goal, timeoutMs, signal) {
-  const txt = await aiText(buildCollectPlanPrompt(goal), currentModel(), timeoutMs || 120000, null, signal || null, '资料收集');
+  const collectPrompt = promptPacks.hasOverride('sources.collect_plan')
+    ? await promptPacks.renderAsync('sources.collect_plan', { goal: goal, goalHeader: goalHeader(goal) })
+    : buildCollectPlanPrompt(goal);
+  const txt = await aiText(collectPrompt, currentModel(), timeoutMs || 120000, null, signal || null, '资料收集');
   let arr = extractJSON(txt);
   if (!Array.isArray(arr)) {
     const m = String(txt || '').match(/\[[\s\S]*\]/);
@@ -1200,7 +1560,10 @@ function buildEbookRecommendPrompt(goal) {
   return L.join('\n');
 }
 async function recommendEbooks(goal, timeoutMs, signal) {
-  const txt = await aiText(buildEbookRecommendPrompt(goal), currentModel(), timeoutMs || 120000, null, signal || null, '电子书推荐');
+  const ebookPrompt = promptPacks.hasOverride('sources.ebook_recommend')
+    ? await promptPacks.renderAsync('sources.ebook_recommend', { goal: goal, goalHeader: goalHeader(goal) })
+    : buildEbookRecommendPrompt(goal);
+  const txt = await aiText(ebookPrompt, currentModel(), timeoutMs || 120000, null, signal || null, '电子书推荐');
   let arr = extractJSON(txt);
   if (!Array.isArray(arr)) {
     const m = String(txt || '').match(/\[[\s\S]*\]/);
@@ -1638,138 +2001,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS source_digests (
   sources_count INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );`);
-function digestsOf(goalId) {
-  return db.prepare('SELECT * FROM source_digests WHERE goal_id = ? ORDER BY id').all(goalId);
-}
-function sourcesOf(goalId) {
-  // 用户自己提供的资料（图片 / 电子书…）排在最前，其次才是检索到的网络信息源
-  return db.prepare("SELECT * FROM sources WHERE goal_id = ? ORDER BY quality DESC, CASE WHEN site = '用户提供的图片' OR site = '用户提供的电子书' OR site = '待找书单' OR kind = 'JD' THEN 0 ELSE 1 END, id").all(goalId);
-}
-
-/* ===== AI 规划 ===== */
-/* ---------- 资料提炼：把全部资料分批喂给 AI，再汇总成多篇主题 MD ---------- */
-function digestBatches(goal) {
-  const all = sourcesOf(goal.id);
-  const own = all.filter(x => x.site === '用户提供的图片' || x.site === '用户提供的电子书' || x.site === '待找书单' || x.site === '导入的资料');
-  const net = all.filter(x => !(x.site === '用户提供的图片' || x.site === '用户提供的电子书' || x.site === '待找书单' || x.site === '导入的资料'));
-  // 用户自己提供的资料全文（最多 4000 字/条）；网络资料 900 字/条
-  const ownCap = 6000, netCap = 3000;   // 用户提供的资料几乎读全文；网络资料 3000 字（覆盖绝大多数）
-  const starred = all.filter(x => Number(x.quality) === 1);
-  const items = starred.map(x => {
-    const full = cleanText(x.content || x.snippet || '');
-    return { label: `[★优质信息源｜${x.kind}] ${x.title}`, body: full.slice(0, 8000) + (full.length > 8000 ? `\n（本条共 ${full.length} 字，此处截取前 8000 字）` : '') };
-  }).concat(own.map(x => {
-    const full = cleanText(x.content || x.snippet || '');
-    return { label: `[用户资料｜${x.kind}] ${x.title}`, body: full.slice(0, ownCap) + (full.length > ownCap ? `\n（本条共 ${full.length} 字，此处截取前 ${ownCap} 字）` : '') };
-  })).concat(net.map(x => {
-    const full = cleanText(x.content || x.snippet || '');
-    return { label: `[${x.site}｜${x.kind}] ${x.title}`, body: full.slice(0, netCap) + (full.length > netCap ? `\n（本条共 ${full.length} 字，此处截取前 ${netCap} 字）` : '') };
-  }));
-  const batches = [];
-  let cur = [], curLen = 0;
-  const LIMIT = 16000;
-  for (const it of items) {
-    const len = it.label.length + it.body.length + 8;
-    if (cur.length && curLen + len > LIMIT) { batches.push(cur); cur = []; curLen = 0; }
-    cur.push(it); curLen += len;
-  }
-  if (cur.length) batches.push(cur);
-  return { batches, ownCount: own.length, netCount: net.length, total: items.length };
-}
-function digestBatchPrompt(batch, idx, total) {
-  const lines = [];
-  lines.push(`你是资料提炼助手。下面是用户目标的资料（第 ${idx}/${total} 批）。`);
-  lines.push('请把其中**对目标规划有价值的信息完整提取出来，宁多勿漏**：');
-  lines.push('- tech：技术栈、技能、框架、语言、工具（逐条列出，保留原文的具体名词与限定词）');
-  lines.push('- hard：硬性条件（学历 / 年限 / 到岗天数 / 证书 / 前置知识 / 地点等）');
-  lines.push('- duties：职责与工作内容、项目类型、业务方向');
-  lines.push('- roadmap：学习路线、知识体系、章节模块与顺序');
-  lines.push('- interview：面试重点、高频考点、面经结论');
-  lines.push('- resources：书 / 课程 / 网站 / 工具 / 证书等具体资源名');
-  lines.push('- timeline：时间节点、流程（投递 / 面试轮次 / 截止时间）');
-  lines.push('- other：其它对规划有用的结论');
-  lines.push('只输出一个 JSON 对象，键为上面这些英文名，值为字符串数组；不要遗漏具体名词。');
-  lines.push('');
-  lines.push('【资料开始】');
-  for (const it of batch) { lines.push('## ' + it.label); lines.push(it.body); }
-  lines.push('【资料结束】');
-  return lines.join('\n');
-}
-function digestSynthesisPrompt(parts, meta) {
-  const lines = [];
-  lines.push('下面是同一目标的资料提炼结果（多批汇总，来自用户提供的图片资料与网络检索资料）。');
-  lines.push(`共处理 ${meta.total} 条资料（用户自己提供 ${meta.ownCount} 条、网络检索 ${meta.netCount} 条）。`);
-  lines.push('请整理成若干篇「主题汇总」Markdown 文档，用于指导后续的目标规划。');
-  lines.push('');
-  lines.push('【要求】');
-  lines.push('1. 按主题拆分（例如：岗位要求与技术栈 / 学习路线与知识体系 / 面试重点与高频考点 / 项目与作品 / 硬性条件与时间安排 / 资源与工具 …），篇数按内容多少决定（3-8 篇），不要硬凑。');
-  lines.push('2. 内容要具体、可执行：保留具体技术名 / 工具名 / 公司 / 证书 / 书名 / 课程名；合并去重；对出现频次高的（更重要的）要求标注「高频」或按重要性排序。');
-  lines.push('3. 技术栈那一篇要**逐项列全**，并标注每项在资料里体现的要求程度（必须掌握 / 加分项 / 了解即可）。');
-  lines.push('4. 只输出一个 JSON 对象：{"digests":[{"topic":"主题","title":"标题","content_md":"# 标题\n\n正文…"}]}');
-  lines.push('5. content_md 用 Markdown（列表 / 表格都行），每篇 400-1500 字，不要写空话。');
-  lines.push('');
-  lines.push('【各批提炼结果】');
-  for (const p of parts) lines.push('### 第 ' + p.idx + ' 批\n' + JSON.stringify(p.data));
-  return lines.join('\n');
-}
-/* 资源库整库导出：提炼汇总 + 全部资料（Markdown，便于分享） */
-function buildLibraryMarkdown(goal) {
-  const digests = digestsOf(goal.id);
-  const all = sourcesOf(goal.id);
-  const own = all.filter(x => x.site === '用户提供的图片' || x.site === '用户提供的电子书' || x.site === '待找书单' || x.site === '导入的资料');
-  const net = all.filter(x => !(x.site === '用户提供的图片' || x.site === '用户提供的电子书' || x.site === '待找书单' || x.site === '导入的资料'));
-  const L = [];
-  L.push('# 资源库：' + goal.title);
-  L.push('');
-  L.push('> 导出时间：' + nowISO() + '　·　资料 ' + all.length + ' 条（自己提供 ' + own.length + ' / 网络检索 ' + net.length + '）　·　提炼汇总 ' + digests.length + ' 篇');
-  L.push('');
-  if (digests.length) {
-    L.push('## 一、提炼汇总（规划的主要依据）');
-    L.push('');
-    for (const d of digests) {
-      L.push('### ' + (d.title || d.topic));
-      L.push('');
-      L.push(String(d.content || ''));
-      L.push('');
-      L.push('---');
-      L.push('');
-    }
-  }
-  const section = (title, list) => {
-    if (!list.length) return;
-    L.push('## ' + title);
-    L.push('');
-    for (const x of list) {
-      L.push('### [' + x.kind + '] ' + x.title);
-      L.push('');
-      const meta = [];
-      if (x.site) meta.push('来源：' + x.site);
-      if (x.url) meta.push('链接：' + x.url);
-      if (x.published_at) meta.push('时间：' + x.published_at);
-      if (meta.length) { L.push('*' + meta.join('　·　') + '*'); L.push(''); }
-      const full = cleanText(x.content || x.snippet || '（无正文）');
-      const cap = (x.site === '用户提供的图片' || x.site === '用户提供的电子书' || x.site === '导入的资料') ? 20000 : 4000;
-      L.push(full.slice(0, cap) + (full.length > cap ? `\n\n> （本条共 ${full.length} 字，此处截取前 ${cap} 字）` : ''));
-      L.push('');
-      L.push('---');
-      L.push('');
-    }
-  };
-  section('二、你自己提供的资料（最高优先级）', own);
-  section('三、网络检索资料', net);
-  return L.join('\n');
-}
-function digestsBlock(goal) {
-  const list = digestsOf(goal.id);
-  if (!list.length) return '';
-  const lines = ['', '【资料提炼汇总（已通读用户全部资料后整理，规划必须以此为主要依据，优先级高于下面的原始资料）】'];
-  for (const d of list) {
-    lines.push('');
-    lines.push('### ' + (d.title || d.topic));
-    lines.push(String(d.content || '').slice(0, 4000));
-  }
-  return lines.join('\n');
-}
+function digestsBlock(goal) { return promptContext.digestsBlockFrom(digestsOf(goal.id)); }
 /* ---------- 节点级资料：每个节点有自己的资料，做节点级规划时只看这一份 ---------- */
 /* 把 AI 写的依据名（可能带前缀/类型）匹配到资料库里的真实条目 */
 function findSourceByRef(goalId, rawName) {
@@ -1831,16 +2063,7 @@ function nodeSourceItems(goal, node) {
   } catch (e) { console.log('[node-folders] 规划提示词组装失败:', e.message); }
   return out;
 }
-function nodeSourcesBlock(goal, node, maxLen) {
-  const items = nodeSourceItems(goal, node);
-  if (!items.length) return '';
-  const lines = ['', '【本节点对应的资料（只依据这些做本节点的规划/拆分/教程，不要去读其它节点的资料）】'];
-  for (const it of items.slice(0, 12)) {
-    const body = String(it.body || '').replace(/\s+/g, ' ').slice(0, maxLen || 900);
-    lines.push('- ' + it.label + (body ? '：' + body : ''));
-  }
-  return lines.join('\n');
-}
+function nodeSourcesBlock(goal, node, maxLen) { return promptContext.nodeSourcesBlockFrom(nodeSourceItems(goal, node), maxLen); }
 /* 其它资料的索引（只给标题，避免把全部正文塞进节点级提示词） */
 /* 资料索引：给模型"有什么可依据"的全景。
    ⚠️ 原来是 all.slice(0, maxTitles) —— 只列**最靠前的 N 条**。
@@ -1849,35 +2072,7 @@ function nodeSourcesBlock(goal, node, maxLen) {
    "这个节点为什么存在"就说不清楚了（线上就这么发生的）。
    改成：**按类别分组、尽量全量列标题**（标题很短，290 条约 1.2 万字，比正文省得多），
    并用字符预算兜底；「自己提供」的排最前并标出来（优先级最高）。 */
-function sourcesIndexBlock(goal, maxTitles, scopeNote, charBudget) {
-  const all = sourcesOf(goal.id);
-  if (!all.length) return '';
-  const budget = charBudget || 14000;
-  const isOwn = x => /用户提供|导入的资料|导入的代码库|待找书单/.test(String(x.site || ''));
-  const own = all.filter(isOwn), net = all.filter(x => !isOwn(x));
-  const head = scopeNote || ('【资料库索引（共 ' + all.length + ' 条：自己提供 ' + own.length
-    + ' / 网络检索 ' + net.length + '）—— 下面是全部条目的标题，规划时请从中挑与该节点最相关的多条作为依据，不要只挑 1 条】');
-  const lines = ['', head];
-  let used = head.length;
-  const push = (x, tag) => {
-    const line = '- ' + (Number(x.quality) === 1 ? '★' : '') + tag + '[' + x.site + '｜' + x.kind + '] ' + x.title;
-    if (used + line.length > budget) return false;
-    lines.push(line); used += line.length; return true;
-  };
-  let n = 0;
-  const cap = maxTitles || 400;
-  for (const x of own) { if (n++ >= cap || !push(x, '【自己提供】')) break; }
-  if (own.length) { lines.push(''); used += 1; }
-  const byKind = {};
-  for (const x of net) (byKind[x.kind || '其它'] = byKind[x.kind || '其它'] || []).push(x);
-  for (const k of Object.keys(byKind).sort((a, b) => byKind[b].length - byKind[a].length)) {
-    if (used > budget) break;
-    lines.push('▸ ' + k + '（' + byKind[k].length + '）'); used += k.length + 8;
-    for (const x of byKind[k]) { if (n++ >= cap || !push(x, '')) break; }
-  }
-  if (used > budget) lines.push('…（索引已按体积截断；需要更多时用检索结果）');
-  return lines.join('\n');
-}
+function sourcesIndexBlock(goal, maxTitles, scopeNote, charBudget) { return promptContext.sourcesIndexBlockFrom(sourcesOf(goal.id), maxTitles, scopeNote, charBudget); }
 /* 对话助理的资料库清单：和「节点级规划」的视角不同 —— 用户常问「资料库里有没有 /
    能不能看到 XX」，所以「自己提供 + 导入的代码库」必须排前面完整列出（代码库的
    摘要正文就在条目里），不能按 id 截前 N 条把代码库挤没；网络资料只列标题，
@@ -1958,56 +2153,9 @@ function siblingScopeBlock(goal, node) {
       .all(goal.id, node.parent_id || 0, node.id);
   } catch (e) { sibs = []; }
   sibs = sibs.map(s => String(s.title || '').trim().slice(0, 40)).filter(Boolean);
-  const lines = [];
-  lines.push('');
-  lines.push('【本节范围（必须遵守，否则视为不合格）】');
-  lines.push('1. 只写与上面【教程主题】直接相关的知识点；其它章节的内容一律不写、不展开、不举例——即使下面的背景资料里提到，也不行。');
-  lines.push('2. 可以一句话点名前置知识（如“需要先懂变量”），但不展开讲解。');
-  lines.push('3. 例外：只有【用户的额外要求】明确点名要加别的内容时，才允许超出本节范围。');
-  if (sibs.length) {
-    lines.push('4. 别的章节排除清单（出现以下任一主题的成段讲解即不合格）：' + sibs.map(t => '「' + t + '」').join('、'));
-  }
-  return lines.join('\n');
+  return promptContext.siblingScopeBlockFrom(sibs);
 }
-function sourcesBlock(goal, maxItems, maxLen) {
-  const all = sourcesOf(goal.id);
-  if (!all.length) return '\n【注意】本次没有检索到网络信息源，请仅依据公开公认的岗位要求与学习路径规划，并在 sources 中注明依据，不确定处标注「待核实」。';
-  // 用户自己提供的图片资料（JD / 大纲 / 笔记…）是最高优先级的一手信息
-  const starred = all.filter(s => Number(s.quality) === 1);
-  const own = all.filter(s => Number(s.quality) !== 1 && (s.site === '用户提供的图片' || s.site === '导入的资料'));
-  const net = all.filter(s => Number(s.quality) !== 1 && !(s.site === '用户提供的图片' || s.site === '导入的资料'));
-  const fmt = (s, len) => {
-    const full = cleanText(s.content || s.snippet || '');
-    const body = full.replace(/\n+/g, ' ').slice(0, len);
-    return `- [${s.site}｜${s.kind}] ${s.title}${body ? '：' + body + (full.length > len ? '…' : '') : ''}`;
-  };
-  const lines = [''];
-    lines.push(`（说明：本目标共收集 ${all.length} 条资料——其中优质信息源 ${starred.length} 条、用户自己提供 ${own.length} 条、网络检索 ${net.length} 条；下面是与你目标最相关的部分，其余资料的结论已由「提炼汇总」概括。）`);
-  if (starred.length) {
-    lines.push('【★优质信息源（用户亲自标注，最高优先级——规划必须重点依据）】');
-    lines.push('要求：① 这些是用户认可的高质量参考，知识体系 / 技术栈 / 学习顺序要优先对齐它们；');
-    lines.push('   ② 在 sources 中引用时写明「优质信息源：<标题>」；③ 与其它资料冲突时以优质信息源为准。');
-    for (const s of starred.slice(0, 20)) lines.push('★ ' + fmt(s, Math.max(maxLen, 700)).replace(/^- /, ''));
-  }
-  if (own.length) {
-    lines.push('【用户自己提供的资料（★最高优先级：用户真实场景的一手信息，必须严格依据）】');
-    lines.push('要求：① 其中的硬性条件（学历 / 到岗天数 / 技能要求 / 时间节点 / 知识范围等）必须原样满足，不得忽略或改写；');
-    lines.push('② 规划要与这些资料高度对齐：按真实 JD 的要求与优先级安排重点，按大纲/笔记的章节顺序组织学习路径；');
-    lines.push('③ 若下面的网络信息源与用户资料冲突，一律以用户资料为准，并可在说明中指出差异；');
-    lines.push('④ 在 sources 中标注这些资料时写明「用户提供的资料」；');
-    lines.push('⑤ 用户有多份同类资料（如多份 JD）时，请横向归纳「共同要求」（出现频次高的技能/条件优先安排），再兼顾各自特殊点。');
-    // 用户资料给足篇幅：每条最多 450 字（关键字段已在正文最前面），最多 24 条
-    for (const s of own.slice(0, 30)) lines.push(fmt(s, Math.max(maxLen, 600)));
-  }
-  if (net.length) {
-    lines.push('');
-    lines.push(own.length
-      ? '【网络检索到的信息源（参考用，优先级低于上面的用户资料）】'
-      : '【已检索到的优质信息源（必须优先依据这些真实资料，并在 sources 中标注来源）】');
-    for (const s of net.slice(0, Math.max(10, maxItems - own.length))) lines.push(fmt(s, maxLen));
-  }
-  return lines.join('\n');
-}
+function sourcesBlock(goal, maxItems, maxLen) { return promptContext.sourcesBlockFrom(sourcesOf(goal.id), maxItems, maxLen, cleanText); }
 /* 资料库注入（检索增强）：开了 RAG 就按当前问题检索片段，只把最相关的给模型；
    未启用/未命中/出错时自动回退到原来的「按条数铺开」方式 —— 行为安全可预期。
    两种情况都会附上标题索引，模型始终知道资料库里还有什么。 */
@@ -2025,14 +2173,7 @@ async function ragAugment(goal, query, k) {
   if ((getSetting('rag_enabled', '1') || '1') === '0') return '';
   try { return await rag.block(goal, query, { k: k || 8 }); } catch (e) { return ''; }
 }
-function goalHeader(goal) {
-  const lines = [];
-  lines.push('【职业目标】' + goal.title);
-  lines.push('【用户现状】' + (goal.profile || '（未填写）'));
-  lines.push('【每周可投入】' + (goal.weekly_hours || '（未填写）') + '　【期望期限】' + (goal.deadline || '（未填写）'));
-  if (goal.materials) lines.push('【用户提供的参考资料（优先采用）】' + goal.materials);
-  return lines.join('\n');
-}
+
 async function buildClarifyPrompt(goal) {
   const lines = [];
   lines.push('你是资深的学习与成长路径规划师。规划前要先做一份**规划前问卷**，摸清用户的真实情况与真实水平。');
@@ -2187,56 +2328,19 @@ function streamDrill(req, res, goal, questionId, answers, note) {
     res.end();
   })();
 }
-function qaRender(questions, answers, label) {
-  const lines = [];
-  let any = false;
-  for (const q of (questions || [])) {
-    const a = (answers || {})[q.id];
-    if (a == null || (Array.isArray(a) && !a.length) || String(a).trim() === '') continue;
-    any = true;
-    const typeName = q.type === 'text' ? '简答' : q.type === 'multi' ? '多选' : q.type === 'quiz' ? '自测' : '单选';
-    const pad = '　'.repeat(Math.min(Number(q.depth || 0), 3));
-    if (q.note) lines.push(`${pad}【用户补充信息】${q.note}`);
-    if (q.type === 'quiz') {
-      const picked = (a && typeof a === 'object') ? a.picked : a;
-      const ok = (a && typeof a === 'object') ? a.correct : null;
-      const opt = (q.options || []).find(o => String(o.v) === String(picked));
-      lines.push(`${pad}Q（${typeName}${q.depth ? '·追问' : ''}）：${q.title}`);
-      lines.push(`${pad}A：选「${opt ? opt.label : picked}」${ok === true ? '（答对，该知识点已掌握）' : ok === false ? '（答错，规划需补齐该基础）' : ''}`);
-    } else {
-      const text = Array.isArray(a) ? a.join('、') : String(a);
-      lines.push(`${pad}Q（${typeName}${q.depth ? '·追问' : ''}）：${q.title}`);
-      lines.push(`${pad}A：${text}`);
-    }
-  }
-  return { any, lines };
-}
+
 function constraintsOf(goal) {
   const list = safeParse((goal && goal.constraints) || '[]') || [];
   return (Array.isArray(list) ? list : []).map(c => (typeof c === 'string' ? { text: c } : c)).filter(c => c && String(c.text || '').trim());
 }
 function constraintsBlock(goal) {
   if (!goalCompOn(goal && goal.id, 'constraints')) return '';
-  const list = constraintsOf(goal);
-  if (!list.length) return '';
-  const lines = ['', '【用户设置的硬性约束（最高优先级，必须严格遵守；与常规做法冲突时以约束为准）】'];
-  list.forEach((c, i) => lines.push(`${i + 1}. ${String(c.text).trim()}`));
-  lines.push('规划、任务拆分与建议都必须满足以上约束；若某条约束导致取舍，请在说明中写清你是如何满足它的。');
-  return lines.join('\n');
+  return promptContext.constraintsBlockFrom(constraintsOf(goal));
 }
 function goalQaBlock(goal) {
   const g = db.prepare('SELECT qa, clarify, clarify_answers FROM goals WHERE id = ?').get(goal.id);
   if (!g) return '';
-  const rounds = safeParse(g.qa) || [];
-  const lines = ['', '【与用户的澄清问答（必须严格遵守，视为用户明确的约束与偏好）】'];
-  let any = false;
-  for (const r of (Array.isArray(rounds) ? rounds : [])) {
-    const rl = qaRender(r.questions, r.answers, r.stage);
-    if (rl.any) { any = true; lines.push(`— 第 ${(r.round != null ? r.round : 0) + 1} 轮确认 —`); lines.push(...rl.lines); }
-  }
-  if (!any) return '';
-  lines.push('规划必须严格贴合以上回答（时间安排、基础水平、偏好与限制）；不要重复询问已确认的内容。');
-  return lines.join('\n');
+  return promptContext.goalQaBlockFrom(safeParse(g.qa) || []);
 }
 function goalPending(goalId) {
   const g = db.prepare('SELECT clarify, clarify_stage FROM goals WHERE id = ?').get(goalId);
@@ -2332,7 +2436,11 @@ async function expandThinStages(goal, skeleton, model, send, sig) {
       const list = Array.isArray(data && data.goals) ? data.goals : (Array.isArray(data) ? data : []);
       const clean = list.filter(x => x && String(x.title || '').trim()).slice(0, 18);
       if (clean.length > before) {
-        st.goals = clean;
+        /* 补足会整段替换小目标：按标题把原来的条件归属带过去，新补的跟阶段走，
+           否则补一次小目标，条件归属就全丢了。 */
+        const oldCond = {};
+        for (const g of (st.goals || [])) oldCond[titleOf(g)] = g.condition || '';
+        st.goals = clean.map(g => Object.assign({}, g, { condition: g.condition || oldCond[titleOf(g)] || st.condition || '' }));
         console.log('[plan] 阶段补足:', String(st.title).slice(0, 20), before, '→', clean.length, '个小目标');
       }
     } catch (e) {
@@ -2353,6 +2461,14 @@ async function buildSkeletonPrompt(goal) {
   lines.push(digestsBlock(goal));
   lines.push(await libraryBlock(goal, String(goal.title || '') + ' ' + String(goal.profile || '').slice(0, 400) + ' ' + String(goal.materials || '').slice(0, 200), { items: 60, len: 200 }));
   lines.push(askBlock(round, '路径骨架'));
+  lines.push('');
+  lines.push('【先想清楚：达成条件（必须做，不能只排阶段）】');
+  lines.push('目标不是「把阶段走完」，而是「满足若干可验收的条件」。先列出要达到这个目标**必须满足的达成条件**：**先判断目标类型，再决定条件的依据与数量**——求职/转行/实习：依据 JD 原文（目标材料或资料库 JD；JD 不足时才按公共 AIPM JD 高频条款补齐）；学习/考证：依据考纲、课程大纲、教材要求；项目/产品/源码：依据交付物与验收标准（能运行 / 能上线 / 指标达标）；认知/兴趣：依据「能讲清 / 能应用 / 能做出东西」的检验点；习惯：依据可量化的频次与节奏。数量按「依据里的独立要求维度」决定：求职类通常 8-12 条（最多 14），学习/项目类 4-10 条，简单目标 3-6 条；一个维度至少一条、同类合并。按「硬性门槛 / 关键能力 / 成果证明 / 资源与资格」分组排序。');
+  lines.push('条件 ≠ 阶段：阶段是时间上的推进台阶（先学什么、后做什么）；条件是要达成的东西，必须能用一句话判定「达成 / 没达成」。一条条件可以横跨多个阶段，一个阶段也可能同时服务多条条件。');
+  lines.push('示例：目标「3 个月转行 AI 产品经理」→ 条件可以是「能独立产出合格 PRD」「掌握大模型能力边界」「有可演示的 AI 产品作品」「面试表达与项目讲述过关」「完成投递并进入面试」。');
+  lines.push('**每条条件都要对到具体依据，不能是宽泛能力话术**：jd 字段写对应依据原文/条款——求职/转行类写 JD 原文；学习类写考纲/大纲/教材要求；项目类写交付物与验收标准；**非求职目标不要硬套 JD / 岗位条款**。求职类的 JD 材料不足时，才按**公共 AIPM（AI 产品经理）JD 高频条款**补足并标「（公共 AIPM JD 常见条款）」。');
+  lines.push('2b. **条件写的是「必须做到 / 必须有」的东西，不是计划节点**：标题/说明里禁止路线图节点名或自造口号（反例：「按需解锁并落地」「XX 里程碑完成」）；**求职类尤其不能把目标名 / 个人项目名当条件**（反例：「思而行闭环与证据跑通」「思而行架构机制全景可盲讲」）；项目类目标可以写自己项目的可验收成果（如「一键跑起来并复现核心流程」），但要能判定。输出前**去重**：同一个要求只出一条，近义/重叠条款合并。');
+  lines.push('然后：每个阶段、每个小目标都必须在 condition 字段写明它主要服务于哪一条条件（填 conditions 里的 key）；确保每条条件至少对应一个小目标。');
   lines.push('');
   lines.push('【要求】');
   lines.push('0. 【最重要】起点必须严格匹配问卷反映的真实水平：自测答对/自述已掌握的内容不要重复安排基础内容；自测答错或自述薄弱的环节必须补足基础。节奏要贴合用户每周可投入时间与期限。');
@@ -2378,7 +2494,8 @@ async function buildSkeletonPrompt(goal) {
   lines.push('   · 依据要分散：不同节点尽量引用不同资料，让整条路线的支撑面铺开；优先级 ① 用户提供的资料 ② 提炼汇总结论 ③ 检索到的片段 ④ 索引条目。');
   lines.push('   优先引用：① 用户提供的资料 ② 提炼汇总里的结论 ③ 下面列出的资料；不同阶段尽量引用与它最相关的不同资料，让依据分布开来。');
   lines.push('6. 路径必须匹配用户现状（零基础从基础开始，有基础则跳过）；顺序体现「真实工作中最看重什么」。');
-  lines.push('7. 只输出一个 JSON 对象（不要其他文字或代码块标记），量控制在 28000 字符内（内容多时 detail 可精简到 40-80 字，但小目标不要省）：');
+  lines.push('7. 只输出一个 JSON 对象（不要其他文字或代码块标记），量控制在 30000 字符内（内容多时 detail 可精简到 40-80 字，但小目标不要省）：');
+  lines.push('{"summary":"总体思路","conditions":[{"key":"c1","title":"条件名（10-20字）","detail":"60-120字：为什么必须满足它","acceptance":"可验证的判定标准","jd":"对应的 JD 原文/条款（没有就写公共 AIPM JD 常见条款）","priority":"must|should|nice"}],"stages":[{"title":"阶段名","detail":"60-120字说明","condition":"c1","sources":[{"name":"来源","note":"依据要点"}],"goals":[{"title":"小目标名","detail":"60-120字","condition":"c1","sources":[{"name":"","note":""}]}]}]}');
   lines.push('8. 若按上面的「关键机制」需要先提问，则只输出 {"analysis":"你的分析","questions":[...]}，不要输出 stages。');
   return lines.join('\n');
 }
@@ -2541,84 +2658,9 @@ async function buildExpandPrompt(goal, node, sources, folderCode) {
   lines.push('6. 如果上面给了挂载文件夹的源码节选：拆分必须沿代码的真实模块/目录结构走（每个子任务对应到具体的包、文件或组件），不要拍脑袋编阶段；detail 里点出要读哪几个文件。');
   return lines.join('\n');
 }
-/* ===== Markdown 教程的「少量内联 HTML」规范 =====
-   渲染端（public/app.js 的 mdTags / mdDetails）只放行这几个标签 —— 提示词必须跟渲染能力
-   对齐：**说了能写却没渲染**，用户看到的是一堆裸标签；**没说能写**，模型就自己发明
-   （2026-10-15 真实反馈：教程里到处是 <span style="color:#dc2626;font-weight:700">）。
-   生成、整篇改写、分节改写三处共用这一份。 */
-function richMdSpecLines() {
-  const lines = [];
-  lines.push('');
-  lines.push('【强调与折叠：可以用一点点内联 HTML（只有下面这几样会被渲染）】');
-  lines.push('· 标重点（最要命的那种）用红色加粗：'
-    + '`<span style="color:#dc2626;font-weight:700">空结果不设分支，模型会直接编答案</span>`；');
-  lines.push('  颜色只认这三种：#dc2626（红·坑/危险）、#c9701f（黄·注意）、#16a34a（绿·正确做法），'
-    + '可以再加 `font-weight:700` 或 `text-decoration:underline`。'
-    + '**每节最多 3 处** —— 满屏红字等于没有重点；');
-  lines.push('· 折叠答案（练习/自测的参考答案）写成：');
-  lines.push('<details>');
-  lines.push('<summary>参考答案</summary>');
-  lines.push('');
-  lines.push('（这里正常写 Markdown：文字、列表、代码块都行）');
-  lines.push('');
-  lines.push('</details>');
-  lines.push('  即 `<details>` 与 `</details>` 各占一行，`<summary>` 写标题，三段之间不要夹别的内容；');
-  lines.push('· 表格单元格里要换行用 `<br>`；行内小强调也可以用 `<mark>高亮</mark>`、`<kbd>Ctrl+S</kbd>`；');
-  lines.push('· **除这几样以外，一个 HTML 标签都不要写**：div / table / a / img / style / script / ul 之类一律不要 ——'
-    + ' 表格用 Markdown 语法、链接用 `[文字](网址)`，图示用下面的 ```viz 可视化块；');
-  lines.push('· 正文里讲别的语言时出现的 `<tag>`、`<Object>`、`<stdin>` 这类，务必用反引号包起来'
-    + '（`<stdin>`），否则会被当成真的标签。');
-  return lines;
-}
+
 /* 按用户意见修改已有教程 */
-/* ===== Markdown 教程的「可视化块」规范 =====
-   生成（buildTutorialPrompt）与修改（buildTutorialEditPrompt）共用同一份。
-   两处各写一遍必然走样：曾经修改提示词只说「别弄坏已有的 viz」，既没说「可以新增」
-   也没给画图规范，于是 AI 改教程时只会删不会加。 */
-function vizSpecLines() {
-  const lines = [];
-  lines.push('');
-  lines.push('【可视化块：图文结合（重要）】纯靠文字讲不清的地方，用可视化块嵌一个**能跑起来的小页面**；');
-  lines.push('其余讲解仍然全部用 Markdown —— 文字讲透、该动图的地方动图，两者别互相替代。');
-  lines.push('写法（三个反引号 + viz，单独一行，里面放完整的 HTML）：');
-  lines.push('```viz');
-  lines.push('<!DOCTYPE html><html><head><meta charset="utf-8"><style>…</style></head>');
-  lines.push('<body>…<script>…<\/script></body></html>');
-  lines.push('```');
-  lines.push('什么时候该用：数据结构与内存布局、算法/流程的分步执行、协议交互时序、前后对比、');
-  lines.push('参数变化带来的影响、坐标系/几何关系、有状态迁移的过程 —— 看图比看字快的地方。');
-  lines.push('');
-  lines.push('【凡是需要"看/点/动"的地方，都要做成 HTML 可视化，而不是用文字描述】');
-  lines.push('判断口径：**这件事如果只能读，不能点、不能换参数、不能一步步看下去，就算讲得再细也不合格。**');
-  lines.push('以下情形必须做成可视化块，不许只写一段话概括：');
-  lines.push('· 流程 / 调用链 / 状态机 / 决策分支（如"什么条件走哪条路"）→ 画成节点和箭头，');
-  lines.push('  分支条件标在箭头上；关键路径可高亮，点节点看它做什么；');
-  lines.push('· 时序与交互（谁调谁、先先后后、传什么）→ 画成泳道时序或步骤时间轴；');
-  lines.push('· 算法执行过程 → 给「下一步 / 上一步 / 重置 / 换一组数据」按钮，让人自己跑一遍看每步状态；');
-  lines.push('· 数据结构 / 内存布局 / 索引结构 → 画出真实结构和指针/下标关系，节点可点开看字段含义；');
-  lines.push('· 并发、异步、事件循环、连接池这类"时间上怎么交错"的 → 画时间轴或甘特式条带，能暂停/单步；');
-  lines.push('· 同一对象的多个状态 / 多方案对比 → 给切换按钮或滑块，让参数变化的后果看得见；');
-  lines.push('· 配置项、命令行参数、环境变量的作用范围 → 做成能填能点的对照面板。');
-  lines.push('');
-  lines.push('【禁止用字符画代替图示】绝对不要用 -> v ^ | ─ │ ┌ ┐ └ ┘ ▼ 这类符号在 ```viz 里画流程图，');
-  lines.push('也不要画 ASCII 表格当布局。这类字符画在网页里会被字体和缩进弄乱、箭头对不齐，');
-  lines.push('用户根本读不出流程 —— 这是不合格输出。图示一律用 HTML 元素 + CSS 画：');
-  lines.push('· 流程图：div 盒子（圆角、边框、背景色做区分）+ CSS 箭头或 SVG <line>/<path> + <marker> 画箭头；');
-  lines.push('· 真实连线优先用内联 <svg>（viewBox + preserveAspectRatio），缩放不糊、箭头方向可控；');
-  lines.push('· 布局用 flex/grid 定位，别靠空格和换行对齐。');
-  lines.push('');
-  lines.push('要求：');
-  lines.push('· 每个块必须**自包含**：样式和脚本全写在块里，禁止引用任何外部 CSS/JS/图片/字体');
-  lines.push('· **块里第一行必须是 <!DOCTYPE html>**；如果你打算在 ```viz 里写的东西不是 HTML，那就写错了 ——');
-  lines.push('  改成真正的 HTML 页面，或者退回普通 Markdown 文字，不要写字符画');
-  lines.push('· 要能交互就加按钮（如「下一步」「重置」「切换参数」「播放」），让用户自己动手看变化');
-  lines.push('· 块的高度会按内容自动适配，不用自己算高度；宽度按容器宽（可用 width:100%）');
-  lines.push('· 沙箱限制（同 HTML 教程的约法三章）：只许操作本块 DOM；禁止 fetch/XHR、localStorage、');
-  lines.push('  Cookie、跳转、弹窗、外部请求。违反即不合格');
-  lines.push('· 节制使用：只在确实"一图胜千言"处放；不要为了炫技堆可视化，也不要给纯概念硬造动画');
-  lines.push('· 视觉上做干净：留白、对齐、配色克制，别用满屏艳色；深浅色都要能看清');
-  return lines;
-}
+
 /* 「只改这一处」的补丁提示词。
    为什么要它：全文重写模式下，改一句话也要把整篇教程重新输出一遍
    （实测 7 万字的教程要 4 轮续写、190~355 秒）。补丁模式只让它回
@@ -2938,87 +2980,17 @@ function saveTutorialVersion(tid, reason) {
     .run(t.id, t.id);
   return Number(r.lastInsertRowid);
 }
-function beginVersion(goalId, reason) {
-  if (!goalCompOn(goalId, 'versions')) return 0;
-  const nodes = db.prepare('SELECT * FROM nodes WHERE goal_id = ? ORDER BY level, sort_order, id').all(goalId);
-  if (!nodes.length) return 0;
-  const res = db.prepare('INSERT INTO goal_versions (goal_id, reason, snapshot, summary, created_at) VALUES (?,?,?,?,?)')
-    .run(goalId, reason, JSON.stringify(nodes), '', nowISO());
-  return Number(res.lastInsertRowid);
-}
-function nodeKeyMap(nodes) {
-  const byId = {};
-  for (const n of nodes) byId[n.id] = n;
-  const memo = {};
-  const build = n => {
-    if (memo[n.id] != null) return memo[n.id];
-    const parent = n.parent_id ? byId[n.parent_id] : null;
-    const k = (parent ? build(parent) + ' / ' : '') + String(n.title || '');
-    memo[n.id] = k;
-    return k;
-  };
-  const map = {};
-  for (const n of nodes) map[build(n)] = n;
-  return map;
-}
-function diffVersions(oldNodes, newNodes) {
-  const oldMap = nodeKeyMap(oldNodes);
-  const newMap = nodeKeyMap(newNodes);
-  const added = [], removed = [], changed = [];
-  const fields = ['detail', 'artifact', 'acceptance', 'hours', 'sources', 'status'];
-  for (const k in newMap) {
-    if (!oldMap[k]) { added.push(newMap[k]); continue; }
-    const a = oldMap[k], b = newMap[k];
-    const diffFields = fields.filter(f => String(a[f] || '') !== String(b[f] || ''));
-    if (diffFields.length) changed.push({ key: k, old: a, new: b, fields: diffFields });
-  }
-  for (const k in oldMap) if (!newMap[k]) removed.push(oldMap[k]);
-  return { added, removed, changed, total: { old: Object.keys(oldMap).length, new: Object.keys(newMap).length } };
-}
-function templateReport(reason, diff) {
-  const parts = [`本次「${reason}」`];
-  if (diff.added.length) parts.push(`新增 ${diff.added.length} 项（${diff.added.slice(0, 3).map(n => n.title).join('、')}${diff.added.length > 3 ? ' 等' : ''}）`);
-  if (diff.removed.length) parts.push(`移除 ${diff.removed.length} 项（${diff.removed.slice(0, 3).map(n => n.title).join('、')}${diff.removed.length > 3 ? ' 等' : ''}）`);
-  if (diff.changed.length) parts.push(`调整 ${diff.changed.length} 项`);
-  if (!diff.added.length && !diff.removed.length && !diff.changed.length) parts.push('结构无变化');
-  parts.push(`当前共 ${diff.total.new} 个节点`);
-  return parts.join('；') + '。';
-}
-function buildReportPrompt(goal, reason, diff) {
-  const lines = [];
-  lines.push('你是职业规划助理。请用 3-5 句话简要汇报路线图的本次变更（中文，平实，不要列表，不要编造）。');
-  lines.push(`【职业目标】${goal.title}`);
-  lines.push(`【本次操作】${reason}`);
-  lines.push(`【新增】${diff.added.slice(0, 12).map(n => n.title).join('、') || '无'}`);
-  lines.push(`【移除】${diff.removed.slice(0, 12).map(n => n.title).join('、') || '无'}`);
-  lines.push(`【调整】${diff.changed.slice(0, 12).map(c => c.new.title).join('、') || '无'}`);
-  lines.push(`【当前规模】${diff.total.new} 个节点`);
-  lines.push('要求：说明这次改了什么、为什么这么改、下一步建议；只依据上面事实，不要编造。');
-  return lines.join('\n');
-}
-async function finishVersion(goal, vid, reason, useAI = true) {
-  if (!vid || !goalCompOn(goal && goal.id, 'versions')) return '';
-  const v = db.prepare('SELECT * FROM goal_versions WHERE id = ?').get(vid);
-  if (!v) return '';
-  const oldNodes = safeParse(v.snapshot) || [];
-  const newNodes = db.prepare('SELECT * FROM nodes WHERE goal_id = ? ORDER BY level, sort_order, id').all(goal.id);
-  const diff = diffVersions(Array.isArray(oldNodes) ? oldNodes : [], newNodes);
-  if (!diff.added.length && !diff.removed.length && !diff.changed.length) {
-    db.prepare('DELETE FROM goal_versions WHERE id = ?').run(vid);
-    return '';
-  }
-  db.prepare('UPDATE goal_versions SET snapshot_after = ? WHERE id = ?').run(JSON.stringify(newNodes), vid);
-  let report = templateReport(reason, diff);
-  if (useAI) {
-    try {
-      const model = currentModel();
-      const txt = await aiText(buildReportPrompt(goal, reason, diff), model, 120000, null, null, '变更报告');
-      if (txt && txt.trim()) report = txt.trim().slice(0, 800);
-    } catch (e) {}
-  }
-  db.prepare('UPDATE goal_versions SET summary = ? WHERE id = ?').run(report, vid);
-  return report;
-}
+const versionDomain = createVersionDomain({
+  db: db, nowISO: nowISO, safeParse: safeParse,
+  goalCompOn: goalCompOn, aiText: aiText, currentModel: currentModel
+});
+const beginVersion = versionDomain.beginVersion;
+const diffVersions = versionDomain.diffVersions;
+const templateReport = versionDomain.templateReport;
+const buildReportPrompt = versionDomain.buildReportPrompt;
+const finishVersion = versionDomain.finishVersion;
+
+
 
 
 /**
@@ -3039,21 +3011,23 @@ function normalizeSkeleton(stages) {
     const title = titleOf(raw);
     const goals = (Array.isArray(raw.goals) ? raw.goals : []).filter(g => g && titleOf(g))
       .map(g => (g.title ? g : Object.assign({}, g, { title: titleOf(g) })));
-    if (title && !goals.length) { pending = { title, detail: raw.detail || '', sources: raw.sources || [] }; continue; }
+    /* condition 是「这个阶段主要服务哪条达成条件」的 key，必须跟着阶段一路带下去 */
+    if (title && !goals.length) { pending = { title, detail: raw.detail || '', sources: raw.sources || [], condition: raw.condition || raw.condition_key || '' }; continue; }
     if (!title && goals.length) {
       const last = out[out.length - 1];
       if (last && !last.goals.length) {           // 上一个阶段还空着，直接补进去
         last.goals = goals.slice(0, 20);
         if (!last.detail && raw.detail) last.detail = raw.detail;
+        if (!last.condition && (raw.condition || raw.condition_key)) last.condition = raw.condition || raw.condition_key;
       } else {
-        const base = pending || { title: '', detail: '', sources: [] };
-        out.push({ title: base.title, detail: base.detail || raw.detail || '', sources: base.sources || raw.sources || [], goals: goals.slice(0, 20) });
+        const base = pending || { title: '', detail: '', sources: [], condition: '' };
+        out.push({ title: base.title, detail: base.detail || raw.detail || '', sources: base.sources || raw.sources || [], condition: base.condition || raw.condition || raw.condition_key || '', goals: goals.slice(0, 20) });
       }
       pending = null;
       continue;
     }
     if (title && goals.length) {
-      out.push({ title, detail: raw.detail || '', sources: raw.sources || [], goals: goals.slice(0, 20) });
+      out.push({ title, detail: raw.detail || '', sources: raw.sources || [], condition: raw.condition || raw.condition_key || '', goals: goals.slice(0, 20) });
       pending = null;
       continue;
     }
@@ -3061,12 +3035,16 @@ function normalizeSkeleton(stages) {
   if (pending && out.length) {   // 结尾多出来的标题：把它的说明补进上一个阶段
     const last = out[out.length - 1];
     if (!last.detail && pending.detail) last.detail = pending.detail;
+    if (!last.condition && pending.condition) last.condition = pending.condition;
   }
   return out.filter(s => s.title && s.goals.length).slice(0, 14);
 }
 function saveSkeleton(goalId, plan) {
   const stages = normalizeSkeleton(plan.stages);
   if (!stages.length) throw new Error('骨架结构异常（没有可用阶段），请重试');
+  /* 先把规划里的「达成条件」写库（只替换 source='plan' 的，手动条件保留），
+     拿到 key → id 的解析器，再把每个阶段/小目标挂上去。 */
+  const condInfo = conditionsDomain.saveFromPlan(goalId, plan);
   const old = db.prepare('SELECT id FROM nodes WHERE goal_id = ?').all(goalId).map(x => x.id);
   for (const id of old) db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
   try { db.prepare('DELETE FROM node_workspaces WHERE goal_id = ?').run(goalId); } catch (e) {}
@@ -3075,12 +3053,14 @@ function saveSkeleton(goalId, plan) {
   db.prepare("UPDATE goals SET summary = ?, status = ?, error = ?, clarify = '', clarify_stage = '', updated_at = ? WHERE id = ?").run(summary, 'planning', '', nowISO(), goalId);
   const stageIds = [];
   stages.forEach((st, si) => {
-    insertNode(goalId, null, 0, st.title, st.detail || '', st.sources, si);
+    const stCond = condInfo.resolve(st.condition);
+    insertNode(goalId, null, 0, st.title, st.detail || '', st.sources, si, { condition_id: stCond });
     const stageId = db.prepare('SELECT last_insert_rowid() AS id').get().id;
     stageIds.push(stageId);
     let gi = 0;
     for (const g of st.goals) {
-      insertNode(goalId, stageId, 1, g.title || '小目标', g.detail || '', g.sources, gi);
+      /* 小目标没写条件时退到阶段的条件（不能让它掉成未归属） */
+      insertNode(goalId, stageId, 1, g.title || '小目标', g.detail || '', g.sources, gi, { condition_id: condInfo.resolve(g.condition) || stCond });
       gi++;
     }
   });
@@ -3105,6 +3085,23 @@ function saveStageTasks(goalId, stageId, goalsOut) {
     }
   }
 }
+/* 规划收尾：如果这次 AI 没产出达成条件（旧提示词覆盖、模型漏了、或老目标重排），
+   就从已保存的路线图反推一遍。只补空，不覆盖：已有条件时直接返回。
+   失败只记日志 —— 条件梳理失败不能把「规划成功」变成「规划失败」。 */
+async function ensureConditionsFromPlan(goal, send) {
+  try {
+    const has = conditionsDomain.countForGoal(goal.id);
+    if (has) return has;
+    const cnt = db.prepare('SELECT COUNT(*) AS c FROM nodes WHERE goal_id = ?').get(goal.id).c;
+    if (!cnt) return 0;
+    if (send) send({ status: '正在梳理「要达成目标需要满足哪些条件」…' });
+    await conditionsDomain.generateFromNodes(goal.id);
+    return conditionsDomain.countForGoal(goal.id);
+  } catch (e) {
+    console.log('[conditions] 自动梳理达成条件失败（不影响规划）:', e.message);
+    return 0;
+  }
+}
 function streamClarify(req, res, goal) {
   // 规划第 0 步：AI 分析用户情况，生成澄清问题（选择/判断/简答）
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
@@ -3114,7 +3111,18 @@ function streamClarify(req, res, goal) {
   (async () => {
     try {
       send({ status: 'AI 正在分析你的情况，准备澄清问题…' });
-      const txt = await aiTextProgress(await buildClarifyPrompt(goal), model, 300000, send, '问题', sig);
+      let clarifyPrompt;
+      if (promptPacks.hasOverride('plan.clarify')) {
+        clarifyPrompt = await promptPacks.renderAsync('plan.clarify', {
+          goal: goal,
+          goalHeader: goalHeader(goal),
+          digests: digestsBlock(goal),
+          library: await libraryBlock(goal, String(goal.title || '') + ' ' + String(goal.profile || '').slice(0, 300), { items: 30, len: 180 })
+        });
+      } else {
+        clarifyPrompt = await buildClarifyPrompt(goal);
+      }
+      const txt = await aiTextProgress(clarifyPrompt, model, 300000, send, '问题', sig);
       const data = extractJSON(txt);
       if (!data || !Array.isArray(data.questions) || !data.questions.length) throw new Error('澄清问题生成失败，请重试');
       /* 「要不要搜集外部资料」是必问的开关：AI 漏了就补固定版（id 固定，前后端都认）。
@@ -3218,16 +3226,21 @@ function buildSkeletonRepairPrompt(goal, rawText) {
   lines.push(String(rawText || '').slice(0, 20000));
   lines.push('');
   lines.push('【任务】把上面的构思整理成标准 JSON，只输出 JSON 对象，不要任何解释、前后缀或代码块标记：');
-  lines.push('{"stages":[{"title":"阶段名","detail":"60-120字说明","sources":[{"name":"来源","note":"依据要点"}],"goals":[{"title":"小目标名","detail":"60-120字","sources":[{"name":"","note":""}]}]}]}');
-  lines.push('要求：阶段 3-12 个；每个阶段的小目标按知识点数量决定（一般 5-10 个，多的可到 16 个，一个知识点至少一个）；**阶段 5-8 条依据、小目标 3-5 条**（依据是节点存在的理由，不要只给 1 条）；detail 可精简到 40-80 字。');
+  lines.push('{"summary":"总体思路","conditions":[{"key":"c1","title":"条件名","detail":"为什么必须满足","acceptance":"判定标准","jd":"对应的 JD 原文/条款","priority":"must|should|nice"}],"stages":[{"title":"阶段名","detail":"60-120字说明","condition":"c1","sources":[{"name":"来源","note":"依据要点"}],"goals":[{"title":"小目标名","detail":"60-120字","condition":"c1","sources":[{"name":"","note":""}]}]}]}');
+  lines.push('要求：阶段 3-12 个；达成条件按 JD 独立维度给全（求职/转行类通常 8-12 条、最多 14；非求职 4-10 条；条件≠阶段，要能判定达成/没达成，**每条都要有 jd 字段对到 JD 原文或公共 AIPM JD 条款**），每个阶段和小目标都要写 condition（填 conditions 的 key）；每个阶段的小目标按知识点数量决定（一般 5-10 个，多的可到 16 个，一个知识点至少一个）；**阶段 5-8 条依据、小目标 3-5 条**（依据是节点存在的理由，不要只给 1 条）；detail 可精简到 40-80 字。');
   return lines.join('\n');
 }
 function streamPlan(req, res, goal, answers) {
   // 第一步：只生成骨架（阶段 + 小目标），等待用户确认（会带上澄清问答）
   res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   const model = currentModel();
-  const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} };
-    const sig = clientSignal(req);
+  const tk = tasks.begin({ type: 'plan', title: '生成规划：' + String(goal.title || '').slice(0, 30), goalId: goal.id, phases: ['生成骨架', '细化小目标', '保存'] });
+  const send = obj => {
+    try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {}
+    if (!obj) return;
+    if (obj.status) tk.progress(undefined, obj.status);
+  };
+    const sig = tk.signal;
   (async () => {
     try {
       clearPlanDraft(goal.id, 'skeleton');   // 全新规划：旧草稿作废，失败时会写入新的
@@ -3240,11 +3253,26 @@ function streamPlan(req, res, goal, answers) {
         if (['yes', 'no', 'later'].includes(v)) db.prepare('UPDATE goals SET collect_pref = ? WHERE id = ?').run(v, goal.id);
       }
       send({ status: answers ? '正在结合你的补充回答生成路径骨架…' : '正在结合你的回答生成路径骨架…' });
-      const planPrompt = await buildSkeletonPrompt(goal);
+      let planPrompt;
+      if (promptPacks.hasOverride('plan.skeleton')) {
+        const round = db.prepare('SELECT ask_round FROM goals WHERE id = ?').get(goal.id).ask_round || 0;
+        planPrompt = await promptPacks.renderAsync('plan.skeleton', {
+          goal: goal,
+          goalHeader: goalHeader(goal),
+          qa: goalQaBlock(goal),
+          constraints: constraintsBlock(goal),
+          digests: digestsBlock(goal),
+          library: await libraryBlock(goal, String(goal.title || '') + ' ' + String(goal.profile || '').slice(0, 400) + ' ' + String(goal.materials || '').slice(0, 200), { items: 60, len: 200 }),
+          ask: askBlock(round, '路径骨架')
+        });
+      } else {
+        planPrompt = await buildSkeletonPrompt(goal);
+      }
       let skeletonText = await aiTextProgress(planPrompt, model, 600000, send, '阶段/小目标', sig);
       let skeleton = extractJSON(skeletonText);
       if (skeleton && Array.isArray(skeleton.questions) && skeleton.questions.length) {
         saveGoalQuestions(goal.id, 'plan', skeleton);
+        tk.done({ questions: skeleton.questions.length, stage: 'plan' });
         send({ questions: { analysis: skeleton.analysis || '', questions: skeleton.questions }, stage: 'plan', goal: getGoal(goal.id) });
         res.end();
         return;
@@ -3276,11 +3304,14 @@ function streamPlan(req, res, goal, answers) {
       skeleton = await expandThinStages(goal, skeleton, model, send, sig);
       const vid = beginVersion(goal.id, '生成新骨架');
       saveSkeleton(goal.id, skeleton);
+      const condCount = await ensureConditionsFromPlan(goal, send);
       db.prepare('UPDATE goals SET status = ?, error = ?, updated_at = ? WHERE id = ?').run('review', '', nowISO(), goal.id);
       const report = await finishVersion(goal, vid, '生成新骨架');
       backup();
-      send({ done: true, stages: skeleton.stages.length, goal: getGoal(goal.id), report, versionId: vid });
+      tk.done({ stages: skeleton.stages.length, conditions: condCount, versionId: vid });
+      send({ done: true, stages: skeleton.stages.length, conditions: condCount, goal: getGoal(goal.id), report, versionId: vid });
     } catch (e) {
+      tk.fail(e);
       if (e && e.cancelled) {
         // 用户点了「停止」：不算失败，回到可继续的状态
         const cnt = db.prepare('SELECT COUNT(*) AS c FROM nodes WHERE goal_id = ?').get(goal.id).c;
@@ -3293,6 +3324,7 @@ function streamPlan(req, res, goal, answers) {
     }
     res.end();
   })();
+  return tk;
 }
 /* 断点继续：把上次失败保留的原始构思喂回去，让模型按正确格式整理，然后走正常保存流程 */
 function streamPlanResume(req, res, goal) {
@@ -3321,11 +3353,12 @@ function streamPlanResume(req, res, goal) {
       const grown = await expandThinStages(goal, fixed, model, send, sig);
       const vid = beginVersion(goal.id, '继续构思生成骨架');
       saveSkeleton(goal.id, grown);
+      const condCount = await ensureConditionsFromPlan(goal, send);
       db.prepare('UPDATE goals SET status = ?, error = ?, updated_at = ? WHERE id = ?').run('review', '', nowISO(), goal.id);
       const report = await finishVersion(goal, vid, '继续构思生成骨架');
       backup();
       clearPlanDraft(goal.id, 'skeleton');
-      send({ done: true, stages: grown.stages.length, goal: getGoal(goal.id), report, versionId: vid });
+      send({ done: true, stages: grown.stages.length, conditions: condCount, goal: getGoal(goal.id), report, versionId: vid });
     } catch (e) {
       if (e && e.cancelled) {
         const cnt = db.prepare('SELECT COUNT(*) AS c FROM nodes WHERE goal_id = ?').get(goal.id).c;
@@ -3340,12 +3373,24 @@ function streamPlanResume(req, res, goal) {
   })();
 }
 function currentSkeleton(goalId) {
-  const stages = db.prepare('SELECT id, title, detail, sources FROM nodes WHERE goal_id = ? AND level = 0 ORDER BY sort_order, id').all(goalId);
-  return stages.map(st => ({
+  /* 调整骨架时要连「达成条件」一起给模型，否则它按旧模板只回 stages，
+     条件就整批丢了（也看不出某个阶段/小目标原来服务哪条条件）。 */
+  const conds = db.prepare('SELECT id, title, detail, acceptance, jd_ref, priority FROM goal_conditions WHERE goal_id = ? ORDER BY sort_order, id').all(goalId);
+  const keyOf = new Map();
+  const condList = conds.map((c, i) => {
+    const key = 'c' + (i + 1);
+    keyOf.set(Number(c.id), key);
+    return { key, title: c.title, detail: c.detail, acceptance: c.acceptance, jd: c.jd_ref || '', priority: c.priority || 'must' };
+  });
+  const stages = db.prepare('SELECT id, title, detail, sources, condition_id FROM nodes WHERE goal_id = ? AND level = 0 ORDER BY sort_order, id').all(goalId);
+  const out = stages.map(st => ({
     title: st.title, detail: st.detail, sources: safeParse(st.sources) || [],
-    goals: db.prepare('SELECT title, detail, sources FROM nodes WHERE parent_id = ? ORDER BY sort_order, id').all(st.id)
-      .map(s => ({ title: s.title, detail: s.detail, sources: safeParse(s.sources) || [] }))
+    condition: keyOf.get(Number(st.condition_id)) || '',
+    goals: db.prepare('SELECT title, detail, sources, condition_id FROM nodes WHERE parent_id = ? ORDER BY sort_order, id').all(st.id)
+      .map(s => ({ title: s.title, detail: s.detail, sources: safeParse(s.sources) || [], condition: keyOf.get(Number(s.condition_id)) || '' }))
   }));
+  out.conditions = condList;
+  return out;
 }
 function streamPlanTasks(req, res, goal, answers) {
   // 第二步：逐阶段细化任务（支持中断后继续，已有任务的阶段自动跳过）
@@ -3422,16 +3467,17 @@ async function buildRefineSkeletonPrompt(goal, current, feedback) {
   lines.push(await libraryBlock(goal, String(goal.title || '') + ' ' + String(feedback || '').slice(0, 300), { items: 40, len: 200 }));
   lines.push(askBlock(round, '骨架调整'));
   lines.push('');
-  lines.push('【现有骨架】');
-  lines.push(JSON.stringify(current));
+  lines.push('【现有骨架（含达成条件 conditions 与每个节点的 condition 归属）】');
+  lines.push(JSON.stringify(Array.isArray(current) ? { conditions: current.conditions || [], stages: current } : current));
   lines.push('');
   lines.push('【用户反馈（必须采纳）】' + feedback);
   lines.push('');
   lines.push('【要求】');
   lines.push('1. 只调整用户指出的问题，其余尽量保持原样（**除非用户明确要求增加 / 删除 / 合并阶段，否则阶段数量、顺序、命名保持稳定**）。用户说"阶段太少/太多/想加一个 XX 阶段"时，就按要求调整数量。');
   lines.push('   · 用户说某个阶段「小目标太少 / 没覆盖到 X」时：直接给该阶段补足小目标（一个知识点一个，必要时可到 16 个），不要只做表面微调。');
-  lines.push('2. 输出完整的调整后骨架，格式与输入一致。');
-  lines.push('3. 只输出一个 JSON 对象：{"summary":"总体思路","stages":[{"title":"","detail":"","sources":[{"name":"","note":""}],"goals":[{"title":"","detail":"","sources":[{"name":"","note":""}]}]}]}');
+  lines.push('2. 输出完整的调整后骨架（含 conditions 与每个阶段/小目标的 condition）；用户没提条件时，条件与归属保持原样（key 可以重排，但要覆盖全部现有条件）；增删节点后每条小目标仍要有归属。');
+  lines.push('2b. 条件必须保留 jd 字段（对应 JD 原文/条款）；用户要求按 JD 重写条件时，逐条对到 JD 具体描述，不要退回宽泛表述。');
+  lines.push('3. 只输出一个 JSON 对象：{"summary":"总体思路","conditions":[{"key":"c1","title":"","detail":"","acceptance":"","jd":"","priority":"must|should|nice"}],"stages":[{"title":"","detail":"","condition":"c1","sources":[{"name":"","note":""}],"goals":[{"title":"","detail":"","condition":"c1","sources":[{"name":"","note":""}]}]}]}');
   lines.push('4. 若按「关键机制」需要先提问，则只输出 {"questions":[...]}，不要输出 stages。');
   return lines.join('\n');
 }
@@ -3454,7 +3500,7 @@ function streamPlanRefine(req, res, goal, feedback, answers) {
       if (!plan || !Array.isArray(plan.stages) || !plan.stages.length) {
         console.log('[refine] 解析失败（将重试），原始输出前 300 字:', String(txt || '').slice(0, 300).replace(/\n/g, ' '));
         send({ status: '正在重新整理调整结果…' });
-        txt = await aiTextProgress(refinePrompt + '\n\n【重要】请严格只输出一个 JSON 对象（不要解释、不要代码块），格式：{"summary":"...","stages":[{"title":"","detail":"","sources":[],"goals":[{"title":"","detail":"","sources":[]}]}]}', model, 480000, send, '阶段/小目标', sig);
+        txt = await aiTextProgress(refinePrompt + '\n\n【重要】请严格只输出一个 JSON 对象（不要解释、不要代码块），格式：{"summary":"...","conditions":[{"key":"c1","title":"","detail":"","acceptance":"","jd":"","priority":"must"}],"stages":[{"title":"","detail":"","condition":"c1","sources":[],"goals":[{"title":"","detail":"","condition":"c1","sources":[]}]}]}', model, 480000, send, '阶段/小目标', sig);
         plan = extractJSON(txt);
       }
       if (plan && Array.isArray(plan.questions) && plan.questions.length) {
@@ -3466,10 +3512,11 @@ function streamPlanRefine(req, res, goal, feedback, answers) {
       if (!plan || !Array.isArray(plan.stages) || !plan.stages.length) throw new Error('调整结果解析失败，请重试');
       const vid = beginVersion(goal.id, '按意见调整骨架');
       saveSkeleton(goal.id, plan);
+      const condCount = await ensureConditionsFromPlan(goal, send);
       db.prepare('UPDATE goals SET status = ?, error = ?, updated_at = ? WHERE id = ?').run('review', '', nowISO(), goal.id);
       const report = await finishVersion(goal, vid, '按意见调整骨架');
       backup();
-      send({ done: true, goal: getGoal(goal.id), report, versionId: vid });
+      send({ done: true, conditions: condCount, goal: getGoal(goal.id), report, versionId: vid });
     } catch (e) {
       if (e && e.cancelled) {
         // 用户点了「停止」：不算失败，回到可继续的状态
@@ -3486,24 +3533,6 @@ function streamPlanRefine(req, res, goal, feedback, answers) {
 }
 
 /* ===== 对话式改规划 ===== */
-function roadmapOutline(goalId) {
-  const nodes = db.prepare('SELECT id, parent_id, level, title, detail, hours, status FROM nodes WHERE goal_id = ? ORDER BY level, sort_order, id').all(goalId);
-  const byParent = {};
-  for (const n of nodes) { const k = n.parent_id || 0; (byParent[k] = byParent[k] || []).push(n); }
-  const lines = [];
-  const walk = (pid, depth) => {
-    if (lines.length > 600) return;
-    for (const n of (byParent[pid] || [])) {
-      const st = n.status === 'done' ? ' ✓已完成' : n.status === 'doing' ? ' ▶进行中' : '';
-      const det = n.level >= 2 && n.detail ? '　' + String(n.detail).replace(/\s+/g, ' ').slice(0, 70) : '';
-      lines.push('  '.repeat(depth) + `[${n.id}] ${n.title}${n.hours ? '（' + n.hours + '）' : ''}${st}${det}`);
-      walk(n.id, depth + 1);
-    }
-  };
-  walk(0, 0);
-  if (lines.length > 600) lines.push('…（节点过多，仅显示前 600 个）');
-  return lines.join('\n');
-}
 /* 从教程正文里挑出「用户这次点名的那一节」。
    教程动辄五六万字，整篇塞进提示词不现实；用户点标题（如"1.2 ReAct"）时就带上那一节，
    没点名就只给目录 —— 不硬塞，免得白白烧掉几万 token。 */
@@ -3733,6 +3762,9 @@ function chatNodesBlock(list) {
 
 async function buildChatPrompt(goal, message, sessionId, opts) {
   const o = opts || {};
+  /* 创造模式：不是"改路线图"，而是生成可安装的 UI 插件/皮肤/功能组件。
+     走单独的提示词（扩展点说明书），产出 create JSON，由用户在卡片上确认安装。 */
+  if (o.mode === 'create') return await buildCreateChatPrompt(goal, message, o);
   /* ASK 模式：只回答、不许改。这里是**服务端**的硬边界 —— 前端也会拦一道，
      但真正决定"能不能改"的是这里，因为 ops 是在这个函数里被允许或禁止的。 */
   const askOnly = o.mode === 'ask';
@@ -3745,13 +3777,28 @@ async function buildChatPrompt(goal, message, sessionId, opts) {
      其实什么都没读到，等于把这块做成装饰。 */
   const ctx = [];
   const addCtx = (label, detail) => { ctx.push({ kind: 'ctx', label, detail: detail || '' }); };
-    lines.push('你是用户的「目标助理」：不只可以改路线图，还能操作这个目标下的所有可操作信息——管理信息源（添加/删除）、触发信息提炼与信息源收集、修改目标信息（现状/时间/期限/参考资料）、添加规划约束。');
+    lines.push('你是用户的「目标助理」：不只可以改路线图，还能操作这个目标下的所有可操作信息——管理信息源（添加/删除）、触发信息提炼与信息源收集、修改目标信息（现状/时间/期限/参考资料）、添加规划约束、新增/修改/删除「达成条件」并把节点归到条件下面。');
   lines.push('用户让你做这些事时，直接通过下面的 ops 执行，不要只说"你可以去某某页面点一下"。');
   lines.push('');
   lines.push(goalHeader(goal));
   lines.push(goalQaBlock(goal));
   lines.push(constraintsBlock(goal));
   addCtx('目标信息、现状与约束', String(goal.title || '').slice(0, 30));
+  /* JD / 招聘原文：条件对齐 JD、简历改写、面试准备都要靠它。
+     目标材料已由 goalHeader 带上；这里补**资料库里 kind 像 JD/招聘/岗位**的正文
+     （以前只列标题，于是 AI 只能写"提升能力"这种空话，用户反馈"条件对不上 JD"）。 */
+  try {
+    const jdRows = db.prepare("SELECT title, kind, snippet, content FROM sources WHERE goal_id = ? AND (kind LIKE '%JD%' OR kind LIKE '%岗位%' OR kind LIKE '%招聘%' OR kind LIKE '%实习%' OR title LIKE '%JD%' OR title LIKE '%岗位%' OR title LIKE '%招聘%') ORDER BY id DESC LIMIT 6").all(goal.id);
+    if (jdRows.length) {
+      lines.push('');
+      lines.push('【资料库里的 JD / 招聘原文（对齐条件、简历、面试时优先引用这里的条款）】');
+      jdRows.forEach((r0, i) => {
+        const txt = String(r0.content || r0.snippet || '').replace(/\s+/g, ' ').slice(0, 1500);
+        lines.push('#' + (i + 1) + ' 「' + String(r0.title || '未命名').slice(0, 60) + '」' + (txt ? '：' + txt : ''));
+      });
+      addCtx('资料库里的 JD 原文', jdRows.length + ' 条');
+    }
+  } catch (e) {}
   const dgBlock = digestsBlock(goal);
   if (dgBlock) { lines.push(dgBlock); addCtx('资料提炼汇总', '多篇主题汇总'); }
   /* 轻档：省掉向量检索与代码检索，并把历史从 12 条压到 4 条。
@@ -3806,6 +3853,27 @@ async function buildChatPrompt(goal, message, sessionId, opts) {
     const n = db.prepare('SELECT COUNT(*) AS n FROM nodes WHERE goal_id = ?').get(goal.id).n;
     addCtx('当前路线图', n ? n + ' 个节点' : '（还没有节点）');
   } catch (e) {}
+  /* 达成条件：让助手能按 id 修改 / 重新归属（用户抱怨过"生成一版就定死了、改不了"）。
+     条件 id 从【当前达成条件】里认；归属改的是节点 id（上面【当前路线图】里有）。 */
+  try {
+    const condData = conditionsDomain.list(goal.id);
+    const conds = condData.conditions || [];
+    if (conds.length) {
+      lines.push('');
+      lines.push('【当前达成条件（方括号内是条件 id；改条件 / 调归属只能引用这些 id；要**整批换成 JD 条款**用 condition_replace）】');
+      for (const c of conds) {
+        const st = c.stats || {};
+        lines.push('[' + c.id + '] ' + String(c.title || '').slice(0, 80) +
+          '（' + (c.priority || 'must') + '，完成 ' + (Number(st.done) || 0) + '/' + (Number(st.total) || 0) + '）' +
+          (c.acceptance ? ' —— 达成标准：' + String(c.acceptance).replace(/\s+/g, ' ').slice(0, 160) : '') +
+          (c.jd_ref ? '；对应 JD：' + String(c.jd_ref).replace(/\s+/g, ' ').slice(0, 200) : '') +
+          (c.detail ? '；说明：' + String(c.detail).replace(/\s+/g, ' ').slice(0, 120) : ''));
+      }
+      const un = (condData.unassigned || []).slice(0, 60);
+      if (un.length) lines.push('【还没有归属条件的节点】' + un.map(x => '[' + x.id + ']' + String(x.title || '').slice(0, 40)).join(' ｜ '));
+      addCtx('这个目标的达成条件', conds.length + ' 条' + (un.length ? '，' + un.length + ' 个节点未归属' : ''));
+    }
+  } catch (e) {}
   /* 该目标的教程清单：让模型能**点名**要改哪一份（tutorial_edit 可带 tutorial_id） */
   try {
     const tlist = db.prepare('SELECT id,title FROM tutorials WHERE goal_id = ? ORDER BY updated_at DESC, id DESC LIMIT 8').all(goal.id);
@@ -3836,59 +3904,42 @@ async function buildChatPrompt(goal, message, sessionId, opts) {
     lines.push(nb.text);
     addCtx(nb.count > 1 ? '你在说的这几个节点' : '你在说的那个节点', nb.ids);
   }
+  /* 用户当前正在看的页面（前端抓的文字）。
+     ⚠️ 教程页不重复带：上面【用户正在看的教程】已经把正文（按预算）放进来了，
+        再贴一遍屏幕上的同一段文字只会挤掉历史对话。其它页面（随堂测验 / 刷题 /
+        面试 / 看懂代码 / 组件页…）都靠这块让 AI 知道"这个 / 这里"指什么。 */
+  const pageRaw = pageContext.sanitizePageContext(o.page);
+  if (pageRaw) {
+    const sameTut = !!(tut && /^#\/t\//.test(pageRaw.route || ''));
+    const block = sameTut
+      ? null
+      : pageContext.pageContextBlockFrom(pageRaw);
+    if (block) {
+      lines.push('');
+      lines.push(block.text);
+      addCtx('你当前页面上的内容', '「' + block.label + '」' + block.chars + ' 字' + (block.cut ? '（掐掉 ' + block.cut + ' 字）' : ''));
+    } else if (sameTut) {
+      addCtx('你正看着的那个页面', '「' + pageRaw.label + '」（正文已在上面的教程块里）');
+    }
+  }
+  /* 用户用「🎯 只改」钉死的范围：放在【你的任务】之前、通用 agent_rules 之前，
+     让模型先看到硬约束（否则它会照着后面那串通用 ops 清单乱改）。 */
+  if (!askOnly && o.scope && o.scope !== 'auto') {
+    const scopeBlock = chatScopePromptBlock(o.scope);
+    if (scopeBlock) {
+      lines.push('');
+      lines.push(scopeBlock);
+      addCtx('本轮改动范围（你指定的）', '只改「' + CHAT_SCOPE_LABEL[chatScopeOf(o.scope)] + '」');
+    }
+  }
   lines.push('【用户的新消息】' + message);
   lines.push('');
   lines.push('【你的任务】');
   if (askOnly) {
-    lines.push('0. **当前是「ASK 提问模式」**：你只能回答、解释、给建议。不要使用任何工具。');
-    lines.push('1. **绝对不要修改任何东西**：不要输出 ops 代码块、不要输出任何 JSON 操作数组、也不要写"我已经帮你改好了"。这个模式下你没有修改权限，也绝对不要把用户的要求转成操作。');
-    lines.push('2. 如果用户其实是要改东西（改路线图 / 改教程 / 存资料 / 加约束 / 改目标信息），就直说：把 AI 助手顶部的模式切成「Agent」，再说一次我就去做。不要假装已经做了。');
-    lines.push('3. 回答要具体、可执行；引用资料时写明来源标题。默认 400 字以内，除非用户要求详细说明。');
-    lines.push('4. 不要编造事实。看不到的信息就说看不到，并告诉用户怎么让你看到。');
+    lines.push(await promptPacks.renderAsync('chat.ask_rules', {}));
     return { prompt: lines.join('\n'), ctx };
   }
-  lines.push('0. 不要使用任何工具（不要读取文件、不要执行命令、不要联网）；规划、资料库与代码库的全部信息都在本提示里，直接基于它作答。');
-  lines.push('   用户问「资料库里有没有 / 能不能看到 XX（如某个代码库）」时，依据上面【资料库清单】【资料提炼汇总】【已导入的代码库】如实回答，不要说资料库是空的：每个代码库都存了完整文件快照（脱敏），并已按本次问题附上最相关文件的内容。要看别的文件时，请用户在消息里直接写文件路径或关键词（如「看 server/ai.js」），下一轮就会带上；你不能写文件、不能执行命令。');
-    lines.push('1. 判断用户意图：只是咨询/提问 → 直接回答，不要修改；要求修改路线图 / 管理资料 / 改目标信息 → 执行对应 ops。');
-  lines.push('   用户口述或粘贴了一段资料（JD、笔记、经验）想留档 → 用 add_source 存进资料库；只是想让你参考着改规划 → 不用存。');
-  lines.push('2. 输出格式（必须严格遵守，便于界面实时渲染）：');
-  lines.push('   先用 Markdown 写回复正文（可以分点、用列表、粗体、代码块，讲清你做了什么、为什么，以及建议；默认控制在 400 字以内，除非用户要求详细说明）；');
-  lines.push('   然后在正文最后附一个 ops 代码块（JSON 数组，即你要执行的修改操作）：');
-  lines.push('   ```ops');
-  lines.push('   [{"op":"add","parent_id":123,"title":"..."}]');
-  lines.push('   ```');
-  lines.push('   - 如果不需要修改路线图，ops 代码块里写 [] 即可。');
-  lines.push('   - 不要输出除正文和 ops 代码块以外的内容（不要输出 JSON 信封）。');
-  lines.push('3. 支持的操作：');
-  lines.push('   - {"op":"add","parent_id":<父节点id>,"title":"","detail":"","artifact":"","acceptance":"","hours":"","sources":[{"name":"","note":""}]}（任一节点的直接子任务不要超过 10 个；要插到指定位置就加 "after":<兄弟节点id> 放到它后面，或 "before":<兄弟节点id> 放到它前面；不加则追加到末尾）');
-  lines.push('   - {"op":"update","id":<id>,"title":"","detail":"","artifact":"","acceptance":"","hours":""}（只填要改的字段）');
-  lines.push('   - {"op":"delete","id":<id>}');
-  lines.push('   - {"op":"move","id":<id>,"parent_id":<新父节点id>}（同一父节点内调整先后顺序也用它：加 "after":<兄弟节点id> 放到它后面，或 "before":<兄弟节点id> 放到它前面；不加则移到末尾）');
-  lines.push('   - {"op":"status","id":<id>,"status":"todo|doing|done"}');
-    lines.push('   - {"op":"constraint","text":"约束内容"}（用户提出长期性要求时使用，如「以后不要安排付费资源」「我只有周末能学」；这类要求应记为约束而不是改节点）');
-  lines.push('   - {"op":"add_source","title":"资料标题","kind":"JD|面经|大纲|笔记|资料","content":"资料正文（尽量完整）","url":"可选链接","site":"来源（可选，默认 对话添加）"}（用户口述/粘贴一份资料时，直接存进资料库）');
-  lines.push('   - {"op":"delete_source","title":"资料标题关键词"}（删除资料库里的一条资料，只有用户明确要求才用）');
-  lines.push('   - {"op":"update_goal","fields":{"title":"","profile":"现状","weekly_hours":"每周可投入","deadline":"期望期限","materials":"参考资料"}}（只填要改的字段）');
-  lines.push('   - {"op":"digest"}（用户要求「提炼资料 / 汇总资料 / 通读全部资料」时使用：会启动信息提炼，把全部资料整理成多篇主题汇总，规划时优先依据）');
-  lines.push('   - {"op":"collect"}（用户要求「再收集一些资料 / 找找岗位信息」时使用：会启动信息源检索）');
-  if (tut) {
-    lines.push('   - {"op":"tutorial_edit","tutorial_id":<编号>,"feedback":"修改意见"}（用户要求改教程时用；tutorial_id 从上面【这个目标的教程】里挑，不填则用他当前打开的那份。feedback 写清改哪里、改成什么样，可以把用户原话整理得更明确。它会开一个后台任务重写整篇教程、耗时几分钟，所以用户只是在问问题时**不要**用它。想在正文里说明你已提交，就写"已把这条修改交给教程任务"。）');
-    lines.push('     ⚠️ feedback 的写法决定这次能不能改成功：');
-    lines.push('     · 要动**结构**（重写其中一整段、重新组织、合并章节、换主线、重新编号、推倒重来）时，');
-    lines.push('       必须在 feedback 开头写清范围 —— 范围明确就写"重写范围：从「<照抄那一节的标题>」开始，到「<下一节标题>」之前结束"；');
-    lines.push('       确确实实要整篇来才写"整篇重新组织"。');
-    lines.push('     · **不要随手加"允许重写结构"**：那是关掉"范围外的章节一个都不许少"这道保护的开关，');
-    lines.push('       只有用户明确要求整篇重写时才写；也不要写"不要写允许重写结构"这类否定说明，那是废话、只会让人困惑。');
-    lines.push('     · 只是改一小处（改某句措辞、某个表、某张图，或往某一节里补内容）就只写"只重写「X」这一节"，');
-    lines.push('       别去描述范围以外的事。');
-    lines.push('     · **拿不准要动到哪几节就别自己定**：先说清你想改的范围并问一句（"这次会重写 A~B 两节，其余不动，可以吗"），');
-    lines.push('       等用户点头再输出 tutorial_edit。系统另有一道闸：结构类改动会先把范围摊给用户核对，他确认了才会真跑；');
-    lines.push('       所以这种情况下别在正文里写"已提交任务"，写"范围已列好，你确认后就开始改"才准。');
-  }
-  lines.push('4. 修改要精准：用户说改哪个就改哪个，不要顺手大改；单次最多 20 个操作。');
-  lines.push('5. 删除要谨慎：只有用户明确要求才删除；阶段（最外层节点）不要删除，除非用户明确要求。');
-  lines.push('6. 新增任务必须带 detail（怎么做，60-120 字）与 hours；依据已确认的问答与用户现状。');
-  lines.push('7. 不要编造 id；只输出 JSON，不要输出其他内容。');
+  lines.push(await promptPacks.renderAsync('chat.agent_rules', { tutorialEditOp: tut ? chatPacks.TUTORIAL_EDIT_OP : '' }));
   return { prompt: lines.join('\n'), ctx };
 }
 /* 把节点放到父节点下的指定位置，并归一化这一组兄弟的 sort_order。
@@ -3909,6 +3960,76 @@ function placeSibling(goalId, parentId, nodeId, op) {
   sibs.forEach((x, i) => stmt.run(i, x.id));
   return idx;
 }
+/* 「本轮只改哪儿」—— 对话栏上方的「🎯 只改」键把用户意图钉死。
+   注意：提示词只是**引导**，真正的边界必须在应用层硬拦（模型会忘、会自作主张）。
+   auto = 不限制；其余每个范围只放行对应的一组 op，越界的 op 直接拒绝并回报错。 */
+const CHAT_SCOPE_OPS = {
+  conditions: ['condition_add', 'add_condition', 'condition_update', 'update_condition', 'condition_delete', 'delete_condition',
+    'condition_assign', 'assign_condition', 'condition_unassign', 'unassign_condition', 'condition_replace', 'replace_conditions'],
+  nodes: ['add', 'update', 'delete', 'move', 'status'],
+  goal: ['update_goal', 'goal', 'constraint'],
+  sources: ['add_source', 'delete_source', 'source', 'digest', 'digest_sources', 'extract', 'collect', 'collect_sources'],
+  tutorials: ['tutorial_edit']
+};
+const CHAT_SCOPE_LABEL = { auto: '自动', conditions: '达成条件', nodes: '路线图节点', goal: '目标信息', sources: '资料库', tutorials: '教程' };
+function chatScopeOf(v) {
+  const k = String(v || '').toLowerCase();
+  return CHAT_SCOPE_LABEL[k] && k !== 'auto' ? k : 'auto';
+}
+function chatScopeAllows(scope, kind) {
+  const s = chatScopeOf(scope);
+  if (s === 'auto') return true;
+  const list = CHAT_SCOPE_OPS[s] || [];
+  return list.indexOf(String(kind || '').toLowerCase()) >= 0;
+}
+/* 给提示词的硬约束块：**先于**通用 agent_rules 出现（写"这条比下面的通用规则优先"，
+   否则模型看到后面一长串 ops 清单就会按清单来）。 */
+function chatScopePromptBlock(scope) {
+  const s = chatScopeOf(scope);
+  if (s === 'auto') return '';
+  const label = CHAT_SCOPE_LABEL[s];
+  const allow = CHAT_SCOPE_OPS[s] || [];
+  const out = [];
+  out.push('【本轮改动范围 · 用户已在界面上锁定：只改「' + label + '」】');
+  out.push('- 这是用户用「🎯 只改」键明确指定的范围，**优先于下面所有通用规则**。');
+  out.push('- 这次只允许输出这些 op：' + allow.join(' / ') + '。');
+  out.push('- **禁止**输出任何范围外的 op（包括但不限于 add / update / delete / move / status / update_goal / constraint / add_source / delete_source / digest / collect / tutorial_edit / 其它 condition_*）：服务端会逐条拒绝，不会生效，用户只会看到"没改成"。');
+  out.push('- 如果用户的要求必须改到范围之外（例如范围是「达成条件」却说"把路线图那个节点改成…"）：**不要动手，也不要用别的 op 绕**；直接回一句「这属于「路线图节点」，请把上方的『只改』切到那一项再发一次」即可。');
+  out.push('- 只回答、不需要改任何东西时，正常回答即可（不必硬凑 op）。');
+  return out.join('\n');
+}
+/* 按范围过滤 ops（应用层边界）；返回保留的 ops 与被挡下的 op 类型。 */
+function chatScopeFilterOps(ops, scope) {
+  const list = Array.isArray(ops) ? ops : [];
+  const s = chatScopeOf(scope);
+  if (s === 'auto') return { ops: list, blocked: [] };
+  const keep = [], blocked = [];
+  for (const op of list) {
+    const kind = String((op && (op.op || op.type)) || '').toLowerCase();
+    if (chatScopeAllows(s, kind)) keep.push(op);
+    else blocked.push(kind || '未知');
+  }
+  return { ops: keep, blocked };
+}
+
+/* 对话 ops 里怎么认一条条件：优先 id，其次标题（精确 → 包含），用户口头说"第 2 条"也能靠标题对上 */
+function chatConditionOf(goalId, op) {
+  try {
+    const list = ((conditionsDomain.list(goalId) || {}).conditions) || [];
+    const o = op || {};
+    const id = Number(o.id != null ? o.id : o.condition_id);
+    if (id) return list.find(c => Number(c.id) === id) || null;
+    const raw = String(o.title || o.condition || o.title_match || o.match || '').trim();
+    if (!raw) return null;
+    return list.find(c => String(c.title) === raw) ||
+      list.find(c => String(c.title).indexOf(raw) >= 0) ||
+      (function () {
+        const m = raw.match(/^第?\s*(\d+)\s*条?$/);
+        if (!m) return null;
+        return list[Number(m[1]) - 1] || null;
+      })();
+  } catch (e) { return null; }
+}
 function applyChatOps(goalId, ops, opts) {
   const chatOpts = opts || {};
   const applied = [], errors = [];
@@ -3916,6 +4037,11 @@ function applyChatOps(goalId, ops, opts) {
   for (const op of (Array.isArray(ops) ? ops : []).slice(0, 25)) {
     try {
       const kind = String(op.op || op.type || '').toLowerCase();
+      /* 第二道闸：即使调用方没先过滤（补操作 / 旧路径），这里也不让越界 op 落库。 */
+      if (!chatScopeAllows(chatOpts.scope, kind)) {
+        errors.push('本轮范围是「' + CHAT_SCOPE_LABEL[chatScopeOf(chatOpts.scope)] + '」，已跳过「' + kind + '」');
+        continue;
+      }
       if (kind === 'add') {
         const parent = op.parent_id ? nodeOf(op.parent_id) : null;
         if (op.parent_id && !parent) { errors.push('父节点不存在：' + op.parent_id); continue; }
@@ -4000,7 +4126,68 @@ function applyChatOps(goalId, ops, opts) {
           const materials = pick('materials', 8000) != null ? pick('materials', 8000) : cur.materials;
           db.prepare('UPDATE goals SET title=?, profile=?, weekly_hours=?, deadline=?, materials=?, updated_at=? WHERE id=?')
             .run(title, profile, weekly, deadline, materials, nowISO(), goalId);
+          recordGoalFieldEvents(goalId, cur, { title: title, profile: profile, weekly_hours: weekly, deadline: deadline, materials: materials }, 'chat');
           applied.push({ op: 'update_goal', title: '已更新目标信息' });
+      } else if (kind === 'condition_add' || kind === 'add_condition') {
+          const title = String(op.title || op.condition || '').trim().slice(0, 120);
+          if (!title) { errors.push('条件标题为空'); continue; }
+          const out = conditionsDomain.saveManual(goalId, { title: title, detail: op.detail || '', acceptance: op.acceptance || '', jd_ref: op.jd_ref || op.jd || '', priority: op.priority || 'must' });
+          applied.push({ op: 'condition_add', id: out.id, title: title.slice(0, 60) });
+      } else if (kind === 'condition_replace' || kind === 'replace_conditions') {
+          /* 整批替换达成条件：用户说"把现有条件换成 JD 要求"时用一条 op 完成，
+             而不是让模型逐条 delete/add（中间失败会留下半套条件）。
+             只替换 source='plan' 的条件；手动条件保留；旧条件的节点回未归属。 */
+          const defs = Array.isArray(op.conditions) ? op.conditions : (Array.isArray(op.list) ? op.list : []);
+          if (!defs.length) { errors.push('condition_replace 没有给出条件列表'); continue; }
+          const saved2 = conditionsDomain.saveFromPlan(goalId, { conditions: defs });
+          let assigned2 = 0;
+          for (let ci = 0; ci < defs.length; ci++) {
+            const d = defs[ci] || {};
+            const cid = saved2.resolve(d.key != null ? d.key : (d.id != null ? d.id : ci + 1));
+            if (!cid) continue;
+            const rawIds = Array.isArray(d.nodes) ? d.nodes : (Array.isArray(d.node_ids) ? d.node_ids : []);
+            const ids = rawIds.map(Number).filter(x => x > 0);
+            if (!ids.length) continue;
+            try {
+              const out2 = conditionsDomain.assign(goalId, { condition_id: cid, node_ids: ids, cascade: true });
+              assigned2 += Number(out2.changed) || 0;
+            } catch (e2) { errors.push('条件「' + String(d.title || '').slice(0, 20) + '」归属失败：' + e2.message); }
+          }
+          applied.push({ op: 'condition_replace', conditions: saved2.defs.length, assigned: assigned2 });
+      } else if (kind === 'condition_update' || kind === 'update_condition') {
+          const c = chatConditionOf(goalId, op);
+          if (!c) { errors.push('条件不存在：' + (op.id || op.title || op.condition || '')); continue; }
+          const f2 = op.fields || op;
+          const pick = (k, max) => (f2[k] != null ? String(f2[k]).trim().slice(0, max) : null);
+          const title = pick('title', 120) || c.title;
+          const jdPick = pick('jd_ref', 600) != null ? pick('jd_ref', 600) : (pick('jd', 600) != null ? pick('jd', 600) : (c.jd_ref || ''));
+          db.prepare('UPDATE goal_conditions SET title = ?, detail = ?, acceptance = ?, jd_ref = ?, priority = ?, updated_at = ? WHERE id = ?')
+            .run(title, pick('detail', 800) != null ? pick('detail', 800) : c.detail,
+              pick('acceptance', 600) != null ? pick('acceptance', 600) : c.acceptance,
+              jdPick,
+              ['must', 'should', 'nice'].includes(String(f2.priority || '')) ? String(f2.priority) : c.priority,
+              nowISO(), Number(c.id));
+          applied.push({ op: 'condition_update', id: Number(c.id), title: String(title).slice(0, 60) });
+      } else if (kind === 'condition_delete' || kind === 'delete_condition') {
+          const c = chatConditionOf(goalId, op);
+          if (!c) { errors.push('条件不存在：' + (op.id || op.title || op.condition || '')); continue; }
+          conditionsDomain.remove(c.id);
+          applied.push({ op: 'condition_delete', id: Number(c.id), title: String(c.title).slice(0, 60) });
+      } else if (kind === 'condition_assign' || kind === 'assign_condition') {
+          const c = chatConditionOf(goalId, op);
+          if (!c) { errors.push('条件不存在：' + (op.id || op.condition_id || op.title || '')); continue; }
+          const rawIds = Array.isArray(op.node_ids) ? op.node_ids
+            : (Array.isArray(op.nodes) ? op.nodes : (op.node_id != null ? [op.node_id] : []));
+          const ids = rawIds.map(Number).filter(x => x > 0);
+          if (!ids.length) { errors.push('没有指定要归到这条条件的节点 id'); continue; }
+          const out = conditionsDomain.assign(goalId, { condition_id: Number(c.id), node_ids: ids, cascade: op.cascade !== false });
+          applied.push({ op: 'condition_assign', id: Number(c.id), title: String(c.title).slice(0, 40), nodes: out.changed });
+      } else if (kind === 'condition_unassign' || kind === 'unassign_condition') {
+          const rawIds = Array.isArray(op.node_ids) ? op.node_ids : (op.node_id != null ? [op.node_id] : []);
+          const ids = rawIds.map(Number).filter(x => x > 0);
+          if (!ids.length) { errors.push('没有指定要取消归属的节点 id'); continue; }
+          const out = conditionsDomain.assign(goalId, { condition_id: 0, node_ids: ids, cascade: op.cascade !== false });
+          applied.push({ op: 'condition_unassign', nodes: out.changed });
       } else if (kind === 'digest' || kind === 'digest_sources' || kind === 'extract') {
           applied.push({ op: 'start', action: 'digest', title: '开始信息提炼（通读全部资料 → 多篇主题汇总）' });
       } else if (kind === 'collect' || kind === 'collect_sources') {
@@ -4102,7 +4289,9 @@ function extractReplyField(s) {
 function parseChatOutput(text) {
   let s = String(text || '').trim();
   let ops = [];
-  const valid = o => o && typeof o === 'object' && ['add', 'update', 'delete', 'move', 'status', 'constraint', 'add_source', 'delete_source', 'update_goal', 'goal', 'source', 'digest', 'digest_sources', 'extract', 'collect', 'collect_sources', 'tutorial_edit'].includes(String(o.op || o.type || '').toLowerCase());
+  const valid = o => o && typeof o === 'object' && ['add', 'update', 'delete', 'move', 'status', 'constraint', 'add_source', 'delete_source', 'update_goal', 'goal', 'source', 'digest', 'digest_sources', 'extract', 'collect', 'collect_sources', 'tutorial_edit',
+    'condition_add', 'add_condition', 'condition_update', 'update_condition', 'condition_delete', 'delete_condition',
+    'condition_assign', 'assign_condition', 'condition_unassign', 'unassign_condition', 'condition_replace', 'replace_conditions'].includes(String(o.op || o.type || '').toLowerCase());
   const takeOps = arr => (Array.isArray(arr) ? arr.filter(valid).slice(0, 25) : []);
   // 1) ```ops 代码块（推荐格式）
   const m = s.match(/```ops[ \t]*\r?\n?([\s\S]*?)```/i);
@@ -4164,16 +4353,24 @@ function looksLikePromise(reply) {
    tutorial_edit 的 JSON 尾巴，用户以为交办了、队列里却什么都没有。
    对策：再用**极小的一次性请求**让它把刚才答应的事表达成 JSON 操作数组（走 AI 埋点，
    scene='助手对话-补操作'）；最多试 2 次，拿不到就返回空数组，沿用"并没有真的交办"提示。 */
+/* 补操作时给模型的 op 清单：带上范围标签，按「🎯 只改」过滤后才发给它 ——
+   否则模型会照着全量清单挑一个范围外的 op 交差。 */
 const OPS_SPEC_LINES = [
-  '{"op":"add","parent_id":<父节点id>,"title":"","detail":"","artifact":"","acceptance":"","hours":""}',
-  '{"op":"update","id":<id>,"title":"","detail":"","artifact":"","acceptance":"","hours":""}',
-  '{"op":"delete","id":<id>}   {"op":"move","id":<id>,"parent_id":<新父节点id>}',
-  '{"op":"status","id":<id>,"status":"todo|doing|done"}   {"op":"constraint","text":""}',
-  '{"op":"add_source","title":"","kind":"JD|面经|大纲|笔记|资料","content":"","url":"","site":""}',
-  '{"op":"delete_source","title":"关键词"}',
-  '{"op":"update_goal","fields":{"title":"","profile":"","weekly_hours":"","deadline":"","materials":""}}',
-  '{"op":"digest"}   {"op":"collect"}',
-  '{"op":"tutorial_edit","tutorial_id":<编号>,"feedback":"修改意见（改哪里、改成什么样；要动结构就写清范围，别随手加「允许重写结构」）"}'
+  { scope: 'nodes', text: '{"op":"add","parent_id":<父节点id>,"title":"","detail":"","artifact":"","acceptance":"","hours":""}' },
+  { scope: 'nodes', text: '{"op":"update","id":<id>,"title":"","detail":"","artifact":"","acceptance":"","hours":""}' },
+  { scope: 'nodes', text: '{"op":"delete","id":<id>}   {"op":"move","id":<id>,"parent_id":<新父节点id>}' },
+  { scope: 'nodes', text: '{"op":"status","id":<id>,"status":"todo|doing|done"}' },
+  { scope: 'goal', text: '{"op":"constraint","text":""}' },
+  { scope: 'sources', text: '{"op":"add_source","title":"","kind":"JD|面经|大纲|笔记|资料","content":"","url":"","site":""}' },
+  { scope: 'sources', text: '{"op":"delete_source","title":"关键词"}' },
+  { scope: 'goal', text: '{"op":"update_goal","fields":{"title":"","profile":"","weekly_hours":"","deadline":"","materials":""}}' },
+  { scope: 'conditions', text: '{"op":"condition_add","title":"","detail":"","acceptance":"","jd":"","priority":"must|should|nice"}' },
+  { scope: 'conditions', text: '{"op":"condition_update","id":<条件id>,"title":"","detail":"","acceptance":"","jd":"","priority":""}' },
+  { scope: 'conditions', text: '{"op":"condition_delete","id":<条件id>}' },
+  { scope: 'conditions', text: '{"op":"condition_assign","condition_id":<条件id>,"node_ids":[<节点id>],"cascade":true}' },
+  { scope: 'conditions', text: '{"op":"condition_replace","conditions":[{"key":"c1","title":"","detail":"","acceptance":"","jd":"","priority":"must","nodes":[<节点id>]}]}' },
+  { scope: 'sources', text: '{"op":"digest"}   {"op":"collect"}' },
+  { scope: 'tutorials', text: '{"op":"tutorial_edit","tutorial_id":<编号>,"feedback":"修改意见（改哪里、改成什么样；要动结构就写清范围，别随手加「允许重写结构」）"}' }
 ];
 async function recoverChatOps(goal, message, reply, o, model, sig) {
   const lines = [
@@ -4190,6 +4387,11 @@ async function recoverChatOps(goal, message, reply, o, model, sig) {
     const tl = db.prepare('SELECT id,title FROM tutorials WHERE goal_id = ? ORDER BY updated_at DESC, id DESC LIMIT 8').all(goal.id);
     if (tl.length) lines.push('【这个目标的教程】' + tl.map(t => '#' + t.id + ' ' + String(t.title || '').slice(0, 40)).join(' ｜ '));
   } catch (e) {}
+  try {
+    const cs = (conditionsDomain.list(goal.id) || {}).conditions || [];
+    if (cs.length) lines.push('【当前达成条件（方括号内是条件 id，只能引用这些 id）】' +
+      cs.map(c => '[' + c.id + ']' + String(c.title || '').slice(0, 40)).join(' ｜ '));
+  } catch (e) {}
   const tutId = Number((o && o.tutorial && o.tutorial.id) || 0);
   if (tutId) lines.push('【用户当前打开的是教程】#' + tutId);
   const fnode = (o && Array.isArray(o.nodes) && o.nodes.length) ? o.nodes[0] : null;
@@ -4198,9 +4400,17 @@ async function recoverChatOps(goal, message, reply, o, model, sig) {
     if (fn) lines.push('【用户是在这些节点上跟你说话的】' + (o.nodes || []).map(x => '#' + Number(x.id)).join(' ')
       + '（第一个是「' + String(fn.title || '').slice(0, 40) + '」）—— 你要做的改动默认落在它们身上，别改错分支');
   }
+  const scope = chatScopeOf(o && o.scope);
+  if (scope !== 'auto') {
+    lines.push('');
+    lines.push('【本轮范围 · 只改「' + CHAT_SCOPE_LABEL[scope] + '」】只允许输出下面列出的这些 op，其它一律不要写。');
+  }
   lines.push('');
   lines.push('【可用的操作】');
-  for (const l of OPS_SPEC_LINES) lines.push('   ' + l);
+  for (const l of OPS_SPEC_LINES) {
+    if (scope !== 'auto' && l.scope !== scope) continue;
+    lines.push('   ' + l.text);
+  }
   lines.push('');
   lines.push('【用户的消息】' + String(message || '').slice(0, 800));
   lines.push('【你刚才的回复（节选）】' + String(reply || '').slice(-1500));
@@ -4220,6 +4430,141 @@ async function recoverChatOps(goal, message, reply, o, model, sig) {
   }
   return [];
 }
+/* 创造模式提示词：把「能改什么、怎么改、红线、输出协议」一次性交给模型。
+   页面上下文复用 AI 助手那套（用户正在看的页面就是他最可能想改的那一页）。 */
+async function buildCreateChatPrompt(goal, message, o) {
+  const rawPage = pageContext.sanitizePageContext(o.page || null);
+  const pageText = rawPage && pageContext.pageContextBlockFrom ? pageContext.pageContextBlockFrom(rawPage) : '';
+  const prompt = createMode.promptBlock({ pageText: pageText })
+    + '\n\n【用户这句话】\n' + String(message || '').trim();
+  const ctx = [{ kind: 'ctx', label: '创造模式扩展点说明书', detail: '可覆盖页面 / 插件契约 / CSS 变量 / 安全红线 / 输出协议' }];
+  if (pageText) ctx.push({ kind: 'ctx', label: '你当前页面上的内容', detail: '' });
+  return { prompt: prompt, ctx: ctx };
+}
+/* ===== 对话图片（粘贴 / 拖入）：原图只随这次请求发给支持多模态的模型，
+   数据库只留缩略图（刷新后还能看到自己发过什么；缩略图很小，不拖垮多端同步）。 */
+const CHAT_IMG_MAX = 4;
+const CHAT_IMG_MAX_BYTES = 8 * 1024 * 1024;
+const CHAT_THUMB_MAX_BYTES = 600 * 1024;
+const CHAT_IMG_RE = /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=\s]+$/;
+function sanitizeChatImages(list) {
+  const out = [];
+  if (!Array.isArray(list)) return out;
+  for (const x of list) {
+    const s = String(x || '');
+    if (!CHAT_IMG_RE.test(s) || s.length > CHAT_IMG_MAX_BYTES) continue;
+    out.push(s);
+    if (out.length >= CHAT_IMG_MAX) break;
+  }
+  return out;
+}
+function sanitizeChatThumbs(list) {
+  const out = [];
+  if (!Array.isArray(list)) return out;
+  for (const x of list) {
+    const s = String(x || '');
+    if (!/^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/=\s]+$/.test(s) || s.length > CHAT_THUMB_MAX_BYTES) continue;
+    out.push(s);
+    if (out.length >= CHAT_IMG_MAX) break;
+  }
+  return out;
+}
+/* 当前对话模型能不能识图：
+   用户 2026-10-19 定调：**默认当作能识图**，先发过去试；模型要是回应不能识图，
+   就把这个模型记进「不支持识图」名单（后面发图直接提示，不再白花一次请求）。
+   名单存 settings.vision_unsupported_models；重新保存 AI 连接会清空（用户换了配置后重试）。 */
+const VISION_UNSUP_KEY = 'vision_unsupported_models';
+function visionUnsupportedList() {
+  try { const a = JSON.parse(getSetting(VISION_UNSUP_KEY, '[]') || '[]'); return Array.isArray(a) ? a.map(x => String(x || '').toLowerCase()).filter(Boolean) : []; } catch (e) { return []; }
+}
+function isVisionUnsupported(modelId) {
+  const id = String(modelId || '').trim().toLowerCase();
+  return !!id && visionUnsupportedList().includes(id);
+}
+function markVisionUnsupported(modelId) {
+  const id = String(modelId || '').trim().toLowerCase();
+  if (!id) return false;
+  const list = visionUnsupportedList();
+  if (list.includes(id)) return false;
+  list.push(id);
+  try { setSetting(VISION_UNSUP_KEY, JSON.stringify(list.slice(-60))); } catch (e) {}
+  try { console.log('[vision] 已标记模型不支持识图:', id); } catch (e) {}
+  return true;
+}
+function clearVisionUnsupported() {
+  try { setSetting(VISION_UNSUP_KEY, '[]'); } catch (e) {}
+}
+function modelSupportsVision(modelId) {
+  const id = String(modelId || '').trim().toLowerCase();
+  if (!id) return false;
+  /* ① 已经被模型自己/上游明确拒绝过的：不再发图 */
+  if (isVisionUnsupported(id)) return false;
+  /* ② 明确的多模态证据 */
+  try { for (const m of (ai.modelPoolVision() || [])) if (String(m.id || '').toLowerCase() === id) return true; } catch (e) {}
+  try { const st = ai.standaloneVision(); if (st && (st.models || []).some(x => String(x).toLowerCase() === id)) return true; } catch (e) {}
+  try { const ref = String(getSetting('vision_model', '') || '').trim().toLowerCase(); if (ref && ref === id) return true; } catch (e) {}
+  try {
+    const conns = ai.connections() || [];
+    for (const c of conns) {
+      const has = (c.models || []).some(x => String(x).toLowerCase() === id) || String(c.defaultModel || '').toLowerCase() === id;
+      if (!has) continue;
+      if (c.visionModel && String(c.visionModel).toLowerCase() === id) return true;
+      const pr = (ai.PROVIDERS || []).find(x => x.id === c.providerId);
+      if (pr && pr.vision && String(pr.vision).toLowerCase() === id) return true;
+    }
+  } catch (e) {}
+  if (/(^|\/)(gpt-4o|gpt-4\.1|gpt-5|o4|claude|gemini|glm-4\.\dv|glm-4v|qwen.*vl|kimi-k3|llava|gemma3|.*-vl|.*vision|mimo.*vl|doubao.*vision|ernie.*vl|step.*vl)/i.test(id)) return true;
+  /* ③ 判断不了就默认「能识图」：先发过去，失败了由上游报错自动标记 */
+  return true;
+}
+function visionRejectText(model, learned) {
+  const id = String(model || '未设置');
+  const marked = learned || isVisionUnsupported(model);
+  return '⚠️ 当前模型不支持识别图片（模型：' + id + '）' + (marked ? '，已把它标记为「不支持识图」' : '') + '。' + String.fromCharCode(10, 10)
+    + '你可以：① 在对话上方模型下拉里换一个支持多模态的模型；'
+    + '② 到「设置 → AI 接入方式」给这条连接配置识图模型；'
+    + '③ 或者把图片里的关键文字直接粘成文本再发给我。' + String.fromCharCode(10, 10)
+    + '（如果这个模型其实支持识图：到「设置 → AI 接入方式」重新保存一次连接，会清掉这个标记再试。）';
+}
+
+/* 设置里配置的识图模型（用户可能单独配了「识图模型」）：
+   当前对话模型不支持识图时，自动改用它来识别图片，再把识别结果交给对话模型回答。 */
+function configuredVisionModel() {
+  try { const v = ai.standaloneVision(); if (v && v.models && v.models[0]) return String(v.models[0]); } catch (e) {}
+  try { const ref = String(getSetting('vision_model', '') || '').trim(); if (ref) return ref; } catch (e) {}
+  try { const vp = ai.modelPoolVision(); if (vp && vp.length) return String(vp[0].model || vp[0].id || ''); } catch (e) {}
+  return '';
+}
+function visionFallbackFor(chatModel) {
+  const vm = configuredVisionModel();
+  if (!vm) return '';
+  if (String(vm).toLowerCase() === String(chatModel || '').toLowerCase()) return '';
+  return vm;
+}
+/* 明确知道「这个模型能识图」的证据（不是默认假设）：用于决定直接发图还是走识图模型。 */
+function modelKnownVision(modelId) {
+  const id = String(modelId || '').trim().toLowerCase();
+  if (!id) return false;
+  try { for (const m of (ai.modelPoolVision() || [])) { const a = String(m.id || '').toLowerCase(), b = String(m.model || '').toLowerCase(); if (a === id || b === id) return true; } } catch (e) {}
+  try { const st = ai.standaloneVision(); if (st && (st.models || []).some(x => String(x).toLowerCase() === id)) return true; } catch (e) {}
+  try { const ref = String(getSetting('vision_model', '') || '').trim().toLowerCase(); if (ref && ref === id) return true; } catch (e) {}
+  try { const conns = ai.connections() || []; for (const c of conns) { const has = (c.models || []).some(x => String(x).toLowerCase() === id) || String(c.defaultModel || '').toLowerCase() === id; if (!has) continue; if (c.visionModel && String(c.visionModel).toLowerCase() === id) return true; const pr = (ai.PROVIDERS || []).find(x => x.id === c.providerId); if (pr && pr.vision && String(pr.vision).toLowerCase() === id) return true; } } catch (e) {}
+  return /(^|\/)(gpt-4o|gpt-4\.1|gpt-5|o4|claude|gemini|glm-4\.\dv|glm-4v|qwen.*vl|kimi-k3|llava|gemma3|.*-vl|.*vision|mimo.*vl|doubao.*vision|ernie.*vl|step.*vl)/i.test(id);
+}
+/* 用识图模型看图：返回识别出的文字（最多 8000 字）；失败返回 { error } */
+async function recognizeImagesWith(images, visionModel, signal) {
+  if (!images || !images.length || !visionModel) return { error: '没有可用的识图模型' };
+  const prompt = '请仔细识别这 ' + images.length + ' 张图片里的全部有用信息：逐字转写图片中的文字（OCR），并描述表格/数字/界面元素/代码/图表结构/关键结论。只输出识别结果本身，不要寒暄或评论。';
+  try {
+    const t = await ai.text({ prompt: prompt, model: visionModel, images: images, timeoutMs: 180000, signal: signal, scene: '识图' });
+    return { text: String(t || '').trim().slice(0, 8000) };
+  } catch (e) { return { error: String((e && e.message) || e) }; }
+}
+function imageRecognitionBlock(rec, visionModel) {
+  return '【图片识别结果（由设置里的识图模型「' + visionModel + '」识别）】' + String.fromCharCode(10) + rec + String.fromCharCode(10)
+    + '回答时以这段识别结果为准；这是用户发来的图片内容，不要说你看不到图片。';
+}
+
 function streamChat(req, res, goal, message, session, opts) {
   const o = opts || {};
   const askOnly = o.mode === 'ask';
@@ -4227,6 +4572,9 @@ function streamChat(req, res, goal, message, session, opts) {
   const sig = clientSignal(req);   // 用户在对话里点「停止」时，终止上游 AI 请求
   const model = (session && session.model) ? session.model : currentModel();
   const sessionId = session ? session.id : 0;
+  /* 用户这次粘贴/拖进来的图片：原图只发给模型，缩略图落库（刷新还能看到） */
+  const images = sanitizeChatImages(o.images);
+  const imageThumbs = sanitizeChatThumbs(o.image_thumbs);
   const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} };
   /* 「它做了什么」：本轮看了什么上下文、调了哪些工具。
      一边收集一边下发（用户要能看着它干），收尾时随这条回复一起落库（刷新后还在）。
@@ -4247,7 +4595,7 @@ function streamChat(req, res, goal, message, session, opts) {
   (async () => {
     let fullText = '';
     try {
-      db.prepare('INSERT INTO chats (goal_id, session_id, role, content, created_at) VALUES (?,?,?,?,?)').run(goal.id, sessionId, 'user', String(message).slice(0, 30000), nowISO());
+      db.prepare('INSERT INTO chats (goal_id, session_id, role, content, images, created_at) VALUES (?,?,?,?,?,?)').run(goal.id, sessionId, 'user', String(message).slice(0, 30000), JSON.stringify(imageThumbs), nowISO());
       if (session && (!session.title || session.title === '新对话')) {
         const autoTitle = String(message).replace(/\s+/g, ' ').trim().slice(0, 24);
         if (autoTitle) {
@@ -4255,14 +4603,61 @@ function streamChat(req, res, goal, message, session, opts) {
           send({ sessionTitle: autoTitle });
         }
       }
+      /* 图片策略：
+         ① 明确知道当前模型能识图 → 直接把图发给它（原生多模态回答）；
+         ② 判断不了或已知不能识图，且**设置里配了识图模型** → 先让识图模型看图，再把识别结果交给对话模型；
+         ③ 两者都不行 → 说清楚不能识别。 */
+      const visionFallback = images.length ? visionFallbackFor(model) : '';
+      const knownVision = images.length ? modelKnownVision(model) : false;
+      let imageRecognition = '';
+      let sendImages = images;
+      if (images.length && !knownVision) {
+        if (visionFallback) {
+          send({ status: '正在用识图模型「' + visionFallback + '」识别图片…' });
+          const rec = await recognizeImagesWith(images, visionFallback, sig);
+          if (rec && rec.text) {
+            imageRecognition = rec.text;
+            sendImages = [];
+            pushStep({ kind: 'ctx', label: '用识图模型「' + visionFallback + '」识别了 ' + images.length + ' 张图片', detail: imageRecognition.length + ' 字' });
+          } else {
+            const why = '⚠️ 当前模型不能识图，设置里的识图模型「' + visionFallback + '」也没识别成功：' + String((rec && rec.error) || '未知错误')
+              + String.fromCharCode(10, 10) + '可以检查「设置 → AI 接入方式」里的识图模型配置，或换一个支持多模态的模型再发。';
+            send({ status: '识图失败' });
+            send({ text: why }); send({ reply: why });
+            const insF = db.prepare('INSERT INTO chats (goal_id, session_id, role, content, ops, version_id, trace, created_at) VALUES (?,?,?,?,?,?,?,?)')
+              .run(goal.id, sessionId, 'assistant', why, '[]', 0, JSON.stringify(trace), nowISO());
+            backup();
+            send({ done: true, id: Number(insF.lastInsertRowid), reply: why, applied: [], errors: [], versionId: 0, trace: trace, goal: getGoal(goal.id) });
+            res.end(); return;
+          }
+        } else if (!modelSupportsVision(model)) {
+          const why = visionRejectText(model);
+          send({ status: '当前模型不支持识别图片' });
+          send({ text: why });
+          send({ reply: why });
+          const ins2 = db.prepare('INSERT INTO chats (goal_id, session_id, role, content, ops, version_id, trace, created_at) VALUES (?,?,?,?,?,?,?,?)')
+            .run(goal.id, sessionId, 'assistant', why, '[]', 0, JSON.stringify([{ kind: 'ctx', label: '图片识别', detail: '当前模型不支持' }]), nowISO());
+          backup();
+          send({ done: true, id: Number(ins2.lastInsertRowid), reply: why, applied: [], errors: [], versionId: 0, trace: [], goal: getGoal(goal.id) });
+          res.end();
+          return;
+        }
+      }
       /* 先算提示词：它的副产物就是「这轮带了哪些上下文」——
          在调 AI 之前先发出去，用户点发送后马上能看到"它正在看什么"。 */
       const bp = await buildChatPrompt(goal, message, sessionId, o);
+      if (imageRecognition) {
+        bp.prompt += String.fromCharCode(10, 10) + imageRecognitionBlock(imageRecognition, visionFallback);
+      } else if (sendImages.length) {
+        bp.prompt += String.fromCharCode(10, 10) + '【用户这次还发了 ' + sendImages.length + ' 张图片】它们是随这条消息一起发来的图片输入，请结合图片内容回答；描述图片时说到关键文字/布局/数字。';
+        pushStep({ kind: 'ctx', label: '你发来的 ' + sendImages.length + ' 张图片', detail: '已随消息一起交给模型' });
+      }
       for (const s of (bp.ctx || [])) pushStep(s);
       send({ status: '正在理解你的要求…' });
       fullText = await ai.text({
         prompt: bp.prompt,
         model: model || currentModel(),
+        images: sendImages.length ? sendImages : undefined,
         timeoutMs: 420000,
         signal: sig,
         scene: '助手对话',
@@ -4274,16 +4669,55 @@ function streamChat(req, res, goal, message, session, opts) {
       });
       const parsed = parseChatOutput(fullText);
       let reply = parsed.reply.slice(0, 20000);
+      /* 创造模式：AI 只负责生成 create JSON，**不直接改任何东西**。
+         这里解析 + 校验 + 暂存；真正安装要等用户在对话卡片上点「安装并查看」
+         （= DSH 的 agent 准备 workspace 包、plugin_manager 安装要用户批准）。 */
+      let createInfo = null;
+      let createParse = null;
+      if (o.mode === 'create') {
+        createParse = createMode.parse(fullText);
+        reply = String(createParse.reply || parsed.reply || '').slice(0, 20000);
+        if (createParse.error) {
+          reply += '\n\n> ⚠️ ' + createParse.error + '\n> 可以说「按上面的问题改一下重新生成」，或把要求说短一点再试。';
+        } else if (!createParse.artifact) {
+          if (!reply) reply = '想改什么？告诉我页面/风格，或想要的新功能，我先给你一版。';
+        } else {
+          try {
+            createInfo = createMode.stage(createParse.artifact);
+            if (!reply) reply = '已生成「' + createInfo.name + '」。确认没问题就点下面的「安装并查看」。';
+            pushStep({ kind: 'create', label: '已生成「' + createInfo.name + '」', detail: createInfo.kind + ' · ' + createInfo.id + ' · 等你确认安装', create: createInfo });
+            send({ status: '已生成，等待你确认安装' });
+          } catch (e) {
+            createInfo = null;
+            reply += '\n\n> ⚠️ 生成的内容没通过服务端校验：' + ((e && e.message) || e) + '\n> 可以说「按上面的问题改一下重新生成」。';
+          }
+        }
+      }
       if (!reply) throw new Error('AI 回复为空，请重试');
       /* ASK 模式下服务端直接丢弃任何 ops —— 不给模型"忘了规矩"的机会。
-         前端也会拦一道，但边界必须在这里。 */
-      let ops = askOnly ? [] : parsed.ops;
+         前端也会拦一道，但边界必须在这里。
+         创造模式同样不走 ops：它产出的是插件文件，不是路线图操作。 */
+      let ops = (askOnly || o.mode === 'create') ? [] : parsed.ops;
+      /* 「🎯 只改」范围：越界的 ops 在这里就被挡掉，绝不下到 applyChatOps。
+         同时把"挡掉了什么"写进回复，否则用户只会觉得"AI 说改了、界面没变"。 */
+      let scopeBlocked = [];
+      if (!askOnly && o.scope && o.scope !== 'auto') {
+        const f = chatScopeFilterOps(ops, o.scope);
+        ops = f.ops;
+        scopeBlocked = f.blocked;
+        if (scopeBlocked.length) {
+          const kinds = Array.from(new Set(scopeBlocked)).slice(0, 4).join(' / ');
+          reply += '\n\n> 🎯 这次你在上方限定只改「' + CHAT_SCOPE_LABEL[chatScopeOf(o.scope)] + '」，'
+            + '有 ' + scopeBlocked.length + ' 处改动超出范围、已被挡掉（' + kinds + '）。'
+            + '要改它们，请把「只改」切到对应项再发一次。';
+        }
+      }
       /* 模型"嘴上说已经交办了、其实没给出任何操作"——两种原因：
          ① 回复写到一半被输出上限截断，末尾那段 ops 直接丢了；
          ② **根本没写 ops**（长正文里 ops 最容易丢，实测 chats id=299）。
          ①的抢救在 parseChatOutput 里；②这里补一刀：先用极小的一次性请求让它把
          刚答应的事表达成 JSON 操作数组，补不到才在对话里说实话，别让人干等。 */
-      if (!ops.length && !askOnly && looksLikePromise(reply)) {
+      if (!ops.length && !askOnly && o.mode !== 'create' && looksLikePromise(reply)) {
         send({ status: '正在补齐可执行的操作…' });
         ops = await recoverChatOps(goal, message, reply, o, model, sig);
       }
@@ -4310,10 +4744,28 @@ function streamChat(req, res, goal, message, session, opts) {
         .run(goal.id, sessionId, 'assistant', reply, JSON.stringify(applied), vid, JSON.stringify(trace), t);
       if (sessionId) db.prepare('UPDATE chat_sessions SET updated_at = ? WHERE id = ?').run(t, sessionId);
       backup();
-      send({ done: true, id: Number(ins.lastInsertRowid), reply, applied, errors, versionId: vid, trace, goal: getGoal(goal.id) });
+      send({ done: true, id: Number(ins.lastInsertRowid), reply, applied, errors, versionId: vid, trace, create: createInfo, createError: (createParse && createParse.error) || '', goal: getGoal(goal.id) });
     } catch (e) {
       if (e && e.cancelled) send({ cancelled: true, status: '已停止（本轮未执行任何修改）' });
       else {
+        /* 图片相关的上游报错（模型其实不支持读图/不接受 image_url）：换成用户看得懂的说明，
+           不要甩一段 HTTP 400 原文。 */
+        if (images.length && /image|vision|multimodal|content[ _-]?type|unsupported|不支持|无法.*图/i.test(String((e && e.message) || e))) {
+          markVisionUnsupported(model);
+          send({ status: '模型不能识别图片，已记下' });
+          const fbNow = visionFallbackFor(model);
+          const why = visionRejectText(model, true) + String.fromCharCode(10, 10) + '（上游返回：' + String((e && e.message) || e).slice(0, 160) + '）'
+            + (fbNow ? String.fromCharCode(10, 10) + '再发一次图片会自动改用识图模型「' + fbNow + '」识别后再回答。' : '');
+          try {
+            const ins2 = db.prepare('INSERT INTO chats (goal_id, session_id, role, content, ops, version_id, trace, created_at) VALUES (?,?,?,?,?,?,?,?)')
+              .run(goal.id, sessionId, 'assistant', why, '[]', 0, JSON.stringify(trace), nowISO());
+            if (sessionId) db.prepare('UPDATE chat_sessions SET updated_at = ? WHERE id = ?').run(nowISO(), sessionId);
+            backup();
+            send({ error: why }); send({ done: true, id: Number(ins2.lastInsertRowid), reply: why, applied: [], errors: [], versionId: 0, trace, goal: getGoal(goal.id) });
+            res.end();
+            return;
+          } catch (e2) {}
+        }
         /* 失败也要在对话里留一条**看得见**的话。
            以前这里只 send({error}) → 前端弹个 toast，几秒后就没了；
            用户回头只看见自己那句孤零零的问题，以为"发出去没反应"（真实踩到过：
@@ -4325,6 +4777,461 @@ function streamChat(req, res, goal, message, session, opts) {
           if (sessionId) db.prepare('UPDATE chat_sessions SET updated_at = ? WHERE id = ?').run(nowISO(), sessionId);
           send({ error: msg });
           send({ done: true, id: Number(ins.lastInsertRowid), reply: '⚠️ 这次没能处理：' + msg, applied: [], errors: [msg], versionId: 0, trace, goal: getGoal(goal.id) });
+        } catch (e2) { send({ error: msg }); }
+      }
+    }
+    res.end();
+  })();
+}
+
+/* ===== 全局 AI 助手（不绑定具体目标） ===== 
+   所有页面都能打开它；没有目标上下文时走这里：读全站内容 + 当前页面文字，但**只读**。
+   修改能力保留在「有目标上下文」的页面（目标/路线图/条件/教程/插件页），
+   由 buildChatPrompt + applyChatOps 处理；这里绝不落库任何 ops。 */
+function globalOverviewBlock() {
+  const lines = ['【全局概览 · 思而行全站】'];
+  try {
+    const goals = db.prepare('SELECT id,title,status,deadline,weekly_hours FROM goals ORDER BY updated_at DESC, id DESC LIMIT 50').all();
+    lines.push('- 目标 ' + goals.length + ' 个：');
+    for (const g of goals.slice(0, 30)) {
+      let done = 0, total = 0;
+      try {
+        const rows = db.prepare('SELECT id,parent_id,status FROM nodes WHERE goal_id = ?').all(g.id);
+        const parents = new Set(rows.filter(r => r.parent_id).map(r => Number(r.parent_id)));
+        const leaves = rows.filter(r => !parents.has(Number(r.id)));
+        total = leaves.length; done = leaves.filter(r => r.status === 'done').length;
+      } catch (e) {}
+      lines.push('  · #' + g.id + ' ' + String(g.title || '').slice(0, 50) + '（' + (total ? Math.round(done / total * 100) : 0) + '%，节点 ' + done + '/' + total +
+        (g.deadline ? '，期限 ' + String(g.deadline).slice(0, 20) : '') + (g.weekly_hours ? '，每周 ' + String(g.weekly_hours).slice(0, 12) : '') + '）');
+    }
+  } catch (e) {}
+  try { lines.push('- 资料库：' + db.prepare('SELECT COUNT(*) AS n FROM sources').get().n + ' 条'); } catch (e) {}
+  try { lines.push('- 达成条件：' + db.prepare('SELECT COUNT(*) AS n FROM goal_conditions').get().n + ' 条'); } catch (e) {}
+  try { lines.push('- 教程：' + db.prepare('SELECT COUNT(*) AS n FROM tutorials').get().n + ' 份'); } catch (e) {}
+  try {
+    const comps = allComponents().filter(c => c.kind !== 'theme');
+    const on = comps.filter(c => c.scope === 'core' || componentEnabled(c.id)).length;
+    lines.push('- 组件：' + comps.length + ' 个（启用 ' + on + '）');
+  } catch (e) {}
+  return lines.join(String.fromCharCode(10));
+}
+/* ===== 全局助手「按需查阅」工具（只读） ===== 
+   用户要求（2026-10-19）：全局助手不能只是概览，设置/资源库/产出库/组件/界面插件/AI 任务
+   这些具体内容**想查的时候都要能拿到**，而不是一次性全灌进上下文。
+   做法：模型先输出一个 ```tool 代码块（JSON 数组），服务端执行只读工具、把结果回填后
+   再让它回答。最多两轮查询，避免死循环/烧 token。 */
+const GTICK = String.fromCharCode(96, 96, 96);
+function globalToolDefs() {
+  return [
+    ['goals.list', '{}', '所有目标：id/标题/状态/进度/节点数/条件数/资料数/教程数'],
+    ['goal.get', '{"id":166}', '单个目标详情：现状、材料节选、约束、节点大纲、达成条件、资料/教程清单'],
+    ['sources.list', '{"goal_id":0,"kind":"","q":"","limit":10}', '资源库清单/搜索：q 同时搜标题与正文，返回命中片段；kind 可筛 JD/岗位/教程等'],
+    ['sources.get', '{"id":123}', '单条资料的正文（最多 8000 字），需要看具体内容时用'],
+    ['tutorials.list', '{"goal_id":0,"q":"","limit":10}', '教程清单：id/标题/所属目标/格式/字数/更新时间'],
+    ['settings.get', '{}', '设置全貌：AI 连接与模型（密钥只显示是否已填）、检索增强、资料搜集、同步、讲解风格、数据位置等'],
+    ['components.list', '{}', '组件管理：所有组件的 id/名称/分类/scope/是否启用/说明'],
+    ['ui.list', '{}', '界面管理：内置页面插件、用户页面插件（覆盖/启用）、皮肤、内核加载状态'],
+    ['tasks.list', '{}', 'AI 任务：正在跑/排队的任务、最近历史（状态/耗时/错误）、成功失败统计'],
+    ['outlib.list', '{"goal_id":0}', '产出库：各目标的文件/目录数/体积、最近文件、顶层目录'],
+    ['library.overview', '{}', '资源库总览：资料按 kind 计数、提炼汇总篇数、教程/目标/产出统计']
+  ];
+}
+function globalToolCatalogText() {
+  const lines = ['【可按需查阅的站内数据（只读；查到什么说什么，不要编造）】'];
+  lines.push('需要具体信息时，**只输出一个 ' + GTICK + 'tool 代码块**（内容是 JSON 数组，一次 1~6 个工具），不要同时输出正文。例如：');
+  lines.push(GTICK + 'tool');
+  lines.push('[{"tool":"sources.list","args":{"q":"JD","limit":10}}]');
+  lines.push(GTICK);
+  lines.push('可用工具：');
+  globalToolDefs().forEach((d, i) => lines.push((i + 1) + '. ' + d[0] + ' ' + d[1] + ' —— ' + d[2]));
+  lines.push('用法：先判断需不需要查；需要就只发 tool 块（服务端执行后会把数据回填给你），再基于数据回答；最多查 2 轮。不需要查就直接回答。');
+  return lines.join(String.fromCharCode(10));
+}
+function gClip(s, n) {
+  s = String(s == null ? '' : s);
+  if (n == null) n = 60;
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+function globalToolLabel(name) {
+  return ({
+    'goals.list': '目标列表', 'goal.get': '目标详情', 'sources.list': '资源库清单', 'sources.get': '资料正文',
+    'tutorials.list': '教程清单', 'settings.get': '设置', 'components.list': '组件管理', 'ui.list': '界面管理',
+    'tasks.list': 'AI 任务', 'outlib.list': '产出库', 'library.overview': '资源库总览'
+  })[name] || name;
+}
+function parseGlobalToolCalls(raw) {
+  const s = String(raw || '');
+  const out = [];
+  const take = arr => {
+    for (const o of arr) {
+      if (!o || typeof o !== 'object') continue;
+      const nm = String(o.tool || o.name || '').trim();
+      if (!nm) continue;
+      const args = (o.args && typeof o.args === 'object' && !Array.isArray(o.args)) ? o.args : (o.arguments && typeof o.arguments === 'object' ? o.arguments : {});
+      out.push({ tool: nm.slice(0, 40), args: args });
+      if (out.length >= 6) break;
+    }
+  };
+  try {
+    const re = new RegExp(GTICK + 'tool[\\t ]*\\r?\\n?([\\s\\S]*?)' + GTICK, 'gi');
+    let m;
+    while ((m = re.exec(s)) && out.length < 6) {
+      const body = String(m[1] || '').trim();
+      if (!body) continue;
+      try {
+        const j = JSON.parse(body);
+        if (Array.isArray(j)) take(j);
+        else if (j && Array.isArray(j.calls)) take(j.calls);
+        else if (j && j.tool) take([j]);
+      } catch (e) {}
+    }
+  } catch (e) {}
+  if (out.length) return out;
+  try {
+    const i = s.search(/\[\s*\{\s*"(tool|name)"\s*:/);
+    if (i >= 0) {
+      const j = JSON.parse(s.slice(i));
+      if (Array.isArray(j)) take(j);
+      else if (j && j.tool) take([j]);
+    }
+  } catch (e) {}
+  return out;
+}
+function stripGlobalToolFences(raw) {
+  let s = String(raw || '');
+  try {
+    const re = new RegExp(GTICK + 'tool[\\t ]*\\r?\\n?[\\s\\S]*?' + GTICK, 'gi');
+    s = s.replace(re, '');
+  } catch (e) {}
+  return s.trim();
+}
+/* 执行一个只读全局工具；参数只认数字/字符串，任何异常都返回 {ok:false}（绝不影响对话）。 */
+function globalToolRun(name, args) {
+  const a = (args && typeof args === 'object') ? args : {};
+  const num = (v, d) => { const n = Number(v); return Number.isFinite(n) ? n : (d || 0); };
+  const str = (v, max) => gClip(String(v == null ? '' : v), max || 80);
+  const goalTitles = () => {
+    const m = {};
+    try { for (const g of db.prepare('SELECT id,title FROM goals').all()) m[g.id] = g.title; } catch (e) {}
+    return m;
+  };
+  try {
+    if (name === 'goals.list') {
+      const rows = db.prepare('SELECT g.id,g.title,g.status,g.deadline,g.weekly_hours,'
+        + ' (SELECT COUNT(*) FROM nodes n WHERE n.goal_id=g.id) AS nodes,'
+        + ' (SELECT COUNT(*) FROM nodes n WHERE n.goal_id=g.id AND n.status=\'done\') AS nodes_done,'
+        + ' (SELECT COUNT(*) FROM goal_conditions c WHERE c.goal_id=g.id) AS conds,'
+        + ' (SELECT COUNT(*) FROM sources s WHERE s.goal_id=g.id) AS sources,'
+        + ' (SELECT COUNT(*) FROM tutorials t WHERE t.goal_id=g.id) AS tutorials'
+        + ' FROM goals g ORDER BY g.updated_at DESC, g.id DESC LIMIT 60').all();
+      return { tool: name, ok: true, data: { count: rows.length, goals: rows.map(r => ({
+        id: r.id, title: gClip(r.title, 60), status: r.status, deadline: r.deadline || '', weekly_hours: r.weekly_hours || '',
+        nodes: r.nodes, nodes_done: r.nodes_done, percent: r.nodes ? Math.round(r.nodes_done / r.nodes * 100) : 0,
+        conditions: r.conds, sources: r.sources, tutorials: r.tutorials })) } };
+    }
+    if (name === 'goal.get') {
+      const gid = num(a.id);
+      const g = gid ? db.prepare('SELECT * FROM goals WHERE id = ?').get(gid) : null;
+      if (!g) return { tool: name, ok: false, error: '目标不存在：' + (a.id == null ? '（缺少 id）' : a.id) };
+      const nodes = db.prepare('SELECT id,parent_id,level,title,status,condition_id FROM nodes WHERE goal_id = ? ORDER BY level, sort_order, id LIMIT 100').all(gid);
+      const conds = db.prepare('SELECT id,title,acceptance,jd_ref,priority,source FROM goal_conditions WHERE goal_id = ? ORDER BY sort_order, id').all(gid);
+      const srcs = db.prepare('SELECT id,title,kind,site,length(content) AS chars FROM sources WHERE goal_id = ? ORDER BY id DESC LIMIT 30').all(gid);
+      const tuts = db.prepare('SELECT id,title,format,length(content) AS chars,updated_at FROM tutorials WHERE goal_id = ? ORDER BY updated_at DESC LIMIT 30').all(gid);
+      return { tool: name, ok: true, data: {
+        id: g.id, title: g.title, status: g.status, profile: gClip(g.profile, 1200), materials: gClip(g.materials, 2000),
+        summary: gClip(g.summary, 1000), deadline: g.deadline || '', weekly_hours: g.weekly_hours || '',
+        constraints: safeParse(g.constraints) || [],
+        nodes: nodes.map(n => ({ id: n.id, parent_id: n.parent_id, level: n.level, title: gClip(n.title, 60), status: n.status, condition_id: n.condition_id })),
+        conditions: conds.map(c => ({ id: c.id, title: gClip(c.title, 60), acceptance: gClip(c.acceptance, 160), jd: gClip(c.jd_ref, 200), priority: c.priority, source: c.source })),
+        sources: srcs.map(s => ({ id: s.id, title: gClip(s.title, 80), kind: s.kind, site: gClip(s.site, 40), chars: s.chars })),
+        tutorials: tuts.map(t => ({ id: t.id, title: gClip(t.title, 80), format: t.format, chars: t.chars, updated_at: t.updated_at }))
+      } };
+    }
+    if (name === 'sources.list' || name === 'library.overview') {
+      const gid = num(a.goal_id);
+      const kind = str(a.kind || a.type, 20).trim();
+      const qq = str(a.q || a.query, 40).trim();
+      const lim = Math.min(20, Math.max(1, num(a.limit, 10)));
+      if (name === 'library.overview') {
+        const byKind = db.prepare('SELECT kind,COUNT(*) AS c FROM sources GROUP BY kind ORDER BY c DESC LIMIT 20').all();
+        let digests = 0; try { digests = db.prepare('SELECT COUNT(*) AS n FROM source_digests').get().n; } catch (e) {}
+        let tutorials = 0; try { tutorials = db.prepare('SELECT COUNT(*) AS n FROM tutorials').get().n; } catch (e) {}
+        let goals = 0; try { goals = db.prepare('SELECT COUNT(*) AS n FROM goals').get().n; } catch (e) {}
+        return { tool: name, ok: true, data: { sources_total: byKind.reduce((x, r) => x + r.c, 0), by_kind: byKind.map(r => ({ kind: r.kind, count: r.c })), digests: digests, tutorials: tutorials, goals: goals } };
+      }
+      const wh = [], ps = [];
+      if (gid) { wh.push('goal_id = ?'); ps.push(gid); }
+      if (kind) { wh.push('kind LIKE ?'); ps.push('%' + kind + '%'); }
+      if (qq) { wh.push('(title LIKE ? OR content LIKE ?)'); const lk = '%' + qq + '%'; ps.push(lk, lk); }
+      const rows = db.prepare('SELECT * FROM sources' + (wh.length ? ' WHERE ' + wh.join(' AND ') : '') + ' ORDER BY id DESC LIMIT ' + lim).all(...ps);
+      const titles = goalTitles();
+      const findSnip = (row) => {
+        const content = String(row.content || '') + ' ' + String(row.snippet || '');
+        if (!qq) return gClip(content.replace(/\s+/g, ' ').trim(), 160);
+        const low = content.toLowerCase(), idx = low.indexOf(qq.toLowerCase());
+        if (idx < 0) return gClip(content.replace(/\s+/g, ' ').trim(), 160);
+        const from = Math.max(0, idx - 90);
+        return (from > 0 ? '…' : '') + content.slice(from, idx + qq.length + 120).replace(/\s+/g, ' ').trim() + '…';
+      };
+      return { tool: name, ok: true, data: { count: rows.length, q: qq || undefined, items: rows.map(r => ({
+        id: r.id, title: gClip(r.title, 90), kind: r.kind, site: gClip(r.site, 40), goal_id: r.goal_id,
+        goal: gClip(titles[r.goal_id] || '', 40), chars: String(r.content || '').length, created_at: r.created_at, snippet: findSnip(r) })) } };
+    }
+    if (name === 'sources.get') {
+      const id = num(a.id);
+      const r = id ? db.prepare('SELECT * FROM sources WHERE id = ?').get(id) : null;
+      if (!r) return { tool: name, ok: false, error: '资料不存在：' + (a.id == null ? '（缺少 id）' : a.id) };
+      return { tool: name, ok: true, data: { id: r.id, title: r.title, kind: r.kind, site: r.site, goal_id: r.goal_id, created_at: r.created_at, content: gClip(String(r.content || r.snippet || ''), 8000) } };
+    }
+    if (name === 'tutorials.list') {
+      const gid = num(a.goal_id);
+      const qq = str(a.q || a.query, 40).trim();
+      const lim = Math.min(30, Math.max(1, num(a.limit, 10)));
+      const wh = [], ps = [];
+      if (gid) { wh.push('goal_id = ?'); ps.push(gid); }
+      if (qq) { wh.push('(title LIKE ? OR content LIKE ?)'); const lk = '%' + qq + '%'; ps.push(lk, lk); }
+      const rows = db.prepare('SELECT id,goal_id,node_id,title,format,length(content) AS chars,updated_at FROM tutorials' + (wh.length ? ' WHERE ' + wh.join(' AND ') : '') + ' ORDER BY updated_at DESC, id DESC LIMIT ' + lim).all(...ps);
+      const titles = goalTitles();
+      return { tool: name, ok: true, data: { count: rows.length, items: rows.map(r => ({ id: r.id, title: gClip(r.title, 80), goal_id: r.goal_id, goal: gClip(titles[r.goal_id] || '', 40), format: r.format, chars: r.chars, updated_at: r.updated_at })) } };
+    }
+    if (name === 'settings.get') {
+      let conns = [];
+      try { conns = (ai.connections() || []).map(c => ({ id: c.id, name: c.name, provider: c.provider, kind: c.kind, purpose: c.purpose, baseUrl: c.baseUrl, key_set: !!c.apiKey, models: (c.models || []).slice(0, 10), defaultModel: c.defaultModel, visionModel: c.visionModel, enabled: c.enabled !== false })); } catch (e) {}
+      let compSettings = {};
+      try { compSettings = componentSettings(); } catch (e) {}
+      return { tool: name, ok: true, data: {
+        ai: { default_model: currentModel(), vision_model: currentVisionModel(), connections: conns,
+          env_keys: { base: !!(process.env.SIERXING_API_BASE || process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE), key: !!(process.env.SIERXING_API_KEY || process.env.OPENAI_API_KEY), model: !!(process.env.SIERXING_MODEL || process.env.OPENAI_MODEL) } },
+        rag: { enabled: (getSetting('rag_enabled', '1') || '1') !== '0', emb_base_url: getSetting('emb_base_url', ''), emb_model: getSetting('emb_model', ''), emb_key_set: !!getSetting('emb_api_key', ''), vector_ready: (getSetting('rag_enabled', '1') || '1') !== '0' && !!getSetting('emb_api_key', '') },
+        collect: { review: (getSetting('collect_review', '1') || '1') !== '0', min_score: getSetting('collect_min_score', '3'), candidates: getSetting('collect_candidates', '220'), per_site: getSetting('collect_per_site', '12'), full: (getSetting('collect_full', '1') || '1') !== '0', full_max: getSetting('collect_full_max', '60000') },
+        sync: { enabled: getSetting('sync_enabled', '') === '1', repo: getSetting('sync_repo', ''), branch: getSetting('sync_branch', 'main'), user: getSetting('sync_user', ''), token_set: !!getSetting('sync_token', ''), auto_push: getSetting('sync_auto_push', '1') !== '0', auto_pull: getSetting('sync_auto_pull', '1') !== '0', images: getSetting('sync_images', '1') === '1' },
+        explain: { style_sample_chars: String(getSetting('explain_style_sample', '') || '').length },
+        app: { app_dir: APP_DIR, data_dir: DATA_DIR, node: process.version },
+        theme: getSetting('theme', '') || '',
+        component_settings: compSettings
+      } };
+    }
+    if (name === 'components.list') {
+      const comps = allComponents() || [];
+      let settings = {};
+      try { settings = componentSettings(); } catch (e) {}
+      return { tool: name, ok: true, data: { count: comps.length, components: comps.map(c => ({
+        id: c.id, name: c.name, scope: c.scope, category: c.category, desc: gClip(c.desc, 120),
+        enabled: c.scope === 'core' ? true : (settings[c.id] != null ? !!settings[c.id] : !!c.defaultEnabled),
+        defaultEnabled: !!c.defaultEnabled, goalToggle: c.goalToggle !== false, builtin: c.builtin !== false })) } };
+    }
+    if (name === 'ui.list') {
+      let pages = [], skins = [], ks = null;
+      try { pages = (uiPlugins.listAll() || []).map(m => ({ id: m.id, name: m.name || m.id, source: m.source || 'builtin', enabled: m.enabled !== false, route: m.route || '', format: m.format || '', overridden: !!m.overrides })); } catch (e) {}
+      try { skins = (uiPlugins.listSkins() || []).map(s => ({ id: s.id, name: s.name, priority: s.priority })); } catch (e) {}
+      try { ks = kernelState(PLUGIN_DIR); } catch (e) {}
+      const kp = (ks && ks.plugins) || [];
+      return { tool: name, ok: true, data: {
+        pages: pages, skins: skins,
+        kernel: { ok: !!(ks && ks.ok), plugin_count: kp.length, service_count: ((ks && ks.services) || []).length, failed: kp.filter(p => p && p.status && p.status !== 'loaded').map(p => ({ id: p.id, status: p.status, error: gClip(p.error, 160) })).slice(0, 10) },
+        user_dir: (function () { try { return uiPlugins.dir; } catch (e) { return ''; } })()
+      } };
+    }
+    if (name === 'tasks.list') {
+      let live = [];
+      try { live = (tasks.list(0) || []).map(t => ({ id: t.id, title: gClip(t.title, 80), type: t.type, status: t.status, progress: t.progress, goalId: t.goalId, message: gClip(t.message, 120), error: gClip(t.error, 160), createdAt: t.createdAt, elapsedMs: t.elapsedMs })); } catch (e) {}
+      let recent = [], stats = [];
+      try { recent = db.prepare('SELECT id,goal_id,type,title,status,error,cost_ms,created_at FROM task_runs ORDER BY id DESC LIMIT 15').all(); } catch (e) {}
+      try { stats = db.prepare('SELECT status,COUNT(*) AS c FROM task_runs GROUP BY status').all(); } catch (e) {}
+      const titles = goalTitles();
+      return { tool: name, ok: true, data: {
+        running: live.filter(t => t.status === 'running').length, queued: live.filter(t => t.status === 'queued').length,
+        live: live.slice(0, 20),
+        recent: recent.map(r => ({ id: r.id, title: gClip(r.title, 80), type: r.type, status: r.status, goal_id: r.goal_id, goal: gClip(titles[r.goal_id] || '', 40), error: gClip(r.error, 160), cost_ms: r.cost_ms, created_at: r.created_at })),
+        stats: stats.map(r => ({ status: r.status, count: r.c }))
+      } };
+    }
+    if (name === 'outlib.list') {
+      const gid = num(a.goal_id);
+      let rows = [], recent = [];
+      try { rows = db.prepare('SELECT goal_id,kind,COUNT(*) AS c,COALESCE(SUM(size),0) AS s FROM outlib_nodes GROUP BY goal_id,kind').all(); } catch (e) {}
+      try { recent = db.prepare('SELECT id,goal_id,kind,name,size,updated_at FROM outlib_nodes WHERE kind = \'file\' ORDER BY updated_at DESC, id DESC LIMIT 20').all(); } catch (e) {}
+      const titles = goalTitles();
+      const byGoal = {};
+      for (const r of rows) {
+        if (gid && Number(r.goal_id) !== gid) continue;
+        const m = byGoal[r.goal_id] || (byGoal[r.goal_id] = { goal_id: r.goal_id, goal: gClip(titles[r.goal_id] || '', 40), files: 0, dirs: 0, bytes: 0 });
+        if (r.kind === 'dir') m.dirs = r.c; else { m.files = r.c; m.bytes = r.s; }
+      }
+      return { tool: name, ok: true, data: {
+        total_files: Object.keys(byGoal).reduce((x, k) => x + byGoal[k].files, 0),
+        by_goal: Object.keys(byGoal).map(k => byGoal[k]),
+        recent_files: recent.filter(r => !gid || Number(r.goal_id) === gid).map(r => ({ id: r.id, name: gClip(r.name, 80), goal_id: r.goal_id, goal: gClip(titles[r.goal_id] || '', 40), size: r.size, updated_at: r.updated_at }))
+      } };
+    }
+    return { tool: name, ok: false, error: '没有这个工具：' + name };
+  } catch (e) {
+    return { tool: name, ok: false, error: String((e && e.message) || e) };
+  }
+}
+function globalToolResultsText(results) {
+  const lines = [];
+  let budget = 16000;
+  for (const r of results) {
+    const label = globalToolLabel(r.tool);
+    if (!r.ok) { lines.push('## ' + label + '（' + r.tool + '）失败：' + gClip(r.error, 200)); continue; }
+    let s = '';
+    try { s = JSON.stringify(r.data); } catch (e) { s = String(r.data); }
+    if (budget > 0 && s.length > budget) s = s.slice(0, budget) + '…（已截断）';
+    budget -= s.length;
+    lines.push('## ' + label + '（' + r.tool + '）');
+    lines.push(s);
+  }
+  return lines.join(String.fromCharCode(10));
+}
+function streamGlobalChat(req, res, session) {
+  res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
+  const send = obj => { try { res.write('data: ' + JSON.stringify(obj) + String.fromCharCode(10, 10)); } catch (e) {} };
+  const trace = [];
+  const pushStep = s => { trace.push(s); send({ step: s }); };
+  (async () => {
+    try {
+      /* ⚠️ 必须先读完 body 再建 abort signal：clientSignal 绑在 req 的 close/aborted 上，
+         先建再读的话，请求体读完触发 close 会立刻把本轮当"用户停止"取消掉（真实踩到）。 */
+      const body = await readBody(req);
+      const sig = clientSignal(req);
+      let message = String(body.message || '').trim().slice(0, 30000);
+      const hasImgs0 = Array.isArray(body.images) && body.images.some(x => /^data:image\//.test(String(x || '')));
+      if (!message && hasImgs0) message = '请看我发的图片。';
+      if (!message) { send({ error: '请先输入内容' }); send({ done: true, reply: '', applied: [], errors: ['请先输入内容'], trace: [], goal: null }); res.end(); return; }
+      const sid = Number(session.id) || 0;
+      const model = session.model || currentModel();
+      const images = sanitizeChatImages(body.images);
+      const imageThumbs = sanitizeChatThumbs(body.image_thumbs);
+      db.prepare('INSERT INTO chats (goal_id, session_id, role, content, images, created_at) VALUES (?,?,?,?,?,?)').run(0, sid, 'user', message, JSON.stringify(imageThumbs), nowISO());
+      if (!session.title || session.title === '新对话') {
+        const at = message.replace(/\s+/g, ' ').trim().slice(0, 24);
+        if (at) { db.prepare('UPDATE chat_sessions SET title = ?, updated_at = ? WHERE id = ?').run(at, nowISO(), sid); send({ sessionTitle: at }); }
+      }
+      /* 图片策略同目标对话：明确能识图就直接发；否则用设置里的识图模型识别后再回答。 */
+      const visionFallback = images.length ? visionFallbackFor(model) : '';
+      const knownVision = images.length ? modelKnownVision(model) : false;
+      let imageRecognition = '';
+      let sendImages = images;
+      if (images.length && !knownVision) {
+        if (visionFallback) {
+          send({ status: '正在用识图模型「' + visionFallback + '」识别图片…' });
+          const rec = await recognizeImagesWith(images, visionFallback, sig);
+          if (rec && rec.text) {
+            imageRecognition = rec.text;
+            sendImages = [];
+            pushStep({ kind: 'ctx', label: '用识图模型「' + visionFallback + '」识别了 ' + images.length + ' 张图片', detail: imageRecognition.length + ' 字' });
+          } else {
+            const why = '⚠️ 当前模型不能识图，设置里的识图模型「' + visionFallback + '」也没识别成功：' + String((rec && rec.error) || '未知错误')
+              + String.fromCharCode(10, 10) + '可以检查「设置 → AI 接入方式」里的识图模型配置，或换一个支持多模态的模型再发。';
+            send({ status: '识图失败' }); send({ text: why }); send({ reply: why });
+            const insF = db.prepare('INSERT INTO chats (goal_id, session_id, role, content, ops, version_id, trace, created_at) VALUES (?,?,?,?,?,?,?,?)')
+              .run(0, sid, 'assistant', why, '[]', 0, JSON.stringify(trace), nowISO());
+            if (sid) db.prepare('UPDATE chat_sessions SET updated_at = ? WHERE id = ?').run(nowISO(), sid);
+            backup();
+            send({ done: true, id: Number(insF.lastInsertRowid), reply: why, applied: [], errors: [], versionId: 0, trace: trace, goal: null });
+            res.end(); return;
+          }
+        } else if (!modelSupportsVision(model)) {
+          const why = visionRejectText(model);
+          send({ status: '当前模型不支持识别图片' });
+          send({ text: why });
+          send({ reply: why });
+          const ins2 = db.prepare('INSERT INTO chats (goal_id, session_id, role, content, ops, version_id, trace, created_at) VALUES (?,?,?,?,?,?,?,?)')
+            .run(0, sid, 'assistant', why, '[]', 0, JSON.stringify([{ kind: 'ctx', label: '图片识别', detail: '当前模型不支持' }]), nowISO());
+          if (sid) db.prepare('UPDATE chat_sessions SET updated_at = ? WHERE id = ?').run(nowISO(), sid);
+          backup();
+          send({ done: true, id: Number(ins2.lastInsertRowid), reply: why, applied: [], errors: [], versionId: 0, trace: [], goal: null });
+          res.end();
+          return;
+        }
+      }
+      const baseLines = [];
+      baseLines.push('你是思而行（SiErXing）的全局 AI 助手：**能读全站**——所有目标与路线图、达成条件、资料库、教程、产出库、AI 任务、组件管理、界面插件、设置，以及用户当前页面的文字。');
+      baseLines.push('当前是「未绑定具体目标」的全局对话：**只读**。不要输出 ops，不要声称已经修改、删除或新增了任何数据；需要改动时告诉用户去哪个页面操作。');
+      baseLines.push('');
+      baseLines.push(globalOverviewBlock());
+      pushStep({ kind: 'ctx', label: '全站目标与资源概览', detail: '目标/资料/条件/教程/组件' });
+      try {
+        const rawPage = pageContext.sanitizePageContext(body.page_context || body.page || null);
+        if (rawPage) {
+          const block = pageContext.pageContextBlockFrom(rawPage);
+          if (block) { baseLines.push(''); baseLines.push(block.text); pushStep({ kind: 'ctx', label: '你当前页面上的内容', detail: '「' + block.label + '」' + block.chars + ' 字' }); }
+        }
+      } catch (e) {}
+      baseLines.push('');
+      baseLines.push('【用户的新消息】' + message);
+      if (imageRecognition) {
+        baseLines.push('');
+        baseLines.push(imageRecognitionBlock(imageRecognition, visionFallback));
+      } else if (sendImages.length) {
+        baseLines.push('');
+        baseLines.push('【用户这次还发了 ' + sendImages.length + ' 张图片】它们是随这条消息一起发来的图片输入，请结合图片内容回答（关键文字/布局/数字要说到）。');
+        pushStep({ kind: 'ctx', label: '你发来的 ' + sendImages.length + ' 张图片', detail: '已随消息一起交给模型' });
+      }
+      baseLines.push('');
+      baseLines.push(globalToolCatalogText());
+      baseLines.push('');
+      baseLines.push('【回答要求】');
+      baseLines.push('1. **先判断需不需要查站内具体数据**：需要就按上面的方式**只输出 tool 块**（不要带正文），拿到数据后再回答；不需要就直接回答。');
+      baseLines.push('2. 引用目标/资料/教程时写清 id 与标题；设置、组件、界面插件、AI 任务、产出库等按查到的实际字段回答，不要用猜测填空。');
+      baseLines.push('3. 用户想改内容时：告诉用户去哪个页面/目标操作（例如「打开目标 #166 → 达成条件页，用『✨ 重新梳理条件』」），不要假装已改。');
+      baseLines.push('4. 默认 500 字以内，除非用户要求详细；查不到就说查不到，不要编造。');
+      const SEP = String.fromCharCode(10);
+      const basePrompt = baseLines.join(SEP);
+      let prompt = basePrompt + SEP + SEP + '【开始】如果需要站内具体数据，先输出 tool 块；不需要就直接回答。';
+      let text = '';
+      const MAX_ROUNDS = 3;
+      for (let round = 0; round < MAX_ROUNDS; round++) {
+        send({ status: round === 0 ? '正在思考…' : '正在查阅站内数据…' });
+        let acc = '';
+        const full = await ai.text({
+          prompt: prompt, model: model || currentModel(), images: sendImages.length ? sendImages : undefined,
+          timeoutMs: 420000, signal: sig, scene: '助手对话-全局',
+          onEvent: ev => { if (ev.text) acc += ev.text; else if (ev.thinking) send({ thinking: summarizeThinking(ev.thinking) }); }
+        });
+        const raw = String(acc || full || '');
+        const calls = round < MAX_ROUNDS - 1 ? parseGlobalToolCalls(raw) : [];
+        if (!calls.length) { text = stripGlobalToolFences(raw); break; }
+        const results = [];
+        for (const c of calls.slice(0, 6)) {
+          const r = globalToolRun(c.tool, c.args || {});
+          results.push(r);
+          pushStep({ kind: 'ctx', label: '查了「' + globalToolLabel(r.tool) + '」', detail: r.ok ? '' : '失败：' + gClip(r.error, 80) });
+        }
+        prompt = basePrompt + SEP + SEP + '【你刚才请求的站内数据】' + SEP + globalToolResultsText(results) + SEP + SEP
+          + '【接着回答用户】基于以上数据直接回答用户；如果确实还缺关键信息，可以再输出一次 tool 块（这是第 ' + (round + 2) + ' 轮），否则直接给出最终回答。不要重复粘贴数据原文。';
+      }
+      text = String(stripGlobalToolFences(text || '')).slice(0, 20000) || '（AI 没有输出内容，请重试）';
+      send({ text: text });
+      send({ reply: text });
+      const ins = db.prepare('INSERT INTO chats (goal_id, session_id, role, content, ops, version_id, trace, created_at) VALUES (?,?,?,?,?,?,?,?)')
+        .run(0, sid, 'assistant', text, '[]', 0, JSON.stringify(trace), nowISO());
+      if (sid) db.prepare('UPDATE chat_sessions SET updated_at = ? WHERE id = ?').run(nowISO(), sid);
+      backup();
+      send({ done: true, id: Number(ins.lastInsertRowid), reply: text, applied: [], errors: [], versionId: 0, trace: trace, goal: null });
+    } catch (e) {
+      if (e && e.cancelled) send({ cancelled: true, status: '已停止（本轮没有改动任何内容）' });
+      else {
+        let msg = String((e && e.message) || e);
+        if (/image|vision|multimodal|content[ _-]?type|unsupported|不支持|无法.*图/i.test(msg)) {
+          markVisionUnsupported(session.model || currentModel());
+          send({ status: '模型不能识别图片，已记下' });
+          const fbNow = visionFallbackFor(session.model || currentModel());
+          const why = visionRejectText(session.model || currentModel(), true) + String.fromCharCode(10, 10) + '（上游返回：' + msg.slice(0, 160) + '）'
+            + (fbNow ? String.fromCharCode(10, 10) + '再发一次图片会自动改用识图模型「' + fbNow + '」识别后再回答。' : '');
+          try {
+            const ins2 = db.prepare('INSERT INTO chats (goal_id, session_id, role, content, ops, version_id, trace, created_at) VALUES (?,?,?,?,?,?,?,?)')
+              .run(0, Number(session.id) || 0, 'assistant', why, '[]', 0, JSON.stringify(trace), nowISO());
+            send({ error: why }); send({ done: true, id: Number(ins2.lastInsertRowid), reply: why, applied: [], errors: [], versionId: 0, trace: trace, goal: null });
+            res.end();
+            return;
+          } catch (e2) {}
+        }
+        try {
+          const ins = db.prepare('INSERT INTO chats (goal_id, session_id, role, content, ops, version_id, trace, created_at) VALUES (?,?,?,?,?,?,?,?)')
+            .run(0, Number(session.id) || 0, 'assistant', '⚠️ 这次没能处理：' + msg, '[]', 0, '[]', nowISO());
+          send({ error: msg }); send({ done: true, id: Number(ins.lastInsertRowid), reply: '⚠️ 这次没能处理：' + msg, applied: [], errors: [msg], versionId: 0, trace: trace, goal: null });
         } catch (e2) { send({ error: msg }); }
       }
     }
@@ -5035,7 +5942,32 @@ function streamTutorial(req, res, node, format, note, codeFiles, withFolders, fo
       if (!txt) {
         send({ status: `正在撰写「${String(node.title).slice(0, 18)}」的${format === 'html' ? ' HTML ' : ' Markdown '}教程`
           + (bud.mode === 'single' ? `（这是一份${bud.hours ? bud.hours + ' 小时' : '篇幅不大'}的教程，约需 30~60 秒）…` : '（讲原理、分步实践、练习与自测，约需 1-3 分钟）…'), pct: 10 });
-        const prompt = buildTutorialPrompt(goal, node, format, note, codeBlock, bud);
+        let prompt;
+        if (promptPacks.hasOverride('tutorial.generate')) {
+          const levelName = { 0: '阶段', 1: '小目标', 2: '任务', 3: '子任务', 4: '步骤', 5: '步骤' }[node.level] || '任务';
+          const topicLines = ['【教程主题（' + levelName + '）】' + node.title];
+          if (node.detail) topicLines.push('任务说明：' + node.detail);
+          if (node.artifact) topicLines.push('应产出的成果：' + node.artifact);
+          if (node.acceptance) topicLines.push('验收标准：' + node.acceptance);
+          if (node.hours) topicLines.push('预计投入：' + node.hours);
+          prompt = await promptPacks.renderAsync('tutorial.generate', {
+            goal: goal, node: node, format: format, note: note, codeBlock: codeBlock, budget: bud,
+            goalHeader: goalHeader(goal),
+            qa: goalQaBlock(goal),
+            constraints: constraintsBlock(goal),
+            topic: topicLines.join('\n'),
+            siblingScope: siblingScopeBlock(goal, node),
+            digests: digestsBlock(goal),
+            nodeSources: nodeSourcesBlock(goal, node, 1100),
+            sourcesIndex: sourcesIndexBlock(goal, 12, '【资料库其它条目（仅索引；与本节无关的一律不读不用，更不要写入教程）】'),
+            codeBlock: codeBlock ? String(codeBlock) : '',
+            note: note ? '【用户的额外要求（必须满足）】' + note : '',
+            budget: tutorialRules.budgetBlock(bud, format),
+            formatRules: tutorialRules.formatBlock(format)
+          });
+        } else {
+          prompt = buildTutorialPrompt(goal, node, format, note, codeBlock, bud);
+        }
         txt = cleanTutorialText(await aiText(prompt, model, 600000, null, signal, '教程生成'), format);
       }
       if (!txt || txt.length < 200) throw new Error('教程生成失败：AI 只写了 ' + (txt ? txt.length : 0) + ' 字就停了。原教程没动，可以点任务上的「🔄 重试」，或换个输出更长的模型再试');
@@ -5085,6 +6017,202 @@ function streamTutorial(req, res, node, format, note, codeFiles, withFolders, fo
        显示成成功，用户完全不知道出了事（这正是"失败看不出原因"的一部分）。 */
     res.end();
   })();
+  return tk;
+}
+
+/* 命令总线/Agent 用：不挂 SSE，后台启动教程生成，返回任务 id。
+   复用 streamTutorial：给一个不写网络的假 res，任务照常进任务中心。 */
+function startTutorialGeneration(nodeId, opts) {
+  const n = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(nodeId));
+  if (!n) throw pipelineError('not_found', '节点不存在：' + nodeId);
+  if (!goalCompOn(n.goal_id, 'tutorial')) throw pipelineError('forbidden', '「学习教程」组件在这个目标上已关闭');
+  const o = opts || {};
+  const format = o.format === 'html' ? 'html' : 'md';
+  const note = String(o.note || '').slice(0, 500);
+  const codeFiles = Array.isArray(o.codeFiles)
+    ? o.codeFiles.filter(function (x) { return typeof x === 'string'; }).map(function (s) { return s.slice(0, 160); }).slice(0, 24)
+    : [];
+  const fakeRes = { writeHead: function () {}, write: function () {}, end: function () {} };
+  const fakeReq = {};
+  const tk = streamTutorial(fakeReq, fakeRes, n, format, note, codeFiles, false, []);
+  return { taskId: tk.id, nodeId: n.id, goalId: n.goal_id, format: format, title: '生成教程：' + String(n.title || '') };
+}
+
+/* 命令总线/Agent 用：调本机现有的教程修改接口（它同步返回 taskId，不挂 SSE）。
+   教程结构守卫、版本快照、任务中心都在原路径里，命令侧不复制。 */
+async function startTutorialEditTask(tid, feedback, opts) {
+  const id = Number(tid);
+  const t = db.prepare('SELECT id,goal_id,title FROM tutorials WHERE id = ?').get(id);
+  if (!t) throw pipelineError('not_found', '教程不存在：' + id);
+  const fb = String(feedback || '').trim().slice(0, 1500);
+  if (!fb) throw pipelineError('bad_input', '请填写修改意见');
+  if (!goalCompOn(t.goal_id, 'tutorial')) throw pipelineError('forbidden', '「学习教程」组件在这个目标上已关闭');
+  const body = { feedback: fb, quiet: false, allow_restructure: !!(opts && opts.allowRestructure) };
+  let r;
+  try {
+    r = await fetch('http://127.0.0.1:' + PORT + '/api/tutorials/' + id + '/edit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+  } catch (e) {
+    throw pipelineError('upstream_error', '启动教程修改失败：' + (e && e.message ? e.message : e));
+  }
+  let j = {};
+  try { j = await r.json(); } catch (e) { j = {}; }
+  if (!r.ok || !j || !j.ok) throw pipelineError('bad_input', (j && j.error) || ('教程修改启动失败：HTTP ' + r.status));
+  return { taskId: j.taskId, tutorialId: id, sessionId: j.sessionId || 0 };
+}
+
+/* 资料搜集：HTTP 路由与命令总线共用。SSE 只是显示层；任务句柄由 tasks.begin 管理。 */
+function streamCollect(req, res, g) {
+  const id = g.id;
+    res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache' });
+    /* 搜集资料要跑好几分钟：把四个阶段声明出来，条才会照着阶段往前走，
+       而不是一条不动的走马灯（用户反馈："有的任务有条、有的只有一行字"）。 */
+    const tk = tasks.begin({
+      type: 'collect', title: '搜集信息源：' + String(g.title || '').slice(0, 30), goalId: id, nodeId: 0, note: '',
+      phases: ['搜索候选', '抓取正文', 'AI 把关', '整理入库']
+    });
+    const sig = tk.signal;   // 只有主动取消才中断；切换/关闭页面不影响后台继续
+    /* onProgress 带 `prog: {phase, frac}` 时走阶段推进，只带 status 时退化成"只换文案"
+       （阶段内由引擎按时间平滑）—— 两种都能在同一套渲染里画出来。 */
+    const tkSend = s => {
+      try { res.write(`data: ${JSON.stringify(s)}\n\n`); } catch (e) {}
+      if (!s) return;
+      if (s.prog) tk.phase(s.prog.phase, s.status, { frac: s.prog.frac });
+      else if (s.status) tk.progress(undefined, s.status);
+    };
+    (async () => {
+      try {
+        let ebSummary = '';
+        try {
+          const eb = await fetchEbooksForGoal(g, tkSend, sig);
+          if (eb && !eb.skipped) {
+            const parts = [];
+            if (eb.ok) parts.push(`电子书入库 ${eb.ok} 本`);
+            if (eb.listed) parts.push(`待找书单 ${eb.listed} 本`);
+            if (eb.missing) parts.push(`${eb.missing} 本没找到公开免费版`);
+            if (eb.failed) parts.push(`${eb.failed} 本下载失败`);
+            if (parts.length) ebSummary = '📚 ' + parts.join('，');
+          }
+        } catch (e) {
+          if (e && e.cancelled) throw e;
+          tkSend({ status: '电子书阶段跳过：' + e.message });
+        }
+        const r = await collectForGoal(g, tkSend, sig);
+        const list = sourcesOf(id);
+        try { res.write(`data: ${JSON.stringify({ done: true, count: r.saved, blocked: r.blocked, sources: list, ebooks: ebSummary, stats: r.stats || null })}\n\n`); } catch (e) {}
+        rag.autoIndex(id);
+        tk.done({ ok: true });
+      } catch (e) {
+        tk.fail(e);
+        if (e && e.cancelled) {
+          try { res.write(`data: ${JSON.stringify({ cancelled: true, status: '已停止收集', sources: sourcesOf(id) })}\n\n`); } catch (e2) {}
+        } else {
+          try { res.write(`data: ${JSON.stringify({ error: '信息源获取失败：' + e.message })}\n\n`); } catch (e2) {}
+        }
+      }
+      res.end();
+    })();
+  return tk;
+}
+
+/* 命令总线/Agent 用：后台启动资料搜集，立即返回 taskId。 */
+function startSourceCollect(goalId) {
+  const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(Number(goalId));
+  if (!g) throw pipelineError('not_found', '目标不存在：' + goalId);
+  if (!goalCompOn(g.id, 'sources')) throw pipelineError('forbidden', '「信息源检索」组件在这个目标上已关闭');
+  const fakeRes = { writeHead: function () {}, write: function () {}, end: function () {} };
+  const tk = streamCollect({}, fakeRes, g);
+  return { taskId: tk.id, goalId: g.id, title: '搜集信息源：' + String(g.title || '') };
+}
+
+/* 命令总线/Agent 用：后台启动资料提炼，立即返回 taskId。 */
+function startSourceDigest(goalId) {
+  const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(Number(goalId));
+  if (!g) throw pipelineError('not_found', '目标不存在：' + goalId);
+  if (!goalCompOn(g.id, 'sources')) throw pipelineError('forbidden', '「信息源检索」组件在这个目标上已关闭');
+  const fakeRes = { writeHead: function () {}, write: function () {}, end: function () {} };
+  const tk = streamDigest({}, fakeRes, g);
+  return { taskId: tk.id, goalId: g.id, title: '资料提炼：' + String(g.title || '') };
+}
+
+/* 资料提炼：HTTP 路由与命令总线共用；任务句柄由 tasks.begin 管理。 */
+function streamDigest(req, res, g) {
+  const id = g.id;
+    res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache' });
+    const tk = tasks.begin({ type: 'digest', title: '资料提炼：' + String(g.title || '').slice(0, 30), goalId: g.id, phases: ['通读资料', '主题汇总', '入库'] });
+    const sig = tk.signal;
+    const send = obj => {
+      try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {}
+      if (!obj) return;
+      if (obj.progress && obj.progress.total) tk.count(obj.progress.done || 0, obj.progress.total, obj.status);
+      else if (obj.status) tk.progress(undefined, obj.status);
+    };
+    (async () => {
+      try {
+        const info = digestBatches(g);
+        if (!info.batches.length) throw new Error('还没有资料可以提炼：先「收集信息源」或上传图片资料');
+        const model = currentModel();
+        send({ status: `共 ${info.total} 条资料（你提供的 ${info.ownCount} 条 / 网络 ${info.netCount} 条），分 ${info.batches.length} 批通读…`, progress: { done: 0, total: info.batches.length } });
+        const parts = [];
+        let done = 0, next = 0;
+        const worker = async () => {
+          while (true) {
+            const my = next++;
+            if (my >= info.batches.length) return;
+            if (sig.aborted) { const e = new Error('已停止'); e.cancelled = true; throw e; }
+            send({ status: `正在通读第 ${my + 1}/${info.batches.length} 批资料…`, progress: { done, total: info.batches.length } });
+            const batch = info.batches[my];
+            const items = batch.map(function (it) { return '## ' + it.label + '\n' + it.body; }).join('\n');
+            const txt = await aiText(promptPacks.render('sources.digest_batch', { batch: batch, batchNo: my + 1, total: info.batches.length, items: items }), model, 300000, null, sig, '代码库摘要');
+            let data = null;
+            try { data = extractJSONRaw(txt) || {}; } catch (e) { data = {}; }
+            parts.push({ idx: my + 1, data });
+            done++;
+            send({ status: `已通读 ${done}/${info.batches.length} 批`, progress: { done, total: info.batches.length } });
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(3, info.batches.length) }, worker));
+        parts.sort((a, b) => a.idx - b.idx);
+        send({ status: '正在汇总成主题文档（按主题拆分成多篇）…', progress: { done, total: info.batches.length } });
+        const partsText = parts.map(function (p) { return '### 第 ' + p.idx + ' 批\n' + JSON.stringify(p.data); }).join('\n');
+        const syn = await aiText(promptPacks.render('sources.digest_synthesis', { partsArr: parts, total: info.total, ownCount: info.ownCount, netCount: info.netCount, parts: partsText }), model, 600000, null, sig, '代码库综合');
+        const parsed = extractJSONRaw(syn) || {};
+        const list = Array.isArray(parsed.digests) ? parsed.digests : (Array.isArray(parsed) ? parsed : []);
+        if (!list.length) throw new Error('汇总结果解析失败，可重试');
+        const t = nowISO();
+        db.prepare('DELETE FROM source_digests WHERE goal_id = ?').run(g.id);
+        for (const d of list.slice(0, 12)) {
+          const topic = String(d.topic || '').slice(0, 60);
+          const title = String(d.title || topic || '汇总').slice(0, 120);
+          const content = String(d.content_md || d.content || '').slice(0, 20000);
+          if (!content.trim()) continue;
+          db.prepare('INSERT INTO source_digests (goal_id, topic, title, content, sources_count, created_at) VALUES (?,?,?,?,?,?)')
+            .run(g.id, topic, title, content, info.total, t);
+        }
+        db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(t, g.id);
+        backup();
+        send({ done: true, count: digestsOf(g.id).length, digests: digestsOf(g.id) });
+        tk.done({ count: digestsOf(g.id).length });
+      } catch (e) {
+        tk.fail(e);
+        if (e && e.cancelled) send({ cancelled: true, status: '已停止提炼' });
+        else send({ error: '资料提炼失败：' + e.message });
+      }
+      res.end();
+    })();
+  return tk;
+}
+
+/* 命令总线/Agent 用：后台启动规划生成，立即返回 taskId；问卷分支会在任务结果里带 questions。 */
+function startGoalPlan(goalId, answers) {
+  const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(Number(goalId));
+  if (!g) throw pipelineError('not_found', '目标不存在：' + goalId);
+  if (String(g.status || '') === 'archived') throw pipelineError('bad_input', '归档目标不能生成规划');
+  const fakeRes = { writeHead: function () {}, write: function () {}, end: function () {} };
+  const a = (answers && typeof answers === 'object' && !Array.isArray(answers)) ? answers : null;
+  const tk = streamPlan({}, fakeRes, g, a);
+  return { taskId: tk.id, goalId: g.id, title: '生成规划：' + String(g.title || '') };
 }
 
 /* ===== HTTP ===== */
@@ -5092,6 +6220,275 @@ async function handleAPI(req, res, u) {
   const p = u.pathname, method = req.method;
 
   if (p === '/api/health' && method === 'GET') return sendJSON(res, 200, { ok: true, app: APP_NAME });
+
+  /* ---------- 界面语言（i18n） ----------
+     GET  /api/language/state        当前语言 + 可用语言列表（内置 + AI 生成的）
+     GET  /api/language/pack.js      字典（注入到入口页面，必须在 app.js 之前加载）
+     POST /api/language/active       切换界面语言（写 settings.app_language，''=跟随浏览器）
+     POST /api/language/generate     输入任意语言名 → AI 翻译整套界面语言包（后台任务）
+     POST /api/language/delete       删除 AI 生成的语言包 */
+  if (p === '/api/language/state' && method === 'GET') {
+    return sendJSON(res, 200, language.state(req.headers['accept-language']));
+  }
+  if (p === '/api/language/pack.js' && method === 'GET') {
+    const wanted = String(u.searchParams.get('code') || '');
+    const code = (wanted && language.pack(wanted)) ? language.normalizeCode(wanted) : language.active(req.headers['accept-language']);
+    res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-cache' });
+    return res.end(language.packJs(code));
+  }
+  if (p === '/api/language/active' && method === 'POST') {
+    const body = await readBody(req).catch(function () { return {}; });
+    const r = language.setActive(body && body.code);
+    if (!r.ok) return sendJSON(res, 400, r);
+    return sendJSON(res, 200, r);
+  }
+  if (p === '/api/language/generate' && method === 'POST') {
+    const body = await readBody(req).catch(function () { return {}; });
+    const name = String((body && body.name) || '').trim();
+    if (!name) return sendJSON(res, 400, { ok: false, error: '请先输入语言名称（例如：日本語 / Français）' });
+    if (name.length > 60) return sendJSON(res, 400, { ok: false, error: '语言名称太长（最多 60 个字符）' });
+    const preset = language.catalogFind(name);
+    if (!currentModel()) {
+      return sendJSON(res, 400, { ok: false, error: '还没有配置 AI 模型：请先在「设置 → AI 接入方式」里加一个连接，再回来生成语言。' });
+    }
+    const tk = tasks.submit({
+      type: 'language',
+      title: '生成界面语言：' + name.slice(0, 40),
+      phases: ['识别语言', '翻译界面文案', '校验并保存'],
+      expectedMs: 150000,
+      run: function (kit) {
+        return languageGenerator.generate({
+          name: name,
+          preset: preset,
+          signal: kit.signal,
+          progress: function (o) {
+            const msg = o && o.msg ? o.msg : '';
+            if (o && o.count) kit.count(o.count.done, o.count.total, msg);
+            else if (o && o.phase != null) kit.phase(o.phase, msg);
+            else if (msg) kit.progress(null, msg);
+          }
+        });
+      }
+    });
+    return sendJSON(res, 200, { ok: true, taskId: tk, name: name });
+  }
+  if (p === '/api/language/delete' && method === 'POST') {
+    const body = await readBody(req).catch(function () { return {}; });
+    const r = language.removeGenerated(body && body.code);
+    if (!r.ok) return sendJSON(res, 400, r);
+    return sendJSON(res, 200, r);
+  }
+
+  /* ---------- 内核自检（P1）：服务清单 + 插件装载状态 + 为什么被跳过 ---------- */
+  if (p === '/api/kernel' && method === 'GET') {
+    const st = kernelState(PLUGIN_DIR);
+    return sendJSON(res, 200, Object.assign({
+      ok: true, app: APP_NAME, node: process.version, pid: process.pid,
+      appDir: APP_DIR, dataDir: DATA_DIR
+    }, st, { config: kernelConfig ? kernelConfig.state() : null }));
+  }
+
+  /* ---------- UI 插件（内置 + 用户覆盖 + 启停状态，P2） ---------- */
+  if (p === '/api/ui/plugins' && method === 'GET') {
+    return sendJSON(res, 200, {
+      apiVersion: uiPlugins.apiVersion,
+      plugins: uiPlugins.listAll(),
+      userDir: uiPlugins.dir,
+      builtinDir: uiPlugins.builtinDir
+    });
+  }
+  /* 启停用户页面插件：停用 = 该页回退内置界面（不删文件、随时可恢复） */
+  const uiStateMatch = p.match(/^\/api\/ui\/plugins\/([^/]+)\/state$/);
+  if (uiStateMatch && method === 'POST') {
+    let id = '';
+    try { id = decodeURIComponent(uiStateMatch[1]); } catch (e) { id = ''; }
+    const body = await readBody(req).catch(function () { return {}; });
+    const enabled = !(body && body.enabled === false);
+    const r = uiPlugins.setEnabled(id, enabled);
+    if (!r) return sendJSON(res, 404, { error: '用户 UI 插件不存在：' + id });
+    return sendJSON(res, 200, { ok: true, plugin: r });
+  }
+  /* 打开用户插件目录（本地应用；NO_OPEN 环境下只返回路径，方便测试与远程使用） */
+  if (p === '/api/ui/plugins/open-dir' && method === 'POST') {
+    const body = await readBody(req).catch(function () { return {}; });
+    const sid = String((body && body.id) || '');
+    const m = sid ? uiPlugins.get(sid) : null;
+    const target = (m && m.source === 'user') ? path.join(uiPlugins.dir, m.id) : uiPlugins.dir;
+    if (process.env.NO_OPEN) return sendJSON(res, 200, { ok: false, reason: 'NO_OPEN', dir: target });
+    const cmd = process.platform === 'win32' ? 'explorer' : process.platform === 'darwin' ? 'open' : 'xdg-open';
+    try {
+      spawn(cmd, [target], { detached: true, stdio: 'ignore', env: guiEnv() }).unref();
+      return sendJSON(res, 200, { ok: true, dir: target });
+    } catch (e) { return sendJSON(res, 500, { ok: false, dir: target, error: '打不开目录：' + e.message }); }
+  }
+  /* ---------- 创造模式：AI 生成 → 暂存 → 用户确认后安装 ----------
+     为什么不在生成时直接装：装上去就是**在用户真实界面里跑代码**。仿 DSH 的
+     plugin_manager：Agent 只准备 bundle，安装动作由用户点按钮批准。 */
+  if (p === '/api/create/meta' && method === 'GET') {
+    return sendJSON(res, 200, {
+      apiVersion: createMode.apiVersion,
+      pages: createMode.PAGES,
+      limits: createMode.limitInfo,
+      stagingDir: createMode.stagingDir
+    });
+  }
+  /* 测试/调试钩子：不经过 AI，直接把一份 create JSON 走同一套校验 + 暂存。
+     只在 SIERXING_CREATE_DEBUG=1 时开放（自动化测试用；正常使用走对话生成）。 */
+  if (p === '/api/create/stage' && method === 'POST' && process.env.SIERXING_CREATE_DEBUG === '1') {
+    try {
+      const body = await readBody(req);
+      const artifact = body && body.artifact ? body.artifact : body;
+      return sendJSON(res, 200, { ok: true, create: createMode.stage(artifact) });
+    } catch (e) {
+      return sendJSON(res, 400, { error: (e && e.message) || String(e), code: (e && e.code) || '' });
+    }
+  }
+  const createMatch = p.match(/^\/api\/create\/changes\/([A-Za-z0-9_-]+)(?:\/(install|discard|rollback))?$/);
+  if (createMatch) {
+    const cid = createMatch[1];
+    const action = createMatch[2] || '';
+    const errStatus = function (e) {
+      const c = e && e.code;
+      if (c === 'not_found') return 404;
+      if (c === 'conflict') return 409;
+      if (c === 'forbidden' || c === 'syntax' || c === 'bad_input' || c === 'too_large') return 400;
+      return 500;
+    };
+    try {
+      if (!action && method === 'GET') return sendJSON(res, 200, { change: createMode.readChange(cid) });
+      if (action === 'install' && method === 'POST') {
+        const body = await readBody(req).catch(function () { return {}; });
+        if (!body || body.confirm !== true) {
+          return sendJSON(res, 400, { error: '安装需要用户确认（body.confirm = true）' });
+        }
+        const r = createMode.install(cid);
+        try { backup(); } catch (e) {}
+        console.log('[create] 已安装 ' + r.kind + '：' + r.id + '（' + r.name + '）');
+        return sendJSON(res, 200, r);
+      }
+      if (action === 'discard' && method === 'POST') return sendJSON(res, 200, createMode.discard(cid));
+      if (action === 'rollback' && method === 'POST') {
+        const r = createMode.rollback(cid);
+        try { backup(); } catch (e) {}
+        console.log('[create] 已回滚 ' + r.kind + '：' + r.id);
+        return sendJSON(res, 200, r);
+      }
+      return sendJSON(res, 405, { error: '不支持的方法' });
+    } catch (e) {
+      return sendJSON(res, errStatus(e), { error: (e && e.message) || String(e), code: (e && e.code) || '' });
+    }
+  }
+  /* ---------- 用户 UI 皮肤：叠加在内置基础皮肤之上，用来「随意改 UI」 ---------- */
+  if (p === '/api/ui/skins' && method === 'GET') {
+    return sendJSON(res, 200, { skins: uiPlugins.listSkins().map(function (s) { return { id: s.id, name: s.name, priority: s.priority }; }) });
+  }
+  if (p === '/api/ui/skin.css' && method === 'GET') {
+    /* 分层配置可以关掉用户皮肤（kernel：ui.skins=false） */
+    if (kernelConfig && kernelConfig.get('ui.skins', true) === false) {
+      res.writeHead(200, { 'Content-Type': 'text/css; charset=utf-8', 'Cache-Control': 'no-cache' });
+      return res.end('');
+    }
+    /* 按 priority 从低到高拼接：后写的覆盖先写的 */
+    const all = uiPlugins.listSkins();
+    const css = all.map(function (s) { return '/* ' + s.id + ' */\n' + s.css; }).join('\n');
+    res.writeHead(200, { 'Content-Type': 'text/css; charset=utf-8', 'Cache-Control': 'no-cache' });
+    return res.end(css);
+  }
+  const uiManifestMatch = p.match(/^\/api\/ui\/plugins\/([^/]+)\/manifest$/);
+  if (uiManifestMatch && method === 'GET') {
+    let id = '';
+    try { id = decodeURIComponent(uiManifestMatch[1]); } catch (e) { id = ''; }
+    const m = uiPlugins.manifestRaw(id);
+    if (!m) return sendJSON(res, 404, { error: 'UI 插件不存在：' + id });
+    return sendJSON(res, 200, m);
+  }
+  const uiEntryMatch = p.match(/^\/api\/ui\/plugins\/([^/]+)\/entry$/);
+  if (uiEntryMatch && method === 'GET') {
+    let id = '';
+    try { id = decodeURIComponent(uiEntryMatch[1]); } catch (e) { id = ''; }
+    const e = uiPlugins.readEntry(id);
+    if (!e) return sendJSON(res, 404, { error: 'UI 插件入口不存在：' + id });
+    try {
+      res.writeHead(200, { 'Content-Type': e.contentType, 'Cache-Control': 'no-cache' });
+      return res.end(e.body);
+    } catch (err) { return; }
+  }
+  /* ===== 命令总线：CLI / Agent 的能力入口 ===== */
+  if (p === '/api/commands' && method === 'GET') {
+    return sendJSON(res, 200, {
+      commands: commandBus.list({
+        category: u.searchParams.get('category') || undefined,
+        risk: u.searchParams.get('risk') || undefined,
+        query: u.searchParams.get('q') || undefined
+      })
+    });
+  }
+  if (p === '/api/commands/manifest' && method === 'GET') {
+    return sendJSON(res, 200, commandBus.fullManifest());
+  }
+  /* 插件 manifest 的稳定入口：独立应用 / CLI / MCP / 技能共用同一份自描述 */
+  if (p === '/api/manifest' && method === 'GET') {
+    return sendJSON(res, 200, commandBus.fullManifest());
+  }
+  if (p === '/api/commands/run' && method === 'POST') {
+    const body = await readBody(req);
+    const name = String((body && body.name) || '').trim();
+    try {
+      const result = await commandBus.run(name, (body && body.input) || {}, {
+        actor: String((body && body.actor) || 'agent:http'),
+        approvalId: String((body && body.approvalId) || '')
+      });
+      return sendJSON(res, 200, { ok: true, result: result });
+    } catch (e) {
+      const code = (e && e.code) || 'internal';
+      const status = code === 'not_found' ? 404 : code === 'approval_required' ? 403 : code === 'bad_input' ? 400 : code === 'forbidden' ? 403 : 500;
+      const err = { code: code, message: String((e && e.message) || e) };
+      if (e && e.details) err.details = e.details;
+      return sendJSON(res, status, { ok: false, error: err });
+    }
+  }
+  const cmdMatch = p.match(/^\/api\/commands\/([^/]+)$/);
+  if (cmdMatch && method === 'GET') {
+    const d = commandBus.describe(decodeURIComponent(cmdMatch[1]));
+    if (!d) return sendJSON(res, 404, { error: { code: 'not_found', message: '命令不存在：' + cmdMatch[1] } });
+    return sendJSON(res, 200, { command: d });
+  }
+
+  /* ===== 审批：用户在本机页面点批准/拒绝；Agent 只轮询状态 ===== */
+  if (p === '/api/approvals' && method === 'GET') {
+    return sendJSON(res, 200, {
+      approvals: commandBus.listApprovals(u.searchParams.get('status') || '', u.searchParams.get('limit'))
+    });
+  }
+  const apPage = p.match(/^\/api\/approvals\/([A-Za-z0-9_]+)\/page$/);
+  if (apPage && method === 'GET') {
+    const a = commandBus.getApproval(apPage[1]);
+    res.writeHead(a ? 200 : 404, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+    res.end(a ? renderApprovalPage(a) : '<!DOCTYPE html><meta charset="utf-8"><h1>审批不存在或已过期</h1>');
+    return true;
+  }
+  const apApprove = p.match(/^\/api\/approvals\/([A-Za-z0-9_]+)\/approve$/);
+  if (apApprove && method === 'POST') {
+    const a = commandBus.approve(apApprove[1], 'user:local');
+    if (!a) return sendJSON(res, 404, { ok: false, error: { code: 'not_found', message: '审批不存在' } });
+    return sendJSON(res, 200, { ok: true, approval: a });
+  }
+  const apReject = p.match(/^\/api\/approvals\/([A-Za-z0-9_]+)\/reject$/);
+  if (apReject && method === 'POST') {
+    const a = commandBus.reject(apReject[1], 'user:local');
+    if (!a) return sendJSON(res, 404, { ok: false, error: { code: 'not_found', message: '审批不存在' } });
+    return sendJSON(res, 200, { ok: true, approval: a });
+  }
+  const apMatch = p.match(/^\/api\/approvals\/([A-Za-z0-9_]+)$/);
+  if (apMatch && method === 'GET') {
+    const a = commandBus.getApproval(apMatch[1]);
+    if (!a) return sendJSON(res, 404, { ok: false, error: { code: 'not_found', message: '审批不存在' } });
+    return sendJSON(res, 200, { ok: true, approval: a });
+  }
+  if (p === '/api/audit' && method === 'GET') {
+    const limit = Number(u.searchParams.get('limit')) || 50;
+    return sendJSON(res, 200, { entries: commandBus.listAudit(limit) });
+  }
   /* 指标接口：一次性返回 8 个可测量指标（AI 埋点数据 + 规划核心表计算）。
      不依赖任何可选组件，组件全关也能算。 */
   if (p === '/api/metrics' && method === 'GET') {
@@ -5183,21 +6580,12 @@ async function handleAPI(req, res, u) {
       const deadline = body.deadline != null ? String(body.deadline).trim().slice(0, 50) : g.deadline;
       db.prepare('UPDATE goals SET title=?, profile=?, materials=?, weekly_hours=?, deadline=?, updated_at=? WHERE id=?')
         .run(title, profile, materials, weekly, deadline, nowISO(), id);
+      recordGoalFieldEvents(id, g, { title: title, profile: profile, materials: materials, weekly_hours: weekly, deadline: deadline }, 'http');
       backup();
       return sendJSON(res, 200, { goal: getGoal(id) });
     }
     if (method === 'DELETE') {
-      db.prepare('DELETE FROM nodes WHERE goal_id = ?').run(id);
-      db.prepare('DELETE FROM sources WHERE goal_id = ?').run(id);
-      db.prepare('DELETE FROM code_repo_files WHERE goal_id = ?').run(id);
-      rag.dropGoal(id);
-      db.prepare('DELETE FROM goals WHERE id = ?').run(id);
-      db.prepare('DELETE FROM goal_versions WHERE goal_id = ?').run(id);
-      db.prepare('DELETE FROM tutorials WHERE goal_id = ?').run(id);
-      db.prepare('DELETE FROM chats WHERE goal_id = ?').run(id);
-      db.prepare('DELETE FROM chat_sessions WHERE goal_id = ?').run(id);
-      for (const pl of PLUGINS) { try { if (typeof pl.onGoalDelete === 'function') pl.onGoalDelete(id, pluginCtx()); } catch (e) { console.error('[plugin]', pl.id, '清理失败:', e.message); } }
-      backup();
+      deleteGoalData(id);
       return sendJSON(res, 200, { ok: true });
     }
   }
@@ -5261,7 +6649,19 @@ async function handleAPI(req, res, u) {
               if (csig && csig.aborted) { const e = new Error('已停止'); e.cancelled = true; throw e; }
               try {
                 aiCalls++;
-                const raw2 = await aiText(textClean.buildCleanPrompt(r.title, g.title, c), currentModel(), 180000, null, csig, '资料清洗');
+                let cleanPrompt;
+                if (promptPacks.hasOverride('sources.clean')) {
+                  cleanPrompt = await promptPacks.renderAsync('sources.clean', {
+                    title: r.title,
+                    goalTitle: g.title,
+                    text: c,
+                    goalLine: g.title ? '（读者要拿它学"' + String(g.title).slice(0, 60) + '"相关的东西，所以只留对学习有用的内容）' : '',
+                    titleLine: r.title ? '（资料标题：' + String(r.title).slice(0, 80) + '）' : ''
+                  });
+                } else {
+                  cleanPrompt = textClean.buildCleanPrompt(r.title, g.title, c);
+                }
+                const raw2 = await aiText(cleanPrompt, currentModel(), 180000, null, csig, '资料清洗');
                 const pr = textClean.parseCleanOutput(raw2, c);
                 pieces.push(pr.ok ? (pr.empty ? '' : pr.text) : c);
               } catch (e) {
@@ -5406,58 +6806,9 @@ async function handleAPI(req, res, u) {
 
   const collectMatch = p.match(/^\/api\/goals\/(\d+)\/collect$/);
   if (collectMatch && method === 'POST') {
-    const id = Number(collectMatch[1]);
-    const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(id);
+    const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(Number(collectMatch[1]));
     if (!g) return sendJSON(res, 404, { error: '目标不存在' });
-    res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache' });
-    /* 搜集资料要跑好几分钟：把四个阶段声明出来，条才会照着阶段往前走，
-       而不是一条不动的走马灯（用户反馈："有的任务有条、有的只有一行字"）。 */
-    const tk = tasks.begin({
-      type: 'collect', title: '搜集信息源：' + String(g.title || '').slice(0, 30), goalId: id, nodeId: 0, note: '',
-      phases: ['搜索候选', '抓取正文', 'AI 把关', '整理入库']
-    });
-    const sig = tk.signal;   // 只有主动取消才中断；切换/关闭页面不影响后台继续
-    /* onProgress 带 `prog: {phase, frac}` 时走阶段推进，只带 status 时退化成"只换文案"
-       （阶段内由引擎按时间平滑）—— 两种都能在同一套渲染里画出来。 */
-    const tkSend = s => {
-      try { res.write(`data: ${JSON.stringify(s)}\n\n`); } catch (e) {}
-      if (!s) return;
-      if (s.prog) tk.phase(s.prog.phase, s.status, { frac: s.prog.frac });
-      else if (s.status) tk.progress(undefined, s.status);
-    };
-    (async () => {
-      try {
-        let ebSummary = '';
-        try {
-          const eb = await fetchEbooksForGoal(g, tkSend, sig);
-          if (eb && !eb.skipped) {
-            const parts = [];
-            if (eb.ok) parts.push(`电子书入库 ${eb.ok} 本`);
-            if (eb.listed) parts.push(`待找书单 ${eb.listed} 本`);
-            if (eb.missing) parts.push(`${eb.missing} 本没找到公开免费版`);
-            if (eb.failed) parts.push(`${eb.failed} 本下载失败`);
-            if (parts.length) ebSummary = '📚 ' + parts.join('，');
-          }
-        } catch (e) {
-          if (e && e.cancelled) throw e;
-          tkSend({ status: '电子书阶段跳过：' + e.message });
-        }
-        const r = await collectForGoal(g, tkSend, sig);
-        const list = sourcesOf(id);
-        try { res.write(`data: ${JSON.stringify({ done: true, count: r.saved, blocked: r.blocked, sources: list, ebooks: ebSummary, stats: r.stats || null })}\n\n`); } catch (e) {}
-        rag.autoIndex(id);
-        tk.done({ ok: true });
-      } catch (e) {
-        tk.fail(e);
-        if (e && e.cancelled) {
-          try { res.write(`data: ${JSON.stringify({ cancelled: true, status: '已停止收集', sources: sourcesOf(id) })}\n\n`); } catch (e2) {}
-        } else {
-          try { res.write(`data: ${JSON.stringify({ error: '信息源获取失败：' + e.message })}\n\n`); } catch (e2) {}
-        }
-      }
-      res.end();
-    })();
-    return;
+    return streamCollect(req, res, g);
   }
 
   /* ---------- 资料提炼：读全部资料 → 提炼 → 多主题 MD 汇总 ---------- */
@@ -5465,58 +6816,7 @@ async function handleAPI(req, res, u) {
   if (digestMatch && method === 'POST') {
     const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(Number(digestMatch[1]));
     if (!g) return sendJSON(res, 404, { error: '目标不存在' });
-    res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache' });
-    const sig = clientSignal(req);
-    const send = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} };
-    (async () => {
-      try {
-        const info = digestBatches(g);
-        if (!info.batches.length) throw new Error('还没有资料可以提炼：先「收集信息源」或上传图片资料');
-        const model = currentModel();
-        send({ status: `共 ${info.total} 条资料（你提供的 ${info.ownCount} 条 / 网络 ${info.netCount} 条），分 ${info.batches.length} 批通读…`, progress: { done: 0, total: info.batches.length } });
-        const parts = [];
-        let done = 0, next = 0;
-        const worker = async () => {
-          while (true) {
-            const my = next++;
-            if (my >= info.batches.length) return;
-            if (sig.aborted) { const e = new Error('已停止'); e.cancelled = true; throw e; }
-            send({ status: `正在通读第 ${my + 1}/${info.batches.length} 批资料…`, progress: { done, total: info.batches.length } });
-            const txt = await aiText(digestBatchPrompt(info.batches[my], my + 1, info.batches.length), model, 300000, null, sig, '代码库摘要');
-            let data = null;
-            try { data = extractJSONRaw(txt) || {}; } catch (e) { data = {}; }
-            parts.push({ idx: my + 1, data });
-            done++;
-            send({ status: `已通读 ${done}/${info.batches.length} 批`, progress: { done, total: info.batches.length } });
-          }
-        };
-        await Promise.all(Array.from({ length: Math.min(3, info.batches.length) }, worker));
-        parts.sort((a, b) => a.idx - b.idx);
-        send({ status: '正在汇总成主题文档（按主题拆分成多篇）…', progress: { done, total: info.batches.length } });
-        const syn = await aiText(digestSynthesisPrompt(parts, info), model, 600000, null, sig, '代码库综合');
-        const parsed = extractJSONRaw(syn) || {};
-        const list = Array.isArray(parsed.digests) ? parsed.digests : (Array.isArray(parsed) ? parsed : []);
-        if (!list.length) throw new Error('汇总结果解析失败，可重试');
-        const t = nowISO();
-        db.prepare('DELETE FROM source_digests WHERE goal_id = ?').run(g.id);
-        for (const d of list.slice(0, 12)) {
-          const topic = String(d.topic || '').slice(0, 60);
-          const title = String(d.title || topic || '汇总').slice(0, 120);
-          const content = String(d.content_md || d.content || '').slice(0, 20000);
-          if (!content.trim()) continue;
-          db.prepare('INSERT INTO source_digests (goal_id, topic, title, content, sources_count, created_at) VALUES (?,?,?,?,?,?)')
-            .run(g.id, topic, title, content, info.total, t);
-        }
-        db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(t, g.id);
-        backup();
-        send({ done: true, count: digestsOf(g.id).length, digests: digestsOf(g.id) });
-      } catch (e) {
-        if (e && e.cancelled) send({ cancelled: true, status: '已停止提炼' });
-        else send({ error: '资料提炼失败：' + e.message });
-      }
-      res.end();
-    })();
-    return;
+    return streamDigest(req, res, g);
   }
   const digestsGetMatch = p.match(/^\/api\/goals\/(\d+)\/digests$/);
   if (digestsGetMatch && method === 'GET') {
@@ -5610,11 +6910,15 @@ function redactText(raw) {
       counts: {
         nodes: inc.nodes ? nodes.length : 0,
         sources: inc.sources ? sources.length : 0,
-        digests: inc.digests ? digests.length : 0
+        digests: inc.digests ? digests.length : 0,
+        conditions: inc.nodes ? db.prepare('SELECT COUNT(*) AS n FROM goal_conditions WHERE goal_id = ?').get(g.id).n : 0
       },
+      conditions: inc.nodes ? db.prepare('SELECT * FROM goal_conditions WHERE goal_id = ? ORDER BY sort_order, id').all(g.id).map(c => ({
+        id: c.id, title: R(c.title), detail: R(c.detail), acceptance: R(c.acceptance), jd_ref: R(c.jd_ref || ''), priority: c.priority, sort_order: c.sort_order
+      })) : [],
       nodes: (inc.nodes ? nodes : []).map(n => ({
         id: n.id, parent_id: n.parent_id, level: n.level, sort_order: n.sort_order, title: R(n.title),
-        detail: R(n.detail), artifact: R(n.artifact), acceptance: R(n.acceptance), hours: n.hours, status: n.status,
+        detail: R(n.detail), artifact: R(n.artifact), acceptance: R(n.acceptance), hours: n.hours, status: n.status, condition_id: n.condition_id || 0,
         sources: (safeParse(n.sources) || []).map(s2 => (redact && s2 && typeof s2 === 'object'
           ? Object.assign({}, s2, { name: R(s2.name), note: R(s2.note) }) : s2))
       })),
@@ -5649,6 +6953,18 @@ function redactText(raw) {
         String(gg.materials || '').slice(0, 8000), String(gg.summary || '').slice(0, 800),
         JSON.stringify(Array.isArray(gg.constraints) ? gg.constraints.slice(0, 30) : []), 'review', JSON.stringify(snapshotCompSel()), t, t);
     const gid = Number(gr.lastInsertRowid);
+    // 达成条件（分享文件里带的话；旧 id → 新 id 映射，节点按映射挂回去）
+    const condMap = new Map();
+    let condCount = 0;
+    for (const c of (Array.isArray(body.conditions) ? body.conditions : []).slice(0, 24)) {
+      if (!c || !String(c.title || '').trim()) continue;
+      const cr = db.prepare('INSERT INTO goal_conditions (goal_id,title,detail,acceptance,jd_ref,priority,source,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run(gid, String(c.title).trim().slice(0, 120), String(c.detail || '').slice(0, 800), String(c.acceptance || '').slice(0, 600), String(c.jd_ref || c.jd || '').slice(0, 600),
+          c.priority === 'should' ? 'should' : (c.priority === 'nice' ? 'nice' : 'must'), 'plan',
+          Number(c.sort_order) || condCount * 10, t, t);
+      condMap.set(Number(c.id), Number(cr.lastInsertRowid));
+      condCount++;
+    }
     // 节点（按层级顺序插入，维护旧 id → 新 id 映射）
     const idMap = new Map();
     let nodeCount = 0;
@@ -5657,7 +6973,8 @@ function redactText(raw) {
       const parentNew = n.parent_id ? (idMap.get(Number(n.parent_id)) || null) : null;
       insertNode(gid, parentNew, Number(n.level) || 0, String(n.title || '节点').slice(0, 200),
         String(n.detail || '').slice(0, 2000), Array.isArray(n.sources) ? n.sources.slice(0, 20) : [],
-        Number(n.sort_order) || 0, { artifact: String(n.artifact || '').slice(0, 500), acceptance: String(n.acceptance || '').slice(0, 500), hours: String(n.hours || '').slice(0, 50) });
+        Number(n.sort_order) || 0, { artifact: String(n.artifact || '').slice(0, 500), acceptance: String(n.acceptance || '').slice(0, 500), hours: String(n.hours || '').slice(0, 50),
+          condition_id: condMap.get(Number(n.condition_id)) || 0 });
       const newId = db.prepare('SELECT last_insert_rowid() AS id').get().id;
       if (Number(n.id)) idMap.set(Number(n.id), newId);
       nodeCount++;
@@ -5685,7 +7002,7 @@ function redactText(raw) {
     }
     rag.autoIndex(gid);
     backup();
-    return sendJSON(res, 200, { ok: true, goalId: gid, counts: { nodes: nodeCount, sources: srcCount, digests: digCount }, goal: getGoal(gid) });
+    return sendJSON(res, 200, { ok: true, goalId: gid, counts: { nodes: nodeCount, conditions: condCount, sources: srcCount, digests: digCount }, goal: getGoal(gid) });
   }
   const sourcesAddMatch = p.match(/^\/api\/goals\/(\d+)\/sources$/);
   if (sourcesAddMatch && method === 'POST') {
@@ -6027,8 +7344,11 @@ function redactText(raw) {
       return sendJSON(res, 200, { sessions: rows });
     }
     if (method === 'POST') {
-      const g = db.prepare('SELECT id FROM goals WHERE id = ?').get(gid);
-      if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+      /* gid=0 = 全局对话（不绑定目标，只读全站内容）：不校验目标存在。 */
+      if (gid !== 0) {
+        const g = db.prepare('SELECT id FROM goals WHERE id = ?').get(gid);
+        if (!g) return sendJSON(res, 404, { error: '目标不存在' });
+      }
       let title = '新对话', model = '', nodeId = 0, nodes = '[]';
       try {
         const b = await readBody(req);
@@ -6086,7 +7406,7 @@ function redactText(raw) {
     const sid = Number(sessMsgsMatch[1]);
     const s = db.prepare('SELECT * FROM chat_sessions WHERE id = ?').get(sid);
     if (!s) return sendJSON(res, 404, { error: '对话不存在' });
-    const rows = db.prepare('SELECT id, role, content, ops, version_id, trace, created_at FROM chats WHERE session_id = ? ORDER BY id').all(sid);
+    const rows = db.prepare('SELECT id, role, content, ops, version_id, trace, images, created_at FROM chats WHERE session_id = ? ORDER BY id').all(sid);
     return sendJSON(res, 200, { session: s, messages: rows });
   }
   const sessChatMatch = p.match(/^\/api\/chat-sessions\/(\d+)\/chat$/);
@@ -6094,14 +7414,20 @@ function redactText(raw) {
     const sid = Number(sessChatMatch[1]);
     const s = db.prepare('SELECT * FROM chat_sessions WHERE id = ?').get(sid);
     if (!s) return sendJSON(res, 404, { error: '对话不存在' });
+    /* goal_id=0：全局助手（不绑定目标，读全站、只回答与指路）。 */
+    if (Number(s.goal_id) === 0) return streamGlobalChat(req, res, s);
     const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(s.goal_id);
     if (!g) return sendJSON(res, 404, { error: '目标不存在' });
     const body = await readBody(req);
-    const message = String(body.message || '').trim().slice(0, 30000);
+    const hasImgs = Array.isArray(body.images) && body.images.some(x => /^data:image\//.test(String(x || '')));
+    let message = String(body.message || '').trim().slice(0, 30000);
+    if (!message && hasImgs) message = '请看我发的图片。';
     if (!message) return sendJSON(res, 400, { error: '请先输入内容' });
     /* mode: 'ask' = 只提问（服务端禁掉一切 ops）；其余一律当 agent（可意图识别 + 调工具）。
        tutorial_id: 用户当前在看哪份教程 —— 有它才允许 AI 提议改教程。 */
-    const mode = String(body.mode || '').toLowerCase() === 'ask' ? 'ask' : 'agent';
+    const reqMode = String(body.mode || '').toLowerCase();
+    /* 三种模式：ask 只读问答 / agent 改路线图（默认）/ create 创造模式（生成可安装的插件） */
+    const mode = reqMode === 'ask' ? 'ask' : (reqMode === 'create' ? 'create' : 'agent');
     const tutorial = Number(body.tutorial_id || 0) ? { id: Number(body.tutorial_id) } : null;
     /* 这条对话带了哪些节点：以请求为准（前端可以随时加/去掉），落库到会话上，
        这样刷新、换设备、重新打开都还在。node_id 是老的单值参数，继续认。 */
@@ -6113,7 +7439,15 @@ function redactText(raw) {
     } else {
       try { chatNodes = sanitizeChatNodes(safeParse(s.nodes) || [], g.id); } catch (e) { chatNodes = []; }
     }
-    return streamChat(req, res, g, message, s, { mode, tutorial, nodes: chatNodes || [] });
+    /* edit_scope：用户在对话栏上方「🎯 只改」里指定的范围（auto / conditions / nodes / goal / sources / tutorials）。
+       服务端按它硬拦 ops —— 用户在达成条件页说「改条件」时，AI 不会再把路线图节点也一起改了。 */
+    const editScope = chatScopeOf(body.edit_scope);
+    /* 粘贴的图片：原图随这次请求交给模型；缩略图落库用于刷新后显示。
+       能不能识图由 streamChat 里按当前模型判断（不支持会直接回一句说明）。 */
+    return streamChat(req, res, g, message, s, {
+      mode, tutorial, nodes: chatNodes || [], page: body.page_context || body.page || null, scope: editScope,
+      images: body.images, image_thumbs: body.image_thumbs
+    });
   }
   const chatsMatch = p.match(/^\/api\/goals\/(\d+)\/chats$/);
   if (chatsMatch && method === 'DELETE') {
@@ -6941,15 +8275,9 @@ function extractEbookPrefFromAnswers(answers) {
       return sendJSON(res, 200, { goal: getGoal(n.goal_id) });
     }
     if (method === 'DELETE') {
-      const n = db.prepare('SELECT * FROM nodes WHERE id = ?').get(id);
-      if (!n) return sendJSON(res, 404, { error: '节点不存在' });
-      const goalRow = db.prepare('SELECT * FROM goals WHERE id = ?').get(n.goal_id);
-      const vidDel = beginVersion(n.goal_id, '手动删除：' + n.title);
-      deleteNodeTree(id);
-      db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), n.goal_id);
-      if (vidDel && goalRow) await finishVersion(goalRow, vidDel, '手动删除：' + n.title, false);
-      backup();
-      return sendJSON(res, 200, { goal: getGoal(n.goal_id) });
+      const r = await deleteNodeData(id);
+      if (!r) return sendJSON(res, 404, { error: '节点不存在' });
+      return sendJSON(res, 200, { goal: r.goal });
     }
   }
 
@@ -7064,9 +8392,10 @@ function extractEbookPrefFromAnswers(answers) {
     const name = decodeURIComponent(catDelMatch[1]).trim();
     saveComponentCategories(componentCategoryList().filter(x => x !== name));
     const map = componentCategoryMap();
-    // 该分类下的组件（含回落到插件默认分类者）显式归入「其它」，否则会被自动检测重新加回
+    // 该分类下的组件（含回落到插件默认分类者）显式归入「其它」，否则会被自动检测重新加回。
+    // 写空串而不是字符串 '其它'：effectiveCategory 认空串为「用户明确归到其它」。
     for (const c of allComponents()) {
-      if (effectiveCategory(c.id, c.category) === name) map[c.id] = '其它';
+      if (effectiveCategory(c.id, c.category) === name) map[c.id] = '';
     }
     saveComponentCategoryMap(map);
     return sendJSON(res, 200, { ok: true, categories: allCategoriesWithUsage().categories });
@@ -7079,12 +8408,14 @@ function extractEbookPrefFromAnswers(answers) {
     const body = await readBody(req);
     const category = String(body.category || '').trim().slice(0, 24) || '其它';
     const map = componentCategoryMap();
-    if (category === '其它') delete map[cid]; else map[cid] = category;
+    /* 「其它」要写成**显式空串**，不能 delete：删掉等于「从没设过」，
+       下一次 effectiveCategory 会回落到插件自己声明的分类，卡片当场跳回原分类。 */
+    if (category === '其它') map[cid] = ''; else map[cid] = category;
     if (category !== '其它' && !componentCategoryList().includes(category)) {
       const list = componentCategoryList(); list.push(category); saveComponentCategories(list);
     }
     saveComponentCategoryMap(map);
-    return sendJSON(res, 200, { ok: true, category: effectiveCategory(cid, comp.category) });
+    return sendJSON(res, 200, { ok: true, category: effectiveCategory(cid, comp.category || '其它') });
   }
 
   /* ---- 后台 AI 任务（切换页面不影响；可并行、可取消） ---- */
@@ -7112,6 +8443,9 @@ function extractEbookPrefFromAnswers(answers) {
     const toTs = String(uu.searchParams.get('to') || '').slice(0, 40);
     const where = [AIT_TERMINAL], args = [];
     if (goal) { where.push('goal_id = ?'); args.push(goal); }
+    /* goal_id=0 是「未关联目标」的真实分组；0 在 JS 里是 falsy，会被上面的 if 跳过，
+       所以前端要精确取它时传 goalExp=zero（否则拉回来的是全部目标的行）。 */
+    if (!goal && String(uu.searchParams.get('goalExp') || '') === 'zero') { where.push('goal_id = 0'); }
     if (['done', 'failed', 'cancelled'].includes(status)) { where.push('status = ?'); args.push(status); }
     /* created_at 老行是 'YYYY-MM-DD HH:MM:SS'、新行是 ISO（带 T），归一化后再比 */
     if (days > 0 && !fromTs) { where.push("REPLACE(created_at,' ','T') >= ?"); args.push(new Date(Date.now() - days * 864e5).toISOString()); }
@@ -7138,7 +8472,10 @@ function extractEbookPrefFromAnswers(answers) {
       running: live.map(t => Object.assign({}, t, { goalTitle: gtitle[t.goalId] || '' })),
       summary: { total: sum.n || 0, done: sum.d || 0, failed: sum.f || 0, cancelled: sum.c || 0 },
       groups: grp.map(g => ({
-        goalId: g.goal_id, goalTitle: gtitle[g.goal_id] || '（目标已删除）',
+        goalId: g.goal_id,
+        /* goal_id=0 = 没关联目标（不是目标被删），文案要区分开 */
+        goalTitle: g.goal_id ? (gtitle[g.goal_id] || '（目标已删除）') : '（未关联目标）',
+        goalMissing: g.goal_id > 0 && !gtitle[g.goal_id],   /* 目标已被删除 → 前端给一个「清理」入口 */
         total: g.n, done: g.d || 0, failed: g.f || 0, cancelled: g.c || 0, lastAt: g.last_at || ''
       })),
       goals: goals.map(g => ({ id: g.id, title: g.title })),
@@ -7160,11 +8497,51 @@ function extractEbookPrefFromAnswers(answers) {
     return sendJSON(res, 200, {
       total, offset, limit, hasMore: offset + rows.length < total,
       rows: rows.map(r => ({
-        runId: r.id, goalId: r.goal_id, goalTitle: gtitle[r.goal_id] || '（目标已删除）',
+        runId: r.id, goalId: r.goal_id,
+        goalTitle: r.goal_id ? (gtitle[r.goal_id] || '（目标已删除）') : '（未关联目标）',
         type: r.type, title: r.title, status: r.status, error: r.error || '',
         costMs: r.cost_ms || 0, createdAt: r.created_at
       }))
     });
+  }
+
+
+  /* ---- 清理 AI 任务历史 ----
+     背景：目标删掉之后，它的任务历史还留在 task_runs 里，任务中心就长期挂着
+     几行「（目标已删除）」；用户既点不进去、也没法去掉（真实反馈）。
+     两个删除入口都**只动 task_runs**，不碰目标/教程/产出等任何真实数据；删前备份。 */
+  if (p === '/api/ai-tasks/history' && method === 'DELETE') {
+    const gid = Number(u.searchParams.get('goal') || 0);
+    if (!gid) return sendJSON(res, 400, { error: '要指定要清理的目标（goal）' });
+    /* 目标还在 → 拒绝：这是「清理已删除目标的残留」，不是「清空某个目标的历史」。 */
+    if (db.prepare('SELECT id FROM goals WHERE id = ?').get(gid)) {
+      return sendJSON(res, 400, { error: '这个目标还在，不能批量清理它的任务历史' });
+    }
+    const n = db.prepare('SELECT COUNT(*) n FROM task_runs WHERE goal_id = ?').get(gid).n;
+    if (!n) return sendJSON(res, 200, { ok: true, deleted: 0 });
+    try { backup(); } catch (e) {}
+    db.prepare('DELETE FROM task_runs WHERE goal_id = ?').run(gid);
+    return sendJSON(res, 200, { ok: true, deleted: n });
+  }
+  /* 一键清理所有已删除目标的残留历史（分组上方那个按钮走它） */
+  if (p === '/api/ai-tasks/history/orphans' && method === 'DELETE') {
+    const ORPHAN = 'goal_id > 0 AND goal_id NOT IN (SELECT id FROM goals)';
+    const n = db.prepare('SELECT COUNT(*) n FROM task_runs WHERE ' + ORPHAN).get().n;
+    if (!n) return sendJSON(res, 200, { ok: true, deleted: 0 });
+    try { backup(); } catch (e) {}
+    db.prepare('DELETE FROM task_runs WHERE ' + ORPHAN).run();
+    return sendJSON(res, 200, { ok: true, deleted: n });
+  }
+  /* 删单条历史（任务中心每行末尾的「删除」） */
+  const aitRunDel = p.match(/^\/api\/ai-tasks\/history\/(\d+)$/);
+  if (aitRunDel && method === 'DELETE') {
+    const rid = Number(aitRunDel[1]);
+    if (!db.prepare('SELECT id FROM task_runs WHERE id = ?').get(rid)) {
+      return sendJSON(res, 404, { error: '任务记录不存在' });
+    }
+    try { backup(); } catch (e) {}
+    db.prepare('DELETE FROM task_runs WHERE id = ?').run(rid);
+    return sendJSON(res, 200, { ok: true });
   }
 
   /* ---- 检索增强（RAG）：状态 / 重建索引 / 检索预览 ---- */
@@ -7389,24 +8766,12 @@ function extractEbookPrefFromAnswers(answers) {
   }
   const compExportMatch = p.match(/^\/api\/components\/([a-z0-9_-]+)\/export$/i);
   if (compExportMatch && method === 'GET') {
-    const cid = String(compExportMatch[1]);
-    const comp = allComponents().find(c => c.id === cid);
-    if (!comp) return sendJSON(res, 404, { error: '组件不存在' });
-    if (comp.builtin) return sendJSON(res, 400, { error: '内置组件不可导出（可在文档中查看其实现）' });
-    let server = '', client = '', style = '';
-    try { server = fs.readFileSync(path.join(PLUGIN_DIR, comp.id + '.js'), 'utf8'); } catch (e) {}
-    try { client = fs.readFileSync(path.join(PUBLIC_DIR, 'plugins', comp.id + '.js'), 'utf8'); } catch (e) {}
-    try { style = fs.readFileSync(path.join(PUBLIC_DIR, 'plugins', comp.id + '.css'), 'utf8'); } catch (e) {}
-    const bundle = {
-      format: 'sierxing-component', formatVersion: 1,
-      id: comp.id, name: comp.name, icon: comp.icon, desc: comp.desc,
-      version: comp.version, author: comp.author, order: comp.order, kind: comp.kind,
-      goalToggle: comp.goalToggle, defaultEnabled: comp.defaultEnabled,
-      exportedAt: nowISO(), server, client, style
-    };
+    let bundle;
+    try { bundle = exportComponentBundle(String(compExportMatch[1])); }
+    catch (e) { return sendJSON(res, e.code === 'not_found' ? 404 : 400, { error: e.message }); }
     res.writeHead(200, {
       'Content-Type': 'application/json; charset=utf-8',
-      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(comp.id + '.component.json')}`
+      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(bundle.id + '.component.json')}`
     });
     return res.end(JSON.stringify(bundle, null, 2));
   }
@@ -7414,42 +8779,24 @@ function extractEbookPrefFromAnswers(answers) {
     const body = await readBody(req);
     let bundle = body && body.bundle;
     if (typeof bundle === 'string') { try { bundle = JSON.parse(bundle); } catch (e) { return sendJSON(res, 400, { error: '组件文件不是合法 JSON' }); } }
-    if (!bundle || bundle.format !== 'sierxing-component') return sendJSON(res, 400, { error: '不是有效的组件文件（缺少 format 标记）' });
-    const cid = String(bundle.id || '').trim();
-    if (!/^[a-z][a-z0-9_-]{1,30}$/i.test(cid)) return sendJSON(res, 400, { error: '组件 id 不合法（只允许字母数字与 - _）' });
-    if (BUILTIN_COMPONENTS.some(b => b.id === cid)) return sendJSON(res, 400, { error: '不能覆盖内置组件 id：' + cid });
-    if (typeof bundle.server !== 'string' || !bundle.server.includes('module.exports')) return sendJSON(res, 400, { error: '组件缺少服务端代码（server 字段）' });
-    if (bundle.client != null && typeof bundle.client !== 'string') return sendJSON(res, 400, { error: 'client 字段必须是字符串' });
-    backup();
-    fs.mkdirSync(PLUGIN_DIR, { recursive: true });
-    const fileExisted = fs.existsSync(path.join(PLUGIN_DIR, cid + '.js'));
-    fs.writeFileSync(path.join(PLUGIN_DIR, cid + '.js'), bundle.server);
-    if (bundle.client) {
-      fs.mkdirSync(path.join(PUBLIC_DIR, 'plugins'), { recursive: true });
-      fs.writeFileSync(path.join(PUBLIC_DIR, 'plugins', cid + '.js'), bundle.client);
-    }
-    if (typeof bundle.style === 'string' && bundle.style.trim()) {
-      fs.mkdirSync(path.join(PUBLIC_DIR, 'plugins'), { recursive: true });
-      fs.writeFileSync(path.join(PUBLIC_DIR, 'plugins', cid + '.css'), bundle.style);
-    }
-    const n = reloadPlugins();
-    const ok = FILE_PLUGINS.some(x => x.id === cid);
-    if (!ok) return sendJSON(res, 500, { error: '组件已写入但加载失败，请检查服务端代码（查看服务日志）' });
+    let r;
+    try { r = installComponentBundle(bundle); }
+    catch (e) { return sendJSON(res, e && (e.code === 'bad_input' || e.code === 'forbidden') ? 400 : 500, { error: e.message }); }
     // 导入时可指定分类（批量导入时统一归类）
     let category = '';
     const wantCat = String(body.category || '').trim();
     if (wantCat && wantCat !== '__auto__') {
       const cat = wantCat.slice(0, 24);
       const map = componentCategoryMap();
-      map[cid] = cat;
+      map[r.id] = cat;
       saveComponentCategoryMap(map);
       const list = componentCategoryList();
       if (!list.includes(cat)) { list.push(cat); saveComponentCategories(list); }
       category = cat;
     } else {
-      category = effectiveCategory(cid, (FILE_PLUGINS.find(x => x.id === cid) || {}).category);
+      category = effectiveCategory(r.id, (FILE_PLUGINS.find(x => x.id === r.id) || {}).category);
     }
-    return sendJSON(res, 201, { ok: true, id: cid, loaded: n, name: bundle.name || cid, category, replaced: fileExisted });
+    return sendJSON(res, 201, { ok: true, id: r.id, loaded: r.loaded, name: (bundle && bundle.name) || r.id, category, replaced: r.replaced });
   }
   if (p === '/api/components/install-batch' && method === 'POST') {
     const body = await readBody(req);
@@ -7468,16 +8815,11 @@ function extractEbookPrefFromAnswers(answers) {
       if (typeof bundle.server !== 'string' || !bundle.server.includes('module.exports')) { results.push({ ok: false, id: cid, name, error: '缺少服务端代码' }); continue; }
       try {
         backup();
-        fs.mkdirSync(PLUGIN_DIR, { recursive: true });
-        fs.writeFileSync(path.join(PLUGIN_DIR, cid + '.js'), bundle.server);
-        if (bundle.client) {
-          fs.mkdirSync(path.join(PUBLIC_DIR, 'plugins'), { recursive: true });
-          fs.writeFileSync(path.join(PUBLIC_DIR, 'plugins', cid + '.js'), bundle.client);
-        }
-        if (typeof bundle.style === 'string' && bundle.style.trim()) {
-          fs.mkdirSync(path.join(PUBLIC_DIR, 'plugins'), { recursive: true });
-          fs.writeFileSync(path.join(PUBLIC_DIR, 'plugins', cid + '.css'), bundle.style);
-        }
+        fs.mkdirSync(USER_PLUGIN_DIR, { recursive: true });
+        fs.mkdirSync(USER_PUBLIC_PLUGIN_DIR, { recursive: true });
+        fs.writeFileSync(path.join(USER_PLUGIN_DIR, cid + '.js'), bundle.server);
+        if (bundle.client) fs.writeFileSync(path.join(USER_PUBLIC_PLUGIN_DIR, cid + '.js'), bundle.client);
+        if (typeof bundle.style === 'string' && bundle.style.trim()) fs.writeFileSync(path.join(USER_PUBLIC_PLUGIN_DIR, cid + '.css'), bundle.style);
         results.push({ ok: true, id: cid, name });
       } catch (e) {
         results.push({ ok: false, id: cid, name, error: e.message });
@@ -7500,15 +8842,22 @@ function extractEbookPrefFromAnswers(answers) {
   }
   const compDelMatch = p.match(/^\/api\/components\/([a-z0-9_-]+)$/i);
   if (compDelMatch && method === 'DELETE') {
-    const cid = String(compDelMatch[1]);
-    if (BUILTIN_COMPONENTS.some(b => b.id === cid)) return sendJSON(res, 400, { error: '内置组件不可卸载' });
-    if (!FILE_PLUGINS.some(x => x.id === cid)) return sendJSON(res, 404, { error: '组件不存在' });
-    backup();
-    try { fs.unlinkSync(path.join(PLUGIN_DIR, cid + '.js')); } catch (e) {}
-    try { fs.unlinkSync(path.join(PUBLIC_DIR, 'plugins', cid + '.js')); } catch (e) {}
-    try { fs.unlinkSync(path.join(PUBLIC_DIR, 'plugins', cid + '.css')); } catch (e) {}
-    reloadPlugins();
-    return sendJSON(res, 200, { ok: true });
+    try { const r = uninstallComponentBundle(String(compDelMatch[1])); return sendJSON(res, 200, { ok: true, id: r.id }); }
+    catch (e) { return sendJSON(res, e.code === 'not_found' ? 404 : 400, { error: e.message }); }
+  }
+  const compStagePreview = p.match(/^\/api\/component-staging\/([A-Za-z0-9_-]+)\/preview$/);
+  if (compStagePreview && method === 'GET') {
+    const stage = commandBus.getComponentStage ? commandBus.getComponentStage(compStagePreview[1]) : null;
+    if (!stage) {
+      res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<!DOCTYPE html><meta charset="utf-8"><h1>暂存组件不存在或已过期</h1>');
+      return true;
+    }
+    let current = null;
+    try { current = exportComponentBundle(stage.summary && stage.summary.id ? stage.summary.id : stage.bundle.id); } catch (e) {}
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+    res.end(renderComponentPreviewPage(stage, current));
+    return true;
   }
   if (p === '/api/components/reload' && method === 'POST') {
     const n = reloadPlugins();
@@ -7588,7 +8937,9 @@ function extractEbookPrefFromAnswers(answers) {
     if (method === 'POST') {
       const body = await readBody(req);
       const pid = String(body.plugin_id || '');
-      const isCore = BUILTIN_COMPONENTS.some(x => x.id === pid && x.scope === 'core');
+      /* core 判定必须查 allComponents()：核心组件不只有 BUILTIN_COMPONENTS 里的，
+         文件插件（如 uimanager）也可以声明 scope:'core'，它们同样不可按目标关。 */
+      const isCore = allComponents().some(x => x.id === pid && x.scope === 'core');
       const manageable = manageableCompIds().includes(pid) || PLUGINS.some(x => x.id === pid);
       if (isCore || !manageable) return sendJSON(res, 404, { error: '插件不存在或不可按目标管理' });
       const cur = safeParse(g.plugins) || {};
@@ -7612,6 +8963,17 @@ function extractEbookPrefFromAnswers(answers) {
   if (p === '/api/ai/agents' && method === 'GET') {
     return sendJSON(res, 200, { agents: ai.AGENTS });
   }
+  /* 宿主 Agent（思而行作为插件运行时由宿主注入）：状态 + 免重启刷新。
+     宿主插件写 DATA_DIR/host-agent.json 后 POST 这里，模型列表立刻进设置/对话下拉。 */
+  if (p === '/api/host-agent' && method === 'GET') {
+    return sendJSON(res, 200, ai.hostAgentStatus());
+  }
+  if (p === '/api/host-agent/refresh' && method === 'POST') {
+    let r;
+    try { r = ai.mountHostAgent(); }
+    catch (e) { return sendJSON(res, 500, { mounted: false, error: (e && e.message) || 'mount failed' }); }
+    return sendJSON(res, 200, r);
+  }
   /* 按 Agent 类型探测本机装没装（?agent=opencode，缺省 opencode） */
   if (p === '/api/ai/agent-status' && method === 'GET') {
     const st = ai.agentStatus(u.searchParams.get('agent') || 'opencode');
@@ -7633,6 +8995,8 @@ function extractEbookPrefFromAnswers(answers) {
     /* 整体提交：设置页「保存」时一次存完，避免前端为每条连接各调一次 */
     if (!body || !Array.isArray(body.connections)) return sendJSON(res, 400, { error: '缺少 connections' });
     ai.saveConnections(body.connections);
+    /* 用户重新保存连接 = 可能换了地址/模型/配置：清掉「不支持识图」标记，下次发图会重新试一次 */
+    try { clearVisionUnsupported(); } catch (e) {}
     /* 用到 opencode Agent 才生成 .opencode/opencode.json（不用就不生成） */
     try {
       const list = ai.connections();
@@ -7654,6 +9018,21 @@ function extractEbookPrefFromAnswers(answers) {
   }
   if (p === '/api/ai/pool' && method === 'GET') {
     return sendJSON(res, 200, { pool: ai.modelPool() });
+  }
+  /* 当前模型能不能识图：前端粘图时先问一句，避免发出去才被告知不支持。 */
+  if (p === '/api/ai/can-vision' && method === 'GET') {
+    const mdl = String(u.searchParams.get('model') || '').trim() || currentModel();
+    return sendJSON(res, 200, {
+      ok: modelSupportsVision(mdl),
+      learned_unsupported: isVisionUnsupported(mdl),
+      fallback_model: (function () {
+        const vm = configuredVisionModel();
+        return (vm && String(vm).toLowerCase() !== String(mdl).toLowerCase()) ? vm : '';
+      })(),
+      model: mdl,
+      vision_model: (function () { try { return currentVisionModel(); } catch (e) { return ''; } })(),
+      reason: '默认按可识图处理；模型回应不能识图后会被标记（重新保存 AI 连接可清除）'
+    });
   }
   if (p === '/api/ai/status' && method === 'GET') {
     // visionModel 返回「实际会用的」视觉模型（含 opencode 默认值），前端据此提示
@@ -7748,6 +9127,8 @@ function extractEbookPrefFromAnswers(answers) {
   if (p === '/api/export/json' && method === 'GET') {
     const goals = db.prepare('SELECT * FROM goals ORDER BY id').all();
     const nodes = db.prepare('SELECT * FROM nodes ORDER BY id').all();
+    let conditions = [];
+    try { conditions = db.prepare('SELECT * FROM goal_conditions ORDER BY id').all(); } catch (e) {}
     const sources = db.prepare('SELECT * FROM sources ORDER BY id').all();
     const settings = db.prepare('SELECT * FROM settings').all();
     const tutorials = db.prepare('SELECT * FROM tutorials ORDER BY id').all();
@@ -7759,20 +9140,25 @@ function extractEbookPrefFromAnswers(answers) {
       'Content-Type': 'application/json; charset=utf-8',
       'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent('思而行-导出-' + stamp() + '.json')}`
     });
-    return res.end(JSON.stringify({ exportedAt: nowISO(), goals, nodes, sources, tutorials, tutorialVersions, settings, pluginData }, null, 2));
+    return res.end(JSON.stringify({ exportedAt: nowISO(), goals, nodes, conditions, sources, tutorials, tutorialVersions, settings, pluginData }, null, 2));
   }
   if (p === '/api/import/json' && method === 'POST') {
     const body = await readBody(req);
     const goals = Array.isArray(body.goals) ? body.goals : [];
     if (!goals.length) return sendJSON(res, 400, { error: '没有可导入的目标' });
     backup();
-    db.exec('DELETE FROM nodes; DELETE FROM sources; DELETE FROM goals; DELETE FROM goal_versions; DELETE FROM tutorials; DELETE FROM tutorial_versions; DELETE FROM chats; DELETE FROM chat_sessions; DELETE FROM code_repo_files;');
+    db.exec('DELETE FROM nodes; DELETE FROM sources; DELETE FROM goals; DELETE FROM goal_versions; DELETE FROM tutorials; DELETE FROM tutorial_versions; DELETE FROM chats; DELETE FROM chat_sessions; DELETE FROM code_repo_files; DELETE FROM goal_conditions;');
     rag.dropAll();
     for (const pl of PLUGINS) { try { if (typeof pl.clearAll === 'function') pl.clearAll(pluginCtx()); } catch (e) {} }
     const insG = db.prepare('INSERT INTO goals (id,title,profile,materials,weekly_hours,deadline,status,error,summary,constraints,plugins,ebook_pref,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
     for (const g of goals) insG.run(g.id != null ? Number(g.id) : null, g.title || '', g.profile || '', g.materials || '', g.weekly_hours || '', g.deadline || '', g.status || 'draft', g.error || '', g.summary || '', typeof g.constraints === 'string' ? g.constraints : JSON.stringify(g.constraints || []), typeof g.plugins === 'string' ? g.plugins : JSON.stringify(g.plugins || {}), typeof g.ebook_pref === 'string' ? g.ebook_pref : JSON.stringify(g.ebook_pref || {}), g.created_at || nowISO(), g.updated_at || nowISO());
-    const insN = db.prepare('INSERT INTO nodes (id,goal_id,parent_id,level,title,detail,artifact,acceptance,hours,sources,status,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
-    for (const n of (Array.isArray(body.nodes) ? body.nodes : [])) insN.run(n.id != null ? Number(n.id) : null, Number(n.goal_id), n.parent_id ? Number(n.parent_id) : null, Number(n.level || 0), n.title || '', n.detail || '', n.artifact || '', n.acceptance || '', n.hours || '', typeof n.sources === 'string' ? n.sources : JSON.stringify(n.sources || []), n.status || 'todo', Number(n.sort_order || 0), n.created_at || nowISO(), n.updated_at || nowISO());
+    const insC = db.prepare('INSERT INTO goal_conditions (id,goal_id,title,detail,acceptance,jd_ref,priority,source,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)');
+    for (const c of (Array.isArray(body.conditions) ? body.conditions : [])) {
+      if (!c || !c.title) continue;
+      insC.run(c.id != null ? Number(c.id) : null, Number(c.goal_id), String(c.title), c.detail || '', c.acceptance || '', c.jd_ref || c.jd || '', c.priority || 'must', c.source || 'plan', Number(c.sort_order || 0), c.created_at || nowISO(), c.updated_at || nowISO());
+    }
+    const insN = db.prepare('INSERT INTO nodes (id,goal_id,parent_id,level,title,detail,artifact,acceptance,hours,sources,status,condition_id,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    for (const n of (Array.isArray(body.nodes) ? body.nodes : [])) insN.run(n.id != null ? Number(n.id) : null, Number(n.goal_id), n.parent_id ? Number(n.parent_id) : null, Number(n.level || 0), n.title || '', n.detail || '', n.artifact || '', n.acceptance || '', n.hours || '', typeof n.sources === 'string' ? n.sources : JSON.stringify(n.sources || []), n.status || 'todo', Number(n.condition_id || 0), Number(n.sort_order || 0), n.created_at || nowISO(), n.updated_at || nowISO());
     const insT = db.prepare('INSERT INTO tutorials (id,goal_id,node_id,title,format,content,code_files,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)');
     for (const t of (Array.isArray(body.tutorials) ? body.tutorials : [])) insT.run(t.id != null ? Number(t.id) : null, Number(t.goal_id), Number(t.node_id), t.title || '', t.format || 'md', t.content || '', typeof t.code_files === 'string' ? t.code_files : JSON.stringify(t.code_files || []), t.created_at || nowISO(), t.updated_at || nowISO());
     const insTV = db.prepare('INSERT INTO tutorial_versions (id,tutorial_id,content,reason,created_at) VALUES (?,?,?,?,?)');
@@ -7834,10 +9220,14 @@ function extractEbookPrefFromAnswers(answers) {
     const sorted = snap.slice().sort((a, b) => ((a.level || 0) - (b.level || 0)) || ((a.sort_order || 0) - (b.sort_order || 0)) || ((a.id || 0) - (b.id || 0)));
     const idMap = new Map();
     const t = nowISO();
+    /* 快照里的 condition_id 可能指向后来被删掉的条件；只保留当前仍然存在的 id，
+       否则节点会挂在一个不存在的条件上（条件页既看不到它、也统计不到）。 */
+    const validConds = new Set(db.prepare('SELECT id FROM goal_conditions WHERE goal_id = ?').all(gid).map(c => Number(c.id)));
     for (const n of sorted) {
       const newParent = n.parent_id ? (idMap.get(n.parent_id) || null) : null;
+      const condId = validConds.has(Number(n.condition_id)) ? Number(n.condition_id) : 0;
       insertNode(gid, newParent, n.level || 0, n.title, n.detail, safeParse(n.sources) || [], n.sort_order || 0,
-        { artifact: n.artifact, acceptance: n.acceptance, hours: n.hours });
+        { artifact: n.artifact, acceptance: n.acceptance, hours: n.hours, condition_id: condId });
       const nid = db.prepare('SELECT last_insert_rowid() AS id').get().id;
       idMap.set(n.id, nid);
       if (n.status && n.status !== 'todo') db.prepare('UPDATE nodes SET status = ? WHERE id = ?').run(n.status, nid);
@@ -7958,12 +9348,16 @@ function serveUpload(req, res, p) {
 }
 function serveStatic(req, res, p) {
   let rel = p === '/' ? 'index.html' : p.replace(/^\/+/, '');
-  const file = path.join(PUBLIC_DIR, rel);
-  if (!file.startsWith(PUBLIC_DIR)) { res.writeHead(403); return res.end('forbidden'); }
-  fs.readFile(file, (err, buf) => {
-    if (err) { res.writeHead(404); res.end('not found'); return; }
-    const ext = path.extname(file).toLowerCase();
-    const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' }[ext] || 'application/octet-stream';
+  /* 用户功能组件的前端脚本/样式放数据目录 plugins-client/，逻辑路径仍是 /plugins/<id>.js|.css：
+     用户版本优先（可覆盖程序目录里早期导入的同名组件），没有再回落到 public/。 */
+  let userFile = '';
+  if (rel.indexOf('plugins/') === 0) {
+    const alt = path.join(USER_PUBLIC_PLUGIN_DIR, rel.slice('plugins/'.length));
+    if (alt.startsWith(USER_PUBLIC_PLUGIN_DIR)) userFile = alt;
+  }
+  const finish = function (filePath, buf) {
+    const ext = path.extname(filePath).toLowerCase();
+    const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.mjs': 'application/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' }[ext] || 'application/octet-stream';
     let out = buf;
     if (rel === 'index.html') {
       // 入口页注入版本戳：发版/重启后前端必加载最新 js/css，不再被缓存坑
@@ -7972,10 +9366,28 @@ function serveStatic(req, res, p) {
       html = html.replace('href="/style.css"', 'href="/style.css?v=' + ASSET_V + '"');
       html = html.replace('src="/sdk.js"', 'src="/sdk.js?v=' + ASSET_V + '"');
       html = html.replace('src="/app.js"', 'src="/app.js?v=' + ASSET_V + '"');
+      html = injectLanguageHtml(html, req);
       out = Buffer.from(html);
     }
     res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'no-cache' });
     res.end(out);
+  };
+  const readUser = function () {
+    if (!userFile) { res.writeHead(404); return res.end('not found'); }
+    fs.readFile(userFile, function (err2, buf2) {
+      if (err2) { res.writeHead(404); return res.end('not found'); }
+      finish(userFile, buf2);
+    });
+  };
+  if (userFile && fs.existsSync(userFile)) return fs.readFile(userFile, function (err, buf) { if (err) return readUser(); finish(userFile, buf); });
+  const file = path.join(PUBLIC_DIR, rel);
+  if (!file.startsWith(PUBLIC_DIR)) { res.writeHead(403); return res.end('forbidden'); }
+  fs.readFile(file, (err, buf) => {
+    if (err) {
+      if (userFile) return readUser();
+      res.writeHead(404); res.end('not found'); return;
+    }
+    finish(file, buf);
   });
 }
 
@@ -7992,6 +9404,23 @@ const server = http.createServer(async (req, res) => {  let u;
   }
   try {
     if (u.pathname.startsWith('/api/')) return await handleAPI(req, res, u);
+    /* 内置 UI 插件源码（ui/plugins/builtin/<id>/）—— 页面插件住 ui/ 下，不走 public/ 静态。
+       只放行 index.js / style.css / manifest.json，路径校验防穿越。 */
+    const builtinUiMatch = u.pathname.match(/^\/ui\/plugins\/builtin\/([a-z0-9._-]+)\/(index\.js|style\.css|manifest\.json)$/i);
+    if (builtinUiMatch) {
+      const pid = builtinUiMatch[1], file = builtinUiMatch[2];
+      const full = path.join(UI_PLUGIN_DIR_BUILTIN, pid, file);
+      const rel = path.relative(UI_PLUGIN_DIR_BUILTIN, full);
+      if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
+        try {
+          const body = fs.readFileSync(full);
+          const type = /\.js$/i.test(file) ? 'application/javascript; charset=utf-8'
+            : /\.css$/i.test(file) ? 'text/css; charset=utf-8' : 'application/json; charset=utf-8';
+          res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-cache' });
+          return res.end(body);
+        } catch (e) { /* 落到下面 404 */ }
+      }
+    }
     if (u.pathname.startsWith('/uploads/')) serveUpload(req, res, u.pathname.slice('/uploads/'.length));
     else serveStatic(req, res, u.pathname);
   } catch (e) {

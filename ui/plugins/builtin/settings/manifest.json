@@ -1,0 +1,8 @@
+{
+  "id": "settings",
+  "name": "设置页（内置）",
+  "apiVersion": "sierxing.ui/1",
+  "version": "1.0.0",
+  "description": "设置页：原版实现的插件化版本（#/settings）。",
+  "entry": "index.js"
+}

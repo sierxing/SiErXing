@@ -1,0 +1,8 @@
+{
+  "id": "versions",
+  "name": "版本管理页（内置）",
+  "apiVersion": "sierxing.ui/1",
+  "version": "1.0.0",
+  "description": "版本管理页：原版实现的插件化版本（#/g/:id/versions）。",
+  "entry": "index.js"
+}

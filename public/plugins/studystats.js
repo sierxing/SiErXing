@@ -14,6 +14,45 @@
 (function () {
   const { api, esc, toast } = SiErXing;
 
+  /* ---------- Vue 版页面（渐进迁移；加载失败自动回退旧页面） ----------
+     默认新页面；?ui=legacy 或 localStorage=sierxing-ui-studystats:legacy 可回退。 */
+  let statsVueUnmount = null;
+  function statsVueEnabled() {
+    try {
+      const q = new URLSearchParams(location.search).get('ui');
+      if (q === 'legacy') return false;
+      if (q === 'vue') return true;
+      const saved = localStorage.getItem('sierxing-ui-studystats');
+      if (saved === 'legacy') return false;
+      if (saved === 'vue') return true;
+    } catch (e) {}
+    return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+  }
+  function ensureStatsVueCss() {
+    if (document.querySelector('link[data-ui-page="studystats"]')) return;
+    const l = document.createElement('link');
+    l.rel = 'stylesheet';
+    l.href = '/ui-dist/studystats.css';
+    l.setAttribute('data-ui-page', 'studystats');
+    document.head.appendChild(l);
+  }
+  async function renderStatsPageVue() {
+    const root = document.getElementById('app');
+    if (!root) throw new Error('页面容器不存在');
+    if (statsVueUnmount) { try { statsVueUnmount(); } catch (e) {} statsVueUnmount = null; }
+    ensureStatsVueCss();
+    const mod = await import('/ui-dist/studystats.js?v=' + Date.now());
+    if (!mod || typeof mod.mountStudystatsPage !== 'function') throw new Error('UI 插件没有导出 mountStudystatsPage');
+    statsVueUnmount = mod.mountStudystatsPage(root, { api: api });
+    return true;
+  }
+  window.addEventListener('hashchange', function () {
+    if (statsVueUnmount && !/^#\/studystats/.test(location.hash)) {
+      try { statsVueUnmount(); } catch (e) {}
+      statsVueUnmount = null;
+    }
+  });
+
   function enabled() { try { return typeof compOn === 'function' ? compOn('studystats') !== false : true; } catch (e) { return true; } }
   function pomoState() { try { return window.Pomodoro ? window.Pomodoro.state() : null; } catch (e) { return null; } }
   function curTid() { const m = (location.hash || '').match(/^#\/t\/(\d+)$/); return m ? Number(m[1]) : 0; }
@@ -277,7 +316,7 @@
   function weekdayStr(ds) {
     try {
       const [y, m, d] = ds.split('-').map(Number);
-      return '周' + ['日', '一', '二', '三', '四', '五', '六'][new Date(y, m - 1, d).getDay()];
+      return tr(['周日', '周一', '周二', '周三', '周四', '周五', '周六'][new Date(y, m - 1, d).getDay()]);
     } catch (e) { return ''; }
   }
   /* ---------- 当天时间轴：6 条 4 小时横轴（上万条也只是绝对定位块，悬停看详情） ---------- */
@@ -473,7 +512,7 @@
     if (builtDay !== selDay) {
       const [yy, mm, dd] = selDay.split('-').map(Number);
       box.innerHTML =
-        `<div class="ssDayHero" id="ssDayHero"><div class="ssDayTop"><span class="ssDayDate">📅 ${mm}月${dd}日 · ${weekdayStr(selDay)}</span><span class="ssLive" hidden>● 直播</span></div>` +
+        `<div class="ssDayHero" id="ssDayHero"><div class="ssDayTop"><span class="ssDayDate">${esc(tr('📅 {0} · {1}', tr('{0}月{1}日', mm, dd), weekdayStr(selDay)))}</span><span class="ssLive" hidden>● 直播</span></div>` +
         `<div class="ssDayTotal"><b id="ssDayFocus">0秒</b><span>专注</span></div>` +
         `<div class="ssDayPills"><span class="ssPill">☕ 休息 <b id="ssDayRest">0秒</b></span><span class="ssPill">📵 暂离 <b id="ssDayAway">0秒</b></span></div></div>` +
         `<div class="ssSecTitle" id="ssTlTitle" hidden>⏱ 当天时间线</div><div class="ssAxView" id="ssAxView" hidden><span>排列：</span><button class="ssViewBtn" data-v="cols2">左右两列</button><button class="ssViewBtn" data-v="cols1">上下单列</button></div><div class="ssTl" id="ssTl"></div>` +
@@ -539,7 +578,16 @@
       show: () => true          // 入口显示由宿主按目标判定；运行时总开关另见 enabled()
     },
     routes: [
-      { match: h => h.match(/^#\/studystats$/), render: async () => { await renderStatsPage(); } }
+      {
+        match: h => h.match(/^#\/studystats$/),
+        render: async () => {
+          if (statsVueEnabled()) {
+            try { if (await renderStatsPageVue()) return; }
+            catch (e) { try { toast('学习统计 Vue 页面加载失败，已回退旧页面'); } catch (e2) {} }
+          }
+          await renderStatsPage();
+        }
+      }
     ]
   });
 

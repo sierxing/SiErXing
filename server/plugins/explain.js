@@ -162,9 +162,29 @@ function parsePrereqs(raw) {
       title: String((p && p.title) || '').replace(/\s+/g, ' ').trim().slice(0, 30),
       why: String((p && p.why) || '').replace(/\s+/g, ' ').trim().slice(0, 60),
       state: ['todo', 'known', 'unknown', 'done'].includes(String(p && p.state)) ? String(p.state) : 'todo',
-      lesson: String((p && p.lesson) || '')
+      lesson: String((p && p.lesson) || ''),
+      /* 这个知识点的追问记录（用户点开某个前置概念后，可以在右边继续问） */
+      chat: Array.isArray(p && p.chat) ? p.chat.slice(-12).map(c => ({
+        role: (c && c.role === 'me') ? 'me' : 'ai',
+        content: String((c && c.content) || '').slice(0, 6000)
+      })).filter(c => c.content) : []
     })).filter(p => p.title).slice(0, PREREQ_MAX);
   } catch (e) { return []; }
+}
+/** 读一条前置知识（从库里取最新的，别用调用方手里的快照） */
+function prereqOf(sid, pid) {
+  const row = db.prepare('SELECT prereqs FROM explain_sessions WHERE id = ?').get(Number(sid));
+  return parsePrereqs(row && row.prereqs).find(p => p.id === String(pid)) || null;
+}
+/** 改一条前置知识（在最新数据上改，避免并行时互相覆盖） */
+function updatePrereq(sid, pid, fn) {
+  const row = db.prepare('SELECT prereqs FROM explain_sessions WHERE id = ?').get(Number(sid));
+  const list = parsePrereqs(row && row.prereqs);
+  const i = list.findIndex(p => p.id === String(pid));
+  if (i < 0) return null;
+  fn(list[i]);
+  savePrereqs(sid, list);
+  return list[i];
 }
 function savePrereqs(sid, arr) {
   db.prepare('UPDATE explain_sessions SET prereqs = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(arr || []), nowISO(), sid);
@@ -228,6 +248,44 @@ function buildPrereqLessonPrompt(s, p) {
   L.push('· 只讲这个概念，**不要顺带讲这段代码别的行在干什么**（那是下一步的事）；');
   L.push('· 讲它必须牵扯到别的概念时，一句话带过就行，不要展开成第二节课；');
   L.push('· 能用生活里的类比就用；术语第一次出现就一句话解释；不客套、不写长篇总结。');
+  return L.join('\n');
+}
+
+/** 前置知识的追问（用户点开某个知识点之后，在右边接着问） */
+function buildPrereqAskPrompt(s, p, text, kind) {
+  const lines = String(s.code || '').split('\n');
+  const L = [];
+  L.push('用户在看一段代码，正在补一个前置概念：「' + p.title + '」' + (p.why ? '（它会出现在：' + p.why + '）' : '') + '。');
+  L.push('这一课你已经给他讲过了，现在他又追问了一句。');
+  L.push('');
+  L.push('【他正在看的代码（带行号，取例子就用它）】');
+  L.push(numCode(lines));
+  if (p.lesson) {
+    L.push('');
+    L.push('【这一课你已经讲过的内容（别整段重复它）】');
+    L.push(String(p.lesson).slice(0, 1500));
+  }
+  if ((p.chat || []).length) {
+    L.push('');
+    L.push('【这条追问之前的来回（旧 → 新）】');
+    for (const t of p.chat.slice(-8)) L.push((t.role === 'me' ? '他：' : '你：') + String(t.content).replace(/\s+/g, ' ').slice(0, 300));
+  }
+  const K = {
+    redo: '【他没看懂，要你重讲这个概念】换个更小的切口或更贴生活的类比重讲一遍（可以拆到词）；别重复上次的原话。',
+    example: '【他想要例子】给一个最小、具体、能跑的小例子（≤6 行，``` 围栏）。',
+    why: '【他问为什么】讲清"没有它 / 不这么写会怎样"，最好给一个反例。',
+    ask: ''
+  };
+  L.push('');
+  L.push('【怎么答】');
+  L.push('· **只回答他问的这一点**，别顺手把这段代码别的行讲一遍（那是「逐行讲解」的事）；');
+  L.push('· 3~6 句说完；要举例就给一小段（≤6 行，``` 围栏）；能用生活里的类比就用；');
+  L.push('· 大白话、不客套；不要输出 JSON 或"元信息"；不要反问他"能跟上吗"。');
+  if (K[kind]) L.push(K[kind]);
+  const sb = styleBlock();
+  if (sb) L.push('· 风格照他给的示例来（语气、详略、排版都学它）。');
+  L.push('');
+  L.push('【他这次的追问（原话，别改成你理解的样子）】' + String(text).slice(0, 2000));
   return L.join('\n');
 }
 
@@ -464,10 +522,14 @@ function startJob(sid) {
   const total = Number(s0.lines || 0);
   if (!total) return { started: false, reason: 'empty' };
   if (RUNNING.has(Number(sid))) return { started: false, reason: 'running' };
-  /* 已经全部讲完（点「继续讲」但没东西可讲）→ 不重复调 AI */
+  /* 已经全部讲完（点「继续讲」但没东西可讲）→ 不重复调 AI。
+     ⚠️ 还要看**有没有欠着的前置小课**："你说知道、其实想听"那条路会把某一课打回 unknown，
+     这时模块都讲完了也不能直接判 done，否则那一课永远写不出来（真实踩到过）。 */
   try {
     const mods0 = parseModules(s0.modules);
-    if (mods0.length && !pendingModules(mods0, coveredSet(sid)).length) {
+    const pre0 = parsePrereqs(s0.prereqs);
+    const prePending = pre0.some(p => p.state === 'unknown' && !p.lesson);
+    if (mods0.length && !pendingModules(mods0, coveredSet(sid)).length && !prePending) {
       db.prepare("UPDATE explain_sessions SET status='done', last_error='', updated_at=? WHERE id=?").run(nowISO(), sid);
       return { started: false, reason: 'done' };
     }
@@ -734,7 +796,10 @@ module.exports = {
         if (goalId && !compOn(goalId)) return sendJSON(res, 403, { error: '「看懂代码」组件已关闭' });
         let sql = `SELECT s.id, s.goal_id, s.node_id, s.tutorial_id, s.title, s.note, s.lang, s.lines, s.explained, s.modules,
           s.status, s.last_error, s.renamed, s.created_at, s.updated_at,
-          (SELECT COUNT(*) FROM explain_turns t WHERE t.session_id = s.id AND t.role = 'me') AS asked
+          (SELECT COUNT(*) FROM explain_turns t WHERE t.session_id = s.id AND t.role = 'me') AS asked,
+          /* 列表按"教程 / 任务节点"归组要用到标题（不然前端只能显示 id） */
+          (SELECT title FROM tutorials t WHERE t.id = s.tutorial_id) AS tut_title,
+          (SELECT title FROM nodes n WHERE n.id = s.node_id) AS node_title
           FROM explain_sessions s WHERE 1=1`;
         const args = [];
         if (goalId) { sql += ' AND s.goal_id = ?'; args.push(goalId); }
@@ -757,7 +822,7 @@ module.exports = {
           } catch (e) {}
         }
         const list = rows.map(r => {
-          const o = Object.assign(sessionOut(r), { asked: Number(r.asked || 0) });
+          const o = Object.assign(sessionOut(r), { asked: Number(r.asked || 0), tut_title: String(r.tut_title || ''), node_title: String(r.node_title || '') });
           const set = cov.get(Number(r.id));
           o.modules_done = o.modules.filter(m => {
             if (!set) return false;
@@ -847,6 +912,53 @@ module.exports = {
           ok: true, started: !!r.started, reason: r.reason || '',
           session: sessionOut(db.prepare('SELECT * FROM explain_sessions WHERE id = ?').get(sid), true)
         });
+      }
+    },
+
+    /* 前置知识的追问：只针对这个概念答，记在它自己名下 */
+    {
+      method: 'POST', pattern: /^\/api\/explain\/sessions\/(\d+)\/prereq\/([\w-]+)\/ask$/,
+      handler: async (req, res, u, ctx) => {
+        const m = u.pathname.match(/^\/api\/explain\/sessions\/(\d+)\/prereq\/([\w-]+)\/ask$/);
+        const sid = Number(m[1]), pid = String(m[2]);
+        const row = db.prepare('SELECT * FROM explain_sessions WHERE id = ?').get(sid);
+        if (!row) return sendJSON(res, 404, { error: '这次讲解不存在' });
+        if (row.goal_id && !compOn(row.goal_id)) return sendJSON(res, 403, { error: '「看懂代码」组件已关闭' });
+        const p = prereqOf(sid, pid);
+        if (!p) return sendJSON(res, 404, { error: '没有这个前置知识' });
+        const b = await readBody(req).catch(() => ({}));
+        const kind = ['redo', 'example', 'why', 'ask'].includes(String(b.kind)) ? String(b.kind) : 'ask';
+        const text = String(b.text || '').slice(0, 2000).trim();
+        if (!text) return sendJSON(res, 400, { error: '先写一句要问什么' });
+        updatePrereq(sid, pid, x => { x.chat = (x.chat || []).concat([{ role: 'me', content: text }]).slice(-12); });
+        const got = await aiJob({
+          title: '前置知识追问：' + String(p.title).slice(0, 14), note: '', goalId: row.goal_id, nodeId: row.node_id,
+          message: 'AI 正在答「' + p.title + '」的追问…',
+          run: async (job) => aiText(buildPrereqAskPrompt(row, p, text, kind), currentModel(), 180000, null, job.signal, '前置知识追问')
+        });
+        const body = String(got || '').trim();
+        if (!body) throw new Error('AI 这次没写出内容，请重试');
+        const upd = updatePrereq(sid, pid, x => { x.chat = (x.chat || []).concat([{ role: 'ai', content: body }]).slice(-12); });
+        backup();
+        return sendJSON(res, 200, { ok: true, prereq: upd, prereqs: parsePrereqs(db.prepare('SELECT prereqs FROM explain_sessions WHERE id = ?').get(sid).prereqs) });
+      }
+    },
+
+    /* "你说知道、其实想听"：把这一条打回待补 → 生成小课（其它已讲好的不动） */
+    {
+      method: 'POST', pattern: /^\/api\/explain\/sessions\/(\d+)\/prereq\/([\w-]+)\/teach$/,
+      handler: async (req, res, u, ctx) => {
+        const m = u.pathname.match(/^\/api\/explain\/sessions\/(\d+)\/prereq\/([\w-]+)\/teach$/);
+        const sid = Number(m[1]), pid = String(m[2]);
+        const row = db.prepare('SELECT * FROM explain_sessions WHERE id = ?').get(sid);
+        if (!row) return sendJSON(res, 404, { error: '这次讲解不存在' });
+        if (row.goal_id && !compOn(row.goal_id)) return sendJSON(res, 403, { error: '「看懂代码」组件已关闭' });
+        if (RUNNING.has(sid)) return sendJSON(res, 409, { error: '正在生成，等它停下来再点' });
+        const upd = updatePrereq(sid, pid, x => { x.state = 'unknown'; x.lesson = ''; });
+        if (!upd) return sendJSON(res, 404, { error: '没有这个前置知识' });
+        backup();
+        const r = startJob(sid);
+        return sendJSON(res, 200, { ok: true, started: !!r.started, prereqs: parsePrereqs(db.prepare('SELECT prereqs FROM explain_sessions WHERE id = ?').get(sid).prereqs) });
       }
     },
 

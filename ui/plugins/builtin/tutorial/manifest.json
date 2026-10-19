@@ -1,0 +1,8 @@
+{
+  "id": "tutorial",
+  "name": "教程阅读页（内置）",
+  "apiVersion": "sierxing.ui/1",
+  "version": "1.0.0",
+  "description": "教程阅读页：原版实现的插件化版本（#/t/:id）。",
+  "entry": "index.js"
+}

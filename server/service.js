@@ -422,13 +422,22 @@ module.exports = function createService({ appDir, port, log = () => {} }) {
     };
   }
 
-  function openBrowser() {
+  function openBrowser(route) {
+    let target = url;
+    const r = String(route || '').trim();
+    if (r) {
+      if (r.length > 300 || !/^[#/]/.test(r) || /\s/.test(r)) {
+        return { ok: false, error: '页面地址格式不对：应以 / 或 # 开头，且不含空白（例：#/g/12）' };
+      }
+      target = url.replace(/\/+$/, '') + (r.charAt(0) === '#' ? '/' + r : r);
+    }
+    if (process.env.NO_OPEN) return { ok: false, reason: 'NO_OPEN', url: target };
     const cmd = platform === 'win32' ? 'cmd' : (platform === 'darwin' ? 'open' : 'xdg-open');
-    const args = platform === 'win32' ? ['/c', 'start', '', url] : [url];
+    const args = platform === 'win32' ? ['/c', 'start', '', target] : [target];
     try {
       const child = spawn(cmd, args, { detached: true, stdio: 'ignore', env: guiEnv() });
       child.unref();
-      return { ok: true };
+      return { ok: true, url: target };
     } catch (e) { return { ok: false, error: e.message }; }
   }
 

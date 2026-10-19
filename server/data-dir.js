@@ -27,6 +27,11 @@ const RESERVE = 64 * 1024 * 1024;   // 目标盘至少要留这么多空间，�
 
 /** 读指针（没有就用程序目录下的 data/） */
 function readPointer(appDir) {
+  /* 测试/多实例沙箱可用 SIERXING_DATA_DIR 临时覆盖；默认仍读 data-location.json。 */
+  if (process.env.SIERXING_DATA_DIR) {
+    const envDir = path.resolve(process.env.SIERXING_DATA_DIR);
+    return { dir: envDir, custom: true, at: 'env' };
+  }
   try {
     const raw = fs.readFileSync(path.join(appDir, POINTER), 'utf8');
     const v = JSON.parse(raw);

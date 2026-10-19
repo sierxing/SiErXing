@@ -10,6 +10,47 @@
 (function () {
   const { api, esc, toast, mdToHTML } = SiErXing;
 
+  /* ---------- Vue 版页面（渐进迁移；加载失败自动回退旧页面） ----------
+     默认新页面；?ui=legacy 或 localStorage=sierxing-ui-quests:legacy 可回退。 */
+  let questsVueUnmount = null;
+  function questsVueEnabled() {
+    try {
+      const q = new URLSearchParams(location.search).get('ui');
+      if (q === 'legacy') return false;
+      if (q === 'vue') return true;
+      const saved = localStorage.getItem('sierxing-ui-quests');
+      if (saved === 'legacy') return false;
+      if (saved === 'vue') return true;
+    } catch (e) {}
+    return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+  }
+  function ensureQuestsVueCss() {
+    const add = (href, key) => {
+      if (document.querySelector('link[data-ui-page="' + key + '"]')) return;
+      const l = document.createElement('link');
+      l.rel = 'stylesheet'; l.href = href; l.setAttribute('data-ui-page', key);
+      document.head.appendChild(l);
+    };
+    add('/plugins/quests.css', 'quests-legacy');
+    add('/ui-dist/quests.css', 'quests-vue');
+  }
+  async function renderPageVue(goal) {
+    const root = document.getElementById('app');
+    if (!root) throw new Error('页面容器不存在');
+    if (questsVueUnmount) { try { questsVueUnmount(); } catch (e) {} questsVueUnmount = null; }
+    ensureQuestsVueCss();
+    const mod = await import('/ui-dist/quests.js?v=' + Date.now());
+    if (!mod || typeof mod.mountQuestsPage !== 'function') throw new Error('UI 插件没有导出 mountQuestsPage');
+    questsVueUnmount = mod.mountQuestsPage(root, { api: api, toast: toast, goalId: Number(goal && goal.id) || 0 });
+    return true;
+  }
+  window.addEventListener('hashchange', function () {
+    if (questsVueUnmount && !/^#\/g\/\d+\/quests/.test(location.hash)) {
+      try { questsVueUnmount(); } catch (e) {}
+      questsVueUnmount = null;
+    }
+  });
+
   let gid = 0;
   let data = null;          // { date, day, items, minutes, default_minutes, history, candidates, node_titles }
   let busy = false;
@@ -238,7 +279,15 @@
     routes: [
       {
         match: h => h.match(/^#\/g\/(\d+)\/quests$/),
-        render: async m => { const goal = await SiErXing.loadGoal(Number(m[1])); await renderPage(goal || { id: Number(m[1]) }); }
+        render: async m => {
+          const id = Number(m[1]);
+          const goal = await SiErXing.loadGoal(id);
+          if (questsVueEnabled()) {
+            try { if (await renderPageVue(goal || { id: id })) return; }
+            catch (e) { try { toast('今日任务 Vue 页面加载失败，已回退旧页面'); } catch (e2) {} }
+          }
+          await renderPage(goal || { id: id });
+        }
       }
     ]
   });

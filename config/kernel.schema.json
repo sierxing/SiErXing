@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "title": "思而行内核配置（分层：builtin < profile < user）",
+  "note": "改这里要给版本号：删掉/改动键后，旧用户配置里对应的键会在启动时被标为「已移除」，不会静默生效。",
+  "sections": {
+    "ui": {
+      "title": "界面",
+      "keys": {
+        "pagePlugins": {
+          "type": "boolean",
+          "default": true,
+          "description": "启用页面插件（关掉 = 回到原版界面，不看任何插件）"
+        },
+        "userPlugins": {
+          "type": "boolean",
+          "default": true,
+          "description": "允许 DATA_DIR/ui-plugins 覆盖内置页面"
+        },
+        "skins": {
+          "type": "boolean",
+          "default": true,
+          "description": "加载用户皮肤 skin.css"
+        }
+      }
+    },
+    "kernel": {
+      "title": "内核",
+      "keys": {
+        "logLevel": {
+          "type": "string",
+          "enum": [
+            "quiet",
+            "normal",
+            "verbose"
+          ],
+          "default": "normal",
+          "description": "内核日志详细程度"
+        },
+        "strictConfig": {
+          "type": "boolean",
+          "default": false,
+          "description": "配置里出现未知键时是否拒绝启动（默认只告警）"
+        }
+      }
+    }
+  }
+}

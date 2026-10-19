@@ -1,0 +1,8 @@
+{
+  "id": "guide",
+  "name": "使用引导（内置）",
+  "apiVersion": "sierxing.ui/1",
+  "version": "1.0.0",
+  "description": "使用引导：原版实现的插件化版本（#/guide/:step）。",
+  "entry": "index.js"
+}

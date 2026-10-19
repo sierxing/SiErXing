@@ -1,0 +1,27 @@
+{
+ "version": 1,
+ "note": "可选语言清单：设置页的『语言列表』从这里渲染；AI 生成时优先用这里的代码/名称，省掉一次识别调用。新增语言往这里加一条即可。",
+ "languages": [
+  { "code": "zh-CN", "nativeName": "中文", "englishName": "Chinese", "emoji": "🇨🇳", "builtin": true },
+  { "code": "en-US", "nativeName": "English", "englishName": "English", "emoji": "🇬🇧", "builtin": true },
+  { "code": "ja-JP", "nativeName": "日本語", "englishName": "Japanese", "emoji": "🇯🇵" },
+  { "code": "ko-KR", "nativeName": "한국어", "englishName": "Korean", "emoji": "🇰🇷" },
+  { "code": "fr-FR", "nativeName": "Français", "englishName": "French", "emoji": "🇫🇷" },
+  { "code": "de-DE", "nativeName": "Deutsch", "englishName": "German", "emoji": "🇩🇪" },
+  { "code": "es-ES", "nativeName": "Español", "englishName": "Spanish", "emoji": "🇪🇸" },
+  { "code": "pt-BR", "nativeName": "Português", "englishName": "Portuguese", "emoji": "🇧🇷" },
+  { "code": "ru-RU", "nativeName": "Русский", "englishName": "Russian", "emoji": "🇷🇺" },
+  { "code": "it-IT", "nativeName": "Italiano", "englishName": "Italian", "emoji": "🇮🇹" },
+  { "code": "nl-NL", "nativeName": "Nederlands", "englishName": "Dutch", "emoji": "🇳🇱" },
+  { "code": "pl-PL", "nativeName": "Polski", "englishName": "Polish", "emoji": "🇵🇱" },
+  { "code": "uk-UA", "nativeName": "Українська", "englishName": "Ukrainian", "emoji": "🇺🇦" },
+  { "code": "tr-TR", "nativeName": "Türkçe", "englishName": "Turkish", "emoji": "🇹🇷" },
+  { "code": "ar-SA", "nativeName": "العربية", "englishName": "Arabic", "emoji": "🇸🇦", "rtl": true },
+  { "code": "fa-IR", "nativeName": "فارسی", "englishName": "Persian", "emoji": "🇮🇷", "rtl": true },
+  { "code": "hi-IN", "nativeName": "हिन्दी", "englishName": "Hindi", "emoji": "🇮🇳" },
+  { "code": "th-TH", "nativeName": "ไทย", "englishName": "Thai", "emoji": "🇹🇭" },
+  { "code": "vi-VN", "nativeName": "Tiếng Việt", "englishName": "Vietnamese", "emoji": "🇻🇳" },
+  { "code": "id-ID", "nativeName": "Bahasa Indonesia", "englishName": "Indonesian", "emoji": "🇮🇩" },
+  { "code": "ms-MY", "nativeName": "Bahasa Melayu", "englishName": "Malay", "emoji": "🇲🇾" }
+ ]
+}

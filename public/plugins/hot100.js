@@ -10,6 +10,57 @@
 (function () {
   const { api, esc, toast, go, state, mdToHTML, fmtDate, safeParse } = SiErXing;
 
+  /* ---------- Vue 版每日页（题目详情 #/p/:id 仍是旧版） ---------- */
+  let hotVueUnmount = null;
+  function hotVueEnabled() {
+    try {
+      const q = new URLSearchParams(location.search).get('ui');
+      if (q === 'legacy') return false;
+      if (q === 'vue') return true;
+      const saved = localStorage.getItem('sierxing-ui-hot100');
+      if (saved === 'legacy') return false;
+      if (saved === 'vue') return true;
+    } catch (e) {}
+    return false;   /* 默认原版界面（Vue 版仍在，?ui=vue 可体验）*/
+  }
+  function ensureHotVueCss() {
+    if (document.querySelector('link[data-ui-page="hot100"]')) return;
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = '/ui-dist/hot100.css'; l.setAttribute('data-ui-page', 'hot100');
+    document.head.appendChild(l);
+  }
+  async function renderHot100Vue(goalId) {
+    const root = document.getElementById('app');
+    if (!root) throw new Error('页面容器不存在');
+    if (hotVueUnmount) { try { hotVueUnmount(); } catch (e) {} hotVueUnmount = null; }
+    ensureHotVueCss();
+    const mod = await import('/ui-dist/hot100.js?v=' + Date.now());
+    if (!mod || typeof mod.mountHot100Page !== 'function') throw new Error('UI 插件没有导出 mountHot100Page');
+    hotVueUnmount = mod.mountHot100Page(root, { api: api, toast: toast, goalId: Number(goalId) || 0 });
+    return true;
+  }
+  let hotProblemVueUnmount = null;
+  async function renderProblemVue(pid) {
+    const root = document.getElementById('app');
+    if (!root) throw new Error('页面容器不存在');
+    if (hotProblemVueUnmount) { try { hotProblemVueUnmount(); } catch (e) {} hotProblemVueUnmount = null; }
+    ensureHotVueCss();
+    const mod = await import('/ui-dist/hot100.js?v=' + Date.now());
+    if (!mod || typeof mod.mountProblemPage !== 'function') throw new Error('UI 插件没有导出 mountProblemPage');
+    hotProblemVueUnmount = mod.mountProblemPage(root, { api: api, toast: toast, fmtDate: fmtDate, problemId: Number(pid) || 0, goalId: Number(state.goal && state.goal.id) || 0 });
+    return true;
+  }
+  window.addEventListener('hashchange', function () {
+    if (hotProblemVueUnmount && !/^#\/p\/\d+/.test(location.hash)) {
+      try { hotProblemVueUnmount(); } catch (e) {}
+      hotProblemVueUnmount = null;
+    }
+    if (hotVueUnmount && !/^#\/g\/\d+\/hot100/.test(location.hash)) {
+      try { hotVueUnmount(); } catch (e) {}
+      hotVueUnmount = null;
+    }
+  });
+
   /* 「按知识点练习」里每个 <details> 的展开状态。
      整页重绘（改完成状态后要重拉数据）会把所有分组折叠掉 —— 用户正操作的那一组
      突然收起，点一下「标记完成」就得再展开一遍，很跳。
@@ -1533,11 +1584,27 @@ function showRecordForm(pid, rec) {
     routes: [
       {
         match: h => h.match(/^#\/g\/(\d+)\/hot100$/),
-        render: async m => { await SiErXing.loadGoal(Number(m[1])); await renderDailyPage(); }
+        render: async m => {
+          const g = Number(m[1]);
+          if (hotVueEnabled()) {
+            try { if (await renderHot100Vue(g)) return; }
+            catch (e) { try { toast('每日刷题 Vue 页面加载失败，已回退旧页面'); } catch (e2) {} }
+          }
+          await SiErXing.loadGoal(g);
+          await renderDailyPage();
+        }
       },
       {
         match: h => h.match(/^#\/p\/(\d+)$/),
-        render: async m => { await SiErXing.ensureGoal(); await renderProblemPage(Number(m[1])); }
+        render: async m => {
+          const pid = Number(m[1]);
+          await SiErXing.ensureGoal();
+          if (hotVueEnabled()) {
+            try { if (await renderProblemVue(pid)) return; }
+            catch (e) { try { toast('题目详情 Vue 页面加载失败，已回退旧页面'); } catch (e2) {} }
+          }
+          await renderProblemPage(pid);
+        }
       }
     ]
   });
