@@ -1,9 +1,9 @@
 {
  "note": "中文硬编码预算（棘轮）：旧代码里还没迁移到 tr() 的界面文案数。只许降不许升；新增文案必须用 tr()。由 `node scripts/check-i18n.js --update` 生成。",
- "updatedAt": "2026-10-19T17:28:10.158Z",
- "total": 7239,
+ "updatedAt": "2026-10-19T19:36:04.888Z",
+ "total": 7238,
  "files": {
-  "public/app.js": 1994,
+  "public/app.js": 1993,
   "public/index.html": 1,
   "public/plugins/aiprompts.js": 38,
   "public/plugins/conditions.js": 141,

@@ -16510,20 +16510,35 @@ function bindAiTasks() {
 }
 
 /* ============ 左栏：可展开的组件模块（分组 + 常用置顶 + 拖拽/右键） ============ */
-const RAIL_LOGO_SVG = `<svg viewBox="0 0 64 64" width="46" height="46" aria-hidden="true">
+const RAIL_LOGO_SVG = `<svg viewBox="0 0 1024 1024" width="46" height="46" aria-hidden="true">
   <defs>
-    <linearGradient id="railLogoBg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#6d5df6"/><stop offset="0.55" stop-color="#8b5cf6"/><stop offset="1" stop-color="#a855f7"/>
+    <linearGradient id="railLogoBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3B1C73"/><stop offset="100%" stop-color="#081537"/>
     </linearGradient>
-    <linearGradient id="railLogoGloss" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.32"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    <linearGradient id="railLogoGlyph" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#67E8F9"/><stop offset="50%" stop-color="#818CF8"/><stop offset="100%" stop-color="#C084FC"/>
     </linearGradient>
+    <linearGradient id="railLogoArrow" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#A855F7"/><stop offset="60%" stop-color="#E879F9"/><stop offset="100%" stop-color="#FBCFE8"/>
+    </linearGradient>
+    <filter id="railLogoGlow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="4" result="blurSmall"/>
+      <feFlood flood-color="#FFFFFF" flood-opacity="0.8" result="glowColorSmall"/>
+      <feComposite in="glowColorSmall" in2="blurSmall" operator="in" result="glowSmall"/>
+      <feGaussianBlur in="SourceAlpha" stdDeviation="14" result="blurLarge"/>
+      <feFlood flood-color="#FFFFFF" flood-opacity="0.45" result="glowColorLarge"/>
+      <feComposite in="glowColorLarge" in2="blurLarge" operator="in" result="glowLarge"/>
+      <feMerge><feMergeNode in="glowLarge"/><feMergeNode in="glowSmall"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
   </defs>
-  <rect width="64" height="64" rx="16" fill="url(#railLogoBg)"/>
-  <rect width="64" height="34" rx="16" fill="url(#railLogoGloss)"/>
-  <text x="32" y="43" text-anchor="middle" font-size="34" font-weight="700"
-        font-family="Songti SC,Noto Serif SC,Source Han Serif SC,STSong,SimSun,Georgia,serif" fill="#ffffff">思</text>
-  <path d="M21 51h22" stroke="#ffffff" stroke-opacity="0.55" stroke-width="2.2" stroke-linecap="round"/>
+  <rect width="1024" height="1024" rx="220" fill="url(#railLogoBg)"/>
+  <rect x="16" y="16" width="992" height="992" rx="206" fill="none" stroke="#45258C" stroke-opacity="0.6" stroke-width="6"/>
+  <rect x="18" y="18" width="988" height="988" rx="204" fill="none" stroke="#FFFFFF" stroke-opacity="0.10" stroke-width="4"/>
+  <path filter="url(#railLogoGlow)" d="M 345 365 C 235 435, 125 310, 215 190 C 315 65, 615 105, 615 320 C 615 495, 355 510, 395 675 C 285 525, 495 450, 505 320 C 515 190, 340 165, 275 240 C 225 295, 285 375, 345 365 Z" fill="url(#railLogoGlyph)"/>
+  <path filter="url(#railLogoGlow)" d="M 445 735 L 515 835 C 530 855, 560 850, 580 820 L 780 425 L 835 525 L 865 210 L 550 325 L 675 360 L 525 695 L 445 695 Z" fill="url(#railLogoArrow)"/>
+  <circle cx="405" cy="705" r="64" fill="none" stroke="#C084FC" stroke-width="8" stroke-opacity="0.35"/>
+  <circle cx="405" cy="705" r="42" fill="none" stroke="#F472B6" stroke-width="16"/>
+  <circle cx="405" cy="705" r="18" fill="#FFFFFF" filter="url(#railLogoGlow)"/>
 </svg>`;
 /* 左栏主导航。左栏原有的「📦 组件」分组（含常用置顶、组件入口、教程书签）已下线：
    组件入口改为放进各页面顶栏的标签栏（收藏栏），组件管理保留下面这个 🧩 入口。 */

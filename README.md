@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="public/icon.png" alt="思而行 SiErXing" width="140">
+</p>
+
 # 思而行 SiErXing · 目标规划助手
 
 > **说清目标与现状 → AI 反复确认 → 拆成可执行路径 → 边做边调。**

@@ -1705,8 +1705,8 @@ body.aiOpen .nodePanel{right:calc(var(--ai-w, 440px) + 26px);}
   display:flex; align-items:center; justify-content:center; text-decoration:none;
   padding:4px 0 6px; flex:none;
 }
-.railLogo svg{border-radius:11px; box-shadow:0 3px 12px rgba(109,93,246,.38), inset 0 1px 0 rgba(255,255,255,.2); transition:transform .16s, box-shadow .16s;}
-.railLogo:hover svg{transform:translateY(-1px) rotate(-2deg); box-shadow:0 6px 18px rgba(109,93,246,.5), inset 0 1px 0 rgba(255,255,255,.24);}
+.railLogo svg{border-radius:21.5%; box-shadow:0 3px 12px rgba(8,21,55,.45), 0 0 0 1px rgba(8,21,55,.10); transition:transform .16s, box-shadow .16s;}
+.railLogo:hover svg{transform:translateY(-1px) rotate(-2deg); box-shadow:0 6px 18px rgba(8,21,55,.55), 0 0 0 1px rgba(8,21,55,.12);}
 .railNav{
   flex:1; min-height:0; width:100%; overflow-y:auto; overflow-x:hidden;
   display:flex; flex-direction:column; align-items:center; gap:4px;
