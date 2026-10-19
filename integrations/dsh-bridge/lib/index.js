@@ -26,7 +26,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 export const name = 'sierxing-dsh-bridge';
 export const inject = ['webServer', 'llm'];
@@ -280,11 +283,30 @@ export function apply(ctx, rawConfig) {
     else if (state.siErXingUp) console.log('[sierxing-dsh-bridge] 已把 ' + state.catalog.length + ' 个 DSH 模型接入思而行：' + state.gatewayUrl);
   }
 
+  async function waitHealth(ms) {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      try { const h = await fetch(config.sierxingUrl + '/api/health'); if (h.ok) return true; } catch (e) {}
+      await new Promise(r => setTimeout(r, 250));
+    }
+    return false;
+  }
+
   async function ensureSiErXing() {
+    if (await waitHealth(1000)) return;
+    /* 优先交给 systemd 用户服务启动：仍然是系统托管（Restart=always），
+       避免 DSH 自己再拉一个实例和它抢 3213 端口。 */
     try {
-      const h = await fetch(config.sierxingUrl + '/api/health');
-      if (h.ok) return;
-    } catch (e) {}
+      /* DSH 从终端/GUI 起来时进程环境里可能没有 DBUS/X 会话变量（实测 web 进程就没有），
+         这里显式补上当前用户的 user bus，否则 systemctl 会报连不上总线而退化成野进程。 */
+      const uid = typeof process.getuid === 'function' ? process.getuid() : 1000;
+      const sysEnv = Object.assign({}, process.env, {
+        DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS || 'unix:path=/run/user/' + uid + '/bus',
+        XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR || '/run/user/' + uid
+      });
+      await execFileAsync('systemctl', ['--user', 'start', 'sierxing.service'], { timeout: 20000, env: sysEnv });
+      if (await waitHealth(15000)) return;
+    } catch (e) { /* 没有 systemd 的用户环境，走下面的兜底 */ }
     const appDir = resolveAppDir(config);
     if (!appDir) throw new Error('思而行没在跑，且没配置 sierxingAppDir，无法自动拉起');
     const u = new URL(config.sierxingUrl);
@@ -292,14 +314,10 @@ export function apply(ctx, rawConfig) {
       cwd: appDir,
       env: Object.assign({}, process.env, { PORT: u.port || '3213' }),
       stdio: 'ignore',
-      detached: false
+      detached: true
     });
     state.child.unref();
-    for (let i = 0; i < 40; i++) {
-      await new Promise(r => setTimeout(r, 250));
-      try { const h = await fetch(config.sierxingUrl + '/api/health'); if (h.ok) return; } catch (e) {}
-    }
-    throw new Error('自动拉起思而行超时：' + config.sierxingUrl);
+    if (!(await waitHealth(15000))) throw new Error('自动拉起思而行超时：' + config.sierxingUrl);
   }
 
   async function handleModels(req, res) {
