@@ -1214,6 +1214,21 @@ const ai = {
     /* 2) 连接：按固定 id 更新，不重复添加；用户手动关掉的不强行打开 */
     const list = connections();
     const old = list.find(x => x.id === HOST_AGENT_ID) || list.find(x => x.providerId === HOST_AGENT_PROVIDER);
+    /* 模型默认选中哪些：宿主每次刷新/重启都会走这里。
+       以前无条件写成**全部**模型 —— 用户好不容易在设置里挑的几个，下次刷新就被冲回一整屏，
+       被投诉过「会把所有模型都添加进去」。现在：
+         · 用户已经挑过的：只保留还在宿主列表里的那几个（新模型不自动加）；
+         · 首次接入：只选第一个，其余让用户按需勾（设置页有搜索 + 全选）；
+         · 挑的全被换掉了：退回第一个，保证对话栏不会空。 */
+    const hostModels = cfgHost.models.slice();
+    const oldPicked = (old && Array.isArray(old.models)) ? old.models : [];
+    let picked;
+    if (old) {
+      picked = oldPicked.filter(m => hostModels.indexOf(m) >= 0);
+      if (!picked.length) picked = hostModels.length ? [hostModels[0]] : [];
+    } else {
+      picked = hostModels.length ? [hostModels[0]] : [];
+    }
     const next = {
       ...(old || {}),
       id: HOST_AGENT_ID,
@@ -1224,8 +1239,8 @@ const ai = {
       providerId: HOST_AGENT_PROVIDER,
       baseUrl: cfgHost.baseUrl,
       apiKey: cfgHost.apiKey || (old && old.apiKey) || '',
-      models: cfgHost.models.slice(),
-      defaultModel: (old && cfgHost.models.includes(old.defaultModel)) ? old.defaultModel : cfgHost.models[0],
+      models: picked,
+      defaultModel: (old && picked.indexOf(old.defaultModel) >= 0) ? old.defaultModel : (picked[0] || ''),
       visionModel: cfgHost.vision || '',
       enabled: old ? old.enabled !== false : true
     };

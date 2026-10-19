@@ -62,6 +62,8 @@ dsh plugin --profile web add /绝对路径/SiErXing/integrations/dsh-bridge
 # 1) DSH 侧网关（监听 127.0.0.1:<DSH 端口>/sierxing/v1）
 curl -s http://127.0.0.1:3213/api/host-agent        # available 应为 true
 # 2) 思而行 → 设置 → AI 接入方式：出现「DSH」连接，模型下拉里是 provider/model
+#    首次接入默认只勾第一个模型；其余的在 DSH 卡片里「搜索模型 / 全选」按需勾，
+#    之后桥刷新/DSH 重启都会保留你挑的那几个（不会又变回两百个全选）
 # 3) 真调一次（会把请求转给 DSH 当前账号的模型）
 curl -s http://127.0.0.1:3213/api/ai/test -X POST -H 'Content-Type: application/json' \
   -d '{"model":"host-agent::aliyun/deepseek-v4.1-flash-1017"}'

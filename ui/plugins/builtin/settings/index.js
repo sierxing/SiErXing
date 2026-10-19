@@ -1541,6 +1541,11 @@ async function renderSettings() {
       add.title = missing ? tr('把「{0}」加入候选（官方出新模型时用）', q) : '';
     }
   };
+  /* 首屏补一次：半选（indeterminate）没法写在 HTML 属性里，只能在渲染后设。
+     不补的话“默认只选第一个”时全选框看着像没选，用户不知道还能一键全选。 */
+  Array.from(H.app.querySelectorAll('.connCard')).forEach(card => {
+    try { paintCardModels(card); } catch (e) {}
+  });
   /* 把卡片上的输入读成连接对象。密钥框留空 = 没碰过，不发 apiKey，
      服务端会保留已存的密钥（否则每次保存都把密钥清成空）。
      连接名不让用户填：按服务商自动起名，重名的加序号（DeepSeek、DeepSeek 2）。
@@ -1585,7 +1590,10 @@ async function renderSettings() {
     try { H.state.aiStatus = await H.api('/api/ai/status').catch(() => null); } catch (e) {}
     const box = document.getElementById('aiStatusBox');
     if (box && H.state.aiStatus) box.innerHTML = H.aiStatusBoxHTML(H.state.aiStatus);
-
+    /* 保存后立刻重取模型池：否则对话栏的“用哪个模型”还是旧的/空的
+       （用户反馈：这里保存了 3 个模型，AI 助手仍显示尚未选择模型）。 */
+    try { await H.aiLoadModels(true); } catch (e) {}
+    try { H.aiRender(); } catch (e) {}
   };
   const save = async () => {
     const r = await H.api('/api/ai/connections', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connections: readConns() }) });

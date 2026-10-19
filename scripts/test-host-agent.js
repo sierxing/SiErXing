@@ -66,12 +66,14 @@ try {
     assert.strictEqual(cs[0].providerId, 'host');
     assert.strictEqual(cs[0].kind, 'api');
     assert.strictEqual(cs[0].enabled, true);
-    assert.deepStrictEqual(cs[0].models, ['deepseek-v4.1-flash-1017', 'deepseek-v4-pro']);
+    /* 首次接入默认只选第一个：全部写进去会把对话栏塞满、
+       用户挑好的几个下次刷新还会被冲掉（真实反馈）。 */
+    assert.deepStrictEqual(cs[0].models, ['deepseek-v4.1-flash-1017']);
     assert.strictEqual(cs[0].defaultModel, 'deepseek-v4.1-flash-1017');
     assert.strictEqual(cs[0].visionModel, 'deepseek-v4-pro');
     const pool = hostPool();
-    assert.strictEqual(pool.length, 2);
-    assert.ok(pool.some(m => m.label === 'DSH · deepseek-v4-pro'));
+    assert.strictEqual(pool.length, 1);
+    assert.strictEqual(pool[0].label, 'DSH · deepseek-v4.1-flash-1017');
     const st = ai.hostAgentStatus();
     assert.strictEqual(st.available, true);
     assert.strictEqual(st.configured, true);
@@ -83,7 +85,7 @@ try {
     ai.mountHostAgent();
     ai.mountHostAgent();
     assert.strictEqual(hostConns().length, 1);
-    assert.strictEqual(ai.modelPool().filter(m => m.connId === 'host-agent').length, 2);
+    assert.strictEqual(ai.modelPool().filter(m => m.connId === 'host-agent').length, 1);
   });
 
   ok('宿主换模型/换地址：刷新后跟着变，不残留旧模型', () => {
@@ -94,6 +96,26 @@ try {
     assert.deepStrictEqual(c.models, ['new-model-1']);
     assert.strictEqual(c.baseUrl, 'http://127.0.0.1:8092/v1');
     assert.strictEqual(c.defaultModel, 'new-model-1');
+  });
+
+  ok('用户挑过的模型：刷新后保留，新增模型不自动勾上', () => {
+    writeCfg({ name: 'DSH', url: 'http://127.0.0.1:8092/v1', models: ['new-model-1', 'new-model-2', 'new-model-3'] });
+    ai.mountHostAgent();
+    /* 模拟用户在设置里只勾了 new-model-2 */
+    ai.saveConnections(ai.connections().map(c => c.id === 'host-agent' ? { ...c, models: ['new-model-2'] } : c));
+    const r = ai.mountHostAgent();
+    const c = hostConns()[0];
+    assert.deepStrictEqual(c.models, ['new-model-2'], '刷新后应保留用户选择');
+    assert.strictEqual(c.defaultModel, 'new-model-2');
+    assert.deepStrictEqual(r.models, ['new-model-1', 'new-model-2', 'new-model-3'], 'r.models 仍是宿主提供的全量清单');
+  });
+
+  ok('用户选的模型全被宿主换掉：退回第一个（不空也不全选）', () => {
+    writeCfg({ name: 'DSH', url: 'http://127.0.0.1:8092/v1', models: ['brand-new-1', 'brand-new-2'] });
+    ai.mountHostAgent();
+    const c = hostConns()[0];
+    assert.deepStrictEqual(c.models, ['brand-new-1']);
+    assert.strictEqual(c.defaultModel, 'brand-new-1');
   });
 
   ok('环境变量注入（没写配置文件也能接）', () => {

@@ -5162,6 +5162,14 @@ function aiToggleLegacy(open, opts) {
        这时候抢焦点会让用户刚点的链接/输入框失焦（以前只有目标页会恢复，所以没暴露）。 */
     if (!o.silent) aiFocusInput();
     setTimeout(aiUpdateSendBtn, 0);
+    /* 用户主动点开对话栏时重取一次模型池：设置里刚保存的连接/模型，
+       不用刷新整页就能在“用哪个模型”里选到（静默恢复不重复请求）。 */
+    if (!o.silent) {
+      Promise.resolve().then(async () => {
+        try { await aiLoadModels(true); } catch (e) {}
+        try { aiRender(); } catch (e) {}
+      });
+    }
   }
 }
 /* 💬 入口统一走 Vue 对话页（有目标上下文就带目标；教程页带 tutorial_id；都没有就去选目标）。
@@ -5554,7 +5562,12 @@ async function aiBindGoal(gid) {
     state.aiNodes = []; state.aiFnPick = 0;
     await aiLoadModels(); await aiLoadSessions(gid);
   }
-  else aiRender();
+  else {
+    /* 保存设置后 state.aiModels 会被置空；换页面回来只是 aiRender 的话，
+       下拉框会一直停在「尚未选择模型」。空池就在这里补一次。 */
+    if (!state.aiModels || !state.aiModels.length) { try { await aiLoadModels(true); } catch (e) {} }
+    aiRender();
+  }
 }
 async function aiLoadSessions(goalId) {
   if (goalId == null) return;
@@ -5659,8 +5672,11 @@ async function aiSetModel(model) {
 /* 对话栏的模型下拉：读「连接 × 已勾选模型」摊平的模型池（/api/ai/pool）。
    模型 id 是 '连接id::模型名' —— 带上连接 id 才能区分两条连接里的同名模型。
    取不到就退回旧的 /api/ai/models（裸模型名），保证旧数据仍能对话。 */
-async function aiLoadModels() {
-  if (state.aiModels) return;
+async function aiLoadModels(force) {
+  /* ⚠️ 判空必须用 length：state.aiModels 被置成 [] 时 [] 是 truthy，
+     旧写法会让模型池永远停在空列表上（设置里保存后又显示「尚未选择模型」就是这个原因）。
+     force = 设置页保存后 / 打开对话栏时强制重取。 */
+  if (!force && state.aiModels && state.aiModels.length) return;
   try {
     const r = await api('/api/ai/pool');
     if (r.pool && r.pool.length) {
@@ -5668,6 +5684,8 @@ async function aiLoadModels() {
       state.aiModelLabels = {};
       for (const x of r.pool) state.aiModelLabels[x.id] = x.label;
       state.aiPoolLoaded = true;
+      /* 之前选的模型可能已经被删/改名：清掉，免得发消息时还带着一个不存在的 id */
+      if (state.aiModel && state.aiModels.indexOf(state.aiModel) < 0) state.aiModel = '';
       return;
     }
   } catch (e) {}
@@ -5677,6 +5695,7 @@ async function aiLoadModels() {
     state.aiModelLabels = null;
     state.aiPoolLoaded = false;
     state.aiDefaultModel = r.default || '';
+    if (state.aiModel && state.aiModels.indexOf(state.aiModel) < 0) state.aiModel = '';
   } catch (e) { state.aiModels = []; state.aiModelLabels = null; state.aiPoolLoaded = false; }
 }
 /* 消息列表的宿主：默认是 AI 助手侧边栏；节点「✨ AI 功能」弹窗打开时切到它自己的列表。
@@ -14553,6 +14572,11 @@ async function renderSettings() {
       add.title = missing ? tr('把「{0}」加入候选（官方出新模型时用）', q) : '';
     }
   };
+  /* 首屏补一次：半选（indeterminate）没法写在 HTML 属性里，只能在渲染后设。
+     不补的话“默认只选第一个”时全选框看着像没选，用户不知道还能一键全选。 */
+  Array.from(app.querySelectorAll('.connCard')).forEach(card => {
+    try { paintCardModels(card); } catch (e) {}
+  });
   /* 把卡片上的输入读成连接对象。密钥框留空 = 没碰过，不发 apiKey，
      服务端会保留已存的密钥（否则每次保存都把密钥清成空）。
      连接名不让用户填：按服务商自动起名，重名的加序号（DeepSeek、DeepSeek 2）。
@@ -14597,7 +14621,10 @@ async function renderSettings() {
     try { state.aiStatus = await api('/api/ai/status').catch(() => null); } catch (e) {}
     const box = document.getElementById('aiStatusBox');
     if (box && state.aiStatus) box.innerHTML = aiStatusBoxHTML(state.aiStatus);
-
+    /* 保存后立刻重取模型池：否则对话栏的“用哪个模型”还是旧的/空的
+       （用户反馈：这里保存了 3 个模型，AI 助手仍显示尚未选择模型）。 */
+    try { await aiLoadModels(true); } catch (e) {}
+    try { aiRender(); } catch (e) {}
   };
   const save = async () => {
     const r = await api('/api/ai/connections', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connections: readConns() }) });
