@@ -11,14 +11,14 @@
 </p>
 
 <p align="center">
-  <a href="#-30-秒上手"><img src="https://img.shields.io/badge/Quick_Start-blue" alt="Quick Start" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow" alt="License: MIT" /></a>
-  <img src="https://img.shields.io/badge/Node.js-%E2%89%A5%2022.5-339933?logo=nodedotjs&logoColor=white" alt="Node.js >= 22.5" />
-  <img src="https://img.shields.io/badge/Zero_Deps-2ea44f" alt="Zero dependencies" />
-  <img src="https://img.shields.io/badge/Local_First-5B2E9E" alt="Local first" />
-  <img src="https://img.shields.io/badge/Windows%20%7C%20Linux%20%7C%20macOS-0074d9" alt="Platforms" />
-  <a href="#配置-ai唯一必须做的事"><img src="https://img.shields.io/badge/AI-OpenAI_Compatible-8A2BE2" alt="AI" /></a>
-  <a href="#-界面语言中文--english--任意语言"><img src="https://img.shields.io/badge/i18n-中文%20%2F%20English-ff69b4" alt="i18n" /></a>
+  <a href="#-30-秒上手"><img src="assets/badges/quick-start.png" width="73" height="20" alt="Quick Start" /></a>
+  <a href="LICENSE"><img src="assets/badges/license-mit.png" width="82" height="20" alt="License: MIT" /></a>
+  <img src="assets/badges/nodejs.png" width="115" height="20" alt="Node.js >= 22.5" />
+  <img src="assets/badges/zero-deps.png" width="67" height="20" alt="Zero dependencies" />
+  <img src="assets/badges/local-first.png" width="67" height="20" alt="Local first" />
+  <img src="assets/badges/platforms.png" width="153" height="20" alt="Platforms" />
+  <a href="#配置-ai唯一必须做的事"><img src="assets/badges/ai.png" width="140" height="20" alt="AI" /></a>
+  <a href="#-界面语言中文--english--任意语言"><img src="assets/badges/i18n.png" width="118" height="20" alt="i18n" /></a>
 </p>
 
 <p align="center">
