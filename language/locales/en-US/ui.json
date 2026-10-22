@@ -5306,5 +5306,8 @@
  "AI 正在重新匹配…": "AI is re-matching…",
  "AI 正在重新审查…": "AI is re-reviewing…",
  "AI 正在重新生成…": "AI is regenerating…",
- "resume-evidence-workflow（重复引用）": "resume-evidence-workflow (duplicate reference)"
+ "resume-evidence-workflow（重复引用）": "resume-evidence-workflow (duplicate reference)",
+ "简历工坊：上传简历 → AI 审查 → 补信息 → 选 JD → 改写 → 生成终版": "Resume Workshop: upload -> AI review -> add info -> pick JD -> rewrite -> final version",
+ "简历工坊组件未加载或已关闭：到「组件管理」确认「简历工坊」是开着的": "Resume Workshop is not loaded or is disabled: check that it is enabled under Component Management",
+ "📄 简历": "📄 Resume"
 }

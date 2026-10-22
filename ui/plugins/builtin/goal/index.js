@@ -1373,6 +1373,7 @@ function renderGoal() {
       ${pluginButtonsHTML(g)}
       ${goalPluginsHTML(g)}
       ${g.nodes.length && H.goalCompOn(g, 'versions') ? '<button class="btn small" data-tbtn id="verBtn">📜 版本对比</button>' : ''}
+      ${H.goalCompOn(g, 'resume') ? '<button class="btn small" data-tbtn id="resumeBtn" title="' + H.esc(tr('简历工坊：上传简历 → AI 审查 → 补信息 → 选 JD → 改写 → 生成终版')) + '">' + tr('📄 简历') + '</button>' : ''}
       <button class="btn small primary" data-tbtn id="planBtn" title="重新规划（会清空现有路径，请三思；微调骨架用下面的调整面板）">${g.nodes.length ? '重新规划（AI 先澄清）' : '开始 AI 规划（AI 先澄清）'}</button>
       <button class="btn small danger" data-tbtn id="delGoalBtn">删除</button>
       <button class="btn small" id="goalMoreBtn" data-morebtn-of="goal" hidden>⋯</button>
@@ -1429,6 +1430,11 @@ function renderGoal() {
   if (chatBtn) chatBtn.addEventListener('click', () => H.aiToggle(true));
   const verBtn = document.getElementById('verBtn');
   if (verBtn) verBtn.addEventListener('click', () => H.showVersionsPanel(g.id));
+  const resumeBtnEl = document.getElementById('resumeBtn');
+  if (resumeBtnEl) resumeBtnEl.addEventListener('click', () => {
+    if (window.SiErXing && typeof SiErXing.openResumeWorkshop === 'function') return SiErXing.openResumeWorkshop();
+    H.toast(tr('简历工坊组件未加载或已关闭：到「组件管理」确认「简历工坊」是开着的'));
+  });
   if (window.Workspace && H.goalCompOn(g, 'workspace')) { try { window.Workspace.bindGoal(g); } catch (e) {} }
   const planBtnEl = document.getElementById('planBtn');
   planBtnEl.addEventListener('click', () => {
