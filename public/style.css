@@ -3963,3 +3963,24 @@ body.htDraggingBody{cursor:grabbing; user-select:none; -webkit-user-select:none;
 .langProgBar{height:8px;border-radius:999px;background:var(--soft);overflow:hidden;margin-bottom:6px;}
 .langProgBar i{display:block;height:100%;width:0;border-radius:999px;
   background:linear-gradient(90deg,var(--accent),var(--accent-2));transition:width .3s ease;}
+
+/* ---------- 方案（同一目标多份规划）弹层 ---------- */
+.planPop { width: 320px; max-width: calc(100vw - 16px); }
+.planCur { font-size: 12px; color: var(--muted, #888); padding: 2px 12px 8px; }
+.planList { max-height: 260px; overflow: auto; padding: 0 6px; }
+.planRow { display: flex; align-items: center; gap: 2px; border-radius: 8px; }
+.planRow.on { background: rgba(99, 102, 241, .12); }
+.planPick { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; background: none; border: 0; color: inherit; font: inherit; text-align: left; padding: 7px 6px; cursor: pointer; border-radius: 8px; }
+.planPick:hover { background: rgba(127, 127, 127, .10); }
+.planName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.planMeta { flex: none; color: var(--muted, #888); font-size: 12px; }
+.planMini { flex: none; background: none; border: 0; color: var(--muted, #888); font-size: 13px; padding: 5px; cursor: pointer; border-radius: 6px; }
+.planMini:hover { background: rgba(127, 127, 127, .14); color: inherit; }
+.planMini.danger:hover { color: #e5484d; }
+.planHint { font-size: 12px; color: var(--muted, #888); padding: 6px 12px 8px; line-height: 1.5; }
+
+/* 版本管理页 · 当前方案 + 切换按钮栏 */
+.planVerBar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--card2)}
+.planVerBar b{font-size:13px}
+.planVerBar .hint{margin:0}
+

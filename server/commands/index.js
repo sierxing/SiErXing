@@ -38,6 +38,7 @@ module.exports = function createCommands(ctx) {
   const installComponent = ctx && ctx.installComponent;
   const uninstallComponent = ctx && ctx.uninstallComponent;
   const recordGoalChange = ctx && ctx.recordGoalChange;
+  const getPlanDomain = ctx && ctx.getPlanDomain;
   const onSourceChanged = ctx && ctx.onSourceChanged;
   const startTutorialGeneration = ctx && ctx.startTutorialGeneration;
   const startTutorialEdit = ctx && ctx.startTutorialEdit;
@@ -1225,6 +1226,145 @@ module.exports = function createCommands(ctx) {
       if (typeof startSourceDigest !== 'function') fail('not_implemented', '资料提炼未接入服务端');
       const r = startSourceDigest(gid);
       return { ok: true, taskId: r.taskId, goalId: r.goalId, status: 'started', uiUrl: ui('#/aitasks'), note: '提炼在后台执行；进度看任务中心，完成后汇总会出现在资料库。' };
+    }
+  });
+
+  /* ---------- 方案（同一目标多份规划） ---------- */
+  function planDomainOrFail() {
+    const p = typeof getPlanDomain === 'function' ? getPlanDomain() : null;
+    if (!p) fail('not_implemented', '方案功能未接入服务端');
+    return p;
+  }
+
+  bus.define({
+    name: 'plan.list',
+    title: '方案列表',
+    description: '列出某个目标下的所有规划方案：当前方案 + 其他方案（含节点数、是否当前）。',
+    category: 'plan', layer: 'content', risk: 'read',
+    inputSchema: { type: 'object', required: ['goalId'], properties: { goalId: { type: 'integer' } } },
+    output: 'json',
+    handler: function (input) {
+      return planDomainOrFail().list(num(input.goalId || input.id, 'goalId'));
+    }
+  });
+
+  bus.define({
+    name: 'plan.save',
+    title: '保存方案',
+    description: '把当前路径另存为一份新方案（不动当前节点）；也可直接传 nodes 快照存成方案。',
+    category: 'plan', layer: 'content', risk: 'write',
+    inputSchema: {
+      type: 'object', required: ['goalId'],
+      properties: { goalId: { type: 'integer' }, name: { type: 'string' }, nodes: { type: 'array' } }
+    },
+    output: 'json',
+    handler: function (input) {
+      const gid = num(input.goalId || input.id, 'goalId');
+      const p = planDomainOrFail();
+      const r = Array.isArray(input.nodes) && input.nodes.length
+        ? p.saveFromNodes(gid, input.name, input.nodes)
+        : p.saveCurrent(gid, input.name);
+      return { ok: true, planId: r.planId, name: r.name, nodes: r.nodes };
+    }
+  });
+
+  bus.define({
+    name: 'plan.create',
+    title: '新建空白方案',
+    description: '新建一份空白方案（0 个节点，不切换当前路径）。用户想从零搭一版新规划时用；之后可用 plan.switch 切过去加节点。',
+    category: 'plan', layer: 'content', risk: 'write',
+    inputSchema: {
+      type: 'object', required: ['goalId'],
+      properties: { goalId: { type: 'integer' }, name: { type: 'string' } }
+    },
+    output: 'json',
+    handler: function (input) {
+      const gid = num(input.goalId || input.id, 'goalId');
+      const r = planDomainOrFail().createBlank(gid, input.name);
+      return { ok: true, planId: r.planId, name: r.name, nodes: r.nodes };
+    }
+  });
+
+  bus.define({
+    name: 'plan.from_version',
+    title: '从历史版本建方案',
+    description: '把某个历史版本（版本 id）的快照复制成一份新方案（类似 git 从 commit 建分支），不改当前路径、也不切换。',
+    category: 'plan', layer: 'content', risk: 'write',
+    inputSchema: {
+      type: 'object', required: ['versionId'],
+      properties: { versionId: { type: 'integer' }, name: { type: 'string' } }
+    },
+    output: 'json',
+    handler: function (input) {
+      const r = planDomainOrFail().toPlan(num(input.versionId, 'versionId'), input.name);
+      return { ok: true, planId: r.planId, name: r.name, nodes: r.nodes };
+    }
+  });
+
+  bus.define({
+    name: 'plan.apply',
+    title: '写入规划方案',
+    description: '把「阶段→小目标→任务」树写成一份新方案（不切换当前路径，用户可随时手动切换）。字段：stages[{title,detail,goals:[{title,detail,tasks:[{title,detail,hours,artifact,acceptance}]}]}]；也可传 nodes 原始快照。',
+    category: 'plan', layer: 'content', risk: 'write',
+    inputSchema: {
+      type: 'object', required: ['goalId'], properties: {
+        goalId: { type: 'integer' }, name: { type: 'string' },
+        stages: { type: 'array' }, nodes: { type: 'array' }
+      }
+    },
+    output: 'json',
+    handler: function (input) {
+      const gid = num(input.goalId || input.id, 'goalId');
+      const p = planDomainOrFail();
+      let r;
+      if (Array.isArray(input.stages) && input.stages.length) r = p.applyStages(gid, input.name, input.stages);
+      else if (Array.isArray(input.nodes) && input.nodes.length) r = p.saveFromNodes(gid, input.name, input.nodes);
+      else fail('bad_input', '需要一个非空的 stages 或 nodes');
+      return { ok: true, planId: r.planId, name: r.name, nodes: r.nodes, note: '已存成方案，未切换当前路径；用 plan.switch 或界面「方案」菜单切换。' };
+    }
+  });
+
+  bus.define({
+    name: 'plan.switch',
+    title: '切换方案',
+    description: '切换到指定方案：先把当前路径存回当前方案，再用目标方案替换节点（保留 done/doing 进度），切换前自动写版本快照并备份。',
+    category: 'plan', layer: 'content', risk: 'write',
+    inputSchema: {
+      type: 'object', required: ['goalId', 'planId'],
+      properties: { goalId: { type: 'integer' }, planId: { type: 'integer' } }
+    },
+    output: 'json',
+    handler: function (input) {
+      const gid = num(input.goalId || input.id, 'goalId');
+      const pid = num(input.planId, 'planId');
+      return planDomainOrFail().switchTo(gid, pid);
+    }
+  });
+
+  bus.define({
+    name: 'plan.rename',
+    title: '方案改名',
+    description: '给一份方案改名。',
+    category: 'plan', layer: 'content', risk: 'write',
+    inputSchema: {
+      type: 'object', required: ['planId', 'name'],
+      properties: { planId: { type: 'integer' }, name: { type: 'string' } }
+    },
+    output: 'json',
+    handler: function (input) {
+      return planDomainOrFail().rename(num(input.planId, 'planId'), input.name);
+    }
+  });
+
+  bus.define({
+    name: 'plan.delete',
+    title: '删除方案',
+    description: '删除一份方案（不能删除当前正在使用的方案）。destructive：需要用户批准。',
+    category: 'plan', layer: 'content', risk: 'destructive',
+    inputSchema: { type: 'object', required: ['planId'], properties: { planId: { type: 'integer' } } },
+    output: 'json',
+    handler: function (input) {
+      return planDomainOrFail().remove(num(input.planId, 'planId'));
     }
   });
 

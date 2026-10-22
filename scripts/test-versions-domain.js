@@ -10,7 +10,8 @@ const { createVersionDomain } = require('../server/domains/versions.js');
 const db = new DatabaseSync(':memory:');
 db.exec([
   "CREATE TABLE nodes (id INTEGER PRIMARY KEY AUTOINCREMENT, goal_id INTEGER NOT NULL, parent_id INTEGER, level INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', artifact TEXT NOT NULL DEFAULT '', acceptance TEXT NOT NULL DEFAULT '', hours TEXT NOT NULL DEFAULT '', sources TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'todo', sort_order INTEGER NOT NULL DEFAULT 0);",
-  "CREATE TABLE goal_versions (id INTEGER PRIMARY KEY AUTOINCREMENT, goal_id INTEGER NOT NULL, reason TEXT NOT NULL DEFAULT '', snapshot TEXT NOT NULL DEFAULT '[]', summary TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, snapshot_after TEXT NOT NULL DEFAULT '', manual INTEGER NOT NULL DEFAULT 0, starred INTEGER NOT NULL DEFAULT 0);"
+  "CREATE TABLE goal_versions (id INTEGER PRIMARY KEY AUTOINCREMENT, goal_id INTEGER NOT NULL, reason TEXT NOT NULL DEFAULT '', snapshot TEXT NOT NULL DEFAULT '[]', summary TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, snapshot_after TEXT NOT NULL DEFAULT '', manual INTEGER NOT NULL DEFAULT 0, starred INTEGER NOT NULL DEFAULT 0, plan_id INTEGER NOT NULL DEFAULT 0);",
+  "CREATE TABLE goals (id INTEGER PRIMARY KEY AUTOINCREMENT, active_plan_id INTEGER NOT NULL DEFAULT 0);"
 ].join('\n'));
 function addNode(id, title, status) {
   db.prepare('INSERT INTO nodes (id,goal_id,parent_id,level,title,status,sort_order) VALUES (?,?,?,?,?,?,?)').run(id, 1, null, 0, title, status || 'todo', id);

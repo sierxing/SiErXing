@@ -18,8 +18,12 @@ function createVersionDomain(opts) {
     if (!goalCompOn(goalId, 'versions')) return 0;
     const nodes = db.prepare('SELECT * FROM nodes WHERE goal_id = ? ORDER BY level, sort_order, id').all(goalId);
     if (!nodes.length) return 0;
-    const res = db.prepare('INSERT INTO goal_versions (goal_id, reason, snapshot, summary, created_at) VALUES (?,?,?,?,?)')
-      .run(goalId, reason, JSON.stringify(nodes), '', nowISO());
+    /* 版本历史按方案隔离：记下这份快照属于当前哪份方案（0 = 主方案）。
+       老库没有 plan_id 列时由 server.js 启动时 ALTER 补上；这里再兜一层。 */
+    let planId = 0;
+    try { const g = db.prepare('SELECT active_plan_id FROM goals WHERE id = ?').get(goalId); planId = Number((g && g.active_plan_id) || 0); } catch (e) { planId = 0; }
+    const res = db.prepare('INSERT INTO goal_versions (goal_id, reason, snapshot, summary, plan_id, created_at) VALUES (?,?,?,?,?,?)')
+      .run(goalId, reason, JSON.stringify(nodes), '', planId, nowISO());
     return Number(res.lastInsertRowid);
   }
   function nodeKeyMap(nodes) {

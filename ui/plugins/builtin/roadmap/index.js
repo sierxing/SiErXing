@@ -200,6 +200,8 @@ function bindMapTools() {
   });
   const mv = document.getElementById('mapVerBtn');
   if (mv) mv.addEventListener('click', () => H.showVersionsPanel(H.state.goal.id));
+  const mpb = document.getElementById('mapPlansBtn');
+  if (mpb) mpb.addEventListener('click', () => planPopShow(mpb));
   const mc = document.getElementById('mapChatBtn');
   if (mc) mc.addEventListener('click', () => H.aiToggle(true));
   const mp = document.getElementById('mapPlanBtn');
@@ -213,17 +215,156 @@ function bindMapTools() {
   H.bindTutorialCard();
 }
 
+/* ---------- 方案（同一目标多份规划）弹层 ----------
+   方案存在 goal_versions(manual=1)：一行就是一份完整路径快照。
+   当前路径始终是 nodes 表的内容；切换时先把当前路径存回当前方案，再整体载入目标方案，
+   所以来回切不丢进度（done/doing 状态跟快照一起存）。 */
+let planPopEl = null;
+function planPopClose() {
+  if (planPopEl) { try { planPopEl.remove(); } catch (e) {} planPopEl = null; }
+  document.removeEventListener('pointerdown', planPopOutside, true);
+}
+function planPopOutside(e) {
+  if (!planPopEl) return;
+  if (planPopEl.contains(e.target)) return;
+  if (e.target && e.target.closest && e.target.closest('[data-plans-btn]')) return;
+  planPopClose();
+}
+async function planPopPaint() {
+  const g = H.state.goal;
+  if (!planPopEl || !g) return;
+  let data = null;
+  try { data = await H.api('/api/goals/' + g.id + '/plans'); } catch (e) {}
+  if (!planPopEl) return;
+  const cur = (data && data.current) || { name: tr('主方案'), nodes: 0, planId: 0 };
+  const plans = (data && data.plans) || [];
+  const row = function (p) {
+    return '<div class="planRow' + (p.active ? ' on' : '') + '">'
+      + '<button class="planPick" data-plan-pick="' + p.planId + '" title="' + H.esc(tr('切换到这个方案')) + '">'
+      + '<span class="planName">' + (p.active ? '✓ ' : '') + H.esc(p.name) + '</span>'
+      + '<span class="planMeta">' + H.esc(tr('{0} 个节点', p.nodes)) + '</span></button>'
+      + '<button class="planMini" data-plan-rename="' + p.planId + '" data-plan-name="' + H.esc(p.name) + '" title="' + H.esc(tr('重命名')) + '">✎</button>'
+      + (p.active ? '' : '<button class="planMini danger" data-plan-del="' + p.planId + '" data-plan-name="' + H.esc(p.name) + '" title="' + H.esc(tr('删除')) + '">🗑</button>')
+      + '</div>';
+  };
+  planPopEl.innerHTML = '<div class="sxiPopT">' + H.esc(tr('规划方案')) + '</div>'
+    + '<div class="planCur">' + H.esc(tr('当前：{0} · {1} 个节点', cur.name, cur.nodes)) + '</div>'
+    + '<div class="planList">' + (plans.length ? plans.map(row).join('') : '<div class="sxiOptEmpty">' + H.esc(tr('还没有保存过其他方案')) + '</div>') + '</div>'
+    + '<div class="sxiPopSep"></div>'
+    + '<button class="sxiOpt" data-plan-save="1">＋ ' + H.esc(tr('把当前路径存为新方案')) + '</button>'
+    + '<button class="sxiOpt" data-plan-blank="1">＋ ' + H.esc(tr('新建空白方案')) + '</button>'
+    + '<div class="planHint">' + H.esc(tr('切换方案会先自动保存当前路径，再载入目标方案，任务进度会保留。')) + '</div>';
+}
+async function planPopShow(btn) {
+  if (planPopEl) { planPopClose(); return; }
+  const g = H.state.goal;
+  if (!g) return;
+  const d = document.createElement('div');
+  d.className = 'sxiPop planPop';
+  d.setAttribute('data-kind', 'plans');
+  document.body.appendChild(d);
+  planPopEl = d;
+  const rect = btn.getBoundingClientRect();
+  d.style.position = 'fixed';
+  d.style.top = Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 380)) + 'px';
+  d.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - 326)) + 'px';
+  d.addEventListener('click', async function (e) {
+    const t = e.target.closest('button');
+    if (!t) return;
+    const gid = H.state.goal ? H.state.goal.id : 0;
+    if (t.hasAttribute('data-plan-save')) {
+      const name = prompt(tr('给这个方案起个名字'), tr('新方案'));
+      if (name == null) return;
+      try {
+        await H.api('/api/goals/' + gid + '/plans', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: String(name).trim() }) });
+        H.toast(tr('已存为新方案'));
+        await planPopPaint();
+      } catch (err) { H.toast(err.message || tr('保存失败')); }
+      return;
+    }
+    if (t.hasAttribute('data-plan-blank')) {
+      const name = prompt(tr('给空白方案起个名字'), tr('空白方案'));
+      if (name == null) return;
+      try {
+        const r = await H.api('/api/goals/' + gid + '/plans', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: String(name).trim(), blank: true }) });
+        await planPopPaint();
+        if (confirm(tr('已新建空白方案「{0}」。现在切换过去吗？（当前路径会先自动存回当前方案）', r.name))) {
+          await H.api('/api/plans/' + r.planId + '/activate', { method: 'POST' });
+          planPopClose();
+          await H.loadGoal(gid);
+          renderMapPage();
+          H.toast(tr('已切换到空白方案，开始搭节点吧'));
+        } else {
+          H.toast(tr('已创建空白方案「{0}」', r.name));
+        }
+      } catch (err) { H.toast(err.message || tr('新建失败')); }
+      return;
+    }
+    if (t.hasAttribute('data-plan-pick')) {
+      const pid = Number(t.getAttribute('data-plan-pick'));
+      if (t.closest('.planRow') && t.closest('.planRow').classList.contains('on')) return;
+      const nm = t.querySelector('.planName') ? t.querySelector('.planName').textContent.replace(/^✓\s*/, '') : '';
+      if (!confirm(tr('切换到方案「{0}」？当前路径会先自动存回当前方案。', nm))) return;
+      try {
+        await H.api('/api/plans/' + pid + '/activate', { method: 'POST' });
+        planPopClose();
+        await H.loadGoal(gid);
+        renderMapPage();
+        H.toast(tr('已切换到「{0}」', nm));
+      } catch (err) { H.toast(err.message || tr('切换失败')); }
+      return;
+    }
+    if (t.hasAttribute('data-plan-rename')) {
+      const pid = Number(t.getAttribute('data-plan-rename'));
+      const old = t.getAttribute('data-plan-name') || '';
+      const name = prompt(tr('方案改名'), old);
+      if (name == null) return;
+      try {
+        await H.api('/api/plans/' + pid + '/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: String(name).trim() }) });
+        await planPopPaint();
+      } catch (err) { H.toast(err.message || tr('改名失败')); }
+      return;
+    }
+    if (t.hasAttribute('data-plan-del')) {
+      const pid = Number(t.getAttribute('data-plan-del'));
+      const nm = t.getAttribute('data-plan-name') || '';
+      if (!confirm(tr('删除方案「{0}」？删除后不可恢复（当前方案不能删）。', nm))) return;
+      try {
+        await H.api('/api/plans/' + pid, { method: 'DELETE' });
+        H.toast(tr('方案已删除'));
+        await planPopPaint();
+      } catch (err) { H.toast(err.message || tr('删除失败')); }
+      return;
+    }
+  });
+  await planPopPaint();
+  setTimeout(function () { document.addEventListener('pointerdown', planPopOutside, true); }, 0);
+}
+
 function renderMapPage() {
   const g = H.state.goal;
   if (!g) { H.app.innerHTML = '<p class="muted">目标不存在</p>'; return; }
   const stages = H.buildTree(g.nodes);
   const pct = g.tasks_total ? Math.round(g.tasks_done / g.tasks_total * 100) : 0;
   if (!stages.length) {
-    H.app.innerHTML = `<div class="mapPage"><div class="mapToolbar"><button class="back" data-back="#/g/${g.id}">← 返回</button><span class="mapTitle">${H.esc(g.title)}</span></div>
-      <div class="mapViewport" id="mapViewport"><div class="emptyBox" style="margin:90px auto; max-width:440px;">
-        <div class="ebIcon">🧭</div><div class="ebTitle">还没有路径</div><div class="ebText">回到执行页开始 AI 规划，生成路径后再来看图。</div>
-        <a class="btn primary" href="#/g/${g.id}">返回执行页</a>
+    H.app.innerHTML = `<div class="mapPage"><div class="mapToolbar"><button class="back" data-back="#/g/${g.id}">← 返回</button><span class="mapTitle">${H.esc(g.title)}</span><div class="spacer"></div><button class="btn small" id="mapPlansBtn" data-plans-btn title="${H.esc(tr('切换或保存多份规划方案'))}">🗂 ${H.esc(tr('方案'))}</button></div>
+      <div class="mapViewport" id="mapViewport"><div class="emptyBox" style="margin:90px auto; max-width:460px;">
+        <div class="ebIcon">🧭</div><div class="ebTitle">${H.esc(tr('这个方案还是空的'))}</div><div class="ebText">${H.esc(tr('可以直接在图上加阶段，或点右上「🗂 方案」切回别的方案。'))}</div>
+        <button class="btn primary" id="emptyMapAdd">＋ ${H.esc(tr('加一个阶段'))}</button>
+        <a class="btn" href="#/g/${g.id}">${H.esc(tr('返回执行页'))}</a>
       </div></div></div>`;
+    bindMapTools();
+    const eadd = document.getElementById('emptyMapAdd');
+    if (eadd) eadd.addEventListener('click', async () => {
+      const title = (prompt(tr('阶段名称'), tr('第一阶段')) || '').trim();
+      if (!title) return;
+      try {
+        const r = await H.api('/api/goals/' + g.id + '/nodes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title }) });
+        H.state.goal = r.goal;
+        renderMapPage();
+        H.toast(tr('已加一个阶段'));
+      } catch (e) { H.toast(e.message); }
+    });
     return;
   }
   const activeStageId = (() => {
@@ -245,6 +386,7 @@ function renderMapPage() {
       <button class="btn small" id="expandAll">全部展开</button>
       ${H.goalCompOn(H.state.goal, 'chat') ? '<button class="btn small" id="mapChatBtn">💬 AI 助手</button>' : ''}
       ${H.goalCompOn(H.state.goal, 'versions') ? '<button class="btn small" id="mapVerBtn">📜 版本对比</button>' : ''}
+      <button class="btn small" id="mapPlansBtn" data-plans-btn title="${H.esc(tr('切换或保存多份规划方案'))}">🗂 ${H.esc(tr('方案'))}</button>
       <button class="btn small" id="mapPlanBtn" title="重新规划（会清空现有路径，请三思；微调骨架用下面的调整面板）">🧭 重新规划</button>
     </div>
     ${H.reportCardHTML()}

@@ -127,10 +127,10 @@ node scripts/sierxing.js audit list --limit 20 --json
 - POST /api/approvals/:id/approve / reject
 - GET /api/audit
 
-当前 51 个命令：23 个 read + 19 个 write + 4 个 admin + 5 个 destructive。
+当前 59 个命令：24 个 read + 25 个 write + 4 个 admin + 6 个 destructive。
 write 直接执行但写审计；destructive/admin 需要用户在审批页点批准（审批表/审计表本机、不同步）。
-- write：goal/node 增改、component.toggle。
-- destructive：goal.delete / node.delete（删前有备份/版本快照）。
+- write：goal/node 增改、component.toggle、plan.save / plan.apply / plan.switch / plan.rename（同一目标多方案）。
+- destructive：goal.delete / node.delete（删前有备份/版本快照）、plan.delete（不能删当前方案）。
 - admin：prompt.update/reset、setting.set（设置白名单，不含 AI key / sync token）。
 insight.list 已给出目标健康度/卡点/动量/下一步；brief.goal / brief.user / goal.list 都带上了。
 friction.report/list/update 已接入洞察：用户记录过的「不舒服」会出现在 insight.list / brief 里，供 Agent 找到最小改动。

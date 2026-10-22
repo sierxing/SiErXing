@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | 提示词重构 | 10 个可编辑提示词包（资料提炼 2 + 对话 2 + 规划 2 + 资料 3 + 教程 1） | `prompt.list` = 10；test-prompt-packs 14 项 |
 | 分层重构 | 4 个领域模块 + prompts/ + commands/ + component-pipeline + insights | test-*-domain 6/8/6/6 项；server.js 只做组装 |
-| 命令总线 | 51 个命令：23 read / 19 write / 4 admin / 5 destructive | `/api/manifest`；test-commands 15 项 + test-commands-write 28 项 |
+| 命令总线 | 59 个命令：24 read / 25 write / 4 admin / 6 destructive | `/api/manifest`；test-commands 15 项 + test-commands-write 28 项 |
 | 事件与审计 | command_audit / command_events / approvals（本机表） | `audit.list`；test-commands 审批闭环 |
 | 语义洞察 | goal_health / stall / momentum / milestone / empty_goal / friction / constraint_conflict / goal_drift | `insight.list`；test-insights 11 项 |
 | 读目标与进度 | `goal.list / goal.get / brief.goal / brief.user / insight.list` | CLI 实跑；goal/sources 领域测试 |
@@ -20,9 +20,9 @@
 | 编辑提示词 | prompt.update / reset（admin，需用户批准，存覆盖+版本） | test-prompt-packs；prompt.history |
 | 编辑非核心组件 | file 插件 export / validate / stage / install / uninstall（安装需批准，失败回滚） | component.export(pomodoro) 成功；component.export(plan) = forbidden |
 | CLI | `node scripts/sierxing.js`（manifest/commands/goal/node/tutorial/source/brief/insight/approvals/audit） | CLI 实跑 manifest / brief / insight |
-| MCP | stdio JSON-RPC 适配器，工具名点号→下划线，审批透传 | test-mcp 14 项全过 |
+| MCP | stdio JSON-RPC 适配器，工具名点号→下划线（如 plan.apply → plan_apply），审批透传 | test-mcp 14 项全过 |
 | 多宿主技能 | claude / cursor / generic 安装器 + mcp-config | test-skills-install 7 项全过 |
-| 多形态底座 | 独立 Web 应用 + CLI + MCP + 技能 + 可构建 Agent 插件包 | `node scripts/build-plugin.js`：commands=50 / prompts=10 / skills=2 |
+| 多形态底座 | 独立 Web 应用 + CLI + MCP + 技能 + 可构建 Agent 插件包 | `node scripts/build-plugin.js`：commands=59 / prompts=10 / skills=2 |
 | 可回滚 | 组件安装失败自动回滚旧文件；备份/版本领域；审批一次性令牌 | test-component-pipeline / backup-domain / versions-domain |
 
 ## 二、实跑证据
@@ -32,7 +32,7 @@ curl -s http://localhost:3213/api/health
 # {"ok":true,"app":"思而行"}
 
 node scripts/sierxing.js manifest
-# 思而行 v1.10.84 · 51 个命令
+# 思而行 v1.10.84 · 59 个命令
 
 node scripts/sierxing.js brief user
 # 目标总数：5 … 当前活跃 … 最值得注意：…
@@ -42,7 +42,7 @@ node scripts/sierxing.js insight list --goal 166
 # [critical] 剩余任务约 105 小时 …
 
 node scripts/build-plugin.js
-# commands=50 prompts=10 skills=2
+# commands=59 prompts=10 skills=2
 ```
 
 组件编辑边界：

@@ -18,6 +18,7 @@ const createService = require('./service');
 const createSync = require('./sync');
 const { createBackupDomain } = require('./domains/backups');
 const { createVersionDomain } = require('./domains/versions');
+const { createPlanDomain } = require('./commands/plan-ops');
 const { createGoalDomain } = require('./domains/goals');
 const { createSourceDomain } = require('./domains/sources');
 const { createConditionsDomain } = require('./conditions');
@@ -240,6 +241,10 @@ CREATE TABLE IF NOT EXISTS goal_versions (
   reason TEXT NOT NULL DEFAULT '',
   snapshot TEXT NOT NULL DEFAULT '[]',
   summary TEXT NOT NULL DEFAULT '',
+  manual INTEGER NOT NULL DEFAULT 0,
+  starred INTEGER NOT NULL DEFAULT 0,
+  snapshot_after TEXT NOT NULL DEFAULT '',
+  plan_id INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
 
@@ -741,6 +746,8 @@ function pluginCtx() {
   if (!gcols.includes('clarify_stage')) db.exec("ALTER TABLE goals ADD COLUMN clarify_stage TEXT NOT NULL DEFAULT '';");
   if (!gcols.includes('constraints')) db.exec("ALTER TABLE goals ADD COLUMN constraints TEXT NOT NULL DEFAULT '[]';");
   if (!gcols.includes('plugins')) db.exec("ALTER TABLE goals ADD COLUMN plugins TEXT NOT NULL DEFAULT '{}';");
+  /* 多方案：当前 nodes 来自哪份「方案」（goal_versions 里 manual=1 的行；0=主方案） */
+  if (!gcols.includes('active_plan_id')) db.exec('ALTER TABLE goals ADD COLUMN active_plan_id INTEGER NOT NULL DEFAULT 0;');
   if (!gcols.includes('ebook_pref')) db.exec("ALTER TABLE goals ADD COLUMN ebook_pref TEXT NOT NULL DEFAULT '';");
   if (!gcols.includes('collect_plan')) db.exec("ALTER TABLE goals ADD COLUMN collect_plan TEXT NOT NULL DEFAULT '';");
   const tcols = db.prepare('PRAGMA table_info(tutorials)').all().map(c => c.name);
@@ -754,6 +761,16 @@ function pluginCtx() {
   if (!vcols.includes('snapshot_after')) db.exec("ALTER TABLE goal_versions ADD COLUMN snapshot_after TEXT NOT NULL DEFAULT '';");
   if (!vcols.includes('manual')) db.exec("ALTER TABLE goal_versions ADD COLUMN manual INTEGER NOT NULL DEFAULT 0;");
   if (!vcols.includes('starred')) db.exec("ALTER TABLE goal_versions ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;");
+  /* 版本历史按方案隔离：这份自动快照属于哪份方案（0 = 主方案） */
+  if (!vcols.includes('plan_id')) {
+    db.exec('ALTER TABLE goal_versions ADD COLUMN plan_id INTEGER NOT NULL DEFAULT 0;');
+    /* 一次性迁移：加 plan_id 之前的版本历史是「所有方案共用」的（plan_id 恒 0）。
+       把已有自动版本归到目标**当前正在使用的方案**上；从没切换过方案的目标
+       active_plan_id 还是 0，保持原样（继续算主方案的历史）。 */
+    try {
+      db.exec('UPDATE goal_versions SET plan_id = (SELECT active_plan_id FROM goals WHERE goals.id = goal_versions.goal_id) WHERE plan_id = 0 AND manual = 0 AND (SELECT active_plan_id FROM goals WHERE goals.id = goal_versions.goal_id) > 0');
+    } catch (e) { try { console.warn('[migrate] 版本历史归属方案失败:', e.message); } catch (e2) {} }
+  }
   const ccols = db.prepare('PRAGMA table_info(chats)').all().map(c => c.name);
   /* 本轮「它做了什么」（看了什么上下文、调了哪些工具）—— JSON 数组，见 streamChat */
   if (!ccols.includes('trace')) db.exec("ALTER TABLE chats ADD COLUMN trace TEXT NOT NULL DEFAULT '[]';");
@@ -1046,6 +1063,7 @@ const commandBus = require('./commands')({
   startSourceCollect: startSourceCollect,
   startSourceDigest: startSourceDigest,
   startGoalPlan: startGoalPlan,
+  getPlanDomain: function () { return planDomain; },
   version: require('../package.json').version
 });
 function normalizeSources(arr) {
@@ -2989,6 +3007,11 @@ const diffVersions = versionDomain.diffVersions;
 const templateReport = versionDomain.templateReport;
 const buildReportPrompt = versionDomain.buildReportPrompt;
 const finishVersion = versionDomain.finishVersion;
+/* 方案领域：同一目标多份规划。goal_versions 的 manual 行 = 方案，nodes = 当前方案。 */
+const planDomain = createPlanDomain({
+  db: db, nowISO: nowISO, safeParse: safeParse, insertNode: insertNode,
+  beginVersion: beginVersion, backup: backup, getGoal: getGoal
+});
 
 
 
@@ -3853,6 +3876,11 @@ async function buildChatPrompt(goal, message, sessionId, opts) {
     const n = db.prepare('SELECT COUNT(*) AS n FROM nodes WHERE goal_id = ?').get(goal.id).n;
     addCtx('当前路线图', n ? n + ' 个节点' : '（还没有节点）');
   } catch (e) {}
+  /* 多方案：让助手知道这个目标下已经有哪些方案、当前在用哪份，才能听懂「切到 19 天版 / 再规划一版」 */
+  try {
+    const pb = planDomain.chatBlock(goal.id);
+    if (pb && pb.text) { lines.push(''); lines.push(pb.text); addCtx(pb.label, pb.detail); }
+  } catch (e) {}
   /* 达成条件：让助手能按 id 修改 / 重新归属（用户抱怨过"生成一版就定死了、改不了"）。
      条件 id 从【当前达成条件】里认；归属改的是节点 id（上面【当前路线图】里有）。 */
   try {
@@ -4086,6 +4114,24 @@ function applyChatOps(goalId, ops, opts) {
         };
         fix(n.id, level);
         applied.push({ op: 'move', id: n.id, title: String(n.title).slice(0, 60), parent_id: newParentId || 0 });
+      } else if (kind === 'plan_create') {
+        const stages = Array.isArray(op.stages) ? op.stages : null;
+        const nodes = Array.isArray(op.nodes) ? op.nodes : null;
+        let r;
+        if (stages && stages.length) r = planDomain.applyStages(goalId, op.name, stages);
+        else if (nodes && nodes.length) r = planDomain.saveFromNodes(goalId, op.name, nodes);
+        else r = planDomain.createBlank(goalId, op.name);
+        applied.push({ op: 'plan_create', planId: r.planId, name: r.name, nodes: r.nodes });
+      } else if (kind === 'plan_switch') {
+        const pid = Number(op.plan_id || op.planId || 0);
+        const r = pid ? planDomain.switchTo(goalId, pid) : planDomain.switchByName(goalId, op.name);
+        applied.push({ op: 'plan_switch', planId: r.planId, name: r.name, nodes: r.nodes });
+      } else if (kind === 'plan_save') {
+        const r = planDomain.saveCurrent(goalId, op.name);
+        applied.push({ op: 'plan_save', planId: r.planId, name: r.name, nodes: r.nodes });
+      } else if (kind === 'plan_list') {
+        const pd = planDomain.list(goalId);
+        applied.push({ op: 'plan_list', current: pd.current, plans: pd.plans });
       } else if (kind === 'constraint') {
         const text = String(op.text || op.title || '').trim().slice(0, 300);
         if (!text) { errors.push('约束内容为空'); continue; }
@@ -4291,7 +4337,8 @@ function parseChatOutput(text) {
   let ops = [];
   const valid = o => o && typeof o === 'object' && ['add', 'update', 'delete', 'move', 'status', 'constraint', 'add_source', 'delete_source', 'update_goal', 'goal', 'source', 'digest', 'digest_sources', 'extract', 'collect', 'collect_sources', 'tutorial_edit',
     'condition_add', 'add_condition', 'condition_update', 'update_condition', 'condition_delete', 'delete_condition',
-    'condition_assign', 'assign_condition', 'condition_unassign', 'unassign_condition', 'condition_replace', 'replace_conditions'].includes(String(o.op || o.type || '').toLowerCase());
+    'condition_assign', 'assign_condition', 'condition_unassign', 'unassign_condition', 'condition_replace', 'replace_conditions',
+    'plan_create', 'plan_switch', 'plan_save', 'plan_list'].includes(String(o.op || o.type || '').toLowerCase());
   const takeOps = arr => (Array.isArray(arr) ? arr.filter(valid).slice(0, 25) : []);
   // 1) ```ops 代码块（推荐格式）
   const m = s.match(/```ops[ \t]*\r?\n?([\s\S]*?)```/i);
@@ -9176,23 +9223,17 @@ function extractEbookPrefFromAnswers(answers) {
 
   const versionsMatch = p.match(/^\/api\/goals\/(\d+)\/versions$/);
   if (versionsMatch && method === 'GET') {
-    const rows = db.prepare('SELECT id, goal_id, reason, summary, manual, starred, created_at FROM goal_versions WHERE goal_id = ? ORDER BY starred DESC, id DESC LIMIT 60').all(Number(versionsMatch[1]));
-    return sendJSON(res, 200, { versions: rows });
+    try { return sendJSON(res, 200, planDomain.versions(Number(versionsMatch[1]), u.searchParams.get('planId'))); }
+    catch (e) { return sendJSON(res, e.code === 'not_found' ? 404 : 400, { error: e.message }); }
   }
   if (versionsMatch && method === 'POST') {
-    // 手动保存当前方案（命名存档，随时恢复）
+    /* 以前的「手动存档」= 现在新建一份方案（版本历史按方案隔离后，方案快照本身就是一份存档） */
     const gid = Number(versionsMatch[1]);
-    const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(gid);
-    if (!g) return sendJSON(res, 404, { error: '目标不存在' });
     const body = await readBody(req).catch(() => ({}));
-    const name = String(body.name || '').trim().slice(0, 40) || '手动存档';
-    const nodes = db.prepare('SELECT * FROM nodes WHERE goal_id = ? ORDER BY level, sort_order, id').all(gid);
-    if (!nodes.length) return sendJSON(res, 400, { error: '当前还没有路径可存' });
-    const r = db.prepare('INSERT INTO goal_versions (goal_id, reason, snapshot, summary, manual, created_at) VALUES (?,?,?,?,?,?)')
-      .run(gid, name, JSON.stringify(nodes), '', 1, nowISO());
-    backup();
-    const rows = db.prepare('SELECT id, goal_id, reason, summary, manual, starred, created_at FROM goal_versions WHERE goal_id = ? ORDER BY starred DESC, id DESC LIMIT 60').all(gid);
-    return sendJSON(res, 200, { ok: true, id: Number(r.lastInsertRowid), versions: rows });
+    try {
+      const r = planDomain.saveCurrent(gid, String(body.name || '').trim().slice(0, 60));
+      return sendJSON(res, 200, Object.assign({ ok: true, id: r.planId }, planDomain.versions(gid)));
+    } catch (e) { return sendJSON(res, e.code === 'not_found' ? 404 : 400, { error: e.message }); }
   }
   const verStarMatch = p.match(/^\/api\/versions\/(\d+)\/star$/);
   if (verStarMatch && method === 'POST') {
@@ -9206,36 +9247,60 @@ function extractEbookPrefFromAnswers(answers) {
   }
   const verRestoreMatch = p.match(/^\/api\/versions\/(\d+)\/restore$/);
   if (verRestoreMatch && method === 'POST') {
-    // 恢复到指定版本：先自动存档当前（可再 undo），再整体替换节点（含进度状态）
-    const v = db.prepare('SELECT * FROM goal_versions WHERE id = ?').get(Number(verRestoreMatch[1]));
-    if (!v) return sendJSON(res, 404, { error: '版本不存在' });
-    const snap = safeParse(v.snapshot) || [];
-    if (!snap.length) return sendJSON(res, 400, { error: '这个版本是空快照，无法恢复' });
-    const gid = v.goal_id;
-    const g = db.prepare('SELECT * FROM goals WHERE id = ?').get(gid);
-    if (!g) return sendJSON(res, 404, { error: '目标不存在' });
-    beginVersion(gid, '恢复版本前自动存档');
-    db.prepare('DELETE FROM nodes WHERE goal_id = ?').run(gid);
-    try { db.prepare('DELETE FROM node_workspaces WHERE goal_id = ?').run(gid); } catch (e) {}
-    const sorted = snap.slice().sort((a, b) => ((a.level || 0) - (b.level || 0)) || ((a.sort_order || 0) - (b.sort_order || 0)) || ((a.id || 0) - (b.id || 0)));
-    const idMap = new Map();
-    const t = nowISO();
-    /* 快照里的 condition_id 可能指向后来被删掉的条件；只保留当前仍然存在的 id，
-       否则节点会挂在一个不存在的条件上（条件页既看不到它、也统计不到）。 */
-    const validConds = new Set(db.prepare('SELECT id FROM goal_conditions WHERE goal_id = ?').all(gid).map(c => Number(c.id)));
-    for (const n of sorted) {
-      const newParent = n.parent_id ? (idMap.get(n.parent_id) || null) : null;
-      const condId = validConds.has(Number(n.condition_id)) ? Number(n.condition_id) : 0;
-      insertNode(gid, newParent, n.level || 0, n.title, n.detail, safeParse(n.sources) || [], n.sort_order || 0,
-        { artifact: n.artifact, acceptance: n.acceptance, hours: n.hours, condition_id: condId });
-      const nid = db.prepare('SELECT last_insert_rowid() AS id').get().id;
-      idMap.set(n.id, nid);
-      if (n.status && n.status !== 'todo') db.prepare('UPDATE nodes SET status = ? WHERE id = ?').run(n.status, nid);
-    }
-    const cnt = db.prepare('SELECT COUNT(*) AS c FROM nodes WHERE goal_id = ?').get(gid).c;
-    db.prepare('UPDATE goals SET status = ?, error = ?, updated_at = ? WHERE id = ?').run(cnt ? 'planned' : 'draft', '', t, gid);
-    backup();
-    return sendJSON(res, 200, { ok: true, goal: getGoal(gid) });
+    try {
+      const r = planDomain.restoreVersion(Number(verRestoreMatch[1]));
+      return sendJSON(res, 200, { ok: true, goal: r.goal, planId: r.planId });
+    } catch (e) { return sendJSON(res, e.code === 'not_found' ? 404 : 400, { error: e.message }); }
+  }
+  const verToPlanMatch = p.match(/^\/api\/versions\/(\d+)\/to-plan$/);
+  if (verToPlanMatch && method === 'POST') {
+    const body = await readBody(req).catch(() => ({}));
+    try { return sendJSON(res, 200, Object.assign({ ok: true }, planDomain.toPlan(Number(verToPlanMatch[1]), body.name))); }
+    catch (e) { return sendJSON(res, e.code === 'not_found' ? 404 : 400, { error: e.message }); }
+  }
+  /* ---------- 方案（同一目标多份规划） ---------- */
+  const plansMatch = p.match(/^\/api\/goals\/(\d+)\/plans$/);
+  if (plansMatch && method === 'GET') {
+    try { return sendJSON(res, 200, planDomain.list(Number(plansMatch[1]))); }
+    catch (e) { return sendJSON(res, e.code === 'not_found' ? 404 : 400, { error: e.message }); }
+  }
+  if (plansMatch && method === 'POST') {
+    const gid = Number(plansMatch[1]);
+    const body = await readBody(req).catch(() => ({}));
+    try {
+      if (Array.isArray(body.stages)) {
+        const r = planDomain.applyStages(gid, body.name, body.stages);
+        return sendJSON(res, 200, { ok: true, planId: r.planId, name: r.name, nodes: r.nodes });
+      }
+      if (body.blank === true) {
+        const r = planDomain.createBlank(gid, body.name);
+        return sendJSON(res, 200, { ok: true, planId: r.planId, name: r.name, nodes: r.nodes });
+      }
+      if (Array.isArray(body.nodes)) {
+        const r = planDomain.saveFromNodes(gid, body.name, body.nodes);
+        return sendJSON(res, 200, { ok: true, planId: r.planId, name: r.name, nodes: r.nodes });
+      }
+      const r = planDomain.saveCurrent(gid, body.name);
+      return sendJSON(res, 200, { ok: true, planId: r.planId, name: r.name, nodes: r.nodes });
+    } catch (e) { return sendJSON(res, e.code === 'not_found' ? 404 : 400, { error: e.message }); }
+  }
+  const planActMatch = p.match(/^\/api\/plans\/(\d+)\/activate$/);
+  if (planActMatch && method === 'POST') {
+    try {
+      const r = planDomain.activateById(Number(planActMatch[1]));
+      return sendJSON(res, 200, { ok: true, goal: r.goal, planId: r.planId, name: r.name, nodes: r.nodes });
+    } catch (e) { return sendJSON(res, e.code === 'not_found' ? 404 : 400, { error: e.message }); }
+  }
+  const planRenameMatch = p.match(/^\/api\/plans\/(\d+)\/rename$/);
+  if (planRenameMatch && method === 'POST') {
+    const body = await readBody(req).catch(() => ({}));
+    try { return sendJSON(res, 200, Object.assign({ ok: true }, planDomain.rename(Number(planRenameMatch[1]), body.name))); }
+    catch (e) { return sendJSON(res, e.code === 'not_found' ? 404 : 400, { error: e.message }); }
+  }
+  const planDelMatch = p.match(/^\/api\/plans\/(\d+)$/);
+  if (planDelMatch && method === 'DELETE') {
+    try { return sendJSON(res, 200, Object.assign({ ok: true }, planDomain.remove(Number(planDelMatch[1])))); }
+    catch (e) { return sendJSON(res, e.code === 'not_found' ? 404 : 400, { error: e.message }); }
   }
   const versionMatch = p.match(/^\/api\/versions\/(\d+)$/);
   if (versionMatch && method === 'GET') {

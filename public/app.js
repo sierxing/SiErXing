@@ -1993,6 +1993,8 @@ function bindMapTools() {
   });
   const mv = document.getElementById('mapVerBtn');
   if (mv) mv.addEventListener('click', () => showVersionsPanel(state.goal.id));
+  const mpb = document.getElementById('mapPlansBtn');
+  if (mpb) mpb.addEventListener('click', () => planPopShow(mpb));
   const mc = document.getElementById('mapChatBtn');
   if (mc) mc.addEventListener('click', () => aiToggle(true));
   const mp = document.getElementById('mapPlanBtn');
@@ -2005,17 +2007,156 @@ function bindMapTools() {
   bindReportCard();
   bindTutorialCard();
 }
+/* ---------- 方案（同一目标多份规划）弹层 ----------
+   方案存在 goal_versions(manual=1)：一行就是一份完整路径快照。
+   当前路径始终是 nodes 表的内容；切换时先把当前路径存回当前方案，再整体载入目标方案，
+   所以来回切不丢进度（done/doing 状态跟快照一起存）。 */
+let planPopEl = null;
+function planPopClose() {
+  if (planPopEl) { try { planPopEl.remove(); } catch (e) {} planPopEl = null; }
+  document.removeEventListener('pointerdown', planPopOutside, true);
+}
+function planPopOutside(e) {
+  if (!planPopEl) return;
+  if (planPopEl.contains(e.target)) return;
+  if (e.target && e.target.closest && e.target.closest('[data-plans-btn]')) return;
+  planPopClose();
+}
+async function planPopPaint() {
+  const g = state.goal;
+  if (!planPopEl || !g) return;
+  let data = null;
+  try { data = await api('/api/goals/' + g.id + '/plans'); } catch (e) {}
+  if (!planPopEl) return;
+  const cur = (data && data.current) || { name: tr('主方案'), nodes: 0, planId: 0 };
+  const plans = (data && data.plans) || [];
+  const row = function (p) {
+    return '<div class="planRow' + (p.active ? ' on' : '') + '">'
+      + '<button class="planPick" data-plan-pick="' + p.planId + '" title="' + esc(tr('切换到这个方案')) + '">'
+      + '<span class="planName">' + (p.active ? '✓ ' : '') + esc(p.name) + '</span>'
+      + '<span class="planMeta">' + esc(tr('{0} 个节点', p.nodes)) + '</span></button>'
+      + '<button class="planMini" data-plan-rename="' + p.planId + '" data-plan-name="' + esc(p.name) + '" title="' + esc(tr('重命名')) + '">✎</button>'
+      + (p.active ? '' : '<button class="planMini danger" data-plan-del="' + p.planId + '" data-plan-name="' + esc(p.name) + '" title="' + esc(tr('删除')) + '">🗑</button>')
+      + '</div>';
+  };
+  planPopEl.innerHTML = '<div class="sxiPopT">' + esc(tr('规划方案')) + '</div>'
+    + '<div class="planCur">' + esc(tr('当前：{0} · {1} 个节点', cur.name, cur.nodes)) + '</div>'
+    + '<div class="planList">' + (plans.length ? plans.map(row).join('') : '<div class="sxiOptEmpty">' + esc(tr('还没有保存过其他方案')) + '</div>') + '</div>'
+    + '<div class="sxiPopSep"></div>'
+    + '<button class="sxiOpt" data-plan-save="1">＋ ' + esc(tr('把当前路径存为新方案')) + '</button>'
+    + '<button class="sxiOpt" data-plan-blank="1">＋ ' + esc(tr('新建空白方案')) + '</button>'
+    + '<div class="planHint">' + esc(tr('切换方案会先自动保存当前路径，再载入目标方案，任务进度会保留。')) + '</div>';
+}
+async function planPopShow(btn) {
+  if (planPopEl) { planPopClose(); return; }
+  const g = state.goal;
+  if (!g) return;
+  const d = document.createElement('div');
+  d.className = 'sxiPop planPop';
+  d.setAttribute('data-kind', 'plans');
+  document.body.appendChild(d);
+  planPopEl = d;
+  const rect = btn.getBoundingClientRect();
+  d.style.position = 'fixed';
+  d.style.top = Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 380)) + 'px';
+  d.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - 326)) + 'px';
+  d.addEventListener('click', async function (e) {
+    const t = e.target.closest('button');
+    if (!t) return;
+    const gid = state.goal ? state.goal.id : 0;
+    if (t.hasAttribute('data-plan-save')) {
+      const name = prompt(tr('给这个方案起个名字'), tr('新方案'));
+      if (name == null) return;
+      try {
+        await api('/api/goals/' + gid + '/plans', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: String(name).trim() }) });
+        toast(tr('已存为新方案'));
+        await planPopPaint();
+      } catch (err) { toast(err.message || tr('保存失败')); }
+      return;
+    }
+    if (t.hasAttribute('data-plan-blank')) {
+      const name = prompt(tr('给空白方案起个名字'), tr('空白方案'));
+      if (name == null) return;
+      try {
+        const r = await api('/api/goals/' + gid + '/plans', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: String(name).trim(), blank: true }) });
+        await planPopPaint();
+        if (confirm(tr('已新建空白方案「{0}」。现在切换过去吗？（当前路径会先自动存回当前方案）', r.name))) {
+          await api('/api/plans/' + r.planId + '/activate', { method: 'POST' });
+          planPopClose();
+          await loadGoal(gid);
+          renderMapPage();
+          toast(tr('已切换到空白方案，开始搭节点吧'));
+        } else {
+          toast(tr('已创建空白方案「{0}」', r.name));
+        }
+      } catch (err) { toast(err.message || tr('新建失败')); }
+      return;
+    }
+    if (t.hasAttribute('data-plan-pick')) {
+      const pid = Number(t.getAttribute('data-plan-pick'));
+      if (t.closest('.planRow') && t.closest('.planRow').classList.contains('on')) return;
+      const nm = t.querySelector('.planName') ? t.querySelector('.planName').textContent.replace(/^✓\s*/, '') : '';
+      if (!confirm(tr('切换到方案「{0}」？当前路径会先自动存回当前方案。', nm))) return;
+      try {
+        await api('/api/plans/' + pid + '/activate', { method: 'POST' });
+        planPopClose();
+        await loadGoal(gid);
+        renderMapPage();
+        toast(tr('已切换到「{0}」', nm));
+      } catch (err) { toast(err.message || tr('切换失败')); }
+      return;
+    }
+    if (t.hasAttribute('data-plan-rename')) {
+      const pid = Number(t.getAttribute('data-plan-rename'));
+      const old = t.getAttribute('data-plan-name') || '';
+      const name = prompt(tr('方案改名'), old);
+      if (name == null) return;
+      try {
+        await api('/api/plans/' + pid + '/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: String(name).trim() }) });
+        await planPopPaint();
+      } catch (err) { toast(err.message || tr('改名失败')); }
+      return;
+    }
+    if (t.hasAttribute('data-plan-del')) {
+      const pid = Number(t.getAttribute('data-plan-del'));
+      const nm = t.getAttribute('data-plan-name') || '';
+      if (!confirm(tr('删除方案「{0}」？删除后不可恢复（当前方案不能删）。', nm))) return;
+      try {
+        await api('/api/plans/' + pid, { method: 'DELETE' });
+        toast(tr('方案已删除'));
+        await planPopPaint();
+      } catch (err) { toast(err.message || tr('删除失败')); }
+      return;
+    }
+  });
+  await planPopPaint();
+  setTimeout(function () { document.addEventListener('pointerdown', planPopOutside, true); }, 0);
+}
+
 function renderMapPage() {
   const g = state.goal;
   if (!g) { app.innerHTML = '<p class="muted">目标不存在</p>'; return; }
   const stages = buildTree(g.nodes);
   const pct = g.tasks_total ? Math.round(g.tasks_done / g.tasks_total * 100) : 0;
   if (!stages.length) {
-    app.innerHTML = `<div class="mapPage"><div class="mapToolbar"><button class="back" data-back="#/g/${g.id}">← 返回</button><span class="mapTitle">${esc(g.title)}</span></div>
-      <div class="mapViewport" id="mapViewport"><div class="emptyBox" style="margin:90px auto; max-width:440px;">
-        <div class="ebIcon">🧭</div><div class="ebTitle">还没有路径</div><div class="ebText">回到执行页开始 AI 规划，生成路径后再来看图。</div>
-        <a class="btn primary" href="#/g/${g.id}">返回执行页</a>
+    app.innerHTML = `<div class="mapPage"><div class="mapToolbar"><button class="back" data-back="#/g/${g.id}">← 返回</button><span class="mapTitle">${esc(g.title)}</span><div class="spacer"></div><button class="btn small" id="mapPlansBtn" data-plans-btn title="${esc(tr('切换或保存多份规划方案'))}">🗂 ${esc(tr('方案'))}</button></div>
+      <div class="mapViewport" id="mapViewport"><div class="emptyBox" style="margin:90px auto; max-width:460px;">
+        <div class="ebIcon">🧭</div><div class="ebTitle">${esc(tr('这个方案还是空的'))}</div><div class="ebText">${esc(tr('可以直接在图上加阶段，或点右上「🗂 方案」切回别的方案。'))}</div>
+        <button class="btn primary" id="emptyMapAdd">＋ ${esc(tr('加一个阶段'))}</button>
+        <a class="btn" href="#/g/${g.id}">${esc(tr('返回执行页'))}</a>
       </div></div></div>`;
+    bindMapTools();
+    const eadd = document.getElementById('emptyMapAdd');
+    if (eadd) eadd.addEventListener('click', async () => {
+      const title = (prompt(tr('阶段名称'), tr('第一阶段')) || '').trim();
+      if (!title) return;
+      try {
+        const r = await api('/api/goals/' + g.id + '/nodes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title }) });
+        state.goal = r.goal;
+        renderMapPage();
+        toast(tr('已加一个阶段'));
+      } catch (e) { toast(e.message); }
+    });
     return;
   }
   const activeStageId = (() => {
@@ -2037,6 +2178,7 @@ function renderMapPage() {
       <button class="btn small" id="expandAll">全部展开</button>
       ${goalCompOn(state.goal, 'chat') ? '<button class="btn small" id="mapChatBtn">💬 AI 助手</button>' : ''}
       ${goalCompOn(state.goal, 'versions') ? '<button class="btn small" id="mapVerBtn">📜 版本对比</button>' : ''}
+      <button class="btn small" id="mapPlansBtn" data-plans-btn title="${esc(tr('切换或保存多份规划方案'))}">🗂 ${esc(tr('方案'))}</button>
       <button class="btn small" id="mapPlanBtn" title="重新规划（会清空现有路径，请三思；微调骨架用下面的调整面板）">🧭 重新规划</button>
     </div>
     ${reportCardHTML()}
@@ -8435,21 +8577,21 @@ async function renderDiffPage(vid) {
   app.innerHTML = html;
 }
 async function showVersionsPanel(goalId) {
-  if (!goalCompOn(goalCtx(), 'versions')) { toast('「版本对比与汇报」组件在本目标已关闭：目标页 🧩 可单独开启'); return; }
-  const { versions } = await api('/api/goals/' + goalId + '/versions');
+  if (!goalCompOn(goalCtx(), 'versions')) { toast(tr('「版本对比与汇报」组件在本目标已关闭：目标页 🧩 可单独开启')); return; }
+  const data = await api('/api/goals/' + goalId + '/versions');
+  const versions = data.versions || [];
+  const curPlan = data.plan || { id: 0, name: tr('主方案') };
   const old = document.getElementById('versionsPanel');
   if (old) old.remove();
   const div = document.createElement('div');
   div.id = 'versionsPanel';
   div.className = 'versionsPanel';
-  let h = `<div class="vpHead"><span>📜 版本历史</span><div class="spacer"></div><button class="btn tiny primary" id="vpSave">📌 保存当前方案</button><button class="btn tiny" id="vpClose">×</button></div>`;
+  let h = `<div class="vpHead"><span>📜 ${esc(tr('版本历史'))} · ${esc(curPlan.name)}</span><div class="spacer"></div><button class="btn tiny primary" id="vpSave">📌 ${esc(tr('存为新方案'))}</button><button class="btn tiny" id="vpClose">×</button></div>`;
   h += `<div class="vpBody">`;
-  if (!versions.length) h += '<div class="empty">还没有版本记录。每次规划/调整/拆分后会自动生成版本，也可以点右上「📌 保存当前方案」手动存一版。</div>';
-  for (const v of versions.slice(0, 8)) {
-    h += versionItemHTML(v, goalId);
-  }
+  if (!versions.length) h += '<div class="empty">' + esc(tr('这个方案还没有版本记录。每次规划/调整后会自动存档一版；也可以点「📌 存为新方案」把当前路径另存一份。')) + '</div>';
+  for (const v of versions.slice(0, 8)) h += versionItemHTML(v, goalId);
   h += `</div>`;
-  h += `<div class="vpFoot"><a class="btn small" href="#/g/${goalId}/versions">📂 打开版本管理页（全部 · 可收藏）</a></div>`;
+  h += `<div class="vpFoot"><a class="btn small" href="#/g/${goalId}/versions">📂 ${esc(tr('打开版本管理页（按方案分开看 · 可收藏）'))}</a></div>`;
   div.innerHTML = h;
   document.body.appendChild(div);
   document.getElementById('vpClose').addEventListener('click', () => div.remove());
@@ -8458,9 +8600,9 @@ async function showVersionsPanel(goalId) {
 /* 版本条目（面板与管理页共用） */
 function versionItemHTML(v, goalId) {
   return `<div class="vpItem" data-vid="${v.id}">
-    <div class="vpTop"><button class="vpStar ${Number(v.starred) ? 'on' : ''}" data-vp-star="${v.id}" title="${Number(v.starred) ? '已收藏（再点取消）' : '收藏这一版，方便找回'}">${Number(v.starred) ? '★' : '☆'}</button>${Number(v.manual) ? '<span class="chip ok">📌 手动保存</span>' : ''}<span class="chip gray">${esc(v.reason || '变更')}</span><span class="hint">${fmtDate(v.created_at)}</span></div>
-    ${v.summary ? `<div class="vpSummary">${mdOneLine(v.summary)}</div>` : '<div class="vpSummary muted">（无汇报）</div>'}
-    <div class="vpOps"><a class="btn small" href="#/g/${goalId}/diff/${v.id}">查看对比图</a><button class="btn small danger" data-vp-restore="${v.id}" title="先自动存档当前，再整体回到这一版（含任务进度状态）">恢复到此版</button></div>
+    <div class="vpTop"><button class="vpStar ${Number(v.starred) ? 'on' : ''}" data-vp-star="${v.id}" title="${Number(v.starred) ? tr('已收藏（再点取消）') : tr('收藏这一版，方便找回')}">${Number(v.starred) ? '★' : '☆'}</button>${Number(v.manual) ? '<span class="chip ok">📌 ' + esc(tr('手动保存')) + '</span>' : ''}<span class="chip gray">${esc(v.reason || tr('变更'))}</span><span class="hint">${fmtDate(v.created_at)}</span></div>
+    ${v.summary ? `<div class="vpSummary">${mdOneLine(v.summary)}</div>` : `<div class="vpSummary muted">${esc(tr('（无汇报）'))}</div>`}
+    <div class="vpOps"><a class="btn small" href="#/g/${goalId}/diff/${v.id}">${esc(tr('查看对比图'))}</a><button class="btn small" data-vp-toplan="${v.id}" title="${esc(tr('把这个版本单独存成一份方案，不动当前路径'))}">＋ ${esc(tr('存成方案'))}</button><button class="btn small danger" data-vp-restore="${v.id}" title="${esc(tr('先自动存档当前，再整体回到这一版（含任务进度状态）'))}">${esc(tr('恢复到此版'))}</button></div>
   </div>`;
 }
 /* 版本条目按钮绑定（面板/管理页共用；after 为操作成功后的刷新回调） */
@@ -8468,12 +8610,12 @@ function bindVersionItems(root, goalId, after) {
   const rerun = after || (() => {});
   const sv = root.querySelector('#vpSave');
   if (sv) sv.addEventListener('click', async () => {
-    const name = (prompt('给这版方案起个名（例如：偏实战版 / 保守版）：', '') || '').trim();
+    const name = (prompt(tr('给这个方案起个名（例如：偏实战版 / 保守版）：'), '') || '').trim();
     if (!name) return;
     sv.disabled = true;
     try {
       await api('/api/goals/' + goalId + '/versions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
-      toast('已保存方案「' + name + '」，重新规划弄丢了也能找回来');
+      toast(tr('已存为新方案「{0}」，可在「🗂 方案」里切换', name));
       rerun();
     } catch (e) { toast(e.message); sv.disabled = false; }
   });
@@ -8483,13 +8625,24 @@ function bindVersionItems(root, goalId, after) {
     const on = !b.classList.contains('on');
     try {
       await api('/api/versions/' + vid + '/star', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ starred: on }) });
-      toast(on ? '已收藏' : '已取消收藏');
+      toast(on ? tr('已收藏') : tr('已取消收藏'));
       rerun();
     } catch (err) { toast(err.message); }
   }));
+  root.querySelectorAll('[data-vp-toplan]').forEach(b => b.addEventListener('click', async e => {
+    e.stopPropagation();
+    const vid = b.getAttribute('data-vp-toplan');
+    const name = (prompt(tr('给这份新方案起个名（会把这一版复制成一份独立方案）'), tr('方案 · 版本 {0}', vid)) || '').trim();
+    if (!name) return;
+    try {
+      const r = await api('/api/versions/' + vid + '/to-plan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+      toast(tr('已存成新方案「{0}」（{1} 个节点），可在「🗂 方案」里切换', r.name, r.nodes));
+      rerun();
+    } catch (err) { toast(err.message || tr('保存失败')); }
+  }));
   root.querySelectorAll('[data-vp-restore]').forEach(b => b.addEventListener('click', async () => {
     const vid = b.getAttribute('data-vp-restore');
-    if (!confirm('恢复到这一版？\n\n当前方案会先自动存档（还可再 undo），然后节点（含任务进度状态）整体替换。\n教程按原节点关联，恢复后旧教程可能对不上新节点 id。')) return;
+    if (!confirm(tr('恢复到这一版？\n\n当前方案会先自动存档（还可再 undo），然后节点（含任务进度状态）整体替换。\n教程按原节点关联，恢复后旧教程可能对不上新节点 id。'))) return;
     b.disabled = true;
     try {
       const r = await api('/api/versions/' + vid + '/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
@@ -8499,7 +8652,7 @@ function bindVersionItems(root, goalId, after) {
       if (pnl) pnl.remove();
       rerenderCurrent();
       renderRail();
-      toast('已恢复到该版本');
+      toast(tr('已恢复到该版本'));
     } catch (e) { toast(e.message); b.disabled = false; }
   }));
 }
@@ -8527,7 +8680,7 @@ async function renderVersionsVue(gid) {
     document.head.appendChild(l);
   }
   const mod = await import('/ui-dist/versions.js?v=' + Date.now());
-  if (!mod || typeof mod.mountVersionsPage !== 'function') throw new Error('UI 插件没有导出 mountVersionsPage');
+  if (!mod || typeof mod.mountVersionsPage !== 'function') throw new Error(tr('UI 插件没有导出 mountVersionsPage'));
   versionsVueUnmount = mod.mountVersionsPage(root, { api: api, toast: toast, goalId: Number(gid) || 0, goalTitle: String((state.goal && state.goal.title) || '') });
   return true;
 }
@@ -8538,30 +8691,71 @@ window.addEventListener('hashchange', function () {
   }
 });
 async function renderVersionsPage(gid) {
+  if (versionsVueEnabled() && await renderVersionsVue(gid)) return;
   const g = state.goal;
-  app.innerHTML = '<p class="muted">加载版本历史…</p>';
-  const { versions } = await api('/api/goals/' + gid + '/versions');
-  const f = state.verFilter || 'all';
-  const counts = { all: versions.length, star: versions.filter(v => Number(v.starred)).length, manual: versions.filter(v => Number(v.manual)).length };
-  const list = versions.filter(v => f === 'star' ? Number(v.starred) : f === 'manual' ? Number(v.manual) : true);
+  app.innerHTML = '<p class="muted">' + esc(tr('加载版本历史…')) + '</p>';
+  const data = await api('/api/goals/' + gid + '/versions');
+  const versions = data.versions || [];
+  const curPlan = data.plan || { id: 0, name: tr('主方案') };
+  const plans = data.plans || [];
+  const otherPlans = plans.filter(p => !p.active);
+  const f = state.verFilter === 'star' ? 'star' : 'all';
+  const counts = { all: versions.length, star: versions.filter(v => Number(v.starred)).length };
+  const list = f === 'star' ? versions.filter(v => Number(v.starred)) : versions;
   app.innerHTML = `<div class="page"><div class="pageHead">
-      <button class="back js-back" data-go="#/g/${gid}">← 返回目标</button>
-      <h2 class="title" style="margin-left:10px;">📜 版本管理</h2>
+      <button class="back js-back" data-go="#/g/${gid}">← ${esc(tr('返回目标'))}</button>
+      <h2 class="title" style="margin-left:10px;">📜 ${esc(tr('版本管理'))}</h2>
       <span class="chip gray">${esc((g && g.title) || '')}</span>
       <div class="spacer"></div>
-      <button class="btn small primary" id="vpSave">📌 保存当前方案</button>
+      <button class="btn small" id="vpBlank">＋ ${esc(tr('新建空白方案'))}</button>
+      <button class="btn small primary" id="vpSave">📌 ${esc(tr('存为新方案'))}</button>
     </div>
+    <div class="sec"><div class="planVerBar"><span class="hint">${esc(tr('当前方案：'))}</span><b>${esc(curPlan.name)}</b>
+      ${otherPlans.map(p => `<button class="btn small" data-plan-switch="${p.planId}" data-plan-name="${esc(p.name)}">${esc(tr('切换到「{0}」（{1} 个节点）', p.name, p.nodes))}</button>`).join('')}
+      ${otherPlans.length ? '' : `<span class="hint">${esc(tr('还没有其他方案；点「＋ 新建空白方案」，或把下面任一历史版本「存成方案」。'))}</span>`}
+    </div></div>
     <div class="sec"><div class="ppCats" id="verFilter">
-      <button type="button" class="ppCat ${f === 'all' ? 'active' : ''}" data-vf="all">全部（${counts.all}）</button>
-      <button type="button" class="ppCat ${f === 'star' ? 'active' : ''}" data-vf="star">⭐ 已收藏（${counts.star}）</button>
-      <button type="button" class="ppCat ${f === 'manual' ? 'active' : ''}" data-vf="manual">📌 手动保存（${counts.manual}）</button>
+      <button type="button" class="ppCat ${f === 'all' ? 'active' : ''}" data-vf="all">${esc(tr('全部（{0}）', counts.all))}</button>
+      <button type="button" class="ppCat ${f === 'star' ? 'active' : ''}" data-vf="star">⭐ ${esc(tr('已收藏（{0}）', counts.star))}</button>
     </div>
-    <p class="hint">每次规划/调整/拆分自动存档；看中的版本点 ☆ 收藏；恢复前会自动存档当前，可再 undo。</p></div>
-    <div class="sec"><div class="vpGrid">${list.length ? list.map(v => versionItemHTML(v, gid)).join('') : '<div class="muted">这里还没有版本。</div>'}</div></div>
+    <p class="hint">${esc(tr('版本历史按方案分开管理：这里只显示「{0}」的历史。每次规划/调整自动存档；看中的版本可以「＋ 存成方案」变成一份独立方案，或恢复到此版（恢复前会自动存档当前）。', curPlan.name))}</p></div>
+    <div class="sec"><div class="vpGrid">${list.length ? list.map(v => versionItemHTML(v, gid)).join('') : `<div class="muted">${esc(tr('这个方案还没有版本记录。'))}</div>`}</div></div>
   </div>`;
   app.querySelectorAll('#verFilter [data-vf]').forEach(b => b.addEventListener('click', () => { state.verFilter = b.getAttribute('data-vf'); renderVersionsPage(gid); }));
-  bindVersionItems(app, gid, () => renderVersionsPage(gid));
+  bindVersionItems(document.getElementById('app'), gid, () => renderVersionsPage(gid));
+  const vb = document.getElementById('vpBlank');
+  if (vb) vb.addEventListener('click', async () => {
+    const name = (prompt(tr('给空白方案起个名字'), tr('空白方案')) || '').trim();
+    if (!name) return;
+    try {
+      const r = await api('/api/goals/' + gid + '/plans', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, blank: true }) });
+      if (confirm(tr('已新建空白方案「{0}」。现在切换过去吗？（当前路径会先自动存回当前方案）', r.name))) {
+        const ar = await api('/api/plans/' + r.planId + '/activate', { method: 'POST' });
+        state.goal = ar.goal;
+        await loadGoal(gid);
+        toast(tr('已切换到空白方案，开始搭节点吧'));
+        location.hash = '#/g/' + gid + '/map';
+        return;
+      }
+      toast(tr('已创建空白方案「{0}」', r.name));
+      renderVersionsPage(gid);
+    } catch (e) { toast(e.message || tr('新建失败')); }
+  });
+  app.querySelectorAll('[data-plan-switch]').forEach(b => b.addEventListener('click', async () => {
+    const pid = Number(b.getAttribute('data-plan-switch'));
+    const nm = b.getAttribute('data-plan-name') || '';
+    if (!confirm(tr('切换到方案「{0}」？当前路径会先自动存回当前方案。', nm))) return;
+    try {
+      const r = await api('/api/plans/' + pid + '/activate', { method: 'POST' });
+      state.goal = r.goal;
+      await loadGoal(gid);
+      toast(tr('已切换'));
+      renderVersionsPage(gid);
+    } catch (e) { toast(e.message || tr('切换失败')); }
+  }));
 }
+
+
 function rerenderCurrent() {
   const r = parseRoute();
   if (r.view === 'map' && state.goal) renderMapPage();
