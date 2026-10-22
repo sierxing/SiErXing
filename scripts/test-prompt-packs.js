@@ -38,12 +38,18 @@ const synthesisCtxValue = synthesisCtx(parts, meta);
 
 // 1. 列表
 const list = reg.list();
-assert.strictEqual(list.length, 4);
+assert.strictEqual(list.length, 9);   /* 4 个原有包 + 简历工坊 5 个 resume.* 包 */
 assert.ok(list.some(function (p) { return p.id === 'sources.digest_batch' && p.source === 'builtin'; }));
 assert.ok(list.some(function (p) { return p.id === 'sources.digest_synthesis' && p.editable === true; }));
 assert.ok(list.some(function (p) { return p.id === 'chat.ask_rules' && p.source === 'builtin'; }));
 assert.ok(list.some(function (p) { return p.id === 'chat.agent_rules' && p.editable === true; }));
-console.log('  ✓ list 返回 4 个内置包（含 chat 规则）');
+['resume.questions', 'resume.evidence', 'resume.match', 'resume.rewrite', 'resume.audit'].forEach(function (id) {
+  assert.ok(list.some(function (p) { return p.id === id && p.source === 'builtin' && p.editable === true; }), '缺少简历工坊提示词包：' + id);
+});
+/* 简历工坊的包是「模板即正文」：没有覆盖时 builtinRender 负责把 {{占位符}} 填上 */
+const rm = reg.render('resume.match', { targetRole: 'AI 产品经理实习', jd: '要求：用户研究', resume: '简历正文', evidence: '证据卡' });
+assert.ok(rm.indexOf('要求：用户研究') >= 0 && rm.indexOf('{{jd}}') < 0, 'resume.match 的占位符没有被填上');
+console.log('  ✓ list 返回 9 个内置包（含 chat 规则 + 简历工坊 5 个）');
 
 // 2. 无覆盖时 render 走 builtin，行为与重构前逐字一致
 assert.strictEqual(reg.render('sources.digest_batch', batchCtxValue), digestBatchPrompt(batch, 1, 2));

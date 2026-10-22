@@ -36,6 +36,7 @@
     "test:search": "node --no-warnings scripts/test-search-api.js",
     "test:chat-ops": "node --no-warnings scripts/test-chat-ops-batch.js",
     "test:collect-ui": "node --no-warnings scripts/test-collect-ui.js",
+    "test:resume": "node --no-warnings --experimental-sqlite scripts/test-resume-component.js",
     "test:dsh-bridge": "node integrations/dsh-bridge/test/run.js",
     "build:lang": "node scripts/build-language-source.js",
     "check:i18n": "node scripts/check-i18n.js",

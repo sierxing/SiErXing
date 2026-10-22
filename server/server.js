@@ -736,7 +736,9 @@ function pluginCtx() {
     log: (...a) => console.log(...a),
     fs, path, os, spawn, APP_DIR, DATA_DIR, UPLOAD_DIR, PUBLIC_DIR,
     getGoal, sourcesOf, aiText, aiTextFiles, currentModel, currentVisionModel, tasks,
-    conditions: conditionsDomain
+    conditions: conditionsDomain,
+    /* 提示词注册表（启动顺序在 reloadPlugins 之后才创建，所以用惰性 getter；组件在请求期才调用） */
+    getPromptPacks: () => promptPacks
   };
 }
 (function migrate() {

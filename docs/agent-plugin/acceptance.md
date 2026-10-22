@@ -10,7 +10,7 @@
 
 | 目标项 | 交付物 | 证据 |
 | --- | --- | --- |
-| 提示词重构 | 10 个可编辑提示词包（资料提炼 2 + 对话 2 + 规划 2 + 资料 3 + 教程 1） | `prompt.list` = 10；test-prompt-packs 14 项 |
+| 提示词重构 | 15 个可编辑提示词包（资料提炼 2 + 对话 2 + 规划 2 + 资料 3 + 教程 1 + 简历工坊 5） | `prompt.list` = 15；test-prompt-packs 14 项 |
 | 分层重构 | 4 个领域模块 + prompts/ + commands/ + component-pipeline + insights | test-*-domain 6/8/6/6 项；server.js 只做组装 |
 | 命令总线 | 59 个命令：24 read / 25 write / 4 admin / 6 destructive | `/api/manifest`；test-commands 15 项 + test-commands-write 28 项 |
 | 事件与审计 | command_audit / command_events / approvals（本机表） | `audit.list`；test-commands 审批闭环 |

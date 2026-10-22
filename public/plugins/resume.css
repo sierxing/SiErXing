@@ -1,0 +1,128 @@
+/* 简历工坊（resume 扩展组件）：右下角入口 + 右侧抽屉面板 */
+.resumeFab{
+  position:fixed; right:22px; bottom:92px; z-index:120;
+  width:52px; height:52px; border-radius:50%;
+  border:1px solid var(--accent-border); background:var(--card); color:var(--text);
+  font-size:22px; cursor:pointer; box-shadow:var(--shadow-lg);
+  display:flex; align-items:center; justify-content:center; transition:.18s;
+}
+.resumeFab:hover{transform:translateY(-2px) scale(1.05); border-color:var(--accent);}
+body.rsLock{overflow:hidden;}
+.rsMask{
+  position:fixed; inset:0; z-index:180; background:rgba(10,12,20,.42);
+  opacity:0; pointer-events:none; transition:opacity .18s ease;
+}
+.rsMask.open{opacity:1; pointer-events:auto;}
+.resumePanel{
+  position:fixed; top:0; right:0; bottom:0; z-index:181;
+  width:min(860px, 96vw); background:var(--card); color:var(--text);
+  border-left:1.5px solid var(--border); box-shadow:var(--shadow-lg);
+  display:flex; flex-direction:column;
+  transform:translateX(102%); transition:transform .22s ease;
+}
+.resumePanel.open{transform:translateX(0);}
+.rsHead{display:flex; align-items:center; gap:8px; padding:11px 14px; border-bottom:1px solid var(--border); flex:none;}
+.rsLogo{font-size:18px;}
+.rsTitle{font-weight:800; font-size:15px;}
+.rsSub{font-size:12px; color:var(--muted); max-width:210px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.rsGrow{flex:1;}
+.rsTabs{display:flex; gap:4px; padding:8px 12px 0; border-bottom:1px solid var(--border); flex:none; flex-wrap:wrap;}
+.rsTab{
+  border:1px solid transparent; border-bottom:none; background:transparent; color:var(--muted);
+  font-size:12.8px; padding:7px 12px; border-radius:9px 9px 0 0; cursor:pointer; font-family:inherit;
+}
+.rsTab:hover{color:var(--text); background:var(--soft);}
+.rsTab.active{color:var(--accent); background:var(--accent-soft); border-color:var(--accent-border); font-weight:700;}
+.rsBody{flex:1; min-height:0; overflow:auto; padding:12px 14px 18px;}
+.rsFoot{
+  flex:none; border-top:1px solid var(--border); padding:6px 14px; font-size:11px; color:var(--muted);
+  display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+}
+.rsFoot a{color:var(--accent); text-decoration:none; font-size:11px;}
+.rsFoot a:hover{text-decoration:underline;}
+/* 通用块 */
+.rsSecHead{margin:10px 0 8px;}
+.rsSecTitle{font-size:13.5px; font-weight:800;}
+.rsSecSub{font-size:11.8px; color:var(--muted); margin-top:3px; line-height:1.6;}
+.rsMsg{border-radius:9px; padding:8px 10px; font-size:12.5px; margin:6px 0 10px; border:1px solid;}
+.rsMsg.bad{background:rgba(224,36,36,.08); border-color:var(--danger); color:var(--danger);}
+.rsMsg.ok{background:var(--ok-soft); border-color:var(--ok-border); color:var(--ok);}
+.rsBusy{display:flex; align-items:center; gap:10px; padding:26px 8px; color:var(--muted); font-size:13px;}
+.rsSpin{width:15px; height:15px; border-radius:50%; border:2px solid var(--border); border-top-color:var(--accent); animation:rsSpin .8s linear infinite; flex:none;}
+@keyframes rsSpin{to{transform:rotate(360deg);}}
+.rsRow{display:flex; align-items:center; gap:8px; margin:7px 0;}
+.rsRowTop{align-items:flex-start;}
+.rsLbl{flex:none; width:150px; font-size:12.5px; color:var(--muted); padding-top:5px;}
+.rsInput{
+  flex:1; min-width:0; border:1px solid var(--border); border-radius:9px; padding:7px 10px;
+  font-family:inherit; font-size:13px; background:var(--bg); color:var(--text);
+}
+.rsInput:focus{outline:none; border-color:var(--accent-border);}
+.rsTextarea{
+  width:100%; min-height:300px; resize:vertical; border:1px solid var(--border); border-radius:11px;
+  padding:10px 12px; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:12.6px; line-height:1.75; background:var(--bg); color:var(--text);
+}
+.rsTextarea.sm{min-height:70px; font-family:inherit; font-size:13px; line-height:1.7;}
+.rsTextarea:focus{outline:none; border-color:var(--accent-border);}
+.rsHint{font-size:11.5px; color:var(--muted);}
+.rsBtns{display:flex; gap:8px; align-items:center; margin:9px 0; flex-wrap:wrap;}
+.rsDivider{border-top:1px dashed var(--border); margin:16px 0 10px;}
+.rsList{display:flex; flex-direction:column; gap:8px;}
+.rsItem{
+  display:flex; align-items:center; gap:8px; border:1px solid var(--border); border-radius:10px;
+  padding:8px 10px; background:var(--bg);
+}
+.rsItemMain{flex:1; min-width:0; font-size:12.8px; line-height:1.6; word-break:break-word;}
+.rsItemOps{flex:none; display:flex; gap:6px;}
+.rsMuted{color:var(--muted); font-size:11.5px;}
+.rsEmpty{color:var(--muted); font-size:12.5px; line-height:1.8; text-align:center; padding:22px 8px;}
+/* 经历证据 */
+.rsCard{border:1px solid var(--border); border-radius:12px; padding:10px 12px; margin:10px 0; background:var(--bg);}
+.rsCard.ai{border-color:var(--accent-border); background:var(--accent-soft);}
+.rsCardTitle{font-size:12.8px; font-weight:800; margin-bottom:8px; display:flex; align-items:center; gap:8px;}
+.rsRight{margin-left:auto;}
+.rsQ{border-top:1px dashed var(--border); padding:9px 0;}
+.rsQT{font-size:13px; font-weight:700; line-height:1.7;}
+.rsQWhy{font-size:11.8px; color:var(--muted); margin-top:2px; line-height:1.65;}
+.rsEvCard{border:1px solid var(--border); border-radius:11px; padding:9px 11px; background:var(--card); margin:7px 0;}
+.rsEvHead{display:flex; gap:8px; align-items:baseline; flex-wrap:wrap; font-size:13px;}
+.rsEvHead b{font-size:13.2px;}
+.rsEvBody{margin-top:5px;}
+.rsEvLine{font-size:12.4px; line-height:1.72; margin:2px 0; word-break:break-word;}
+.rsEvLine span{color:var(--muted); margin-right:6px; font-size:11.5px;}
+.rsForm{border:1px dashed var(--accent-border); border-radius:12px; padding:10px 12px; margin:10px 0; background:var(--accent-soft);}
+.rsFormTitle{font-weight:800; font-size:13px; margin-bottom:6px;}
+/* 匹配矩阵 */
+.rsChips{display:flex; gap:6px; flex-wrap:wrap; margin:6px 0;}
+.rsChip{background:var(--soft); border:1px solid var(--border); border-radius:20px; padding:2px 9px; font-size:11.5px; color:var(--muted);}
+.rsTableWrap{overflow:auto; border:1px solid var(--border); border-radius:10px; margin:8px 0;}
+.rsTable{width:100%; border-collapse:collapse; font-size:12.2px;}
+.rsTable th,.rsTable td{border-bottom:1px solid var(--border); padding:7px 8px; text-align:left; vertical-align:top; line-height:1.6;}
+.rsTable th{background:var(--soft); font-size:11.8px; color:var(--muted); position:sticky; top:0;}
+.rsTable tr:last-child td{border-bottom:none;}
+.rsBadge{display:inline-block; border-radius:20px; padding:1px 8px; font-size:11px; border:1px solid var(--border); white-space:nowrap;}
+.rsBadge.direct,.rsBadge.ok{background:var(--ok-soft); border-color:var(--ok-border); color:var(--ok);}
+.rsBadge.adjacent,.rsBadge.warn{background:rgba(217,119,6,.12); border-color:rgba(217,119,6,.4); color:var(--warn);}
+.rsBadge.weak{background:rgba(217,119,6,.08); border-color:rgba(217,119,6,.28); color:var(--warn);}
+.rsBadge.gap,.rsBadge.bad{background:rgba(224,36,36,.08); border-color:rgba(224,36,36,.34); color:var(--danger);}
+.rsBadge.mute{background:var(--soft); color:var(--muted);}
+.rsSummary{font-size:12.9px; line-height:1.75; margin:6px 0; white-space:pre-wrap;}
+.rsSub{font-weight:800; font-size:12.5px; margin:10px 0 4px;}
+.rsUl{margin:2px 0 4px 20px; font-size:12.5px; line-height:1.8;}
+.rsBullet{border:1px solid var(--border); border-radius:11px; padding:9px 11px; margin:7px 0; background:var(--card);}
+.rsBOrig{font-size:12px; color:var(--muted); text-decoration:line-through; line-height:1.6;}
+.rsBNew{font-size:13.2px; line-height:1.75; margin:3px 0;}
+.rsBMeta{font-size:11.5px; color:var(--muted); line-height:1.6; margin:2px 0;}
+.rsBWarn{font-size:11.8px; color:var(--warn); margin-top:3px; line-height:1.6;}
+.rsClaim{border:1px solid var(--border); border-radius:11px; padding:9px 11px; background:var(--card);}
+.rsClaimH{display:flex; gap:8px; align-items:center; margin-bottom:3px; flex-wrap:wrap;}
+.rsClaimT{font-size:13px; line-height:1.7; word-break:break-word;}
+.rsMd{font-size:12.6px; line-height:1.75; word-break:break-word; overflow:auto; max-height:60vh;}
+.rsMd pre{background:var(--code-bg); border:1px solid var(--code-border); border-radius:9px; padding:8px; overflow:auto;}
+.rsMd code{background:var(--code-bg); border-radius:4px; padding:1px 4px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px;}
+@media (max-width:720px){
+  .resumePanel{width:100vw;}
+  .rsLbl{width:110px;}
+  .rsTextarea{min-height:220px;}
+}

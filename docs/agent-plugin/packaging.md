@@ -14,7 +14,7 @@
 - 同一套命令总线（59 个命令，risk 分级 + 审批 + 审计）
 - 同一份自描述 manifest（schema: sierxing.plugin/1）
 - 同一套数据与语义洞察（insight.list / brief.*）
-- 同一套提示词包（10 个可编辑包）
+- 同一套提示词包（15 个可编辑包）
 
 ## 一、一份 manifest
 
