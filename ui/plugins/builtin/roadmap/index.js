@@ -253,7 +253,7 @@ async function planPopPaint() {
     + '<div class="sxiPopSep"></div>'
     + '<button class="sxiOpt" data-plan-save="1">＋ ' + H.esc(tr('把当前路径存为新方案')) + '</button>'
     + '<button class="sxiOpt" data-plan-blank="1">＋ ' + H.esc(tr('新建空白方案')) + '</button>'
-    + '<div class="planHint">' + H.esc(tr('切换方案会先自动保存当前路径，再载入目标方案，任务进度会保留。')) + '</div>';
+    + '<div class="planHint">' + H.esc(tr('切换方案会先自动保存当前路径，再载入目标方案；任务进度、教程、笔记、代码目录都会跟着回到对应节点。')) + '</div>';
 }
 async function planPopShow(btn) {
   if (planPopEl) { planPopClose(); return; }

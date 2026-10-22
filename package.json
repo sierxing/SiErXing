@@ -26,6 +26,7 @@
     "test:user-ui": "node scripts/test-user-vue-page.js",
     "test:create": "node --no-warnings scripts/test-create-mode.js && node --no-warnings scripts/test-create-ui.js",
     "test:core": "node --no-warnings scripts/test-core-components.js",
+    "test:plan-identity": "node --no-warnings scripts/test-plan-domain.js && node --no-warnings scripts/test-plan-identity.js",
     "kernel:config": "node scripts/kernel-config.js",
     "build:pages": "node scripts/build-page-plugin.js --all",
     "gen:hostmap": "node scripts/gen-host-map.js",

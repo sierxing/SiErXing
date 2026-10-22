@@ -9,7 +9,12 @@
  * （0 = 主方案）。切到某方案后只看得到该方案自己的历史；「从历史版本建方案」= 把某个快照
  * 复制成一份新方案（类似 git 从 commit 建分支）。
  *
+ * 切方案会重建整棵 nodes（id 全换新）。为了让教程/笔记/学习记录/代码目录这些
+ * 「按 node_id 挂」的东西不跟着断，restoreSnapshot 会按【节点标题路径】把旧 id 搬回新 id，
+ * 并把旧节点的代码目录一起迁移过来（2026-10-22，教程"全没了"的根因修复）。
+ *
  * 依赖注入：db / nowISO / safeParse / insertNode / beginVersion / backup / getGoal
+ * 可选：【repair】={ index(gid), rebind(gid, oldIdOf, dryRun), slots(gid), applyWorkspace(gid,nodeId,path,oldPath) }
  */
 
 function createPlanDomain(opts) {
@@ -20,6 +25,8 @@ function createPlanDomain(opts) {
   const beginVersion = opts.beginVersion || function () { return 0; };
   const backup = opts.backup || function () {};
   const getGoal = opts.getGoal || function () { return null; };
+  /* 节点身份延续：整棵替换后把「按 node_id 挂的数据」搬回新 id（注入方实现细节，缺失则降级为旧行为） */
+  const repair = opts.repair || null;
 
   function err(code, message) { const e = new Error(message); e.code = code; return e; }
   function goalRow(gid) { return db.prepare('SELECT id, title, active_plan_id FROM goals WHERE id = ?').get(gid); }
@@ -129,13 +136,22 @@ function createPlanDomain(opts) {
     const allowEmpty = !!(opts2 && opts2.allowEmpty);
     if (!arr.length && !allowEmpty) throw err('bad_input', '这个方案是空快照，无法切换');
     beginVersion(gid, reason || '切换方案前自动存档');
+    /* ---------- ① 换树前先把「节点身份」记下来 ----------
+       教程、节点笔记、学习记录、代码目录都是按 node_id 挂的；下面要 DELETE 整棵 nodes
+       再重插（id 全部换新）。不先记旧树，那些东西就全成了孤儿 —— 用户看到的就是
+       「切了方案，教程全没了」（2026-10-21 真实翻车）。 */
+    const oldIndex = repair ? repair.index(gid) : null;
+    if (repair) { try { repair.begin(gid, oldIndex); } catch (e) { console.error('[plan] 记录旧节点身份失败:', e.message); } }
     db.prepare('DELETE FROM nodes WHERE goal_id = ?').run(gid);
-    try { db.prepare('DELETE FROM node_workspaces WHERE goal_id = ?').run(gid); } catch (e) {}
+    /* ⚠️ 这里**故意不删 node_workspaces**：那些行是每份方案各自的目录档案（key = 该方案快照里的
+       节点 id）。删了它就再也认不回旧目录，用户文件和「这个任务对应的文件夹」全断。
+       换树结束后由 node-identity.end() 统一清理「不指向任何存活节点、也不属于任何方案快照」的行。 */
     const sorted = arr.slice().sort(function (a, b) {
       return ((a.level || 0) - (b.level || 0)) || ((a.sort_order || 0) - (b.sort_order || 0)) || ((a.id || 0) - (b.id || 0));
     });
     const validConds = new Set(db.prepare('SELECT id FROM goal_conditions WHERE goal_id = ?').all(gid).map(function (c) { return Number(c.id); }));
     const idMap = new Map();
+    const nodeRows = [];
     for (const n of sorted) {
       const newParent = n.parent_id ? (idMap.get(n.parent_id) || null) : null;
       const condId = validConds.has(Number(n.condition_id)) ? Number(n.condition_id) : 0;
@@ -143,8 +159,19 @@ function createPlanDomain(opts) {
         { artifact: n.artifact, acceptance: n.acceptance, hours: n.hours, condition_id: condId });
       const newId = db.prepare('SELECT last_insert_rowid() AS id').get().id;
       idMap.set(n.id, newId);
+      nodeRows.push({ oldId: Number(n.id), newId: Number(newId) });
       if (n.status && n.status !== 'todo') db.prepare('UPDATE nodes SET status = ? WHERE id = ?').run(n.status, newId);
     }
+    /* ---------- ② 换树后按「标题路径」把旧 id 搬到新 id ---------- */
+    if (repair) {
+      try { repair.rebind(gid, nodeRows, oldIndex); } catch (e) { console.error('[plan] 节点身份迁移失败（不影响切换）:', e.message); }
+    }
+    /* ---------- ③ 代码目录：把旧节点的目录映射挂到新节点上（有文件的优先） ---------- */
+    for (const row of nodeRows) {
+      if (!repair) break;
+      try { repair.applyWorkspace(gid, row.newId, row.oldId); } catch (e) {}
+    }
+    if (repair) { try { repair.end(); } catch (e) {} }
     const cnt = db.prepare('SELECT COUNT(*) AS c FROM nodes WHERE goal_id = ?').get(gid).c;
     db.prepare('UPDATE goals SET status = ?, error = ?, updated_at = ? WHERE id = ?').run(cnt ? 'planned' : 'draft', '', nowISO(), gid);
     return cnt;

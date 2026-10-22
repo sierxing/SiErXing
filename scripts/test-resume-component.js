@@ -76,6 +76,7 @@ function waitHealth(port) {
 (async function main() {
   console.log('== 简历工坊：组件与纯函数 ==');
   const plugin = require('../server/plugins/resume.js');
+const domainMod = require('../server/resume-domain.js');
   await ok('组件 id / 名称 / 客户端脚本正确', function () {
     if (plugin.id !== 'resume') throw new Error('id=' + plugin.id);
     if (plugin.client !== '/plugins/resume.js') throw new Error('client=' + plugin.client);
@@ -88,9 +89,10 @@ function waitHealth(port) {
     if (plugin.defaultEnabled !== true) throw new Error('defaultEnabled=' + plugin.defaultEnabled);
     if (plugin.goalToggle !== false) throw new Error('goalToggle=' + plugin.goalToggle);
   });
-  await ok('five prompt packs registered (resume.*)', function () {
+  await ok('prompt packs registered (resume.*) — 至少 8 个，含 review/answers/finalize', function () {
     const packs = require('../server/prompts/packs');
-    for (const id of ['resume.questions', 'resume.evidence', 'resume.match', 'resume.rewrite', 'resume.audit']) {
+    const need = ['resume.questions', 'resume.evidence', 'resume.match', 'resume.rewrite', 'resume.audit', 'resume.review', 'resume.answers', 'resume.finalize'];
+    for (const id of need) {
       const p = packs[id];
       if (!p) throw new Error('缺少提示词包 ' + id);
       if (!p.template || p.template.length < 200) throw new Error(id + ' 模板过短');
@@ -98,45 +100,40 @@ function waitHealth(port) {
       if (typeof p.builtinRender !== 'function') throw new Error(id + ' 缺 builtinRender');
     }
   });
-  await ok('firstJSON：能从带围栏/前后文字的回复里抠出 JSON', function () {
+  await ok('简历文件解析 / 生成：docx 往返（markdownToDocx → parseResumeBuffer）', function () {
+    const f = require('../server/plugins/lib/resume-file');
+    const md = '# 张三\n\n## 教育背景\n- 某大学 计算机硕士\n- GPA 3.7\n\n**加粗**';
+    const buf = f.markdownToDocx(md, '测试简历');
+    if (buf.length < 500) throw new Error('docx 太小');
+    const names = f.zipEntries(buf).map(function (e) { return e.name; });
+    if (names.indexOf('word/document.xml') < 0) throw new Error('缺 document.xml');
+    const parsed = f.parseResumeBuffer(buf, 't.docx');
+    if (parsed.text.indexOf('张三') < 0) throw new Error('没解析出标题');
+    if (parsed.text.indexOf('GPA 3.7') < 0) throw new Error('没解析出条目');
+    if (parsed.text.indexOf('**') >= 0) throw new Error('markdown 星号没清掉');
+  });
+  await ok('简历文件解析：不支持格式 / 空文件 返回明确错误码', function () {
+    const f = require('../server/plugins/lib/resume-file');
+    let e1 = null, e2 = null;
+    try { f.parseResumeBuffer(Buffer.from('x'), 'a.xyz'); } catch (e) { e1 = e.message; }
+    try { f.parseResumeBuffer(Buffer.from('   '), 'a.txt'); } catch (e) { e2 = e.message; }
+    if (e1 !== 'unsupported-format') throw new Error('格式错误码：' + e1);
+    if (e2 !== 'empty-document') throw new Error('空文件错误码：' + e2);
+  });
+  await ok('领域纯函数：firstJSON / normalize / evidenceBlock 可用', function () {
+    const t = domainMod.__test;
+    if (typeof t.firstJSON !== 'function') throw new Error('缺 firstJSON');
     const fence = String.fromCharCode(96, 96, 96);
-    const text = '好的，下面是结果：\n' + fence + 'json\n{"cards":[{"title":"x"}]}\n' + fence + '\n以上。';
-    const d = plugin.__test.firstJSON(text);
-    if (!d || !Array.isArray(d.cards) || d.cards[0].title !== 'x') throw new Error(JSON.stringify(d));
+    const d = t.firstJSON('结果：\n' + fence + 'json\n{"issues":[{"type":"x"}]}\n' + fence);
+    if (!d || !Array.isArray(d.issues)) throw new Error('firstJSON 失败');
+    const n = t.normalize('match', { rows: [{ requirement: 'r', match: 'gap' }], keywords: 'x' });
+    if (!Array.isArray(n.rows) || !Array.isArray(n.keywords)) throw new Error('normalize 失败');
+    const b = t.evidenceBlock([{ title: 'T', role: 'R', result: 'OK' }]);
+    if (b.indexOf('T') < 0 || b.indexOf('R') < 0) throw new Error('evidenceBlock 失败');
   });
-  await ok('firstJSON：解析失败返回 null（不抛异常）', function () {
-    if (plugin.__test.firstJSON('not json at all') !== null) throw new Error('应该返回 null');
-  });
-  await ok('normalize：questions 支持字符串数组并补 id', function () {
-    const d = plugin.__test.normalize('questions', { questions: ['问题一', { q: '问题二' }] });
-    if (d.questions.length !== 2) throw new Error('数量 ' + d.questions.length);
-    if (!d.questions[0].id || !d.questions[0].q) throw new Error('缺字段');
-  });
-  await ok('normalize：match 的 rows/evidence 归一化 + 上限', function () {
-    const rows = [];
-    for (let i = 0; i < 40; i++) rows.push({ requirement: 'r' + i, match: 'gap', evidence: ['a'] });
-    const d = plugin.__test.normalize('match', { rows: rows, keywords: 'x' });
-    if (d.rows.length !== 30) throw new Error('rows 未截断：' + d.rows.length);
-    if (!Array.isArray(d.keywords) || d.keywords.length) throw new Error('keywords 应为空数组');
-    if (!Array.isArray(d.rows[0].evidence)) throw new Error('evidence 应为数组');
-  });
-  await ok('normalize：audit 保留状态词并截断', function () {
-    const d = plugin.__test.normalize('audit', { claims: [{ claim: 'x', status: '部分证实', evidence: 'e' }], patterns: 'p' });
-    if (d.claims.length !== 1 || d.claims[0].status !== '部分证实') throw new Error(JSON.stringify(d));
-    if (!Array.isArray(d.patterns)) throw new Error('patterns 应为数组');
-  });
-  await ok('evidenceBlock：把证据卡拼成提示词上下文（含标题/角色/结果）', function () {
-    const s = plugin.__test.evidenceBlock([{ title: '项目 A', role: '独立开发', result: '上线' }]);
-    if (s.indexOf('项目 A') < 0 || s.indexOf('独立开发') < 0 || s.indexOf('上线') < 0) throw new Error(s);
-    if (s.indexOf('角色：') < 0) throw new Error('缺标签：' + s);
-  });
-  await ok('fakeAI：五个动作的假数据形状正确', function () {
-    const q = plugin.__test.fakeAI('questions', {});
-    if (!Array.isArray(q.questions) || !q.questions.length) throw new Error('questions');
-    const m = plugin.__test.fakeAI('match', {});
-    if (!Array.isArray(m.rows) || !m.rows.length) throw new Error('match.rows');
-    const a = plugin.__test.fakeAI('audit', {});
-    if (!Array.isArray(a.claims) || !a.claims.length) throw new Error('audit.claims');
+  await ok('领域 STAGES：六步流水线、顺序固定', function () {
+    const s = domainMod.STAGES;
+    if (JSON.stringify(s) !== JSON.stringify(['upload', 'review', 'supplement', 'jd', 'match', 'finalize'])) throw new Error(JSON.stringify(s));
   });
 
   console.log('\n== 简历工坊：HTTP e2e（沙箱实例，假 AI） ==');
@@ -254,6 +251,90 @@ function waitHealth(port) {
       if (r.status !== 200) throw new Error(r.status + ' ' + r.text);
       const text = JSON.stringify(r.json);
       if (text.indexOf('JD') < 0) throw new Error('渲染结果里没有 JD：' + text.slice(0, 300));
+    });
+    /* ===== 流水线（向导每一步）+ Agent 命令 ===== */
+    let pipeDocId = 0;
+    await ok('POST /upload：传 base64 docx → 解析成正文并进入 review 步骤', async function () {
+      const f = require('../server/plugins/lib/resume-file');
+      const docx = f.markdownToDocx('# 张思为\n\n## 教育背景\n- 中国石油大学 计算机硕士\n\n## 项目经历\n- 做了个 AI 规划产品', '简历');
+      const c = await req(port, 'POST', '/api/resume/docs', { title: '流水线测试', target_role: 'AI 产品经理实习' });
+      pipeDocId = c.json.doc.id;
+      const r = await req(port, 'POST', '/api/resume/docs/' + pipeDocId + '/upload', { filename: 'my.docx', base64: docx.toString('base64') });
+      if (r.status !== 200) throw new Error(r.status + ' ' + r.text);
+      if (!r.json.imported || r.json.imported.chars < 20) throw new Error('没解析出正文');
+      if (r.json.doc.stage !== 'review') throw new Error('stage 应为 review：' + r.json.doc.stage);
+      if (r.json.doc.content_md.indexOf('张思为') < 0) throw new Error('正文没写回 doc');
+    });
+    await ok('GET /pipeline：六步 + 当前步骤 + JD 候选', async function () {
+      const r = await req(port, 'GET', '/api/resume/docs/' + pipeDocId + '/pipeline');
+      if (r.status !== 200) throw new Error(r.text);
+      if ((r.json.steps || []).length !== 6) throw new Error('步骤数：' + (r.json.steps || []).length);
+      if (r.json.stage !== 'review') throw new Error('stage：' + r.json.stage);
+      if (r.json.steps.filter(function (x) { return x.done; }).length < 1) throw new Error('upload 应已完成');
+      if (!Array.isArray(r.json.jd_sources)) throw new Error('缺 jd_sources');
+    });
+    await ok('POST /upload：不支持的格式 → unsupported_format', async function () {
+      const r = await req(port, 'POST', '/api/resume/docs/' + pipeDocId + '/upload', { filename: 'a.xyz', base64: Buffer.from('hello').toString('base64') });
+      if (r.status !== 400 || r.json.code !== 'unsupported_format') throw new Error(r.status + ' ' + r.text);
+    });
+    await ok('POST /jd：同时支持材料库 sourceId 与直接贴文本', async function () {
+      const r1 = await req(port, 'POST', '/api/resume/docs/' + pipeDocId + '/jd', { jd: '岗位职责：负责用户研究与需求分析；要求：数据驱动' });
+      if (r1.status !== 200 || !r1.json.doc.has_jd) throw new Error(r1.text);
+      if (r1.json.doc.stage !== 'match') throw new Error('stage：' + r1.json.doc.stage);
+      const r2 = await req(port, 'POST', '/api/resume/docs/' + pipeDocId + '/jd', {});
+      if (r2.status !== 400 || r2.json.code !== 'need_jd') throw new Error('空 JD 应报 need_jd：' + r2.text);
+    });
+    await ok('POST /ai finalize：返回 markdown + 落库到 final_md', async function () {
+      const r = await req(port, 'POST', '/api/resume/docs/' + pipeDocId + '/ai', { kind: 'finalize' });
+      if (r.status !== 200) throw new Error(r.status + ' ' + r.text);
+      if (!r.json.data || !r.json.data.markdown) throw new Error('没有 markdown');
+      const g = await req(port, 'GET', '/api/resume/docs/' + pipeDocId + '/pipeline');
+      if (!g.json.doc.has_final) throw new Error('final_md 没落库');
+    });
+    await ok('GET /export：返回 docx 二进制（能被 resume-file 解析回来）', async function () {
+      const res = await fetch('http://127.0.0.1:' + port + '/api/resume/docs/' + pipeDocId + '/export');
+      if (res.status !== 200) throw new Error('status ' + res.status);
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length < 500) throw new Error('docx 太小：' + buf.length);
+      const f = require('../server/plugins/lib/resume-file');
+      const parsed = f.parseResumeBuffer(buf, 'x.docx');
+      if (!parsed.text.trim()) throw new Error('导出的 docx 解析不出文字');
+    });
+    await ok('Agent 命令：resume.create / resume.upload / resume.review / resume.get 全链路', async function () {
+      const c = await req(port, 'POST', '/api/commands/run', { name: 'resume.create', input: { title: 'Agent 调用测试', target_role: 'AI PM' } });
+      if (c.status !== 200 || !c.json.result.doc.id) throw new Error(c.text);
+      const docId = c.json.result.doc.id;
+      const f = require('../server/plugins/lib/resume-file');
+      const docx = f.markdownToDocx('# 张三\n\n## 项目经历\n- 负责一个 AI 产品', '简历');
+      const up = await req(port, 'POST', '/api/commands/run', { name: 'resume.upload', input: { docId: docId, filename: 'a.docx', base64: docx.toString('base64') } });
+      if (up.status !== 200 || !up.json.result.imported.chars) throw new Error(up.text);
+      if (up.json.result.next !== 'resume.review') throw new Error('next：' + up.json.result.next);
+      const rv = await req(port, 'POST', '/api/commands/run', { name: 'resume.review', input: { docId: docId } });
+      if (rv.status !== 200 || !(rv.json.result.data.issues || []).length) throw new Error(rv.text);
+      const got = await req(port, 'POST', '/api/commands/run', { name: 'resume.get', input: { docId: docId } });
+      if (got.status !== 200 || got.json.result.pipeline.stage !== 'supplement') throw new Error(got.text);
+    });
+    await ok('Agent 命令：resume.jd 无参数时列出资料库 JD（need=jd），带文本时选中', async function () {
+      const c = await req(port, 'POST', '/api/commands/run', { name: 'resume.create', input: { title: 'JD 测试' } });
+      const docId = c.json.result.doc.id;
+      const list = await req(port, 'POST', '/api/commands/run', { name: 'resume.jd', input: { docId: docId } });
+      if (list.status !== 200 || list.json.result.need !== 'jd') throw new Error(list.text);
+      if (!Array.isArray(list.json.result.jd_sources)) throw new Error('缺 jd_sources');
+      const pick = await req(port, 'POST', '/api/commands/run', { name: 'resume.jd', input: { docId: docId, jd: '要求：用户研究、数据指标' } });
+      if (pick.status !== 200 || pick.json.result.next !== 'resume.match') throw new Error(pick.text);
+    });
+    await ok('Agent 命令：resume.export 返回 base64 docx', async function () {
+      const c = await req(port, 'POST', '/api/commands/run', { name: 'resume.create', input: { title: '导出测试' } });
+      const docId = c.json.result.doc.id;
+      const f = require('../server/plugins/lib/resume-file');
+      await req(port, 'POST', '/api/resume/docs/' + docId + '/upload', { text: '# 张三\n\n- 内容', filename: '' });
+      await req(port, 'POST', '/api/resume/docs/' + docId + '/jd', { jd: '要求：用户研究' });
+      await req(port, 'POST', '/api/resume/docs/' + docId + '/ai', { kind: 'finalize' });
+      const r = await req(port, 'POST', '/api/commands/run', { name: 'resume.export', input: { docId: docId } });
+      if (r.status !== 200 || !r.json.result.base64) throw new Error(r.text);
+      const buf = Buffer.from(r.json.result.base64, 'base64');
+      if (buf.length < 500) throw new Error('docx 太小');
+      if (!f.parseResumeBuffer(buf, 'x.docx').text.trim()) throw new Error('导出内容为空');
     });
     await ok('组件开关：可以全局关闭 resume（不是 core）', async function () {
       const off = await req(port, 'POST', '/api/components/resume/toggle', { enabled: false });

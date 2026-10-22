@@ -23,7 +23,7 @@
 const META = (require('../../language/plugin-meta') || {}).resume || {};
 const L = require('../../language/resume-labels');
 
-let db, nowISO, safeParse, sendJSON, readBody, backup, log, aiText, currentModel, getPromptPacks;
+let db, nowISO, safeParse, sendJSON, readBody, backup, log, aiText, currentModel, getPromptPacks, getResumeDomain;
 
 const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS resume_docs (',
@@ -77,6 +77,7 @@ function bind(ctx) {
   log = ctx.log || function () {};
   aiText = ctx.aiText; currentModel = ctx.currentModel;
   getPromptPacks = ctx.getPromptPacks;
+  getResumeDomain = ctx.getResumeDomain;
 }
 
 function clean(v, max) { return String(v == null ? '' : v).slice(0, max == null ? 4000 : max); }
@@ -289,189 +290,147 @@ async function runAI(kind, doc, payload) {
   return { data: norm, text: '', raw: false };
 }
 
-/* ---------- 路由 ---------- */
-function docOf(id) { return db.prepare('SELECT * FROM resume_docs WHERE id = ?').get(num(id)) || null; }
+/* ---------- 路由 ----------
+   领域逻辑全部在 server/resume-domain.js；这里只做 HTTP 适配（参数解析 / 二进制响应）。
+   旧路径（/api/resume/docs/:id/ai + kind=questions|evidence|match|rewrite|audit）继续可用，
+   新流水线（pipeline / upload / jd / finalize / export）走同一套领域方法。 */
+
+function dom() {
+  const d = getResumeDomain && getResumeDomain();
+  if (!d) { const e = new Error('resume_unavailable'); e.code = 'resume_unavailable'; throw e; }
+  return d;
+}
+function fail(res, code, status) { return sendJSON(res, status || 400, { error: code, code: code }); }
+function errCode(e) {
+  const c = String((e && e.code) || '');
+  if (c) return c;
+  const m = String((e && e.message) || '');
+  if (/^[a-z_]+$/.test(m)) return m;
+  return 'internal';
+}
+function sendErr(res, e) {
+  const code = errCode(e);
+  const detail = String((e && e.message) || '');
+  const status = code === 'not_found' ? 404 : code === 'ai_failed' ? 502 : code === 'internal' ? 500 : 400;
+  return sendJSON(res, status, { error: code, code: code, detail: detail === code ? '' : detail.slice(0, 600) });
+}
 
 async function handler(req, res, u) {
   const p = u.pathname;
   const method = req.method || 'GET';
+  const q = new URL(u.href, 'http://x').searchParams;
   let m;
+  const D = dom();
 
-  /* 文档列表 / 新建 */
+  /* 列表 / 新建 */
   if (p === '/api/resume/docs') {
-    if (method === 'GET') {
-      const goalId = Number(new URL(u.href, 'http://x').searchParams.get('goalId') || 0);
-      const rows = goalId
-        ? db.prepare('SELECT * FROM resume_docs WHERE goal_id = ? ORDER BY updated_at DESC').all(goalId)
-        : db.prepare('SELECT * FROM resume_docs ORDER BY updated_at DESC').all();
-      const evCount = {};
-      db.prepare('SELECT doc_id, COUNT(*) AS n FROM resume_evidence GROUP BY doc_id').all().forEach(function (r) { evCount[r.doc_id] = r.n; });
-      return sendJSON(res, 200, { docs: rows.map(function (r) { const o = docOut(r); o.evidence_count = evCount[r.id] || 0; return o; }) });
-    }
+    if (method === 'GET') return sendJSON(res, 200, { docs: D.listDocs({ goalId: q.get('goalId') || 0 }) });
     if (method === 'POST') {
       const body = await readBody(req).catch(function () { return {}; });
-      const title = clean(body.title, 120);
-      if (!title) return fail(res, 'need_title');
-      const t = nowISO();
-      const info = db.prepare('INSERT INTO resume_docs (goal_id, title, target_role, content_md, created_at, updated_at) VALUES (?,?,?,?,?,?)')
-        .run(num(body.goalId || body.goal_id), title, clean(body.target_role || body.targetRole, 120), clean(body.content_md || body.content, 400000), t, t);
-      backup();
-      return sendJSON(res, 200, { ok: true, doc: docOut(docOf(info.lastInsertRowid)) });
+      try { return sendJSON(res, 200, { ok: true, doc: D.createDoc(body) }); } catch (e) { return sendErr(res, e); }
     }
   }
 
-  /* 单个文档 */
+  /* 单文档 */
   m = p.match(/^\/api\/resume\/docs\/(\d+)$/);
   if (m) {
-    const d = docOf(m[1]);
-    if (!d) return fail(res, 'not_found', 404);
-    if (method === 'GET') {
-      return sendJSON(res, 200, {
-        doc: docOut(d),
-        evidence: db.prepare('SELECT * FROM resume_evidence WHERE doc_id = ? ORDER BY id').all(d.id).map(evOut),
-        versions: db.prepare('SELECT id, note, created_at, length(content_md) AS chars FROM resume_versions WHERE doc_id = ? ORDER BY id DESC LIMIT 50').all(d.id),
-        reports: db.prepare('SELECT id, kind, created_at, length(output_md) AS chars FROM resume_reports WHERE doc_id = ? ORDER BY id DESC LIMIT 50').all(d.id)
-      });
-    }
-    if (method === 'PUT' || method === 'PATCH') {
-      const body = await readBody(req).catch(function () { return {}; });
-      const t = nowISO();
-      db.prepare('UPDATE resume_docs SET title = ?, target_role = ?, content_md = ?, updated_at = ? WHERE id = ?')
-        .run(clean(body.title, 120) || d.title, clean(body.target_role || body.targetRole, 120) || d.target_role,
-          body.content_md != null || body.content != null ? clean(body.content_md != null ? body.content_md : body.content, 400000) : d.content_md, t, d.id);
-      backup();
-      return sendJSON(res, 200, { ok: true, doc: docOut(docOf(d.id)) });
-    }
-    if (method === 'DELETE') {
-      db.prepare('DELETE FROM resume_evidence WHERE doc_id = ?').run(d.id);
-      db.prepare('DELETE FROM resume_versions WHERE doc_id = ?').run(d.id);
-      db.prepare('DELETE FROM resume_reports WHERE doc_id = ?').run(d.id);
-      db.prepare('DELETE FROM resume_docs WHERE id = ?').run(d.id);
-      backup();
-      return sendJSON(res, 200, { ok: true });
-    }
-    return fail(res, 'bad_method', 405);
+    const id = Number(m[1]);
+    try {
+      if (method === 'GET') return sendJSON(res, 200, D.getDoc(id));
+      if (method === 'PUT' || method === 'PATCH') { const body = await readBody(req).catch(function () { return {}; }); return sendJSON(res, 200, { ok: true, doc: D.updateDoc(id, body) }); }
+      if (method === 'DELETE') return sendJSON(res, 200, D.deleteDoc(id));
+    } catch (e) { return sendErr(res, e); }
   }
 
-  /* 版本：存快照 / 恢复 */
-  m = p.match(/^\/api\/resume\/docs\/(\d+)\/versions$/);
+  /* 流水线状态（前端向导每步都用它决定下一步） */
+  m = p.match(/^\/api\/resume\/docs\/(\d+)\/pipeline$/);
+  if (m && method === 'GET') {
+    try { return sendJSON(res, 200, D.pipeline(Number(m[1]))); } catch (e) { return sendErr(res, e); }
+  }
+
+  /* 第一步：拖入 / 上传简历文件（JSON 里带 base64；也支持纯文本） */
+  m = p.match(/^\/api\/resume\/docs\/(\d+)\/upload$/);
   if (m && method === 'POST') {
-    const d = docOf(m[1]);
-    if (!d) return fail(res, 'not_found', 404);
     const body = await readBody(req).catch(function () { return {}; });
-    const t = nowISO();
-    db.prepare('INSERT INTO resume_versions (doc_id, note, content_md, created_at) VALUES (?,?,?,?)')
-      .run(d.id, clean(body.note, 120), String(body.content_md != null ? body.content_md : d.content_md), t);
-    backup();
-    return sendJSON(res, 200, { ok: true, version: { id: num(db.prepare('SELECT last_insert_rowid() AS id').get().id), created_at: t } });
-  }
-  m = p.match(/^\/api\/resume\/versions\/(\d+)\/restore$/);
-  if (m && method === 'POST') {
-    const v = db.prepare('SELECT * FROM resume_versions WHERE id = ?').get(num(m[1]));
-    if (!v) return fail(res, 'not_found', 404);
-    const d = docOf(v.doc_id);
-    if (!d) return fail(res, 'not_found', 404);
-    const t = nowISO();
-    db.prepare('INSERT INTO resume_versions (doc_id, note, content_md, created_at) VALUES (?,?,?,?)')
-      .run(d.id, 'before-restore', d.content_md, t);
-    db.prepare('UPDATE resume_docs SET content_md = ?, updated_at = ? WHERE id = ?').run(v.content_md, t, d.id);
-    backup();
-    return sendJSON(res, 200, { ok: true, doc: docOut(docOf(d.id)) });
+    try { return sendJSON(res, 200, D.importFile(Number(m[1]), body)); } catch (e) { return sendErr(res, e); }
   }
 
-  /* 经历证据卡 */
+  /* 第四步：JD 候选（来自目标资料库） / 选中某个 JD */
+  if (p === '/api/resume/jd-sources' && method === 'GET') {
+    return sendJSON(res, 200, { sources: D.listJdSources(Number(q.get('goalId') || 0)) });
+  }
+  m = p.match(/^\/api\/resume\/docs\/(\d+)\/jd$/);
+  if (m && method === 'POST') {
+    const body = await readBody(req).catch(function () { return {}; });
+    try { return sendJSON(res, 200, D.pickJd(Number(m[1]), body)); } catch (e) { return sendErr(res, e); }
+  }
+
+  /* 第二 / 三 / 五 / 六步：AI 动作 */
+  m = p.match(/^\/api\/resume\/docs\/(\d+)\/ai$/);
+  if (m && method === 'POST') {
+    const body = await readBody(req).catch(function () { return {}; });
+    let kind = String(body.kind || '');
+    /* 兼容旧 kind：evidence → answers（把回答整理成证据卡） */
+    if (kind === 'evidence') kind = 'answers';
+    try { return sendJSON(res, 200, await D.runAI(Number(m[1]), kind, body)); } catch (e) { return sendErr(res, e); }
+  }
+
+  /* 证据卡 */
   m = p.match(/^\/api\/resume\/docs\/(\d+)\/evidence$/);
   if (m) {
-    const d = docOf(m[1]);
-    if (!d) return fail(res, 'not_found', 404);
-    if (method === 'GET') {
-      return sendJSON(res, 200, { evidence: db.prepare('SELECT * FROM resume_evidence WHERE doc_id = ? ORDER BY id').all(d.id).map(evOut) });
-    }
-    if (method === 'POST') {
-      const body = await readBody(req).catch(function () { return {}; });
-      const list = Array.isArray(body.cards) ? body.cards : [body];
-      const t = nowISO();
-      const ids = [];
-      for (const c of list.slice(0, 10)) {
-        if (!c || typeof c !== 'object') continue;
-        const info = db.prepare([
-          'INSERT INTO resume_evidence (doc_id, title, org, role, period, situation, task, action, result, scope, metrics, source, tags, created_at, updated_at)',
-          'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
-        ].join(' ')).run(d.id, clean(c.title, 120), clean(c.org, 120), clean(c.role, 120), clean(c.period, 60),
-          clean(c.situation, 1500), clean(c.task, 1500), clean(c.action, 3000), clean(c.result, 2000),
-          clean(c.scope, 400), clean(c.metrics, 400), clean(c.source, 200), JSON.stringify(Array.isArray(c.tags) ? c.tags.slice(0, 6) : []), t, t);
-        ids.push(num(info.lastInsertRowid));
+    try {
+      if (method === 'GET') return sendJSON(res, 200, { evidence: D.listEvidence(Number(m[1])) });
+      if (method === 'POST') {
+        const body = await readBody(req).catch(function () { return {}; });
+        return sendJSON(res, 200, D.addEvidence(Number(m[1]), Array.isArray(body.cards) ? body.cards : [body]));
       }
-      db.prepare('UPDATE resume_docs SET updated_at = ? WHERE id = ?').run(t, d.id);
-      backup();
-      return sendJSON(res, 200, { ok: true, ids: ids, evidence: db.prepare('SELECT * FROM resume_evidence WHERE doc_id = ? ORDER BY id').all(d.id).map(evOut) });
-    }
+    } catch (e) { return sendErr(res, e); }
   }
   m = p.match(/^\/api\/resume\/evidence\/(\d+)$/);
   if (m) {
-    const e = db.prepare('SELECT * FROM resume_evidence WHERE id = ?').get(num(m[1]));
-    if (!e) return fail(res, 'not_found', 404);
-    if (method === 'PUT' || method === 'PATCH') {
-      const body = await readBody(req).catch(function () { return {}; });
-      const t = nowISO();
-      db.prepare([
-        'UPDATE resume_evidence SET title=?, org=?, role=?, period=?, situation=?, task=?, action=?, result=?, scope=?, metrics=?, source=?, tags=?, updated_at=? WHERE id=?'
-      ].join(' ')).run(clean(body.title, 120) || e.title, clean(body.org, 120), clean(body.role, 120), clean(body.period, 60),
-        clean(body.situation, 1500), clean(body.task, 1500), clean(body.action, 3000), clean(body.result, 2000),
-        clean(body.scope, 400), clean(body.metrics, 400), clean(body.source, 200),
-        JSON.stringify(Array.isArray(body.tags) ? body.tags.slice(0, 6) : []), t, e.id);
-      backup();
-      return sendJSON(res, 200, { ok: true, evidence: evOut(db.prepare('SELECT * FROM resume_evidence WHERE id = ?').get(e.id)) });
-    }
-    if (method === 'DELETE') {
-      db.prepare('DELETE FROM resume_evidence WHERE id = ?').run(e.id);
-      backup();
-      return sendJSON(res, 200, { ok: true });
-    }
+    try {
+      if (method === 'PUT' || method === 'PATCH') { const body = await readBody(req).catch(function () { return {}; }); return sendJSON(res, 200, D.updateEvidence(Number(m[1]), body)); }
+      if (method === 'DELETE') return sendJSON(res, 200, D.deleteEvidence(Number(m[1])));
+    } catch (e) { return sendErr(res, e); }
   }
 
-  /* 报告列表 / 详情 / 删除 */
+  /* 版本 */
+  m = p.match(/^\/api\/resume\/docs\/(\d+)\/versions$/);
+  if (m && method === 'POST') {
+    const body = await readBody(req).catch(function () { return {}; });
+    try { return sendJSON(res, 200, D.saveVersion(Number(m[1]), body)); } catch (e) { return sendErr(res, e); }
+  }
+  m = p.match(/^\/api\/resume\/versions\/(\d+)\/restore$/);
+  if (m && method === 'POST') {
+    try { return sendJSON(res, 200, D.restoreVersion(Number(m[1]))); } catch (e) { return sendErr(res, e); }
+  }
+
+  /* 报告 */
   m = p.match(/^\/api\/resume\/docs\/(\d+)\/reports$/);
   if (m && method === 'GET') {
-    const d = docOf(m[1]);
-    if (!d) return fail(res, 'not_found', 404);
-    return sendJSON(res, 200, { reports: db.prepare('SELECT * FROM resume_reports WHERE doc_id = ? ORDER BY id DESC LIMIT 50').all(d.id).map(function (r) { return reportOut(r, false); }) });
+    try { return sendJSON(res, 200, { reports: D.listReports(Number(m[1])) }); } catch (e) { return sendErr(res, e); }
   }
   m = p.match(/^\/api\/resume\/reports\/(\d+)$/);
   if (m) {
-    const r = db.prepare('SELECT * FROM resume_reports WHERE id = ?').get(num(m[1]));
-    if (!r) return fail(res, 'not_found', 404);
-    if (method === 'GET') return sendJSON(res, 200, { report: reportOut(r, true) });
-    if (method === 'DELETE') {
-      db.prepare('DELETE FROM resume_reports WHERE id = ?').run(r.id);
-      backup();
-      return sendJSON(res, 200, { ok: true });
-    }
+    try {
+      if (method === 'GET') return sendJSON(res, 200, { report: D.getReport(Number(m[1])) });
+      if (method === 'DELETE') return sendJSON(res, 200, D.deleteReport(Number(m[1])));
+    } catch (e) { return sendErr(res, e); }
   }
 
-  /* AI：追问 / 整理证据 / JD 匹配 / 改写 / 审计 */
-  m = p.match(/^\/api\/resume\/docs\/(\d+)\/ai$/);
-  if (m && method === 'POST') {
-    const d = docOf(m[1]);
-    if (!d) return fail(res, 'not_found', 404);
-    const body = await readBody(req).catch(function () { return {}; });
-    const kind = clean(body.kind, 20);
-    if (['questions', 'evidence', 'match', 'rewrite', 'audit'].indexOf(kind) < 0) return fail(res, 'bad_kind');
-    if (kind === 'match' || kind === 'rewrite') {
-      if (!clean(body.jd, 8000)) return fail(res, 'need_jd');
-    }
-    if (kind === 'evidence' && !clean(body.answers, 12000)) return fail(res, 'need_answers');
-    let out;
+  /* 第六步：导出 .docx（二进制） */
+  m = p.match(/^\/api\/resume\/docs\/(\d+)\/export$/);
+  if (m && (method === 'GET' || method === 'POST')) {
     try {
-      out = await runAI(kind, d, body);
-    } catch (e) {
-      return sendJSON(res, 502, { error: 'ai_failed', code: 'ai_failed', detail: clean(e && e.message, 600) });
-    }
-    const t = nowISO();
-    const info = db.prepare('INSERT INTO resume_reports (doc_id, kind, jd_text, output_json, output_md, created_at) VALUES (?,?,?,?,?,?)')
-      .run(d.id, kind, clean(body.jd, 8000), JSON.stringify(out.data || {}), out.text || '', t);
-    backup();
-    return sendJSON(res, 200, { ok: true, kind: kind, data: out.data, text: out.text, raw: !!out.raw, reportId: num(info.lastInsertRowid), created_at: t });
+      const r = D.exportDocx(Number(m[1]), {});
+      res.writeHead(200, {
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'Content-Disposition': 'attachment; filename="resume.docx"; filename*=UTF-8\'\'' + encodeURIComponent(r.filename),
+        'Content-Length': r.buffer.length,
+        'Cache-Control': 'no-cache'
+      });
+      return res.end(r.buffer);
+    } catch (e) { return sendErr(res, e); }
   }
 
   return false;
@@ -483,7 +442,7 @@ module.exports = {
   icon: META.icon || '📄',
   category: META.category || 'extra',
   desc: META.desc || '',
-  version: '1.0.0',
+  version: '2.0.0',
   author: 'SiErXing',
   order: 60,
   goalToggle: false,
@@ -492,17 +451,13 @@ module.exports = {
 
   init(ctx) {
     bind(ctx);
-    db.exec(SCHEMA);
+    /* 建表 + 老库补列都由领域层负责（组件初始化早于领域？不，领域在 server.js 里先建，
+       所以这里只是兜底 ensureSchema，幂等） */
+    try { const d = getResumeDomain && getResumeDomain(); if (d && d.ensureSchema) d.ensureSchema(); } catch (e) {}
   },
 
   onGoalDelete(goalId, ctx) {
-    const rows = db.prepare('SELECT id FROM resume_docs WHERE goal_id = ?').all(num(goalId));
-    for (const r of rows) {
-      db.prepare('DELETE FROM resume_evidence WHERE doc_id = ?').run(r.id);
-      db.prepare('DELETE FROM resume_versions WHERE doc_id = ?').run(r.id);
-      db.prepare('DELETE FROM resume_reports WHERE doc_id = ?').run(r.id);
-    }
-    db.prepare('DELETE FROM resume_docs WHERE goal_id = ?').run(num(goalId));
+    try { const d = getResumeDomain && getResumeDomain(); if (d && d.onGoalDelete) d.onGoalDelete(goalId); } catch (e) {}
   },
 
   api: [
@@ -511,8 +466,5 @@ module.exports = {
     { method: 'PUT', pattern: /^\/api\/resume\//, handler: handler },
     { method: 'PATCH', pattern: /^\/api\/resume\//, handler: handler },
     { method: 'DELETE', pattern: /^\/api\/resume\//, handler: handler }
-  ],
-
-  /* 纯函数（给回归测试用） */
-  __test: { firstJSON: firstJSON, normalize: normalize, evidenceBlock: evidenceBlock, fakeAI: fakeAI, schema: SCHEMA }
+  ]
 };

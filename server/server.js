@@ -19,6 +19,8 @@ const createSync = require('./sync');
 const { createBackupDomain } = require('./domains/backups');
 const { createVersionDomain } = require('./domains/versions');
 const { createPlanDomain } = require('./commands/plan-ops');
+const { createResumeDomain } = require('./resume-domain');
+const { createNodeIdentity } = require('./node-identity');
 const { createGoalDomain } = require('./domains/goals');
 const { createSourceDomain } = require('./domains/sources');
 const { createConditionsDomain } = require('./conditions');
@@ -738,7 +740,9 @@ function pluginCtx() {
     getGoal, sourcesOf, aiText, aiTextFiles, currentModel, currentVisionModel, tasks,
     conditions: conditionsDomain,
     /* 提示词注册表（启动顺序在 reloadPlugins 之后才创建，所以用惰性 getter；组件在请求期才调用） */
-    getPromptPacks: () => promptPacks
+    getPromptPacks: () => promptPacks,
+    /* 简历工坊领域（同样惰性：resumeDomain 在 reloadPlugins 之后才创建） */
+    getResumeDomain: () => resumeDomain
   };
 }
 (function migrate() {
@@ -1140,6 +1144,7 @@ const commandBus = require('./commands')({
   startSourceDigest: startSourceDigest,
   startGoalPlan: startGoalPlan,
   getPlanDomain: function () { return planDomain; },
+  getResumeDomain: function () { return resumeDomain; },
   version: require('../package.json').version
 });
 function normalizeSources(arr) {
@@ -3114,9 +3119,24 @@ const templateReport = versionDomain.templateReport;
 const buildReportPrompt = versionDomain.buildReportPrompt;
 const finishVersion = versionDomain.finishVersion;
 /* 方案领域：同一目标多份规划。goal_versions 的 manual 行 = 方案，nodes = 当前方案。 */
+/* 节点身份延续：切方案 / 恢复版本会整棵重建 nodes（id 全换），
+   教程、节点笔记、学习记录、代码目录都按 node_id 挂，必须换树前后搬一次，
+   否则它们全变成孤儿 —— 用户看到的就是「切了方案，教程全没了」（2026-10-21 真实翻车）。 */
+const nodeIdentity = createNodeIdentity({ db: db, DATA_DIR: DATA_DIR, safeParse: safeParse, log: console.log });
 const planDomain = createPlanDomain({
   db: db, nowISO: nowISO, safeParse: safeParse, insertNode: insertNode,
-  beginVersion: beginVersion, backup: backup, getGoal: getGoal
+  beginVersion: beginVersion, backup: backup, getGoal: getGoal, repair: nodeIdentity
+});
+
+/* 简历工坊领域：一份简历 = 上传 → 审查 → 补充信息 → 选 JD → 匹配 → 生成终版 的流水线。
+   组件 API 与命令总线（Agent 逐步调用）共用这一套实现，避免两处逻辑漂移。 */
+const resumeDomain = createResumeDomain({
+  db: db, nowISO: nowISO, safeParse: safeParse, backup: backup, log: (...a) => console.log(...a),
+  aiText: function () { return aiText.apply(null, arguments); },
+  currentModel: function () { return currentModel(); },
+  getPromptPacks: function () { return promptPacks; },
+  getGoal: getGoal,
+  sourcesOf: sourcesOf
 });
 
 
@@ -3174,9 +3194,12 @@ function saveSkeleton(goalId, plan) {
   /* 先把规划里的「达成条件」写库（只替换 source='plan' 的，手动条件保留），
      拿到 key → id 的解析器，再把每个阶段/小目标挂上去。 */
   const condInfo = conditionsDomain.saveFromPlan(goalId, plan);
+  /* 重新生成/调整骨架同样是「整棵删掉再重插」：先记下旧节点身份，重插后把教程、
+     笔记、学习记录、代码目录按标题路径搬回来（跟切方案同一套机制）。 */
+  const oldIndex = nodeIdentity.index(goalId);
+  nodeIdentity.begin(goalId, oldIndex);
   const old = db.prepare('SELECT id FROM nodes WHERE goal_id = ?').all(goalId).map(x => x.id);
   for (const id of old) db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
-  try { db.prepare('DELETE FROM node_workspaces WHERE goal_id = ?').run(goalId); } catch (e) {}
   const summary = String(plan.summary || '').slice(0, 800);
   // 骨架已定：旧问卷作废（clarify 答案保留在 clarify_answers 里），避免目标页 sticky 显示过期问卷
   db.prepare("UPDATE goals SET summary = ?, status = ?, error = ?, clarify = '', clarify_stage = '', updated_at = ? WHERE id = ?").run(summary, 'planning', '', nowISO(), goalId);
@@ -3193,6 +3216,8 @@ function saveSkeleton(goalId, plan) {
       gi++;
     }
   });
+  try { nodeIdentity.rebind(goalId, []); } catch (e) { console.error('[plan] 骨架重建后迁移节点身份失败:', e.message); }
+  try { nodeIdentity.end(); } catch (e) {}
   return stageIds;
 }
 function saveStageTasks(goalId, stageId, goalsOut) {

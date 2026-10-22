@@ -125,7 +125,42 @@ const PACKS = {
     template: template('resume.audit'),
     sampleCtx: { targetRole: 'AI 产品经理实习', resume: '## 简历\n…', evidence: '【证据 1】…' },
     builtinRender: function (ctx) { return fill(template('resume.audit'), ctx); }
+
+  },
+  'resume.review': {
+    id: 'resume.review',
+    title: '简历 · 审查问题清单',
+    description: '先审查待修改简历：按定位/证据/指标/关键词/结构/时态出问题清单 + 需要用户补充的信息。',
+    editable: true,
+    placeholders: ['targetRole', 'resume', 'evidence'],
+    mustInclude: ['JSON', '"issues"'],
+    template: template('resume.review'),
+    sampleCtx: { targetRole: 'AI 产品经理实习', resume: '## 项目经历', evidence: '【证据 1】…' },
+    builtinRender: function (ctx) { return fill(template('resume.review'), ctx); }
+  },
+  'resume.answers': {
+    id: 'resume.answers',
+    title: '简历 · 回答转证据卡',
+    description: '把用户对追问的口语回答整理成结构化经历证据卡（事实/估计/解释分开）。',
+    editable: true,
+    placeholders: ['targetRole', 'answers'],
+    mustInclude: ['JSON', '"cards"'],
+    template: template('resume.answers'),
+    sampleCtx: { targetRole: 'AI 产品经理实习', answers: '我在项目里负责访谈…' },
+    builtinRender: function (ctx) { return fill(template('resume.answers'), ctx); }
+  },
+  'resume.finalize': {
+    id: 'resume.finalize',
+    title: '简历 · 生成终版（改写 + 排版）',
+    description: '按 JD 改写并排版成可直接投递的终版 Markdown 简历；不新增事实、指标必须有口径。',
+    editable: true,
+    placeholders: ['targetRole', 'jd', 'resume', 'evidence', 'extra'],
+    mustInclude: ['JSON', '"markdown"', '不得新增事实'],
+    template: template('resume.finalize'),
+    sampleCtx: { targetRole: 'AI 产品经理实习', jd: '岗位职责：…', resume: '## 简历\n…', evidence: '【证据 1】…', extra: 'review summary' },
+    builtinRender: function (ctx) { return fill(template('resume.finalize'), ctx); }
   }
 };
+
 
 module.exports = PACKS;

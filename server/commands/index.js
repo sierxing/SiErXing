@@ -39,6 +39,7 @@ module.exports = function createCommands(ctx) {
   const uninstallComponent = ctx && ctx.uninstallComponent;
   const recordGoalChange = ctx && ctx.recordGoalChange;
   const getPlanDomain = ctx && ctx.getPlanDomain;
+  const getResumeDomain = ctx && ctx.getResumeDomain;
   const onSourceChanged = ctx && ctx.onSourceChanged;
   const startTutorialGeneration = ctx && ctx.startTutorialGeneration;
   const startTutorialEdit = ctx && ctx.startTutorialEdit;
@@ -1145,6 +1146,168 @@ module.exports = function createCommands(ctx) {
       db.prepare('UPDATE goals SET updated_at = ? WHERE id = ?').run(nowISO(), row.goal_id);
       backup();
       return { ok: true, tutorialId: tid, title: row.title };
+    }
+  });
+
+  /* ===== 简历工坊（resume 组件）：Agent 逐步调用同一套领域方法 =====
+     Agent 典型用法（每一步都能单独调用，不用一次跑完）：
+       resume.docs {goalId}                       —— 看这个目标下已有几份简历、到哪一步
+       resume.create {goalId,title,target_role}   —— 建一份新简历
+       resume.upload {docId,filename,base64}      —— 直接传用户发来的简历文件（docx/pdf/txt）
+       resume.review {docId}                      —— AI 审查，返回问题清单（不改简历）
+       resume.questions {docId}                   —— AI 追问缺哪些信息
+       resume.answer {docId,answers:[{id,q,a}]}   —— 把用户回答整理成证据卡
+       resume.jd {docId,sourceId?|jd?}            —— 选资料库里已有的 JD，或直接给 JD 文本
+       resume.match {docId}                       —— JD-证据匹配矩阵
+       resume.finalize {docId}                    —— 生成改写+排版好的终版简历
+       resume.get {docId}                         —— 读当前状态与终版正文
+     */
+  bus.define({
+    name: 'resume.docs',
+    title: '简历工坊 · 列表',
+    description: '列出简历文档（可按目标过滤），返回每份的流水线步骤与进度（read）。',
+    category: 'resume', layer: 'content', risk: 'read',
+    inputSchema: { type: 'object', properties: { goalId: { type: 'integer' } } }, output: 'json',
+    handler: function (input) {
+      const d = getResumeDomain && getResumeDomain();
+      if (!d) fail('not_found', '简历工坊未启用');
+      const docs = d.listDocs({ goalId: (input && input.goalId) || 0 });
+      const pipelines = docs.slice(0, 30).map(function (x) {
+        try { const p = d.pipeline(x.id); return { id: x.id, title: x.title, stage: p.stage, next_stage: p.next_stage, steps: p.steps, chars: x.chars, evidence_count: p.evidence_count }; }
+        catch (e) { return { id: x.id, title: x.title, stage: x.stage || 'upload' }; }
+      });
+      return { ok: true, docs: docs, pipelines: pipelines, count: docs.length };
+    }
+  });
+
+  bus.define({
+    name: 'resume.create',
+    title: '简历工坊 · 新建简历',
+    description: '新建一份简历文档（write）。之后用 resume.upload 传文件、resume.review 审查。',
+    category: 'resume', layer: 'content', risk: 'write',
+    inputSchema: { type: 'object', required: ['title'], properties: { goalId: { type: 'integer' }, title: { type: 'string' }, target_role: { type: 'string' }, content_md: { type: 'string' } } }, output: 'json',
+    handler: function (input) {
+      const d = getResumeDomain && getResumeDomain();
+      if (!d) fail('not_found', '简历工坊未启用');
+      return { ok: true, doc: d.createDoc(input || {}) };
+    }
+  });
+
+  bus.define({
+    name: 'resume.upload',
+    title: '简历工坊 · 上传简历文件',
+    description: '把用户发来的简历文件（.docx / .pdf / .txt / .md，base64）解析成正文并进入审查步骤（write）。Agent 收到用户附件后直接调它，用户不用自己点界面。',
+    category: 'resume', layer: 'content', risk: 'write',
+    inputSchema: { type: 'object', required: ['docId'], properties: { docId: { type: 'integer' }, filename: { type: 'string' }, base64: { type: 'string' }, text: { type: 'string' } } }, output: 'json',
+    handler: function (input) {
+      const d = getResumeDomain && getResumeDomain();
+      if (!d) fail('not_found', '简历工坊未启用');
+      const r = d.importFile(num((input && input.docId), 'docId'), input || {});
+      return { ok: true, imported: r.imported, doc: r.doc, next: 'resume.review' };
+    }
+  });
+
+  /* 审查 / 追问 / 回答 / 匹配 / 改写 / 终版 / 审计：都是「跑一次 AI + 落库」 */
+  const AI_CMDS = [
+    { name: 'resume.review', title: '简历工坊 · 审查简历', desc: 'AI 审查待修改简历，返回问题清单与需要补充的信息（不改正文）。', risk: 'write', props: ['docId'], next: 'resume.questions' },
+    { name: 'resume.questions', title: '简历工坊 · 生成追问', desc: 'AI 找出简历的信息缺口并生成追问，等用户回答后调 resume.answer。', risk: 'write', props: ['docId'], next: 'resume.answer' },
+    { name: 'resume.match', title: '简历工坊 · JD 匹配', desc: '把 JD 拆成要求并与证据卡做匹配矩阵，给出证据空白与补强建议。', risk: 'write', props: ['docId'], next: 'resume.finalize' },
+    { name: 'resume.finalize', title: '简历工坊 · 生成终版', desc: '按 JD 改写并排版成可直接投递的终版简历（Markdown），之后可导出 docx。', risk: 'write', props: ['docId'], next: 'resume.export' },
+    { name: 'resume.audit', title: '简历工坊 · 证据审计', desc: '把简历拆成原子主张，逐条给证据状态并标出夸大模式。', risk: 'write', props: ['docId'], next: '' }
+  ];
+  AI_CMDS.forEach(function (c) {
+    bus.define({
+      name: c.name,
+      title: c.title,
+      description: c.desc + '（write；AI 调用，可能耗时数十秒）',
+      category: 'resume', layer: 'content', risk: c.risk,
+      inputSchema: { type: 'object', required: ['docId'], properties: { docId: { type: 'integer' }, jd: { type: 'string' }, extra: { type: 'string' } } }, output: 'json',
+      async: true,
+      handler: async function (input) {
+        const d = getResumeDomain && getResumeDomain();
+        if (!d) fail('not_found', '简历工坊未启用');
+        const r = await d.runAI(num((input && input.docId), 'docId'), c.name.split('.')[1], input || {});
+        return { ok: true, kind: r.kind, data: r.data, reportId: r.reportId, doc: r.doc, next: c.next };
+      }
+    });
+  });
+
+  bus.define({
+    name: 'resume.answer',
+    title: '简历工坊 · 回答转证据卡',
+    description: '把用户对追问的回答整理成结构化经历证据卡并入库（write）。answers 传 [{id,q,a}] 或纯文本。',
+    category: 'resume', layer: 'content', risk: 'write',
+    inputSchema: { type: 'object', required: ['docId'], properties: { docId: { type: 'integer' }, answers: { type: 'array' } } }, output: 'json',
+    async: true,
+    handler: async function (input) {
+      const d = getResumeDomain && getResumeDomain();
+      if (!d) fail('not_found', '简历工坊未启用');
+      const docId = num(input.docId, 'docId');
+      const answers = Array.isArray(input.answers) ? input.answers : [];
+      const text = answers.map(function (x, i) {
+        if (typeof x === 'string') return x;
+        return 'Q' + (i + 1) + '：' + String(x.q || x.question || '') + '\nA' + (i + 1) + '：' + String(x.a || x.answer || '');
+      }).join('\n\n');
+      const r = await d.runAI(docId, 'answers', { answers: text });
+      const cards = (r.data && r.data.cards) || [];
+      let added = null;
+      if (cards.length) { try { added = d.addEvidence(docId, cards); } catch (e) {} }
+      return { ok: true, cards: cards, evidence: (added && added.evidence) || [], reportId: r.reportId, next: 'resume.jd' };
+    }
+  });
+
+  bus.define({
+    name: 'resume.jd',
+    title: '简历工坊 · 选择岗位 JD',
+    description: '选目标资料库里已有的 JD（sourceId）或直接给 JD 文本（jd），避免用户重复上传（write）。不传参数时列出可选的 JD。',
+    category: 'resume', layer: 'content', risk: 'write',
+    inputSchema: { type: 'object', required: ['docId'], properties: { docId: { type: 'integer' }, sourceId: { type: 'integer' }, jd: { type: 'string' }, goalId: { type: 'integer' } } }, output: 'json',
+    handler: function (input) {
+      const d = getResumeDomain && getResumeDomain();
+      if (!d) fail('not_found', '简历工坊未启用');
+      if (input && !input.sourceId && !input.jd) {
+        const cur = d.getDoc(num(input.docId, 'docId'));
+        return { ok: true, need: 'jd', jd_sources: d.listJdSources((input && input.goalId) || (cur && cur.doc && cur.doc.goal_id) || 0), next: 'resume.match' };
+      }
+      const r = d.pickJd(num(input.docId, 'docId'), input || {});
+      return { ok: true, doc: r.doc, next: 'resume.match' };
+    }
+  });
+
+  bus.define({
+    name: 'resume.get',
+    title: '简历工坊 · 读简历状态',
+    description: '读一份简历的流水线状态、问题清单、证据卡、匹配矩阵与终版正文（read）。',
+    category: 'resume', layer: 'content', risk: 'read',
+    inputSchema: { type: 'object', required: ['docId'], properties: { docId: { type: 'integer' }, withBody: { type: 'boolean' } } }, output: 'json',
+    handler: function (input) {
+      const d = getResumeDomain && getResumeDomain();
+      if (!d) fail('not_found', '简历工坊未启用');
+      const docId = num(input.docId, 'docId');
+      const p = d.pipeline(docId);
+      const g = d.getDoc(docId);
+      const out = { ok: true, pipeline: p };
+      if (input && input.withBody !== false) {
+        out.doc = g.doc;
+        out.evidence = g.evidence;
+        out.versions = g.versions;
+        out.reports = g.reports;
+      }
+      return out;
+    }
+  });
+
+  bus.define({
+    name: 'resume.export',
+    title: '简历工坊 · 导出 docx',
+    description: '把终版简历导出成 .docx（base64 返回给 Agent，由 Agent 交给用户；write 但只读正文不写库）。',
+    category: 'resume', layer: 'content', risk: 'read',
+    inputSchema: { type: 'object', required: ['docId'], properties: { docId: { type: 'integer' } } }, output: 'json',
+    handler: function (input) {
+      const d = getResumeDomain && getResumeDomain();
+      if (!d) fail('not_found', '简历工坊未启用');
+      const r = d.exportDocx(num(input.docId, 'docId'), {});
+      return { ok: true, filename: r.filename, bytes: r.buffer.length, base64: r.buffer.toString('base64'), mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
     }
   });
 

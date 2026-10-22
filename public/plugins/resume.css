@@ -1,41 +1,30 @@
-/* 简历工坊（resume 扩展组件）：右下角入口 + 右侧抽屉面板 */
-.resumeFab{
-  position:fixed; right:22px; bottom:92px; z-index:120;
-  width:52px; height:52px; border-radius:50%;
-  border:1px solid var(--accent-border); background:var(--card); color:var(--text);
-  font-size:22px; cursor:pointer; box-shadow:var(--shadow-lg);
-  display:flex; align-items:center; justify-content:center; transition:.18s;
+/* 简历工坊（resume 扩展组件）—— 整页 #/g/:id/resume
+   只写组件自己的样式；通用样式（chip / bar / emptyBox / pageHead / mapTitle）复用全局。 */
+.rsPage{max-width:980px; margin:0 auto; padding:0 4px 80px;}
+.rsPage .pageHead{flex-wrap:wrap; row-gap:8px;}
+.rsIntro{position:relative; background:var(--soft); border:1px solid var(--border); border-left:3px solid var(--accent-border); border-radius:10px; padding:10px 14px; font-size:13px; color:var(--muted); line-height:1.7; margin-bottom:14px;}
+.rsIntroTip{color:var(--accent);}
+/* 简历库切换条：一份简历一个 chip，当前那份高亮 */
+.rsDocBar{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:0 0 12px;}
+.rsDocBarLbl{font-size:12px; color:var(--muted); font-weight:700; flex:none;}
+.rsDocChip{
+  border:1px solid var(--border); background:var(--card); color:var(--muted);
+  border-radius:999px; padding:4px 12px; font-size:12.5px; font-family:inherit; cursor:pointer;
+  max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; transition:.15s;
 }
-.resumeFab:hover{transform:translateY(-2px) scale(1.05); border-color:var(--accent);}
-body.rsLock{overflow:hidden;}
-.rsMask{
-  position:fixed; inset:0; z-index:180; background:rgba(10,12,20,.42);
-  opacity:0; pointer-events:none; transition:opacity .18s ease;
-}
-.rsMask.open{opacity:1; pointer-events:auto;}
-.resumePanel{
-  position:fixed; top:0; right:0; bottom:0; z-index:181;
-  width:min(860px, 96vw); background:var(--card); color:var(--text);
-  border-left:1.5px solid var(--border); box-shadow:var(--shadow-lg);
-  display:flex; flex-direction:column;
-  transform:translateX(102%); transition:transform .22s ease;
-}
-.resumePanel.open{transform:translateX(0);}
-.rsHead{display:flex; align-items:center; gap:8px; padding:11px 14px; border-bottom:1px solid var(--border); flex:none;}
-.rsLogo{font-size:18px;}
-.rsTitle{font-weight:800; font-size:15px;}
-.rsSub{font-size:12px; color:var(--muted); max-width:210px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
-.rsGrow{flex:1;}
-.rsTabs{display:flex; gap:4px; padding:8px 12px 0; border-bottom:1px solid var(--border); flex:none; flex-wrap:wrap;}
+.rsDocChip:hover{border-color:var(--accent-border); color:var(--accent);}
+.rsDocChip.on{background:var(--accent-soft); border-color:var(--accent-border); color:var(--accent); font-weight:700;}
+/* 页签 */
+.rsTabs{display:flex; gap:4px; padding:0; border-bottom:1px solid var(--border); flex:none; flex-wrap:wrap; margin-bottom:14px;}
 .rsTab{
   border:1px solid transparent; border-bottom:none; background:transparent; color:var(--muted);
-  font-size:12.8px; padding:7px 12px; border-radius:9px 9px 0 0; cursor:pointer; font-family:inherit;
+  font-size:12.8px; padding:8px 13px; border-radius:9px 9px 0 0; cursor:pointer; font-family:inherit;
 }
 .rsTab:hover{color:var(--text); background:var(--soft);}
 .rsTab.active{color:var(--accent); background:var(--accent-soft); border-color:var(--accent-border); font-weight:700;}
-.rsBody{flex:1; min-height:0; overflow:auto; padding:12px 14px 18px;}
+.rsBody{min-height:320px;}
 .rsFoot{
-  flex:none; border-top:1px solid var(--border); padding:6px 14px; font-size:11px; color:var(--muted);
+  margin-top:18px; border-top:1px solid var(--border); padding:8px 2px 0; font-size:11px; color:var(--muted);
   display:flex; gap:8px; align-items:center; flex-wrap:wrap;
 }
 .rsFoot a{color:var(--accent); text-decoration:none; font-size:11px;}
@@ -122,7 +111,34 @@ body.rsLock{overflow:hidden;}
 .rsMd pre{background:var(--code-bg); border:1px solid var(--code-border); border-radius:9px; padding:8px; overflow:auto;}
 .rsMd code{background:var(--code-bg); border-radius:4px; padding:1px 4px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px;}
 @media (max-width:720px){
-  .resumePanel{width:100vw;}
   .rsLbl{width:110px;}
   .rsTextarea{min-height:220px;}
 }
+
+
+/* ===== 向导版（一步一步）：步骤条 / 拖放区 / 问题清单 ===== */
+.rsSteps{display:flex; align-items:center; gap:2px; padding:8px 12px; border-bottom:1px solid var(--border); flex:none; overflow-x:auto;}
+.rsStep{display:flex; align-items:center; gap:5px; padding:5px 9px; border-radius:9px; cursor:pointer; flex:none; font-size:12.3px; color:var(--muted); border:1px solid transparent;}
+.rsStep:hover{background:var(--soft); color:var(--text);}
+.rsStep.cur{background:var(--accent-soft); border-color:var(--accent-border); color:var(--accent); font-weight:700;}
+.rsStep.done{color:var(--ok);}
+.rsStepIcon{font-size:13px;}
+.rsStepLine{flex:none; width:10px; height:1px; background:var(--border);}
+.rsNav{display:flex; justify-content:space-between; gap:8px; margin-bottom:10px;}
+.rsDrop{border:2px dashed var(--border); border-radius:14px; padding:26px 16px; text-align:center; cursor:pointer; transition:.16s; background:var(--bg);}
+.rsDrop:hover,.rsDrop.on{border-color:var(--accent); background:var(--accent-soft);}
+.rsDropIcon{font-size:30px; line-height:1;}
+.rsDropTitle{font-size:14px; font-weight:700; margin-top:8px;}
+.rsDropHint{font-size:12px; color:var(--muted); margin-top:4px;}
+.rsFold{margin:10px 0; border:1px solid var(--border); border-radius:11px; padding:8px 11px; background:var(--bg);}
+.rsFold>summary{cursor:pointer; font-size:12.8px; font-weight:700; color:var(--muted);}
+.rsFold>summary:hover{color:var(--text);}
+.rsFold[open]>summary{margin-bottom:8px;}
+.rsIssue{border:1px solid var(--border); border-radius:11px; padding:9px 11px; background:var(--card); border-left-width:3px;}
+.rsIssue.high{border-left-color:var(--danger);}
+.rsIssue.medium{border-left-color:var(--warn);}
+.rsIssue.low{border-left-color:var(--muted);}
+.rsIssueH{display:flex; gap:8px; align-items:center; margin-bottom:3px;}
+.rsIssueWhere{font-size:11.8px; color:var(--muted); background:var(--soft); border-radius:6px; padding:2px 7px; display:inline-block; margin:2px 0; word-break:break-word;}
+.rsIssueT{font-size:13px; line-height:1.7; margin:3px 0;}
+.rsIssueFix{font-size:12.5px; color:var(--ok); line-height:1.65;}
