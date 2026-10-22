@@ -171,6 +171,11 @@ async function main() {
     const promptSeen = seenPrompts.join('\n');
     ok('请求带上了「创造模式」提示词', promptSeen.indexOf('创造模式') >= 0, promptSeen.slice(-300));
     ok('提示词里有可覆盖页面表 / 输出协议 / 安全红线', promptSeen.indexOf('可覆盖的页面') >= 0 && promptSeen.indexOf('create 代码块') >= 0 && (promptSeen.indexOf('不许联网') >= 0 || promptSeen.indexOf('不允许联网') >= 0));
+    /* 创造模式以前只看得到扩展点说明书，看不到线上实现 —— 现在必须带真实上下文 */
+    ok('提示词带上了被改页面的现有实现（源码或明确的体积上限说明）', promptSeen.indexOf('被改页面的现有实现') >= 0, promptSeen.slice(-600));
+    ok('提示词带上了当前页面 DOM 结构（真实选择器）', promptSeen.indexOf('DOM 结构') >= 0 && promptSeen.indexOf('#app') >= 0, promptSeen.slice(-400));
+    ok('提示词带上了组件清单', promptSeen.indexOf('组件清单') >= 0, promptSeen.slice(-400));
+    ok('提示词说明了「同 id 覆盖 + 可撤销安装」', promptSeen.indexOf('同 id') >= 0 && promptSeen.indexOf('撤销安装') >= 0, promptSeen.slice(-600));
 
     /* 查看代码 */
     await evalIn("(function(){var c=document.querySelector('#adMsgs .chCreate'); c.querySelector('[data-create-act=\"code\"]').click(); return 1;})()");
@@ -202,18 +207,19 @@ async function main() {
     await evalIn("document.querySelectorAll('#guideMask,#pomoBadge,#pomoPanel').forEach(x=>x.remove())");
     await evalIn("if(!document.querySelector('#aiDrawer.open')) { try { aiToggleLegacy(true); } catch(e) {} }");
     await sleep(1200);
-    const afterReload = await evalIn("((document.querySelector('#adMsgs .chCreate')||{}).innerText||'')");
-    ok('刷新/重开对话后「已生成」卡片还在（不会丢）', afterReload.indexOf('暖色首页') >= 0 && afterReload.indexOf('已生成') >= 0, afterReload.slice(0, 160));
-
-    /* 刷新后卡片是「已生成」，再点一次安装：服务端说已安装过，前端应切成「已安装」而不是弹失败 */
-    await evalIn("(function(){var c=document.querySelector('#adMsgs .chCreate'); c.querySelector('[data-create-act=\"install\"]').click(); return 1;})()");
-    let reinstalled = '';
-    for (let i = 0; i < 30; i++) {
-      await sleep(300);
-      reinstalled = await evalIn("((document.querySelector('#adMsgs .chCreate')||{}).innerText||'')");
-      if (reinstalled.indexOf('已安装') >= 0) break;
+    let afterReload = '';
+    let afterReloadBtns = [];
+    for (let i = 0; i < 40; i++) {
+      await sleep(400);
+      const st = await evalIn("JSON.stringify({t:((document.querySelector('#adMsgs .chCreate')||{}).innerText||''),b:Array.from(document.querySelectorAll('#adMsgs .chCreate [data-create-act]')).map(x=>x.getAttribute('data-create-act'))})");
+      const parsed = JSON.parse(st || '{}');
+      afterReload = parsed.t || '';
+      afterReloadBtns = parsed.b || [];
+      if (afterReload.indexOf('已安装') >= 0) break;
     }
-    ok('刷新后再点「安装」不会报错，直接显示已安装', reinstalled.indexOf('已安装') >= 0 && reinstalled.indexOf('撤销安装') >= 0, reinstalled.slice(0, 140));
+    /* 卡片状态要跟服务端对账：刷新后不能再显示「已生成/安装」，否则用户会重复安装、也找不到撤销入口 */
+    ok('刷新/重开对话后卡片自动恢复成「已安装」（状态来自 /api/create/changes/:id/status）', afterReload.indexOf('暖色首页') >= 0 && afterReload.indexOf('已安装') >= 0, afterReload.slice(0, 160));
+    ok('刷新后的卡片直接有「撤销安装」按钮（不用再点安装）', afterReloadBtns.indexOf('rollback') >= 0 && afterReloadBtns.indexOf('install') < 0, JSON.stringify(afterReloadBtns));
 
     /* 撤销（用刷新后卡片上的按钮，验证按钮链路在恢复后同样可用） */
     await evalIn("(function(){var c=document.querySelector('#adMsgs .chCreate'); c.querySelector('[data-create-act=\"rollback\"]').click(); return 1;})()");

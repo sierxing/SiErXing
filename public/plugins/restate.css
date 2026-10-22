@@ -102,24 +102,45 @@
    以前还有个「📋 解析反馈」右栏，内容和对话重复，已去掉。
    ⚠️ 左栏用 align-self:start —— 之前跟着中栏一起拉满高度，
       内容只占上面 55%，下面一大片空白，看着像没加载完。 */
-.rsTalkPage{max-width:min(1340px,100%);}
-body:has(.rsTalkPage) .wrap{max-width:1400px;}
+.rsTalkPage{max-width:min(1440px,100%);}
+/* ⚠️ 必须压过 ui-skin.css 的 `#app .jdPage{max-width:var(--sx-page-max)}`（900px）：
+   那条选择器带 id，单类 .rsTalkPage 根本盖不住 —— 对话页会被锁在 900px 里两边都窄，
+   用户反馈「初始状态也太窄」主要就是它 + 左栏 320。这里用同带 id 且更具体的选择器。 */
+#app .rsTalkPage.rsPage{max-width:min(1440px,100%);}
+/* 外层容器 #app.wrap 默认 1080（ui-skin.css 的 #app.wrap 带 id，单类 .wrap 盖不住）——
+   对话页要更宽，必须用同样带 id 的选择器。 */
+body:has(.rsTalkPage) #app.wrap,body:has(.rsTalkPage) .wrap{max-width:1480px;}
 .rsPanes{
   display:grid; gap:0; align-items:start;
   /* 左栏宽度由 --rs-col-q 给，可拖动调整（存 localStorage）；中栏吃掉剩下的 */
-  grid-template-columns:var(--rs-col-q,320px) 6px minmax(0,1fr);
+  grid-template-columns:var(--rs-col-q,380px) 12px minmax(0,1fr);
   min-height:430px;
 }
 .rsPaneQ{margin:0 7px 0 0;}
 .rsPaneC{margin:0 0 0 7px;}
 
-/* 拖动把手 */
-.rsSplit{position:relative; align-self:stretch; cursor:col-resize; touch-action:none;}
-.rsSplit::after{
-  content:''; position:absolute; left:50%; top:8px; bottom:8px; width:3px; margin-left:-1.5px;
-  border-radius:2px; background:transparent; transition:background .12s;
+/* 拖动把手：必须**常驻可见**——以前只有 6px 透明热区，用户反馈"看不出来能拖动拉宽"。
+   现在是一根带握把纹的竖条：平时淡边框色，hover / 拖动中变成主题色。 */
+.rsSplit{
+  position:relative; align-self:stretch; cursor:col-resize; touch-action:none;
+  border-radius:8px; transition:background .12s;
 }
-.rsSplit:hover::after{background:var(--accent-border);}
+.rsSplit:hover,.rsSplit:focus-visible{background:var(--accent-soft);}
+.rsSplit:focus-visible{outline:2px solid var(--accent-border); outline-offset:-2px;}
+.rsGrip{
+  position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+  width:12px; height:76px; border-radius:12px;
+  display:flex; align-items:center; justify-content:center; gap:3px;
+  background:var(--accent-border); box-shadow:0 0 0 2px var(--card), 0 1px 6px rgba(0,0,0,.16);
+  transition:background .12s, box-shadow .12s;
+}
+/* 两条竖纹 = "可以左右拖"的握把 */
+.rsGrip::before,.rsGrip::after{
+  content:''; width:2px; height:30px; border-radius:2px; background:var(--muted); opacity:.55;
+}
+.rsSplit:hover .rsGrip,body.rsResizing .rsGrip{background:var(--accent); box-shadow:0 0 0 2px var(--card), 0 2px 8px rgba(0,0,0,.2);}
+.rsSplit:hover .rsGrip::before,.rsSplit:hover .rsGrip::after,
+body.rsResizing .rsGrip::before,body.rsResizing .rsGrip::after{background:#fff; opacity:.9;}
 .rsSplit:hover::before{
   content:'拖动调宽 · 双击复位'; position:absolute; top:10px; left:50%; transform:translateX(-50%);
   z-index:6; white-space:nowrap; font-size:11px; color:var(--muted);
@@ -308,6 +329,11 @@ body.rsResizing,body.rsResizing *{cursor:col-resize!important; user-select:none!
 .rsGap{background:var(--bg); border:1px solid var(--border); border-left:3px solid var(--warn); border-radius:8px; padding:9px 12px; font-size:13px;}
 .rsGap b{display:block; margin-bottom:3px;}
 .rsGap span{color:var(--muted); font-size:12.5px; line-height:1.7;}
+/* 收尾页的差距/✓ 条目里会出现标识符（服务端已剥掉围栏，前端只把成对反引号渲染成代码） */
+.rsGap code,.rsKeptI code,.rsLine code{
+  background:var(--soft); border:1px solid var(--border); border-radius:5px; padding:1px 5px;
+  font-size:12px; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
 
 /* ============ 知识架构（先看全局，再逐点深入） ============ */
 .rsArc{background:var(--card); border:1px solid var(--accent-border); border-radius:12px; padding:14px 16px; margin-bottom:14px;}

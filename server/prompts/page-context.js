@@ -19,6 +19,8 @@
    头部是页面标题/当前题目，尾部往往是用户刚看到的那一段，中间多是重复的列表项。 */
 const PAGE_TEXT_BUDGET = 9000;
 const PAGE_TEXT_INPUT_MAX = 20000;
+/* 页面 DOM 骨架的上限（只留标签/class/id，不含文本）：够看清层级，又不会把提示词撑爆。 */
+const PAGE_DOM_INPUT_MAX = 16000;
 
 /* 把任意输入清洗成 { label, title, route, text } 或 null。
    ⚠️ 服务端**必须**再过一遍：客户端可以伪造 / 也可能带着整篇教程正文上来。 */
@@ -31,8 +33,14 @@ function sanitizePageContext(raw) {
   const label = String(raw.label == null ? '' : raw.label).replace(/\s+/g, ' ').trim().slice(0, 60);
   const title = String(raw.title == null ? '' : raw.title).replace(/\s+/g, ' ').trim().slice(0, 160);
   const route = String(raw.route == null ? '' : raw.route).replace(/\s+/g, ' ').trim().slice(0, 200);
-  if (!text.trim() && !title) return null;
-  return { label: label || '当前页面', title, route, text };
+  /* 创造模式额外要「页面结构」：只有文字时模型改不动布局（拿不到真实 class / 容器层级）。
+     其它模式不带这个字段，避免每条消息都多传几 KB。 */
+  const dom = String(raw.dom == null ? '' : raw.dom)
+    .replace(/[\u200b-\u200d\ufeff]/g, '')
+    .replace(/\u0000/g, '')
+    .slice(0, PAGE_DOM_INPUT_MAX);
+  if (!text.trim() && !title && !dom.trim()) return null;
+  return { label: label || '当前页面', title, route, text, dom };
 }
 
 /* 去掉抓取噪声：连续空行、行尾空白、零宽字符、纯分隔符行 */
@@ -52,7 +60,8 @@ function pageContextBlockFrom(page) {
   if (!p) return null;
   const body = tidyPageText(p.text);
   /* 太短就当没有：一两个字的页面（比如刚渲染的空壳）塞进去只会让模型分心。 */
-  if (body.length < 20 && !p.title) return null;
+  /* 创造模式只带 DOM 也算有内容（正文可能全是代码块/输入框），别直接丢掉。 */
+  if (body.length < 20 && !p.title && !p.dom) return null;
   let shown = body;
   let cut = 0;
   if (body.length > PAGE_TEXT_BUDGET) {
@@ -71,7 +80,7 @@ function pageContextBlockFrom(page) {
   }
   lines.push('用户说「这个 / 这里 / 当前页面 / 上面这道题 / 这一页」时，默认指的就是上面这个页面的内容；'
     + '页面里没有的信息就说没看到，不要凭空补。');
-  return { text: lines.join('\n'), label: p.label, chars: body.length, cut };
+  return { text: lines.join('\n'), label: p.label, chars: body.length, cut: cut, dom: p.dom };
 }
 
-module.exports = { pageContextBlockFrom, sanitizePageContext, tidyPageText, PAGE_TEXT_BUDGET, PAGE_TEXT_INPUT_MAX };
+module.exports = { pageContextBlockFrom, sanitizePageContext, tidyPageText, PAGE_TEXT_BUDGET, PAGE_TEXT_INPUT_MAX, PAGE_DOM_INPUT_MAX };

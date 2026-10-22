@@ -245,4 +245,29 @@ function goalQaBlockFrom(rounds) {
   return lines.join('\n');
 }
 
-module.exports = { goalHeader, richMdSpecLines, vizSpecLines, digestsBlockFrom, nodeSourcesBlockFrom, sourcesIndexBlockFrom, siblingScopeBlockFrom, sourcesBlockFrom, qaRender, constraintsBlockFrom, goalQaBlockFrom };
+
+/* 对话助理的「网络来源分布 + 批量清理」提示块（2026-10-20）。
+   为什么放这里：chatSourcesBlock 在 server.js，而 server.js 是 i18n 硬编码扫描范围，
+   提示词文案写在那儿会抬高硬编码预算；提示词类中文统一放 prompts/。
+   起因：用户要"删掉所有不是我上传的资料"（222 条网络资料），但清单只列前 20 条标题，
+   助手看不到其余条目、也没有批量删除入口，最后只删了 7 条、还让用户把标题发过来。 */
+function chatNetSiteSummaryFrom(net) {
+  if (!net || !net.length) return '';
+  const bySite = {};
+  for (const s of net) {
+    const key = String((s && s.site) || '').trim() || '（未知）';
+    bySite[key] = (bySite[key] || 0) + 1;
+  }
+  const sites = Object.keys(bySite).sort((a, b) => bySite[b] - bySite[a]);
+  const lines = [];
+  lines.push('▸ 网络来源分布（' + sites.length + ' 个站点，共 ' + net.length + ' 条）：'
+    + sites.map(k => k + ' ' + bySite[k]).join('、'));
+  lines.push('▸ 批量清理资料只写一条 delete_source（见规则 3）：按站点删用 {"op":"delete_source","site":"CSDN"}；'
+    + '用户说"除了我自己上传的，其余全删"用 {"op":"delete_source","except_sites":["用户提供的图片","导入的代码库"]}。'
+    + '不要逐条猜标题，也不用让用户把标题发过来。');
+  lines.push('▸ 「自己提供」的资料（截图 / 电子书 / 导入的资料与代码库）不会被 site / except_sites 批量删掉，'
+    + '要删它们只能按 ids 或用 site 显式点名。');
+  return lines.join('\n');
+}
+
+module.exports = { goalHeader, richMdSpecLines, vizSpecLines, digestsBlockFrom, nodeSourcesBlockFrom, sourcesIndexBlockFrom, siblingScopeBlockFrom, sourcesBlockFrom, qaRender, constraintsBlockFrom, goalQaBlockFrom, chatNetSiteSummaryFrom };

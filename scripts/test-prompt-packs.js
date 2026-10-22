@@ -65,6 +65,14 @@ assert.strictEqual(reg.render('chat.agent_rules', { tutorialEditOp: chat.TUTORIA
 assert.strictEqual(reg.render('chat.agent_rules', {}).indexOf('tutorial_edit'), -1);
 console.log('  ✓ chat 规则包：ASK/Agent 默认文本 = 原规则块');
 
+// 3b2. 批量 ops 策略（用户 2026-10-20 反馈：删除几十条资料被"单次最多 20 个操作"拆成多轮、还要回「继续」）
+const agentBaseRules = chat.agentRules({});
+assert.ok(agentBaseRules.indexOf('删除类操作') >= 0 && agentBaseRules.indexOf('不设上限') >= 0,
+  'chat.agent_rules 必须说明删除类操作不设上限');
+assert.ok(agentBaseRules.indexOf('单次最多 20 个操作') < 0, '不能再有一刀切的"单次最多 20 个操作"');
+assert.ok(agentBaseRules.indexOf('不要自己把操作拆成多轮') >= 0, '必须明确禁止模型自己把操作拆成多轮');
+console.log('  ✓ chat.agent_rules：删除类不设上限、禁止自己拆多轮');
+
 // 3c. chat.agent_rules 覆盖 + 占位符注入 + reset
 const agentPack = reg.get('chat.agent_rules');
 reg.update('chat.agent_rules', agentPack.template.replace('5. 删除要谨慎', '5. 删除要谨慎（自定义）'), 'test');

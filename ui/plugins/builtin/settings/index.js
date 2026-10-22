@@ -93,6 +93,48 @@ function connCardHTML(c, provs, ctx) {
   </div>`;
 }
 
+function searchSettingsHTML(s) {
+  const sc = (s && s.search) || {};
+  const provider = sc.provider === 'deepseek' || sc.provider === 'custom' ? sc.provider : 'builtin';
+  const isApi = provider !== 'builtin';
+  const statusText = tr('当前使用：{0}', searchProviderLabel(provider))
+    + (provider === 'builtin' ? '' : ' · ' + (sc.has_key ? tr('密钥已配置') : tr('密钥未配置')));
+  return `<p class="hint" style="margin:-4px 0 12px;">${tr('搜集资料时默认用内置搜索（百度 + 必应网页抓取）。如果你有搜索 API，可以在这里显式指定：指定后优先用它；没指定或调用失败时自动回落到内置搜索。')}</p>
+  <div class="field">
+    <label>${tr('搜索方式')}</label>
+    <select class="sxi-sel" id="searchProvider" style="max-width:360px;">
+      <option value="builtin"${provider === 'builtin' ? ' selected' : ''}>${tr('内置搜索（百度 + 必应，无需配置）')}</option>
+      <option value="deepseek"${provider === 'deepseek' ? ' selected' : ''}>${tr('DeepSeek 网页搜索 API')}</option>
+      <option value="custom"${provider === 'custom' ? ' selected' : ''}>${tr('自定义（DeepSeek 兼容接口）')}</option>
+    </select>
+  </div>
+  <div id="searchApiFields"${isApi ? '' : ' hidden'}>
+    <div class="ccRow" style="margin-bottom:9px;">
+      <label class="ccWide">${tr('API 地址')}
+        <span class="inWrap"><i>🔗</i><input class="mono" id="searchBase" value="${H.esc(sc.base || '')}" placeholder="${provider === 'custom' ? tr('完整接口地址') : tr('默认 https://api.deepseek.com，留空即用默认')}" spellcheck="false"></span>
+      </label>
+      <label class="ccWide">${tr('API 密钥')}
+        <span class="inWrap"><i>🔑</i><input type="password" id="searchKey" value="" placeholder="${sc.has_key ? tr('已保存（留空则不修改）') : 'sk-…'}" spellcheck="false"><button type="button" class="peekBtn" id="searchPeek" title="${tr('显示 / 隐藏')}">👁</button></span>
+      </label>
+    </div>
+    <div class="ccRow">
+      <label class="ccWide">${tr('每次返回条数')}
+        <span class="inWrap"><i>#</i><input type="number" id="searchCount" min="1" max="50" value="${H.esc(String(sc.count || 20))}"></span>
+      </label>
+    </div>
+    <p class="hint" id="searchBaseHint" style="margin:7px 0 0;">${provider === 'custom' ? tr('填完整接口地址；只填域名会自动补 /v1/tools/search。') : tr('只填服务地址即可，会自动拼上 /v1/tools/search。')}</p>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:9px;">
+      <input type="checkbox" id="searchContent"${sc.content !== false ? ' checked' : ''}> ${tr('同时取回网页正文（接口支持时，抓不到正文的网站也能入库）')}
+    </label>
+    <p class="hint" style="margin-top:6px;">${tr('DeepSeek 的 Search 接口按请求次数计费（约 5 元 / 1000 次，具体以官网为准），密钥在 platform.deepseek.com 创建；这里的密钥与「AI 接入方式」分开存。')}</p>
+  </div>
+  <div class="toolbarRow" style="margin-top:9px;">
+    <button class="btn primary" id="searchSave">${tr('保存搜索设置')}</button>
+    <button class="btn" id="searchTest">${tr('测试搜索')}</button>
+  </div>
+  <div class="hint" id="searchMsg" style="margin-top:8px;line-height:1.8;">${statusText}${sc.endpoint ? ' · ' + H.esc(sc.endpoint) : ''}</div>`;
+}
+
 /* ---- 设置页：检索增强（RAG） ---- */
 function ragSettingsHTML(s) {
   const gopts = (H.state.goals || []).map(g => `<option value="${g.id}">${H.esc(g.title)}</option>`).join('')
@@ -489,6 +531,86 @@ function bindLanguageSection(st) {
   bindLanguageBody();
 }
 
+function bindSearchSettings() {
+  const sel = id => document.getElementById(id);
+  const say = (t, isErr) => {
+    const el = sel('searchMsg');
+    if (el) el.innerHTML = isErr ? '<span style="color:var(--warn)">' + t + '</span>' : t;
+  };
+  const providerSel = sel('searchProvider');
+  if (!providerSel) return;
+  const paintFields = () => {
+    const pv = providerSel.value;
+    const fields = sel('searchApiFields');
+    if (fields) fields.hidden = pv === 'builtin';
+    const hint = sel('searchBaseHint');
+    if (hint) hint.textContent = pv === 'custom'
+      ? tr('填完整接口地址；只填域名会自动补 /v1/tools/search。')
+      : tr('只填服务地址即可，会自动拼上 /v1/tools/search。');
+    const base = sel('searchBase');
+    if (base) {
+      base.placeholder = pv === 'custom' ? tr('完整接口地址') : tr('默认 https://api.deepseek.com，留空即用默认');
+      if (pv === 'custom' && /^https?:\/\/api\.deepseek\.com\/?$/i.test(base.value.trim())) base.value = '';
+    }
+  };
+  providerSel.addEventListener('change', paintFields);
+  paintFields();
+  const vals = () => ({
+    provider: providerSel.value || 'builtin',
+    base: (((sel('searchBase') || {}).value) || '').trim(),
+    count: Math.max(1, Math.min(50, Number(((sel('searchCount') || {}).value)) || 20)),
+    content: !!((sel('searchContent') || {}).checked),
+    apiKey: (((sel('searchKey') || {}).value) || '').trim()
+  });
+  const peek = sel('searchPeek');
+  if (peek) peek.addEventListener('click', () => {
+    const k = sel('searchKey');
+    if (k) k.type = k.type === 'password' ? 'text' : 'password';
+  });
+  const saveBtn = sel('searchSave');
+  if (saveBtn) saveBtn.addEventListener('click', async () => {
+    const v = vals();
+    saveBtn.disabled = true; saveBtn.textContent = tr('保存中…');
+    try {
+      const body = { search_provider: v.provider, search_api_base: v.base, search_api_count: String(v.count), search_api_content: v.content ? '1' : '0' };
+      if (v.apiKey) body.search_api_key = v.apiKey;
+      const r = await H.api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const sc = r.search || {};
+      const k = sel('searchKey');
+      if (k) { k.value = ''; k.placeholder = sc.has_key ? tr('已保存（留空则不修改）') : 'sk-…'; }
+      H.toast(tr('搜索设置已保存'));
+      say(H.esc(tr('当前使用：{0}', searchProviderLabel(sc.provider)))
+        + (sc.endpoint ? ' · ' + H.esc(sc.endpoint) : ''));
+    } catch (e) {
+      H.toast(tr('保存失败：{0}', e.message));
+    } finally {
+      saveBtn.disabled = false; saveBtn.textContent = tr('保存搜索设置');
+    }
+  });
+  const testBtn = sel('searchTest');
+  if (testBtn) testBtn.addEventListener('click', async () => {
+    const v = vals();
+    testBtn.disabled = true; testBtn.textContent = tr('测试中…');
+    say(H.esc(tr('正在真实调用一次搜索，请稍候…')));
+    try {
+      const body = { provider: v.provider, base: v.base, count: 3, content: v.content };
+      if (v.apiKey) body.apiKey = v.apiKey;
+      const r = await H.api('/api/search/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (r.ok) {
+        const sample = (r.items || []).slice(0, 2).map(x => '《' + H.esc(x.title) + '》').join('、');
+        say('✅ ' + H.esc(tr('搜索可用')) + ' · ' + H.esc(searchProviderLabel(r.provider)) + ' · ' + H.esc(tr('返回 {0} 条', r.count))
+          + (sample ? ' · ' + sample : '') + (r.ms ? ' · ' + r.ms + ' ms' : ''));
+      } else {
+        say('❌ ' + H.esc(tr('不可用')) + '：' + H.esc(searchErrText(r)), true);
+      }
+    } catch (e) {
+      say('❌ ' + H.esc(tr('测试失败')) + '：' + H.esc(e.message), true);
+    } finally {
+      testBtn.disabled = false; testBtn.textContent = tr('测试搜索');
+    }
+  });
+}
+
 let _storeState = null;
 
 async function storeSectionLoad() {
@@ -695,6 +817,13 @@ function providerButtonsHTML(sel) {
     </button>`).join('')}</div>`;
 }
 
+/* 搜索 API 的服务商 id → 界面文字（服务端只回 id，文案统一在 tr 里） */
+function searchProviderLabel(id) {
+  if (id === 'deepseek') return tr('DeepSeek 网页搜索 API');
+  if (id === 'custom') return tr('自定义兼容接口');
+  return tr('内置搜索（百度 + 必应）');
+}
+
 function fmtUpdTime(t) { return t ? String(t).replace(' +0800', '').slice(0, 16) : ''; }
 
 function updHasUpdate() {
@@ -883,6 +1012,23 @@ function bindLanguageBody() {
       } catch (err) { langSay('❌ ' + H.esc(err.message || tr('切换失败'))); }
     }
   });
+}
+
+/* 搜索 API 的错误码 → 界面文字（错误细节由服务端给，文案由前端 tr） */
+function searchErrText(r) {
+  r = r || {};
+  const detail = String(r.detail || '').slice(0, 220);
+  switch (r.code) {
+    case 'timeout': return tr('搜索 API 超时，请检查网络或接口地址');
+    case 'network': return tr('连不上搜索 API：{0}', detail || tr('网络错误'));
+    case 'http': return tr('搜索 API 返回 HTTP {0}{1}', r.status || '', detail ? '：' + detail : '');
+    case 'bad_response': return tr('搜索 API 返回的不是 JSON');
+    case 'api_error': return tr('搜索 API 报错：{0}', detail);
+    case 'no_endpoint': return tr('还没有填搜索 API 地址');
+    case 'builtin_empty': return tr('内置搜索这次没有返回结果（可能被限流）');
+    case 'builtin_error': return tr('内置搜索失败：{0}', detail || '');
+    default: return detail ? tr('搜索 API 调用失败：{0}', detail) : tr('搜索 API 调用失败');
+  }
 }
 
 /** 迁移对话框：选目录（或粘路径）→ 实时体检 → 确认 → 带进度条执行 */
@@ -1285,6 +1431,7 @@ async function renderSettings() {
      每条连接里多选模型；具体用哪个模型由「AI 助手」对话栏的模型下拉决定。 */
   const SET_TABS = [
     ['set-ai', '🔌 AI 接入方式'],
+    ['set-search', '🔎 ' + tr('信息源检索')],
     ['set-rag', '🔍 检索增强'],
     ['set-theme', '🎨 外观主题'],
     ['set-lang', '🌐 语言 Language'],
@@ -1344,6 +1491,10 @@ async function renderSettings() {
       </div>
     </div>
     <div class="setGrid">
+    <div class="sec" id="set-search">
+      <div class="secTitle">${tr('信息源检索')} <span class="secSub">${tr('搜集资料时用哪个搜索服务：默认内置搜索，也可以指定外部搜索 API')}</span></div>
+      ${searchSettingsHTML(s)}
+    </div>
     <div class="sec" id="set-rag">
       <div class="secTitle">检索增强（RAG） <span class="secSub">把资料库当知识库：按问题检索片段，而不是整包塞给模型</span></div>
       ${ragSettingsHTML(s)}
@@ -2082,6 +2233,7 @@ async function renderSettings() {
   bindUpdateSection();
   bindSyncSection();
   bindLanguageSection(langState);
+  bindSearchSettings();
 
   /* 顶栏页签：一次只显示一块，整页切换，不再全挤在一起。
      切页签只做 hidden 显隐 —— 输入框里的未保存内容不会丢，各区块的监听也都在，

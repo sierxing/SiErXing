@@ -50,7 +50,11 @@ const AI_SCOPES = [
 ];
 
 
-const state = { goals: [], goal: null, sources: [], planning: false, collecting: false, collectStatus: '', expanded: {}, filter: '', models: [], model: '', showNew: false, showEdit: false, mapScale: 1, mapTx: 40, mapTy: 40, _drag: null, _suppressClick: false, taskKidsOpen: {},
+/* 长任务状态一律按目标隔离（见 collectJobOf / planBusyFor 一组辅助函数）：
+   collectJobs / digestJobs 以 goal id 为键（同一目标内仍互斥、不同目标可并行）；
+   planning / expanding / tutoring 是单实例任务，用 *GoalId 记住它属于哪个目标，
+   避免在 A 目标跑任务时打开 B 目标也显示 A 的进度、还把 B 的按钮禁掉。 */
+const state = { goals: [], goal: null, sources: [], planning: false, planGoalId: 0, collectJobs: {}, digestJobs: {}, expandGoalId: 0, tutGoalId: 0, expanded: {}, filter: '', models: [], model: '', showNew: false, showEdit: false, mapScale: 1, mapTx: 40, mapTy: 40, _drag: null, _suppressClick: false, taskKidsOpen: {},
   /* AI 助手：这条对话带着哪些节点（右键节点 → AI 功能 会把它加进来）、功能区选中的是哪个节点 */
   aiNodes: [], aiFnPick: 0,
   /* 「🎯 只改」范围：aiScope = auto/conditions/nodes/goal/sources/tutorials；
@@ -2601,6 +2605,8 @@ function showNodePanel(id, rerender) {
 function reportCardHTML() {
   const r = state.lastReport;
   if (!r || !r.text) return '';
+  /* 变更汇报是某个目标的：在别的目标页不显示它（按目标隔离） */
+  if (r.goalId && Number(r.goalId) !== Number((state.goal || {}).id)) return '';
   return `<div class="reportCard">
     <div class="rcHead"><span>📋</span><span>AI 变更汇报</span>
       <div class="spacer"></div>
@@ -4505,6 +4511,43 @@ function pageTextForTutorial() {
   } catch (e) { return ''; }
 }
 /* 采集"当前页面"：返回给服务端的 {label,title,route,text}；没有信息就返回 null */
+/* 页面 DOM 骨架（只给创造模式用）：标签 + id/class + 少量 data 属性，不含文字。
+   为什么需要：只给页面文字时模型拿不到真实选择器，改布局只能瞎猜 class（真实翻车：
+   在「用自己的话」页把分栏热区改成 6px 透明，用户根本看不出能拖）。
+   ⚠️ 只扫 #app（不含左栏/抽屉/AI 面板），节点数/深度/字符数都有上限。 */
+function pageDomOutline(root) {
+  if (!root) return '';
+  const out = [];
+  let count = 0;
+  const MAX_NODES = 320, MAX_DEPTH = 8, MAX_CHARS = 12000;
+  const SKIP = /^(script|style|svg|path|br|meta|link|option|noscript|template)$/i;
+  const KEEP_ATTRS = ['data-k', 'data-act', 'data-view', 'data-tab', 'data-plugin-go', 'data-goal-id'];
+  (function walk(el, depth) {
+    if (!el || count >= MAX_NODES || depth > MAX_DEPTH) return;
+    const tag = el.tagName ? el.tagName.toLowerCase() : '';
+    if (!tag || SKIP.test(tag)) return;
+    let line = '  '.repeat(depth) + tag;
+    if (el.id) line += '#' + el.id;
+    if (el.classList && el.classList.length) line += '.' + Array.prototype.slice.call(el.classList, 0, 5).join('.');
+    const attrs = [];
+    if (el.getAttribute) {
+      const role = el.getAttribute('role');
+      if (role) attrs.push('role=' + role);
+      for (const name of KEEP_ATTRS) {
+        const v = el.getAttribute(name);
+        if (v) attrs.push(name + '=' + String(v).slice(0, 30));
+      }
+    }
+    if (attrs.length) line += ' [' + attrs.join(' ') + ']';
+    out.push(line);
+    count++;
+    const kids = el.children || [];
+    for (let i = 0; i < kids.length; i++) walk(kids[i], depth + 1);
+  })(root, 0);
+  let text = out.join('\n');
+  if (text.length > MAX_CHARS) text = text.slice(0, MAX_CHARS) + '\n...(truncated)';
+  return text;
+}
 function collectPageContext() {
   let r = null;
   try { r = parseRoute(); } catch (e) { return null; }
@@ -4526,8 +4569,15 @@ function collectPageContext() {
     }
   } catch (e) { text = ''; }
   text = String(text || '').trim();
-  if (!text && !title) return null;
-  return { label, title, route: location.hash || '', text: text.slice(0, 20000) };
+  /* 创造模式额外带 DOM 骨架：改界面/组件必须看到真实结构（其它模式不带，省流量） */
+  let dom = '';
+  if (state.aiMode === 'create') {
+    try { dom = pageDomOutline(document.getElementById('app')); } catch (e) { dom = ''; }
+  }
+  if (!text && !title && !dom) return null;
+  const ctx = { label, title, route: location.hash || '', text: text.slice(0, 20000) };
+  if (dom) ctx.dom = dom;
+  return ctx;
 }
 /* 当前路由有没有"目标上下文"：有才显示 AI 入口（首页/设置/组件管理/学习统计先不做）。 */
 function aiRouteHasGoal(r) {
@@ -4840,6 +4890,50 @@ function chatCreateInstalledHTML(c) {
     + '<button class="btn small" data-create-act="rollback" data-change="' + esc(c.changeId) + '">撤销安装</button>'
     + '</div>';
 }
+function chatCreateRolledBackHTML(name) {
+  return '<div class="chCreHead">↩️ 已撤销：' + esc(name || '') + '</div>'
+    + '<div class="chCreRow"><button class="btn small" data-create-act="reload">刷新查看</button></div>';
+}
+function chatCreateDiscardedHTML(name) {
+  return '<div class="chCreHead">🗑 已放弃：' + esc(name || '') + '</div>';
+}
+/* 刷新对话后把卡片恢复成**真实状态**（服务端 /status 只回库里的状态，不读暂存文件）。
+   以前刷新后卡片一律回到「已生成」：已装好的版本又显示「安装并查看 / 放弃」，
+   用户点安装只收到「已经安装过」，想撤销安装却没有入口 —— 装坏的组件因此撤回不了。 */
+async function chatCreateSync(root) {
+  const host = root || document;
+  if (!host.querySelectorAll) return;
+  const cards = Array.prototype.slice.call(host.querySelectorAll('.chCreate[data-create]'));
+  for (const card of cards) {
+    if (card.getAttribute('data-create-synced')) continue;
+    card.setAttribute('data-create-synced', '1');
+    const cid = card.getAttribute('data-create');
+    if (!cid) continue;
+    try {
+      const r = await api('/api/create/changes/' + encodeURIComponent(cid) + '/status');
+      const st = String((r && r.status) || '');
+      const nm = (r && r.name) || card.getAttribute('data-create-name') || '';
+      const kind = (r && r.kind) || card.getAttribute('data-create-kind');
+      const pid = (r && r.id) || card.getAttribute('data-create-id');
+      if (st === 'installed') {
+        card.innerHTML = chatCreateInstalledHTML({ changeId: cid, name: nm, kind: kind, id: pid, warnings: [] });
+      } else if (st === 'rolled_back') {
+        card.classList.add('chCreGone');
+        card.innerHTML = chatCreateRolledBackHTML(nm);
+      } else if (st === 'discarded') {
+        card.classList.add('chCreGone');
+        card.innerHTML = chatCreateDiscardedHTML(nm);
+      } else if (st === 'missing') {
+        /* 记录和暂存都被清理了（服务重装 / 用户清过数据）：别再显示「已生成」骗用户去点安装 */
+        card.classList.add('chCreGone');
+        card.innerHTML = '<div class="chCreHead">' + tr('这次生成已失效（暂存文件已清理），让 AI 重新生成一次') + '</div>';
+      }
+    } catch (e) {
+      /* 网络抖动之类：保持原卡片，下次渲染会重新对状态 */
+      card.removeAttribute('data-create-synced');
+    }
+  }
+}
 async function chatCreateAct(card, act, btn) {
   const cid = card.getAttribute('data-create');
   if (!cid) return;
@@ -4867,12 +4961,14 @@ async function chatCreateAct(card, act, btn) {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: true })
       });
       const name = card.getAttribute('data-create-name') || r.id;
+      card.setAttribute('data-create-synced', '1');
       card.innerHTML = chatCreateInstalledHTML(Object.assign({ changeId: cid, name: name, kind: card.getAttribute('data-create-kind'), id: r.id, warnings: r.warnings || [] }, r));
       toast('✅ 已安装「' + (r.name || name) + '」，点「刷新查看」就能看到');
     } catch (e) {
       /* 刷新后卡片会回到「已生成」，但服务端记录是已安装 —— 这不算失败，直接切到已安装面板 */
       if (String(e.message || '').indexOf('已经安装过') >= 0) {
         const nm = card.getAttribute('data-create-name') || card.getAttribute('data-create-id');
+        card.setAttribute('data-create-synced', '1');
         card.innerHTML = chatCreateInstalledHTML({ changeId: cid, name: nm, kind: card.getAttribute('data-create-kind'), id: card.getAttribute('data-create-id'), warnings: [] });
         toast('这个版本已经安装过了，点「刷新查看」即可；要改就再让 AI 生成一版');
         return;
@@ -4887,7 +4983,8 @@ async function chatCreateAct(card, act, btn) {
     try {
       await api('/api/create/changes/' + encodeURIComponent(cid) + '/discard', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       card.classList.add('chCreGone');
-      card.innerHTML = '<div class="chCreHead">🗑 已放弃：' + esc(card.getAttribute('data-create-name') || card.getAttribute('data-create-id')) + '</div>';
+      card.setAttribute('data-create-synced', '1');
+      card.innerHTML = chatCreateDiscardedHTML(card.getAttribute('data-create-name') || card.getAttribute('data-create-id'));
       toast('已放弃这次生成（没有改动任何东西）');
     } catch (e) { btn.disabled = false; toast('放弃失败：' + e.message); }
     return;
@@ -4896,14 +4993,20 @@ async function chatCreateAct(card, act, btn) {
     btn.disabled = true; btn.textContent = '撤销中…';
     try {
       const r = await api('/api/create/changes/' + encodeURIComponent(cid) + '/rollback', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-      card.innerHTML = '<div class="chCreHead">↩️ 已撤销：' + esc(card.getAttribute('data-create-name') || r.id) + '</div>'
-        + '<div class="chCreRow"><button class="btn small" data-create-act="reload">刷新查看</button></div>';
+      card.classList.add('chCreGone');
+      card.setAttribute('data-create-synced', '1');
+      card.innerHTML = chatCreateRolledBackHTML(card.getAttribute('data-create-name') || r.id);
       toast('已撤销安装');
     } catch (e) { btn.disabled = false; btn.textContent = '撤销安装'; toast('撤销失败：' + e.message); }
     return;
   }
   if (act === 'reload') {
+    /* 只有页面插件才需要"跳到它覆盖的页面"；组件/皮肤是给当前页面加能力，
+       原地刷新即可。以前一律 location.hash=route（组件 route 还是 #/components），
+       用户改完当前组件，一刷新就被弹去组件管理页，得点好几步才回得来。 */
+    const kind = card.getAttribute('data-create-kind') || '';
     let route = card.getAttribute('data-create-route') || '';
+    if (kind !== 'ui-page') route = '';
     if (route.indexOf(':id') >= 0) {
       const gid = (state.goal && state.goal.id) || 0;
       route = gid ? route.replace(':id', String(gid)) : '#/';
@@ -5864,6 +5967,10 @@ function aiRenderMsgs() {
   } else {
     const gid = state.goal ? state.goal.id : 0;
     box.innerHTML = msgs.map(m => chatBubbleHTML(m, gid)).join('') + chatStreamHTML();
+    /* 创造卡片先按「已生成」画出来，再向服务端对一次真实状态：
+       已安装 → 换成"已安装/撤销安装"；已撤销/已放弃 → 换成对应状态。
+       （异步，不阻塞消息渲染；失败保持原卡片，不影响聊天。） */
+    try { chatCreateSync(box); } catch (e) {}
   }
   box.scrollTop = box.scrollHeight;
 }
@@ -6598,8 +6705,11 @@ function showTutorialDialog(nodeId) {
 }
 async function startTutorial(nodeId, format, note, codeFiles, withFolders) {
   if (!goalCompOn(goalCtx(), 'tutorial')) { toast('「学习教程」组件在本目标已关闭：目标页 🧩 可单独开启'); return; }
-  if (state.tutoring || state.planning || state.collecting || state.expanding) return;
+  const gid = (state.goal && state.goal.id) || 0;
+  if (tutBusyFor(gid) || planBusyFor(gid) || collectingAt(gid) || digestingAt(gid) || expandBusyFor(gid)) return;
+  if (state.tutoring || state.planning || state.expanding) { taskBusyElsewhereToast(); return; }
   state.tutoring = true;
+  state.tutGoalId = gid;
   state.tutStatus = '正在撰写图文教程（文字用 Markdown，需要演示的地方 AI 会自己嵌活的 HTML）…';
   rerenderCurrent();
   try {
@@ -6619,31 +6729,40 @@ async function startTutorial(nodeId, format, note, codeFiles, withFolders) {
         if (!line) continue;
         let d;
         try { d = JSON.parse(line.slice(6)); } catch (e) { continue; }
-        if (d.status) { state.tutStatus = d.status; const el = document.getElementById('tutStatus'); if (el) el.textContent = d.status; }
-        if (d.done) { finished = true; state.goal = d.goal; tut = d.tutorial; }
+        if (d.status) { if (isGoalCurrent(gid)) { state.tutStatus = d.status; const el = document.getElementById('tutStatus'); if (el) el.textContent = d.status; } }
+        if (d.done) { finished = true; if (isGoalCurrent(gid)) state.goal = d.goal; tut = d.tutorial; }
         if (d.error) { finished = true; toast(d.error); }
       }
     }
     if (tut) {
-      state.lastTutorial = { id: tut.id, title: tut.title, nodeId, format: tut.format };
+      state.lastTutorial = { id: tut.id, title: tut.title, nodeId, format: tut.format, goalId: gid };
       toast('教程已生成，点击「查看教程」开始学习');
     } else if (!finished) toast('教程生成中断，可重试');
   } catch (e) {
     toast(e.message);
   } finally {
     state.tutoring = false;
+    state.tutGoalId = 0;
     state.tutStatus = '';
-    try { await loadGoal(state.goal.id); } catch (e) {}
-    rerenderCurrent();
+    /* 教程属于它自己的目标：用户中途换到别的目标页时不要拿它的结果覆盖当前页 */
+    if (isGoalCurrent(gid)) {
+      try { await loadGoal(gid); } catch (e) {}
+      try {
+        const rr = parseRoute();
+        if ((rr.view === 'goal' || rr.view === 'map') && Number(rr.id) === Number(gid)) rerenderCurrent();
+      } catch (e) {}
+    }
   }
 }
 function tutProgressHTML() {
-  if (!state.tutoring) return '';
+  if (!tutBusyFor((state.goal && state.goal.id) || 0)) return '';
   return `<div class="expandPanel"><span class="spinner"></span><span id="tutStatus">${esc(state.tutStatus || '正在撰写教程…')}</span></div>`;
 }
 function tutorialCardHTML() {
   const t = state.lastTutorial;
   if (!t) return '';
+  /* 教程卡片也按目标隔离：A 目标刚生成的教程不在 B 目标页上弹 */
+  if (t.goalId && Number(t.goalId) !== Number((state.goal || {}).id)) return '';
   return `<div class="reportCard tutCard">
     <div class="rcHead"><span>📘</span><span>教程已生成：${esc(t.title)}</span>
       <div class="spacer"></div>
@@ -9005,7 +9124,7 @@ async function saveQuestionNote(qid, box, btn) {
   btn.disabled = true; btn.textContent = '保存中…';
   try {
     const r = await api('/api/goals/' + state.goal.id + '/clarify/note', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question_id: qid, note }) });
-    const pend = state.pendingAsk || goalPendingAsk(state.goal);
+    const pend = pendingAskFor(state.goal);
     if (pend) pend.data = r.clarify;
     const wrap = document.querySelector('.clarifyQ[data-qid="' + qid + '"]');
     if (wrap) {
@@ -9021,7 +9140,7 @@ async function saveQuestionNote(qid, box, btn) {
 }
 async function drillQuestion(qid, btn, note) {
   if (state.drilling) return toast('AI 正在生成子问题，请稍候');
-  const pend = state.pendingAsk || goalPendingAsk(state.goal);
+  const pend = pendingAskFor(state.goal);
   if (!pend || !state.goal) return toast('当前没有进行中的问卷');
   state.drilling = true;
   const oldText = btn.textContent;
@@ -9052,7 +9171,7 @@ async function drillQuestion(qid, btn, note) {
         if (d.error) { finished = true; toast(d.error); }
         if (d.done) {
           finished = true;
-          state.pendingAsk = { stage: pend.stage, feedback: pend.feedback, data: d.clarify };
+          state.pendingAsk = { stage: pend.stage, feedback: pend.feedback, data: d.clarify, goalId: state.goal && state.goal.id };
           state.goal = d.goal;
           const wrap = document.querySelector('.clarifyQ[data-qid="' + qid + '"]');
           if (wrap && note) {
@@ -9099,7 +9218,7 @@ function goalPendingAsk(g) {
   return null;
 }
 function submitAsk(skip) {
-  const pend = state.pendingAsk || goalPendingAsk(state.goal);
+  const pend = pendingAskFor(state.goal);
   if (!pend) return;
   const answers = skip ? {} : collectClarifyAnswers();
   state.pendingAsk = null;
@@ -9138,7 +9257,7 @@ function collectClarifyAnswers() {
 function planPanelHTML() {
   const g = state.goal;
   if (!g) return '';
-  if (state.planning) {
+  if (planBusyFor(g.id)) {
     return `<div class="planPanel" id="planPanel">
       <div class="ppHead"><span class="spinner"></span><span id="ppStatus">${esc(state.planStatus || 'AI 正在规划…')}${state.planTaskCount ? '（已生成 ' + state.planTaskCount + ' 个任务，中断后可继续）' : ''}</span><span class="ppTime" id="ppTime">0s</span><div class="spacer"></div><button class="btn tiny" id="planStop" title="停止这次生成（已生成的内容不会丢，可随时重新开始或继续）">⏹ 停止</button></div>
       <div class="ppTrack"><div class="ppTrackIn"></div></div>
@@ -9147,7 +9266,7 @@ function planPanelHTML() {
       <div class="hint">${esc(state.planHint || '规划约需 1-3 分钟，请保持页面打开。')}</div>
     </div>`;
   }
-  const pend = state.pendingAsk || goalPendingAsk(g);
+  const pend = pendingAskFor(g);
   if (pend && pend.data && Array.isArray(pend.data.questions) && pend.data.questions.length) return askPanelHTML(pend);
   if (g.status === 'review') {
     const stages = (state.goal.nodes || []).filter(n => n.level === 0).length;
@@ -9263,10 +9382,13 @@ async function streamSSE(url, body, onEvent, signal) {
   return result;
 }
 async function startClarify(id) {
-  if (state.planning || state.collecting || state.expanding) return;
+  /* 只看「这个目标」自己的长任务；别的目标在跑不该拦住这里的规划（用户反馈：搜集/AI 任务串目标） */
+  if (planBusyFor(id) || collectingAt(id) || digestingAt(id) || expandBusyFor(id)) return;
+  if (state.planning) { taskBusyElsewhereToast(); return; }
   if (!(await ensureAIConfigured())) return;
   if (!goalCompOn(goalCtx(), 'clarify')) { return startPlanning(id, null); }
   state.planning = true;
+  state.planGoalId = id;
   state.planAbort = new AbortController();
   state.planStatus = 'AI 正在分析你的情况，准备澄清问题…';
   state.planHint = 'AI 会先问几个问题（选择/简答），充分了解你的情况后再制定规划。';
@@ -9280,6 +9402,7 @@ async function startClarify(id) {
   }, state.planAbort.signal).catch(e => ({ done: true, error: e.message }));
   clearInterval(planTimer);
   state.planning = false;
+  state.planGoalId = 0;
   if (r.error || !r.done) {
     toast(r.error || '澄清问题生成中断，可重试');
     try { await loadGoal(id); } catch (e) {}
@@ -9292,8 +9415,11 @@ async function startClarify(id) {
   else if (rr.view === 'map' && rr.id === id) renderMapPage();
 }
 async function startPlanning(id, answers) {
-  if (state.planning || state.collecting || state.expanding) return;
+  /* 只看「这个目标」自己的长任务；别的目标在跑不该拦住这里的规划（用户反馈：搜集/AI 任务串目标） */
+  if (planBusyFor(id) || collectingAt(id) || digestingAt(id) || expandBusyFor(id)) return;
+  if (state.planning) { taskBusyElsewhereToast(); return; }
   state.planning = true;
+  state.planGoalId = id;
   state.planAbort = new AbortController();
   state.planProgress = null;
   state.planStage = 'skeleton';
@@ -9312,8 +9438,9 @@ async function startPlanning(id, answers) {
   }, state.planAbort.signal).catch(e => ({ done: true, error: e.message }));
   clearInterval(planTimer);
   state.planning = false;
+  state.planGoalId = 0;
   if (asked) {
-    state.pendingAsk = asked;
+    state.pendingAsk = Object.assign({ goalId: id }, asked);
     toast('AI 想先确认几个问题，回答后继续规划');
     try { await loadGoal(id); } catch (e) {}
   } else if (r.error || !r.done) {
@@ -9339,8 +9466,11 @@ async function planResumeCheck(id) {
   } catch (e) {}
 }
 async function startPlanResume(id) {
-  if (state.planning || state.collecting || state.expanding) return;
+  /* 只看「这个目标」自己的长任务；别的目标在跑不该拦住这里的规划（用户反馈：搜集/AI 任务串目标） */
+  if (planBusyFor(id) || collectingAt(id) || digestingAt(id) || expandBusyFor(id)) return;
+  if (state.planning) { taskBusyElsewhereToast(); return; }
   state.planning = true;
+  state.planGoalId = id;
   state.planAbort = new AbortController();
   state.planProgress = null;
   state.planStage = 'skeleton';
@@ -9357,6 +9487,7 @@ async function startPlanResume(id) {
   }, state.planAbort.signal).catch(e => ({ done: true, error: e.message }));
   clearInterval(planTimer);
   state.planning = false;
+  state.planGoalId = 0;
   if (r.error || !r.done) {
     toast(r.error || '继续构思中断，可重试');
     try { await loadGoal(id); } catch (e) {}
@@ -9372,8 +9503,11 @@ async function startPlanResume(id) {
   else if (rr.view === 'map' && rr.id === id) renderMapPage();
 }
 async function startPlanTasks(id, answers) {
-  if (state.planning || state.collecting || state.expanding) return;
+  /* 只看「这个目标」自己的长任务；别的目标在跑不该拦住这里的规划（用户反馈：搜集/AI 任务串目标） */
+  if (planBusyFor(id) || collectingAt(id) || digestingAt(id) || expandBusyFor(id)) return;
+  if (state.planning) { taskBusyElsewhereToast(); return; }
   state.planning = true;
+  state.planGoalId = id;
   state.planAbort = new AbortController();
   state.planProgress = null;
   state.planStage = 'tasks';
@@ -9398,8 +9532,9 @@ async function startPlanTasks(id, answers) {
   }, state.planAbort.signal).catch(e => ({ done: true, error: e.message }));
   clearInterval(planTimer);
   state.planning = false;
+  state.planGoalId = 0;
   if (asked) {
-    state.pendingAsk = asked;
+    state.pendingAsk = Object.assign({ goalId: id }, asked);
     toast('AI 想先确认几个问题，回答后继续细化');
     try { await loadGoal(id); } catch (e) {}
   } else if (r.error) { toast(r.error); } else { state.goal = r.data.goal; if (r.data.report) state.lastReport = { text: r.data.report, versionId: r.data.versionId, goalId: id }; toast('任务细化完成'); }
@@ -9409,8 +9544,11 @@ async function startPlanTasks(id, answers) {
   else if (rr.view === 'map' && rr.id === id) renderMapPage();
 }
 async function startPlanRefine(id, feedback, answers) {
-  if (state.planning || state.collecting || state.expanding) return;
+  /* 只看「这个目标」自己的长任务；别的目标在跑不该拦住这里的规划（用户反馈：搜集/AI 任务串目标） */
+  if (planBusyFor(id) || collectingAt(id) || digestingAt(id) || expandBusyFor(id)) return;
+  if (state.planning) { taskBusyElsewhereToast(); return; }
   state.planning = true;
+  state.planGoalId = id;
   state.planAbort = new AbortController();
   state.planProgress = null;
   state.planStatus = '正在根据你的意见调整骨架…';
@@ -9425,8 +9563,9 @@ async function startPlanRefine(id, feedback, answers) {
   }, state.planAbort.signal).catch(e => ({ done: true, error: e.message }));
   clearInterval(planTimer);
   state.planning = false;
+  state.planGoalId = 0;
   if (asked) {
-    state.pendingAsk = asked;
+    state.pendingAsk = Object.assign({ goalId: id }, asked);
     toast('AI 想先确认几个问题，回答后继续调整');
     try { await loadGoal(id); } catch (e) {}
   } else if (r.error) { toast(r.error); } else { state.goal = r.data.goal; if (r.data.report) state.lastReport = { text: r.data.report, versionId: r.data.versionId, goalId: id }; toast('骨架已按你的意见调整，请确认'); }
@@ -9436,14 +9575,18 @@ async function startPlanRefine(id, feedback, answers) {
   else if (rr.view === 'map' && rr.id === id) renderMapPage();
 }
 function expandPanelHTML() {
-  if (!state.expanding) return '';
+  /* 只在这个目标页显示它自己的拆分进度：A 目标在拆分时打开 B 目标不该看到这行 */
+  if (!expandBusyFor((state.goal && state.goal.id) || 0)) return '';
   return `<div class="expandPanel"><span class="spinner"></span><span id="expandStatus">${esc(state.expandStatus || '准备中…')}</span></div>`;
 }
 async function startExpand(id, feedback, answers) {
-  if (state.expanding || state.planning || state.collecting) return;
+  const gid = (state.goal && state.goal.id) || 0;
+  if (expandBusyFor(gid) || planBusyFor(gid) || collectingAt(gid) || digestingAt(gid)) return;
+  if (state.expanding || state.planning) { taskBusyElsewhereToast(); return; }
   const n = state.goal.nodes.find(x => x.id === id);
   if (!n) return;
   state.expanding = true;
+  state.expandGoalId = gid;
   state.expandStatus = feedback ? `正在按你的意见调整「${String(n.title).slice(0, 14)}」的划分…` : `围绕「${String(n.title).slice(0, 18)}」搜集信息源…`;
   rerenderCurrent();
   let asked = null;
@@ -9466,18 +9609,20 @@ async function startExpand(id, feedback, answers) {
         let d;
         try { d = JSON.parse(line.slice(6)); } catch (e) { continue; }
         if (d.status) {
-          state.expandStatus = d.status;
-          const el = document.getElementById('expandStatus');
-          if (el) el.textContent = d.status;
+          if (isGoalCurrent(gid)) {
+            state.expandStatus = d.status;
+            const el = document.getElementById('expandStatus');
+            if (el) el.textContent = d.status;
+          }
         }
-        if (d.sources) state.sources = d.sources;
+        if (d.sources && isGoalCurrent(gid)) state.sources = d.sources;
         if (d.questions) {
           finished = true;
-          asked = { stage: 'expand', nodeId: id, nodeTitle: d.nodeTitle || n.title, feedback: d.feedback || feedback || '', data: d.questions };
+          asked = { stage: 'expand', nodeId: id, nodeTitle: d.nodeTitle || n.title, feedback: d.feedback || feedback || '', data: d.questions, goalId: gid };
         }
         if (d.done) {
           finished = true;
-          state.goal = d.goal;
+          if (isGoalCurrent(gid)) state.goal = d.goal;
           state.expanded['t' + id] = true;
           state.expanded['g' + id] = true;
           state.expanded['s' + id] = true;
@@ -9489,15 +9634,22 @@ async function startExpand(id, feedback, answers) {
         if (d.error) { finished = true; toast(d.error); }
       }
     }
-    if (asked) { state.pendingAsk = asked; toast('AI 想先确认几个问题，回答后继续拆分'); }
+    if (asked) { state.pendingAsk = Object.assign({ goalId: gid }, asked); toast('AI 想先确认几个问题，回答后继续拆分'); }
     else if (!finished) toast('拆分中断，可重试');
   } catch (e) {
     toast(e.message);
   } finally {
     state.expanding = false;
+    state.expandGoalId = 0;
     state.expandStatus = '';
-    try { await loadGoal(state.goal.id); } catch (e) {}
-    rerenderCurrent();
+    /* 拆分是它自己目标的：用户中途去了别的目标页，就别用它的结果重画 / 覆盖当前页 */
+    if (isGoalCurrent(gid)) {
+      try { await loadGoal(gid); } catch (e) {}
+      try {
+        const rr = parseRoute();
+        if ((rr.view === 'goal' || rr.view === 'map') && Number(rr.id) === Number(gid)) rerenderCurrent();
+      } catch (e) {}
+    }
   }
 }
 /* 资料搜集是**可选**的：用户在问卷里选过「不用」就别再催他。
@@ -9526,11 +9678,40 @@ function sourceItemHTML(s) {
     ${body ? `<details class="siDet"><summary>${esc(body.replace(/\s+/g, ' ').slice(0, 120))}${body.length > 120 ? '…' : ''}（${body.length} 字）</summary><div class="siFull mdBody">${mdToHTML(body.slice(0, 20000))}</div></details>` : ''}
   </div>`;
 }
+/* ===== 长任务按目标隔离 =====
+   信息搜集 / 信息提炼是后台长任务：状态按目标 id 存（collectJobs / digestJobs），
+   A 目标在跑时打开 B 目标既不会看到 A 的进度，也不会把 B 的「重新规划」等按钮禁掉
+   （用户反馈「不同目标没有隔离开」）。
+   规划 / 拆分 / 教程是单实例任务（同一时间只允许一个），用 *GoalId 记住它属于哪个目标：
+   进度只在那个目标页显示，在别的目标页点它会给出提示，而不是静默失效。 */
+function collectJobOf(gid) { const id = Number(gid) || 0; return (state.collectJobs && state.collectJobs[id]) || null; }
+function digestJobOf(gid) { const id = Number(gid) || 0; return (state.digestJobs && state.digestJobs[id]) || null; }
+function collectingAt(gid) { return !!collectJobOf(gid); }
+function digestingAt(gid) { return !!digestJobOf(gid); }
+function planBusyFor(gid) { return !!state.planning && Number(state.planGoalId) === Number(gid); }
+function expandBusyFor(gid) { return !!state.expanding && Number(state.expandGoalId) === Number(gid); }
+function tutBusyFor(gid) { return !!state.tutoring && Number(state.tutGoalId) === Number(gid); }
+/* 单实例长任务正在别的目标上跑时，统一提示（复用已有词条，不新增文案） */
+function taskBusyElsewhereToast() { toast(tr('正在生成，稍等一下再点')); }
+/* 当前 state.goal 是不是这个目标（决定能不能改 state / DOM，防止后台任务把别的目标页改花） */
+function isGoalCurrent(gid) { return !!(state.goal && Number(state.goal.id) === Number(gid)); }
+/* 等待回答的问卷也要按目标取：A 目标的问卷不能显示到 B 目标页上（按目标持久化的那份仍然读服务端） */
+function pendingAskFor(g) {
+  const pe = state.pendingAsk;
+  if (pe && (!pe.goalId || Number(pe.goalId) === Number(g && g.id))) return pe;
+  return goalPendingAsk(g);
+}
+/* 路由是不是正停在这个目标的目标页（长任务收尾只重画它自己那一页） */
+function onGoalPage(gid) {
+  try { const rr = parseRoute(); return rr.view === 'goal' && Number(rr.id) === Number(gid); } catch (e) { return false; }
+}
 function srcPanelHTML() {
   const list = state.sources || [];
   const digests = state.digests || [];
   const gid = (state.goal && state.goal.id) || 0;
   const srcClosed = foldClosed(gid, 'sources', true);
+  const cj = collectJobOf(gid);
+  const dj = digestJobOf(gid);
   let h = `<div class="srcPanel">
     <div class="spHead">
       ${foldBtn('sources', srcClosed)}
@@ -9545,8 +9726,8 @@ function srcPanelHTML() {
         ${list.length ? `<button class="btn small danger" id="srcClearBtn" title="删除本目标全部信息源（含已导入的图片/电子书原件），不可恢复">🗑 清空</button>` : ''}
       </div>
     <div data-foldbody="sources"${srcClosed ? ' hidden' : ''}>`;
-  if (state.collecting) {
-      h += `<div class="spProgress"><span class="spinner"></span><span id="spStatus">${esc(state.collectStatus || '正在检索…')}</span><div class="spacer"></div><button class="btn tiny" id="collectStop" title="停止本次收集（已收集到的会保留）">⏹ 停止</button></div>`;
+  if (cj) {
+      h += `<div class="spProgress"><span class="spinner"></span><span id="spStatus">${esc(cj.status || '正在检索…')}</span><div class="spacer"></div><button class="btn tiny" id="collectStop" title="停止本次收集（已收集到的会保留）">⏹ 停止</button></div>`;
   }
     const starCount = list.filter(x => Number(x.quality) === 1).length;
     if (starCount) h += `<div class="spStarTip">★ 优质信息源 ${starCount} 条 —— 规划时会重点依据这些资料（可在资料左侧点 ★ 标注/取消）</div>`;
@@ -9567,9 +9748,9 @@ function srcPanelHTML() {
         </div>
       </div>`;
     }
-    if (state.digesting) {
-      const dp = state.digestProgress || {};
-      h += `<div class="spProgress"><span class="spinner"></span><span id="spStatus">${esc(state.digestStatus || '正在通读资料…')}</span>${dp.total ? `<span class="muted" style="font-size:11.5px;">（${dp.done || 0}/${dp.total} 批）</span>` : ''}<div class="spacer"></div><button class="btn tiny" id="digestStop" title="停止提炼">⏹ 停止</button></div>`;
+    if (dj) {
+      const dp = dj.progress || {};
+      h += `<div class="spProgress"><span class="spinner"></span><span id="spStatus">${esc(dj.status || '正在通读资料…')}</span>${dp.total ? `<span class="muted" style="font-size:11.5px;">（${dp.done || 0}/${dp.total} 批）</span>` : ''}<div class="spacer"></div><button class="btn tiny" id="digestStop" title="停止提炼">⏹ 停止</button></div>`;
     }
     if (digests.length) {
       h += `<div class="spDigests"><div class="spDigestsHead">📄 提炼汇总（${digests.length} 篇 · 规划优先依据）<div class="spacer"></div><a class="btn tiny" href="/api/goals/${(state.goal || {}).id}/digests/export" download>⬇ 下载全部 MD</a></div>`
@@ -9584,25 +9765,24 @@ function srcPanelHTML() {
       <div class="spListBar"><label class="spSelAll"><input type="checkbox" id="srcSelAll" ${selN && selN === list.length ? 'checked' : ''}> 全选</label>
       ${selN ? `<button class="btn tiny danger" id="srcDelSel">删除选中（${selN}）</button>` : '<span class="muted" style="font-size:12px;">勾选可批量删除；每条右侧 × 可单独删除</span>'}
       </div><div class="spList">${list.map(sourceItemHTML).join('')}</div></details>`;
-  } else if (!state.collecting) {
+  } else if (!cj) {
     h += '<div class="spEmpty">还没有信息源。建议先「收集信息源」，AI 规划会依据真实 JD 与面经，质量更高。</div>';
   }
   h += '</div></div>';
   return h;
 }
-/* 信息提炼：让 AI 通读全部资料（含图片资料）→ 提炼成多篇主题 MD 汇总 → 规划优先依据 */
+/* 信息提炼：让 AI 通读全部资料（含图片资料）→ 提炼成多篇主题 MD 汇总 → 规划优先依据
+   状态存在 state.digestJobs[goalId]（按目标隔离）：只有该目标页显示进度，别的目标不受影响。 */
 async function startDigest(id) {
-  if (state.digesting) return;
+  if (digestingAt(id)) return;
   if (!(await ensureAIConfigured())) return;
   if (!(state.sources || []).length) { toast('还没有资料：先「收集信息源」或上传图片资料'); return; }
   if (!confirm('让 AI 通读全部 ' + (state.sources || []).length + ' 条资料并提炼成多篇主题汇总？\n\n你的资料越多耗时越长（100 条以上大约 10-20 分钟，期间可随时点「⏹ 停止」，已提炼的部分会保留），提炼结果会用于后续规划。')) return;
-  state.digesting = true;
-  state.digestStatus = '正在通读资料…';
-  state.digestProgress = null;
-  state.digestAbort = new AbortController();
-  renderGoal();
+  const job = { status: '正在通读资料…', progress: null, abort: new AbortController() };
+  state.digestJobs[id] = job;
+  if (isGoalCurrent(id)) renderGoal();
   try {
-    const resp = await fetch('/api/goals/' + id + '/sources/digest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: state.digestAbort.signal });
+    const resp = await fetch('/api/goals/' + id + '/sources/digest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: job.abort.signal });
     if (!resp.ok || !resp.body) throw new Error('无法连接提炼服务');
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
@@ -9618,9 +9798,12 @@ async function startDigest(id) {
         if (!line) continue;
         let d;
         try { d = JSON.parse(line.slice(6)); } catch (e) { continue; }
-        if (d.status) { state.digestStatus = d.status; const el = document.getElementById('spStatus'); if (el) el.textContent = d.status; }
-        if (d.progress) { state.digestProgress = d.progress; }
-        if (d.done) { done = true; state.digests = d.digests || []; toast('提炼完成：' + d.count + ' 篇主题汇总（规划会优先依据）'); }
+        if (d.status) {
+          job.status = d.status;
+          if (isGoalCurrent(id)) { const el = document.getElementById('spStatus'); if (el) el.textContent = d.status; }
+        }
+        if (d.progress) { job.progress = d.progress; }
+        if (d.done) { done = true; if (isGoalCurrent(id)) state.digests = d.digests || []; toast('提炼完成：' + d.count + ' 篇主题汇总（规划会优先依据）'); }
         if (d.cancelled) { done = true; toast(d.status || '已停止提炼'); }
         if (d.error) { done = true; toast(d.error); }
       }
@@ -9629,24 +9812,25 @@ async function startDigest(id) {
   } catch (e) {
     if (e && e.name !== 'AbortError') toast(e.message);
   } finally {
-    state.digesting = false;
-    state.digestStatus = '';
-    state.digestProgress = null;
-    state.digestAbort = null;
-    try { await loadGoal(id); } catch (e) {}
-    renderGoal();
+    if (state.digestJobs && state.digestJobs[id] === job) delete state.digestJobs[id];
+    if (isGoalCurrent(id) && onGoalPage(id)) {
+      try { await loadGoal(id); } catch (e) {}
+      if (onGoalPage(id)) renderGoal();
+    }
   }
 }
+/* 信息源搜集：状态存在 state.collectJobs[goalId]（按目标隔离）。
+   A 目标在搜集时打开 B 目标：不显示 A 的进度、A 的进度也不会被 B 的渲染顶掉；
+   搜集继续在后台跑，回到 A 还能看到进度、点停止。不同目标可以各自搜集。 */
 async function startCollect(id) {
   if (!goalCompOn(goalCtx(), 'sources')) { toast('「信息源检索」组件在本目标已关闭：目标页 🧩 可单独开启'); return; }
-  if (state.collecting) return;
+  if (collectingAt(id)) return;
   if (!(await ensureCollectSetup(id))) return;   // 搜集前确认搜什么+要不要电子书（取消则不搜集）
-  state.collecting = true;
-  state.collectStatus = '正在检索…';
-  renderGoal();
+  const job = { status: '正在检索…', abort: new AbortController() };
+  state.collectJobs[id] = job;
+  if (isGoalCurrent(id)) renderGoal();
   try {
-    state.collectAbort = new AbortController();
-      const resp = await fetch('/api/goals/' + id + '/collect', { method: 'POST', signal: state.collectAbort.signal });
+    const resp = await fetch('/api/goals/' + id + '/collect', { method: 'POST', signal: job.abort.signal });
     if (!resp.ok || !resp.body) throw new Error('无法连接采集服务');
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
@@ -9663,35 +9847,42 @@ async function startCollect(id) {
         if (!line) continue;
         let d;
         try { d = JSON.parse(line.slice(6)); } catch (e) { continue; }
-        if (d.status) {
-          state.collectStatus = d.status;
-          const el = document.getElementById('spStatus');
-          if (el) el.textContent = d.status;
+        if (d.status_code) {
+          const t = searchFallbackStatusText(d.status_detail);
+          job.status = t;
+          /* 只有用户正在看这个目标时才改 DOM：否则会把另一个目标的进度条内容改掉 */
+          if (isGoalCurrent(id)) { const el = document.getElementById('spStatus'); if (el) el.textContent = t; }
+        } else if (d.status) {
+          job.status = d.status;
+          if (isGoalCurrent(id)) { const el = document.getElementById('spStatus'); if (el) el.textContent = d.status; }
         }
         if (d.done) {
-          done = true; state.sources = d.sources || [];
+          done = true;
+          if (isGoalCurrent(id)) state.sources = d.sources || [];
           const st = d.stats || null;
           const fun = st
             ? '（搜到 ' + st.searched + ' 条 → 进审 ' + st.toReview + ' 条 → 入库 ' + st.saved + ' 条'
               + (st.aiDrop ? '，AI 判为不合格 ' + st.aiDrop + ' 条' : '')
               + (st.fullGot ? '，补抓全文 ' + st.fullGot + ' 条' : '') + '）'
             : '';
-          toast('信息源收集完成：' + d.count + ' 条' + fun + (d.ebooks ? '；' + d.ebooks : '') + (d.blocked ? '（百度限流，本次用备用搜索，可稍后重新收集以获取更多）' : ''));
+          const fbNote = st && st.searchFallback ? tr('（搜索 API 不可用，本次用内置搜索）') : '';
+          toast('信息源收集完成：' + d.count + ' 条' + fun + fbNote + (d.ebooks ? '；' + d.ebooks : '') + (d.blocked ? '（百度限流，本次用备用搜索，可稍后重新收集以获取更多）' : ''));
         }
         if (d.error) { done = true; toast(d.error); }
       }
     }
     if (!done) toast('信息源收集中断，可重试');
   } catch (e) {
-    toast(e.message);
+    if (e && e.name !== 'AbortError') toast(e.message);
   } finally {
-    state.collecting = false;
-    state.collectStatus = '';
-    try { await loadGoal(id); } catch (e) {}
-    renderGoal();
-    // 收集完成后若还没有路径，自动开始规划
-    if (state.goal && !state.goal.nodes.length && !state.planning) {
-      startPlanning(id);
+    if (state.collectJobs && state.collectJobs[id] === job) delete state.collectJobs[id];
+    if (isGoalCurrent(id) && onGoalPage(id)) {
+      try { await loadGoal(id); } catch (e) {}
+      if (onGoalPage(id)) renderGoal();
+      // 收集完成后若这个目标还没有路径，自动开始规划（只在这个目标页上做，别在别的页面突然开始规划）
+      if (onGoalPage(id) && state.goal && Number(state.goal.id) === Number(id) && !state.goal.nodes.length && !state.planning) {
+        startPlanning(id);
+      }
     }
   }
 }
@@ -9727,27 +9918,25 @@ async function ensureCollectSetup(id, editOnly) {
   } catch (e) { return true; }
   if (!editOnly && plan && plan.asked && pref && pref.asked) return true;
   toast('AI 正在按目标制定搜集方案…');
-  let queries = (plan && plan.queries) || [];
-  let books = [];
-  try {
-    const rs = await Promise.all([
-      (plan && plan.asked) ? {} : api('/api/goals/' + id + '/collect-plan/recommend', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(e => ({})),
-      (pref && pref.asked) ? {} : api('/api/goals/' + id + '/ebooks/recommend', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(e => ({}))
-    ]);
-    if (!(plan && plan.asked)) {
-      queries = rs[0].queries || [];
-      if (rs[0].error && !queries.length) toast('搜集方案推荐失败：' + rs[0].error + '（可用默认模板或手动填写）');
-      if (!queries.length) queries = [];
-    }
-    if (!(pref && pref.asked)) {
-      books = rs[1].books || [];
-      if (rs[1].error && !books.length) toast('书单推荐失败：' + rs[1].error + '（可手动填写）');
-    }
-  } catch (e) { toast('推荐失败，可手动填写：' + e.message); }
-  return showCollectSetupDialog(id, { queries, books, pref, editOnly: !!editOnly });
+  /* 弹窗先出来，AI 推荐在后台补进去：以前是"等两个 AI 请求（10~30 秒）都回来才弹窗"，
+     中间只有一个 3 秒就消失的 toast，用户看到的就是"点了没反应"。 */
+  return showCollectSetupDialog(id, {
+    queries: (plan && plan.queries) || [],
+    books: (pref && pref.books) || [],
+    pref,
+    editOnly: !!editOnly,
+    csGate,
+    auto: { plan: !(plan && plan.asked), books: !(pref && pref.asked) }
+  });
 }
 function showCollectSetupDialog(gid, opts) {
-  const { queries, books, pref, editOnly } = opts;
+  opts = opts || {};
+  let queries = opts.queries || [];
+  let books = opts.books || [];
+  const pref = opts.pref || null;
+  const editOnly = !!opts.editOnly;
+  const csGate = opts.csGate || { review: true, min: 3, cap: 220, perSite: 12, full: true, fullMax: 60000 };
+  const auto = opts.auto || { plan: false, books: false };
   const prefAsked = !!(pref && pref.asked);
   const savedWant = (pref && pref.want) || 'auto';
   return new Promise(resolve => {
@@ -9823,14 +10012,34 @@ function showCollectSetupDialog(gid, opts) {
     let liveQueries = queries && queries.length ? queries : [{ kind: '资料', q: '', days: 365, on: false }, { kind: '资料', q: '', days: 365, on: false }];
     paintQueries(liveQueries);
     const ebBox = m.querySelector('#ebBooks');
-    ebBox.innerHTML = books.length ? books.map((b, i) => `<label class="ebBook"><input type="checkbox" data-ebbook="${i}" checked>
+    const paintBooks = () => {
+      ebBox.innerHTML = books.length ? books.map((b, i) => `<label class="ebBook"><input type="checkbox" data-ebbook="${i}" checked>
         <span class="ebCover">📖</span>
         <span class="ebInfo"><b>《${esc(b.title)}》${b.author ? `<span class="muted">　${esc(b.author)}</span>` : ''}</b>
         ${b.pitch ? `<span class="ebPitch">${esc(b.pitch)}</span>` : ''}
         <span class="ebWhere">${b.public_domain ? '<span class="chip ok">公版可直下</span>' : ''}${b.where ? `<span class="muted">去哪找：${esc(b.where)}</span>` : ''}</span></span></label>`).join('')
       : '<div class="muted">这次没推荐出来，直接在下面写书名也行。</div>';
+    };
+    paintBooks();
     document.body.appendChild(m);
     const close = v => { m.remove(); resolve(v); };
+    /* 方案/书单还没定过：弹窗立刻显示，AI 推荐在后台补进来（以前是等两个 AI 请求都回来才弹窗，用户以为点了没反应） */
+    if (auto.plan) {
+      qList.innerHTML = '<div class="spProgress"><span class="spinner"></span></div>';
+      api('/api/goals/' + gid + '/collect-plan/recommend', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+        .then(rr => {
+          if (rr && rr.queries && rr.queries.length) { queries = rr.queries; liveQueries = queries; }
+          else if (rr && rr.error) toast(rr.error);
+          paintQueries(liveQueries);
+        })
+        .catch(e => { toast(e.message); paintQueries(liveQueries); });
+    }
+    if (auto.books) {
+      ebBox.innerHTML = '<div class="spProgress"><span class="spinner"></span></div>';
+      api('/api/goals/' + gid + '/ebooks/recommend', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+        .then(rr => { books = (rr && rr.books) || []; paintBooks(); })
+        .catch(() => paintBooks());
+    }
     m.querySelector('#csX').addEventListener('click', () => close(editOnly ? true : false));
     m.querySelector('#csCancel').addEventListener('click', () => close(editOnly ? true : false));
     const all = m.querySelector('#csAll'), none = m.querySelector('#csNone');
@@ -10051,7 +10260,7 @@ function renderGoal() {
   const pct = g.tasks_total ? Math.round(g.tasks_done / g.tasks_total * 100) : 0;
   const stages = buildTree(g.nodes);
   const stMap = { draft: ['待规划', 'warn'], review: ['骨架待确认', 'warn'], planned: ['已规划', 'ok'], failed: ['规划失败', 'danger'] };
-  const st = (g.status === 'planning' && !state.planning) ? ['上次规划中断', 'warn'] : (stMap[g.status] || (state.planning ? ['规划中…', ''] : ['待规划', 'warn']));
+  const st = (g.status === 'planning' && !planBusyFor(g.id)) ? ['上次规划中断', 'warn'] : (stMap[g.status] || (planBusyFor(g.id) ? ['规划中…', ''] : ['待规划', 'warn']));
   let html = `<div class="page">
     <div class="goalSticky">
     <div class="pageHead">
@@ -10102,7 +10311,7 @@ function renderGoal() {
     html += viewBarHTML(g);
     const fStages = filterTree(stages);
     html += `<div data-foldbody="map"${foldClosed(g.id, 'map', true) ? ' hidden' : ''}>` + listViewHTML(fStages) + '</div>';
-  } else if (!state.planning) {
+  } else if (!planBusyFor(g.id)) {
     html += `<div class="emptyBox" style="margin-top:8px;">
       <div class="ebIcon">🧭</div>
       <div class="ebTitle">还没有路径</div>
@@ -10181,11 +10390,11 @@ function renderGoal() {
     if (await ensureCollectSetup(g.id, true)) toast('搜集方案已保存，下次搜集生效');
   });
   const cs = document.getElementById('collectStop');
-  if (cs) cs.addEventListener('click', () => { if (state.collectAbort) state.collectAbort.abort(); });
+  if (cs) cs.addEventListener('click', () => { const job = collectJobOf(g.id); if (job && job.abort) job.abort.abort(); });
   const db2 = document.getElementById('digestBtn');
   if (db2) db2.addEventListener('click', () => startDigest(g.id));
   const ds = document.getElementById('digestStop');
-  if (ds) ds.addEventListener('click', () => { if (state.digestAbort) state.digestAbort.abort(); });
+  if (ds) ds.addEventListener('click', () => { const job = digestJobOf(g.id); if (job && job.abort) job.abort.abort(); });
   app.querySelectorAll('[data-digest-del]').forEach(b => b.addEventListener('click', async () => {
     if (!confirm('删除这篇提炼汇总？')) return;
     try { await api('/api/digests/' + b.getAttribute('data-digest-del'), { method: 'DELETE' });
@@ -10193,7 +10402,9 @@ function renderGoal() {
       toast('已删除'); renderGoal();
     } catch (e) { toast(e.message); }
   }));
-  if (state.planning || state.collecting) {
+  /* 只按「这个目标」自己的长任务禁用按钮：A 目标在搜集/提炼/规划时，B 目标页照常可用 */
+  const goalBusy = planBusyFor(g.id) || collectingAt(g.id) || digestingAt(g.id);
+  if (goalBusy) {
     planBtnEl.disabled = true;
     if (cb) cb.disabled = true;
     document.getElementById('delGoalBtn').disabled = true;
@@ -10333,7 +10544,7 @@ function renderGoal() {
       } catch (err) { toast(err.message); }
     });
   }
-  if (state.planning) bindPlanningPanel();
+  if (planBusyFor(g.id)) bindPlanningPanel();
   bindPlanPanel();
   bindTreeEvents(renderGoal);
 }
@@ -13124,6 +13335,160 @@ function ragSettingsHTML(s) {
     <div id="ragHits" style="margin-top:8px;"></div>
   </div>`;
 }
+
+/* 搜索 API 的服务商 id → 界面文字（服务端只回 id，文案统一在 tr 里） */
+function searchProviderLabel(id) {
+  if (id === 'deepseek') return tr('DeepSeek 网页搜索 API');
+  if (id === 'custom') return tr('自定义兼容接口');
+  return tr('内置搜索（百度 + 必应）');
+}
+/* 搜索 API 的错误码 → 界面文字（错误细节由服务端给，文案由前端 tr） */
+function searchErrText(r) {
+  r = r || {};
+  const detail = String(r.detail || '').slice(0, 220);
+  switch (r.code) {
+    case 'timeout': return tr('搜索 API 超时，请检查网络或接口地址');
+    case 'network': return tr('连不上搜索 API：{0}', detail || tr('网络错误'));
+    case 'http': return tr('搜索 API 返回 HTTP {0}{1}', r.status || '', detail ? '：' + detail : '');
+    case 'bad_response': return tr('搜索 API 返回的不是 JSON');
+    case 'api_error': return tr('搜索 API 报错：{0}', detail);
+    case 'no_endpoint': return tr('还没有填搜索 API 地址');
+    case 'builtin_empty': return tr('内置搜索这次没有返回结果（可能被限流）');
+    case 'builtin_error': return tr('内置搜索失败：{0}', detail || '');
+    default: return detail ? tr('搜索 API 调用失败：{0}', detail) : tr('搜索 API 调用失败');
+  }
+}
+/* 搜集进度里「搜索 API 失败回落」的进度文案（服务端只回 code） */
+function searchFallbackStatusText(code) {
+  if (code === 'no_endpoint') return tr('搜索 API 地址为空，本次回落到内置搜索…');
+  if (code === 'timeout') return tr('搜索 API 超时，本次回落到内置搜索…');
+  if (code === 'network') return tr('连不上搜索 API，本次回落到内置搜索…');
+  if (code === 'builtin_error') return tr('内置搜索失败，本次没有关键字结果…');
+  return tr('搜索 API 调用失败（{0}），本次回落到内置搜索…', code || 'error');
+}
+/* ---- 设置页：信息源检索（搜索 API） ----
+   默认用内置搜索（百度 + 必应）；用户显式指定搜索 API 后优先用它，失败再回落内置。 */
+function searchSettingsHTML(s) {
+  const sc = (s && s.search) || {};
+  const provider = sc.provider === 'deepseek' || sc.provider === 'custom' ? sc.provider : 'builtin';
+  const isApi = provider !== 'builtin';
+  const statusText = tr('当前使用：{0}', searchProviderLabel(provider))
+    + (provider === 'builtin' ? '' : ' · ' + (sc.has_key ? tr('密钥已配置') : tr('密钥未配置')));
+  return `<p class="hint" style="margin:-4px 0 12px;">${tr('搜集资料时默认用内置搜索（百度 + 必应网页抓取）。如果你有搜索 API，可以在这里显式指定：指定后优先用它；没指定或调用失败时自动回落到内置搜索。')}</p>
+  <div class="field">
+    <label>${tr('搜索方式')}</label>
+    <select class="sxi-sel" id="searchProvider" style="max-width:360px;">
+      <option value="builtin"${provider === 'builtin' ? ' selected' : ''}>${tr('内置搜索（百度 + 必应，无需配置）')}</option>
+      <option value="deepseek"${provider === 'deepseek' ? ' selected' : ''}>${tr('DeepSeek 网页搜索 API')}</option>
+      <option value="custom"${provider === 'custom' ? ' selected' : ''}>${tr('自定义（DeepSeek 兼容接口）')}</option>
+    </select>
+  </div>
+  <div id="searchApiFields"${isApi ? '' : ' hidden'}>
+    <div class="ccRow" style="margin-bottom:9px;">
+      <label class="ccWide">${tr('API 地址')}
+        <span class="inWrap"><i>🔗</i><input class="mono" id="searchBase" value="${esc(sc.base || '')}" placeholder="${provider === 'custom' ? tr('完整接口地址') : tr('默认 https://api.deepseek.com，留空即用默认')}" spellcheck="false"></span>
+      </label>
+      <label class="ccWide">${tr('API 密钥')}
+        <span class="inWrap"><i>🔑</i><input type="password" id="searchKey" value="" placeholder="${sc.has_key ? tr('已保存（留空则不修改）') : 'sk-…'}" spellcheck="false"><button type="button" class="peekBtn" id="searchPeek" title="${tr('显示 / 隐藏')}">👁</button></span>
+      </label>
+    </div>
+    <div class="ccRow">
+      <label class="ccWide">${tr('每次返回条数')}
+        <span class="inWrap"><i>#</i><input type="number" id="searchCount" min="1" max="50" value="${esc(String(sc.count || 20))}"></span>
+      </label>
+    </div>
+    <p class="hint" id="searchBaseHint" style="margin:7px 0 0;">${provider === 'custom' ? tr('填完整接口地址；只填域名会自动补 /v1/tools/search。') : tr('只填服务地址即可，会自动拼上 /v1/tools/search。')}</p>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:9px;">
+      <input type="checkbox" id="searchContent"${sc.content !== false ? ' checked' : ''}> ${tr('同时取回网页正文（接口支持时，抓不到正文的网站也能入库）')}
+    </label>
+    <p class="hint" style="margin-top:6px;">${tr('DeepSeek 的 Search 接口按请求次数计费（约 5 元 / 1000 次，具体以官网为准），密钥在 platform.deepseek.com 创建；这里的密钥与「AI 接入方式」分开存。')}</p>
+  </div>
+  <div class="toolbarRow" style="margin-top:9px;">
+    <button class="btn primary" id="searchSave">${tr('保存搜索设置')}</button>
+    <button class="btn" id="searchTest">${tr('测试搜索')}</button>
+  </div>
+  <div class="hint" id="searchMsg" style="margin-top:8px;line-height:1.8;">${statusText}${sc.endpoint ? ' · ' + esc(sc.endpoint) : ''}</div>`;
+}
+function bindSearchSettings() {
+  const sel = id => document.getElementById(id);
+  const say = (t, isErr) => {
+    const el = sel('searchMsg');
+    if (el) el.innerHTML = isErr ? '<span style="color:var(--warn)">' + t + '</span>' : t;
+  };
+  const providerSel = sel('searchProvider');
+  if (!providerSel) return;
+  const paintFields = () => {
+    const pv = providerSel.value;
+    const fields = sel('searchApiFields');
+    if (fields) fields.hidden = pv === 'builtin';
+    const hint = sel('searchBaseHint');
+    if (hint) hint.textContent = pv === 'custom'
+      ? tr('填完整接口地址；只填域名会自动补 /v1/tools/search。')
+      : tr('只填服务地址即可，会自动拼上 /v1/tools/search。');
+    const base = sel('searchBase');
+    if (base) {
+      base.placeholder = pv === 'custom' ? tr('完整接口地址') : tr('默认 https://api.deepseek.com，留空即用默认');
+      if (pv === 'custom' && /^https?:\/\/api\.deepseek\.com\/?$/i.test(base.value.trim())) base.value = '';
+    }
+  };
+  providerSel.addEventListener('change', paintFields);
+  paintFields();
+  const vals = () => ({
+    provider: providerSel.value || 'builtin',
+    base: (((sel('searchBase') || {}).value) || '').trim(),
+    count: Math.max(1, Math.min(50, Number(((sel('searchCount') || {}).value)) || 20)),
+    content: !!((sel('searchContent') || {}).checked),
+    apiKey: (((sel('searchKey') || {}).value) || '').trim()
+  });
+  const peek = sel('searchPeek');
+  if (peek) peek.addEventListener('click', () => {
+    const k = sel('searchKey');
+    if (k) k.type = k.type === 'password' ? 'text' : 'password';
+  });
+  const saveBtn = sel('searchSave');
+  if (saveBtn) saveBtn.addEventListener('click', async () => {
+    const v = vals();
+    saveBtn.disabled = true; saveBtn.textContent = tr('保存中…');
+    try {
+      const body = { search_provider: v.provider, search_api_base: v.base, search_api_count: String(v.count), search_api_content: v.content ? '1' : '0' };
+      if (v.apiKey) body.search_api_key = v.apiKey;
+      const r = await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const sc = r.search || {};
+      const k = sel('searchKey');
+      if (k) { k.value = ''; k.placeholder = sc.has_key ? tr('已保存（留空则不修改）') : 'sk-…'; }
+      toast(tr('搜索设置已保存'));
+      say(esc(tr('当前使用：{0}', searchProviderLabel(sc.provider)))
+        + (sc.endpoint ? ' · ' + esc(sc.endpoint) : ''));
+    } catch (e) {
+      toast(tr('保存失败：{0}', e.message));
+    } finally {
+      saveBtn.disabled = false; saveBtn.textContent = tr('保存搜索设置');
+    }
+  });
+  const testBtn = sel('searchTest');
+  if (testBtn) testBtn.addEventListener('click', async () => {
+    const v = vals();
+    testBtn.disabled = true; testBtn.textContent = tr('测试中…');
+    say(esc(tr('正在真实调用一次搜索，请稍候…')));
+    try {
+      const body = { provider: v.provider, base: v.base, count: 3, content: v.content };
+      if (v.apiKey) body.apiKey = v.apiKey;
+      const r = await api('/api/search/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (r.ok) {
+        const sample = (r.items || []).slice(0, 2).map(x => '《' + esc(x.title) + '》').join('、');
+        say('✅ ' + esc(tr('搜索可用')) + ' · ' + esc(searchProviderLabel(r.provider)) + ' · ' + esc(tr('返回 {0} 条', r.count))
+          + (sample ? ' · ' + sample : '') + (r.ms ? ' · ' + r.ms + ' ms' : ''));
+      } else {
+        say('❌ ' + esc(tr('不可用')) + '：' + esc(searchErrText(r)), true);
+      }
+    } catch (e) {
+      say('❌ ' + esc(tr('测试失败')) + '：' + esc(e.message), true);
+    } finally {
+      testBtn.disabled = false; testBtn.textContent = tr('测试搜索');
+    }
+  });
+}
+
 /* ---------- 设置页「外观主题」子路由 Vue 版（其余设置仍旧版） ---------- */
 let settingsThemeVueUnmount = null;
 function settingsThemeVueEnabled() {
@@ -13643,21 +14008,23 @@ function sxPageHostMap() {
     updMaskShow, updMaskSub, waitServerBack, applyUpdate, updateSectionHTML, bindUpdateSection, serviceSectionHTML, bindServiceSection,
     syncSwitch, syncSectionHTML, bindSyncSection, openSyncConflictDialog, AI_PROVIDERS_FALLBACK, AI_AGENTS_FALLBACK, providerButtonsHTML, modelButtonsHTML,
     testedOf, paintBtn, chosenChipsHTML, shortHost, connFolded, agentButtonsHTML, connCardHTML, agentCardHTML,
-    aiStatusBoxHTML, themeSettingsHTML, themeMsgText, ragSettingsHTML, settingsThemeVueEnabled, renderSettingsThemeVue, settingsVueEnabled, renderSettingsVue,
-    settingsAiVueEnabled, renderSettingsAiVue, settingsDataVueEnabled, renderSettingsDataVue, settingsSyncVueEnabled, renderSettingsSyncVue, settingsRagVueEnabled, renderSettingsRagVue,
-    settingsServiceVueEnabled, renderSettingsServiceVue, settingsUpdateVueEnabled, renderSettingsUpdateVue, settingsSystemVueEnabled, renderSettingsSystemVue, guideVueEnabled, renderGuideVue,
-    tutorialVueEnabled, renderTutorialVue, mapVueEnabled, pagePluginIsUser, ensureBuiltinPageStyle, removeBuiltinPageStyle, findUserUiPlugin, loadUiHostBridge,
-    loadClassicScript, mountUserUiPage, markPagePlugin, currentPagePlugin, renderMapVue, chatVueEnabled, renderChatVue, goalVueEnabled,
-    renderGoalVue, renderSettings, showImportDialog, setupCardHTML, ensureAIConfigured, PLUGIN_BTNS_VISIBLE, pluginEntriesVisible, pluginButtonsHTML,
-    goalPluginsHTML, goalManageableEntries, showGoalPluginsMenu, pluginPickerHTML, bindPluginPicker, AITASK_ST, AIT_PAGE_OPTS, aitPageSize,
-    aiTasksStopPoll, aitTypeMeta, aitDur, aitWhen, aitS, aitQuery, sxiSelText, sxiSelPaint,
-    sxiSelify, aitGoalLabel, aitStatusLabel, aitShortDate, aitShortDT, aitTimeLabel, aitTimeOn, aitDayISO,
-    aitHoursISO, aitApplyPreset, aitApplyCustom, aitLocalDT, bindAitFillBtns, aitPaintFilterBtns, sxiPopClose, sxiPopShow,
-    aitAfterFilterChange, aitRunningCard, aitRunHTML, aitGrpHTML, aitHistRowHTML, aitRowHeadHTML, aitRowsHTML, aitPaintRun,
-    aitPaintHist, aitLoadRows, aitReloadAll, aitToggle, aitVueEnabled, ensureAitVueCss, renderAiTasksPageVue, renderAiTasksPage,
-    bindAiTasks, RAIL_LOGO_SVG, _railTutGoal, _railTutPending, railTutGoalAsync, railGoalId, RAIL_ORDER_KEY, RAIL_ORDER_HINT_KEY,
-    railOrderLoad, railOrderSave, railOrderApply, railBindDnD, railDnDMove, railDnDEnd, railOrderHinted, railItemsHTML,
-    renderRail, loadFrontendPlugins, ensureGoal, pluginGoButtonsBind
+    aiStatusBoxHTML, themeSettingsHTML, themeMsgText, ragSettingsHTML, searchProviderLabel, searchErrText, searchFallbackStatusText, searchSettingsHTML,
+    bindSearchSettings, settingsThemeVueEnabled, renderSettingsThemeVue, settingsVueEnabled, renderSettingsVue, settingsAiVueEnabled, renderSettingsAiVue, settingsDataVueEnabled,
+    renderSettingsDataVue, settingsSyncVueEnabled, renderSettingsSyncVue, settingsRagVueEnabled, renderSettingsRagVue, settingsServiceVueEnabled, renderSettingsServiceVue, settingsUpdateVueEnabled,
+    renderSettingsUpdateVue, settingsSystemVueEnabled, renderSettingsSystemVue, guideVueEnabled, renderGuideVue, tutorialVueEnabled, renderTutorialVue, mapVueEnabled,
+    pagePluginIsUser, ensureBuiltinPageStyle, removeBuiltinPageStyle, findUserUiPlugin, loadUiHostBridge, loadClassicScript, mountUserUiPage, markPagePlugin,
+    currentPagePlugin, renderMapVue, chatVueEnabled, renderChatVue, goalVueEnabled, renderGoalVue, LANG_FALLBACK_LOCALES, langCodeBadge,
+    langLocaleList, langCurrentLabel, languageBodyHTML, languageSectionHTML, langRefreshBody, langSay, langProgressShow, langProgressPaint,
+    langDisableGen, langWatchTask, langStartGenerate, bindLanguageBody, bindLanguageSection, renderSettings, showImportDialog, setupCardHTML,
+    ensureAIConfigured, PLUGIN_BTNS_VISIBLE, pluginEntriesVisible, pluginButtonsHTML, goalPluginsHTML, goalManageableEntries, showGoalPluginsMenu, pluginPickerHTML,
+    bindPluginPicker, AITASK_ST, AIT_PAGE_OPTS, aitPageSize, aiTasksStopPoll, aitTypeMeta, aitDur, aitWhen,
+    aitS, aitQuery, sxiSelText, sxiSelPaint, sxiSelify, aitGoalLabel, aitStatusLabel, aitShortDate,
+    aitShortDT, aitTimeLabel, aitTimeOn, aitDayISO, aitHoursISO, aitApplyPreset, aitApplyCustom, aitLocalDT,
+    bindAitFillBtns, aitPaintFilterBtns, sxiPopClose, sxiPopShow, aitAfterFilterChange, aitRunningCard, aitRunHTML, aitGrpHTML,
+    aitHistRowHTML, aitRowHeadHTML, aitRowsHTML, aitPaintRun, aitPaintHist, aitLoadRows, aitReloadAll, aitToggle,
+    aitVueEnabled, ensureAitVueCss, renderAiTasksPageVue, renderAiTasksPage, bindAiTasks, RAIL_LOGO_SVG, _railTutGoal, _railTutPending,
+    railTutGoalAsync, railGoalId, RAIL_ORDER_KEY, RAIL_ORDER_HINT_KEY, railOrderLoad, railOrderSave, railOrderApply, railBindDnD,
+    railDnDMove, railDnDEnd, railOrderHinted, railItemsHTML, renderRail, loadFrontendPlugins, ensureGoal, pluginGoButtonsBind
   };
   Object.defineProperty(h, "mdInlineSt", {
     get: function () { return mdInlineSt; },
@@ -14510,6 +14877,7 @@ async function renderSettings() {
      每条连接里多选模型；具体用哪个模型由「AI 助手」对话栏的模型下拉决定。 */
   const SET_TABS = [
     ['set-ai', '🔌 AI 接入方式'],
+    ['set-search', '🔎 ' + tr('信息源检索')],
     ['set-rag', '🔍 检索增强'],
     ['set-theme', '🎨 外观主题'],
     ['set-lang', '🌐 语言 Language'],
@@ -14569,6 +14937,10 @@ async function renderSettings() {
       </div>
     </div>
     <div class="setGrid">
+    <div class="sec" id="set-search">
+      <div class="secTitle">${tr('信息源检索')} <span class="secSub">${tr('搜集资料时用哪个搜索服务：默认内置搜索，也可以指定外部搜索 API')}</span></div>
+      ${searchSettingsHTML(s)}
+    </div>
     <div class="sec" id="set-rag">
       <div class="secTitle">检索增强（RAG） <span class="secSub">把资料库当知识库：按问题检索片段，而不是整包塞给模型</span></div>
       ${ragSettingsHTML(s)}
@@ -15307,6 +15679,7 @@ async function renderSettings() {
   bindUpdateSection();
   bindSyncSection();
   bindLanguageSection(langState);
+  bindSearchSettings();
 
   /* 顶栏页签：一次只显示一块，整页切换，不再全挤在一起。
      切页签只做 hidden 显隐 —— 输入框里的未保存内容不会丢，各区块的监听也都在，

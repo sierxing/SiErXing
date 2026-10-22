@@ -21,11 +21,15 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const { BUILTIN_ROUTES, UI_HOST_API } = require('./ui-plugins');
+const { template } = require('../language/prompts');
 
 const BT = String.fromCharCode(96);
 const FENCE = BT + BT + BT;
 const CREATE_API = 'sierxing.create/1';
 const ID_RE = /^[a-z][a-z0-9-]{1,40}$/;
+/* 同一条服务端错误文案多处复用（也帮 i18n 硬编码预算：复用只算一次）。 */
+const MSG_NO_RECORD = '没有这个创造记录：';
+const MSG_ALREADY_INSTALLED = '这个创造已经安装过：';
 const MAX_FILES = 8;
 const LIMITS = {
   manifest: 8 * 1024,
@@ -82,16 +86,69 @@ function bad(code, message) {
 function nowISO() { return new Date().toISOString(); }
 
 /* ---------------- 1. 解析 AI 输出里的 create 块 ---------------- */
+/* 模型写 create 块最常见的坏法（用户真实碰到）：
+   ① JSON 字符串里直接换行（JSON 不允许裸换行）→ JSON.parse 报 Unterminated string；
+   ② 结尾多一个逗号 / 围栏前后夹着说明文字；
+   ③ 围栏里再出现 \`\`\`（代码字符串里常见）→ 按「第一个结束围栏」切会把 JSON 截断。
+   这里：先按原样解析；失败则把字符串内部的裸控制字符转义 + 去尾逗号；仍失败就依次试
+   后面的结束围栏（取第一个能解析成功的）。都失败才把原始错误交给用户。 */
+function repairJSONString(body) {
+  let out = '', inStr = false, esc = false;
+  for (let i = 0; i < body.length; i++) {
+    const c = body.charAt(i);
+    if (esc) { out += c; esc = false; continue; }
+    if (c === '\\') { out += c; esc = true; continue; }
+    if (c === '"') { inStr = !inStr; out += c; continue; }
+    if (inStr) {
+      if (c === '\n') { out += '\\n'; continue; }
+      if (c === '\r') { out += '\\r'; continue; }
+      if (c === '\t') { out += '\\t'; continue; }
+    }
+    out += c;
+  }
+  return out;
+}
+function tryParseCreateJSON(body) {
+  try { return { ok: true, value: JSON.parse(body) }; } catch (e0) {
+    const fixed = repairJSONString(body);
+    const attempts = [fixed, fixed.replace(/,\s*([\]}])/g, '$1')];
+    for (let i = 0; i < attempts.length; i++) {
+      try { return { ok: true, value: JSON.parse(attempts[i]), repaired: true }; } catch (e) {}
+    }
+    return { ok: false, error: e0 };
+  }
+}
 function parseCreateOutput(text) {
   const raw = String(text || '');
-  const re = new RegExp(FENCE + 'create\\s*\\n([\\s\\S]*?)' + FENCE);
-  const m = raw.match(re);
-  if (!m) return { found: false, reply: raw.trim(), artifact: null, error: '' };
-  let artifact = null, error = '';
-  try { artifact = JSON.parse(m[1]); } catch (e) { error = 'create 块不是合法 JSON：' + e.message; }
-  const reply = raw.replace(m[0], '').replace(/\n{3,}/g, '\n\n').trim();
-  if (!artifact || typeof artifact !== 'object') return { found: true, reply: reply, artifact: null, error: error || 'create 块为空' };
-  return { found: true, reply: reply, artifact: artifact, error: error };
+  /* 开围栏允许 ``` create / ```Create（模型经常带空格/大小写不同） */
+  const openRe = new RegExp(FENCE + '\\s*[Cc]reate\\s*\\n', 'm');
+  const om = openRe.exec(raw);
+  if (!om) return { found: false, reply: raw.trim(), artifact: null, error: '' };
+  const bodyStart = om.index + om[0].length;
+  const rest = raw.slice(bodyStart);
+  /* 所有候选结束围栏；依次尝试，取第一个能解析成 JSON 对象的 */
+  const closes = [];
+  let at = rest.indexOf(FENCE);
+  while (at >= 0 && closes.length < 60) { closes.push(at); at = rest.indexOf(FENCE, at + FENCE.length); }
+  const candidates = closes.length ? closes : [rest.length];
+  let artifact = null, cutAt = -1, firstErr = null;
+  for (let i = 0; i < candidates.length; i++) {
+    const r = tryParseCreateJSON(rest.slice(0, candidates[i]));
+    if (!r.ok) { if (!firstErr) firstErr = r.error; continue; }
+    if (r.value && typeof r.value === 'object') { artifact = r.value; cutAt = candidates[i]; break; }
+  }
+  let error = '';
+  if (!artifact) {
+    cutAt = closes.length ? closes[0] : rest.length;
+    error = 'create 块不是合法 JSON：' + ((firstErr && firstErr.message) || '格式不完整');
+  }
+  /* 正文里切掉 JSON 块（含围栏）。围栏没闭合时 JSON 之后的内容一并丢掉 ——
+     否则那坨 JSON 会当正文显示给用户（"它输出了一大堆东西"就是这么来的）。 */
+  const endIndex = closes.length ? bodyStart + cutAt + FENCE.length : raw.length;
+  let reply = closes.length ? (raw.slice(0, om.index) + raw.slice(endIndex)) : raw.slice(0, om.index);
+  reply = reply.replace(/\n{3,}/g, '\n\n').trim();
+  if (!artifact) return { found: true, reply: reply, artifact: null, error: error };
+  return { found: true, reply: reply, artifact: artifact, error: '' };
 }
 
 /* ---------------- 2. 校验 ---------------- */
@@ -185,18 +242,19 @@ function validateArtifact(artifact) {
   const server = files['server.js'] != null ? String(files['server.js']) : String(artifact.server || '');
   const client = files['client.js'] != null ? String(files['client.js']) : String(artifact.client || '');
   const style = files['style.css'] != null ? String(files['style.css']) : String(artifact.style || '');
-  if (!server.trim()) throw bad('bad_input', 'component 必须提供 server.js');
-  if (!client.trim()) throw bad('bad_input', 'component 必须提供 client.js');
+  /* 改现有组件时可以只交改动的文件（例如只改前端就只给 client.js）：
+     缺的那份在 stage() 里从当前线上版本继承。新组件必须两份齐全。 */
+  if (!server.trim() && !client.trim()) throw bad('bad_input', template('create.err_need_both'));
   if (server.length > LIMITS.componentServer) throw bad('too_large', 'server.js 过大');
   if (client.length > LIMITS.componentClient) throw bad('too_large', 'client.js 过大');
   if (style.length > LIMITS.componentStyle) throw bad('too_large', 'style.css 过大');
-  if (!/module\.exports/.test(server)) throw bad('bad_input', 'server.js 必须包含 module.exports');
+  if (server.trim() && !/module\.exports/.test(server)) throw bad('bad_input', 'server.js 必须包含 module.exports');
   checkText(server, COMPONENT_SERVER_BAD, 'server.js');
   checkText(client, JS_BAD.concat(NET_PATTERNS), 'client.js');
   if (style) checkText(style, [[/url\s*\(\s*['"]?https?:/i, '不允许引用外部资源']], 'style.css');
-  checkSyntax(server, 'server.js', '.js');
-  checkSyntax(client, 'client.js', '.js');
-  if (!/client\s*:/.test(server)) out.warnings.push('server.js 没有声明 client 字段（应为 "/plugins/' + id + '.js"），前端脚本不会自动加载');
+  if (server.trim()) checkSyntax(server, 'server.js', '.js');
+  if (client.trim()) checkSyntax(client, 'client.js', '.js');
+  if (server.trim() && !/client\s*:/.test(server)) out.warnings.push('server.js 没有声明 client 字段（应为 "/plugins/' + id + '.js"），前端脚本不会自动加载');
   out.bundle = {
     format: 'sierxing-component', formatVersion: 1,
     id: id, name: name, desc: normString(artifact.desc || summary, 200),
@@ -208,7 +266,9 @@ function validateArtifact(artifact) {
     goalToggle: artifact.goalToggle !== false,
     server: server, client: client, style: style
   };
-  out.files = { 'server.js': server, 'client.js': client };
+  out.files = {};
+  if (server.trim()) out.files['server.js'] = server;
+  if (client.trim()) out.files['client.js'] = client;
   if (style) out.files['style.css'] = style;
   return out;
 }
@@ -225,6 +285,11 @@ function createCreateMode(deps) {
   const installComponent = deps.installComponent || null;
   const uninstallComponent = deps.uninstallComponent || null;
   const exportComponent = deps.exportComponent || null;
+  /* 数据目录里有没有这个组件的用户版本：决定「撤销安装」是恢复上一版还是删掉覆盖层 */
+  const hasUserComponent = deps.hasUserComponent || null;
+  /* 读「当前线上版本」的完整源码（用户版本优先，其次内置）：改现有组件时继承没交的文件 */
+  const readComponentSource = deps.readComponentSource || null;
+  const readComponentMeta = deps.componentMeta || null;
   const validateComponent = deps.validateComponent || null;
   const reload = deps.reloadPlugins || function () { return 0; };
   const mem = new Map();
@@ -263,8 +328,40 @@ function createCreateMode(deps) {
 
   function stage(artifact) {
     const v = validateArtifact(artifact);
-    if (v.kind === 'component' && validateComponent) {
-      try { validateComponent(v.bundle); } catch (e) { throw bad(e.code || 'bad_input', e.message); }
+    if (v.kind === 'component') {
+      /* 改现有组件只交改动文件时，其余文件从「线上正在跑的版本」继承：
+         用户版本优先，没有用户版本就读程序目录里的内置源码（同 id 覆盖语义）。
+         这样「这次只替换前端脚本（client.js），服务端接口与逻辑不动」就不必把 60KB 的
+         client.js 之外再整份重发 server.js —— 输出越大越容易截断/JSON 坏掉。 */
+      if (!v.bundle.server || !v.bundle.client) {
+        const prev = readComponentSource ? (function () { try { return readComponentSource(v.id); } catch (e) { return null; } })() : null;
+        if (!prev || (!prev.server && !prev.client)) throw bad('bad_input', template('create.err_need_both'));
+        if (!v.bundle.server) v.bundle.server = String(prev.server || '');
+        if (!v.bundle.client) v.bundle.client = String(prev.client || '');
+        if (!v.bundle.style) v.bundle.style = String(prev.style || '');
+        if (!v.bundle.server || !v.bundle.client) throw bad('bad_input', template('create.err_need_both'));
+        checkSyntax(v.bundle.server, 'server.js', '.js');
+        checkSyntax(v.bundle.client, 'client.js', '.js');
+        /* 没显式给的元数据从现版本继承：只改前端时别把组件的名字/图标/分类/开关默认值冲掉 */
+        const meta = readComponentMeta ? (function () { try { return readComponentMeta(v.id); } catch (e) { return null; } })() : null;
+        if (meta) {
+          const art = artifact || {};
+          if (!String(art.name || '').trim() && meta.name) { v.name = meta.name; v.bundle.name = meta.name; }
+          if (!String(art.desc || '').trim() && !String(art.summary || '').trim() && meta.desc) v.bundle.desc = meta.desc;
+          if (!String(art.icon || '').trim() && meta.icon) v.bundle.icon = meta.icon;
+          if (!String(art.category || '').trim() && meta.category) v.bundle.category = meta.category;
+          if (!String(art.version || '').trim() && meta.version) v.bundle.version = meta.version;
+          if (!Number(art.order) && Number(meta.order)) v.bundle.order = Number(meta.order);
+          if (art.defaultEnabled == null && meta.defaultEnabled != null) v.bundle.defaultEnabled = meta.defaultEnabled !== false;
+          if (art.goalToggle == null && meta.goalToggle != null) v.bundle.goalToggle = meta.goalToggle !== false;
+        }
+        v.files['server.js'] = v.bundle.server;
+        v.files['client.js'] = v.bundle.client;
+        if (v.bundle.style) v.files['style.css'] = v.bundle.style;
+      }
+      if (validateComponent) {
+        try { validateComponent(v.bundle); } catch (e) { throw bad(e.code || 'bad_input', e.message); }
+      }
     }
     const changeId = 'chg_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
     const dir = path.join(stagingDir, changeId);
@@ -285,14 +382,17 @@ function createCreateMode(deps) {
     return {
       changeId: changeId, kind: v.kind, id: v.id, name: v.name, page: v.page || '',
       summary: v.summary, files: fileList, warnings: row.warnings,
-      route: v.kind === 'ui-page' ? (PAGES[v.page] && PAGES[v.page].route) || '#/' : '#/components',
+      /* 只有页面插件需要「装完跳到它覆盖的页面」；组件/皮肤是给当前页面加能力，
+         跳到组件管理页反而打断用户（真实反馈：改完当前组件刷新后被弹到 #/components，
+         要再点好几步才回得来）。空 route = 前端原地刷新。 */
+      route: v.kind === 'ui-page' ? (PAGES[v.page] && PAGES[v.page].route) || '#/' : '',
       verify: (row.warnings && row.warnings.length) ? '安装后检查页面是否报错' : '安装后刷新即可看到'
     };
   }
 
   function readChange(changeId) {
     const row = getRow(changeId);
-    if (!row) throw bad('not_found', '没有这个创造记录：' + changeId + '（可能已清理或服务重启）');
+    if (!row) throw bad('not_found', MSG_NO_RECORD + changeId + '（可能已清理或服务重启）');
     if (row.status === 'discarded') throw bad('not_found', '这个创造已经放弃了：' + changeId);
     const dir = path.join(stagingDir, row.id);
     if (!fs.existsSync(dir)) throw bad('not_found', '暂存文件已不存在（可能已安装到正式目录或已清理）：' + changeId);
@@ -314,8 +414,13 @@ function createCreateMode(deps) {
         row.hadBackup = true;
       }
     } else if (row.kind === 'component' && exportComponent) {
+      /* 只有「数据目录里已经有一份用户版本」才需要快照来回滚；
+         覆盖内置组件时数据目录本来就没有旧文件 —— exportComponent 会回落到读程序目录，
+         把那份内置源码当备份写回去，撤销安装就变成「在数据目录里又放一份内置代码」，
+         覆盖层永远撤不掉（真实 bug）。所以先问 hasUserComponent。 */
+      const hadUser = !hasUserComponent || hasUserComponent(row.plugin_id);
       try {
-        const prev = exportComponent(row.plugin_id);
+        const prev = hadUser ? exportComponent(row.plugin_id) : null;
         if (prev && prev.server) {
           fs.writeFileSync(path.join(backupDir, 'component.json'), JSON.stringify(prev, null, 2), 'utf8');
           row.hadBackup = true;
@@ -352,8 +457,8 @@ function createCreateMode(deps) {
 
   function install(changeId) {
     const row = getRow(changeId);
-    if (!row) throw bad('not_found', '没有这个创造记录：' + changeId);
-    if (row.status === 'installed') throw bad('conflict', '这个创造已经安装过：' + row.name);
+    if (!row) throw bad('not_found', MSG_NO_RECORD + changeId);
+    if (row.status === 'installed') throw bad('conflict', MSG_ALREADY_INSTALLED + row.name);
     const dir = path.join(stagingDir, row.id);
     if (!fs.existsSync(dir)) throw bad('not_found', '暂存文件已不存在，请重新生成');
     const backupDir = snapshotTarget(row);
@@ -389,7 +494,7 @@ function createCreateMode(deps) {
         saveRow(row);
         return {
           ok: true, changeId: row.id, kind: row.kind, id: row.plugin_id, name: row.name,
-          page: '', route: '#/components', reload: true, loaded: r && r.loaded,
+          page: '', route: '', reload: true, loaded: r && r.loaded,
           warnings: (row.warnings || []).concat(['功能组件需要刷新页面才能加载前端部分'])
         };
       }
@@ -402,7 +507,7 @@ function createCreateMode(deps) {
 
   function rollback(changeId) {
     const row = getRow(changeId);
-    if (!row) throw bad('not_found', '没有这个创造记录：' + changeId);
+    if (!row) throw bad('not_found', MSG_NO_RECORD + changeId);
     const backupDir = path.join(stagingDir, row.id, 'backup');
     restoreBackup(row, backupDir);
     row.status = 'rolled_back';
@@ -414,11 +519,26 @@ function createCreateMode(deps) {
 
   function discard(changeId) {
     const row = getRow(changeId);
-    if (!row) throw bad('not_found', '没有这个创造记录：' + changeId);
+    if (!row) throw bad('not_found', MSG_NO_RECORD + changeId);
+    /* 已经装上了就不能「放弃」：用户点放弃的语义是「这次生成不要了」，
+       但文件已经在正式目录里生效，悄悄删暂存记录会让「撤销安装」永久失效
+       （真实 bug：组件装坏后卡片只能点放弃，结果弃了记录、坏文件还在）。 */
+    if (row.status === 'installed') throw bad('conflict', MSG_ALREADY_INSTALLED + row.name);
     try { fs.rmSync(path.join(stagingDir, row.id), { recursive: true, force: true }); } catch (e) {}
     row.status = 'discarded';
     saveRow(row);
     return { ok: true, changeId: row.id, discarded: true };
+  }
+
+  /* 卡片状态同步：刷新对话后卡片不能退回「已生成」——否则已装好的版本又显示
+     「安装并查看 / 放弃」，用户点了只会收到「已经安装过」。这里只回状态，不读暂存文件。 */
+  function status(changeId) {
+    const row = getRow(changeId);
+    if (!row) throw bad('not_found', MSG_NO_RECORD + changeId);
+    return {
+      ok: true, changeId: row.id, kind: row.kind, id: row.plugin_id, name: row.name,
+      page: row.page || '', status: row.status || 'staged', installed_at: row.installed_at || null
+    };
   }
 
   function readTokens() {
@@ -522,11 +642,15 @@ function createCreateMode(deps) {
       '- 要重做某个页面的布局/内容 → ui-page（整页接管，原版回退随时可用）。',
       '- 要在目标页里加一个可开关的新功能（带自己的数据/接口）→ component。',
       '',
+      /* 「改现有组件 / 界面红线」正文在 language/prompts/zh-CN/packs.json（create.rules_ext），
+         不写回本文件：提示词正文统一放语言目录，也避免中文硬编码预算上涨。 */
+      template('create.rules_ext'),
+      '',
       '【硬性约束（违反会被服务端拒绝）】',
       '- 零外部依赖：不许 require 第三方包、不许 import 外部模块；前端只用 window.SiErXingUI（vue/h 从它取）。',
       '- 不许联网（fetch 只能请求本站相对路径 /api/...）、不许子进程、不许 eval / new Function。',
       '- 只覆盖 page 表里的页面 id；id 用小写字母开头的短横线命名；单文件 ≤200KB。',
-      '- 不要改内置文件（server/、public/、ui/ 下的东西），你的产物会装到数据目录。',
+      '- 不要试图直接改程序目录的文件（server/、public/、ui/）；你的产物一律装到数据目录，内置组件用「同 id 覆盖」的方式改。',
       '- 不要输出「我已经改好了」这类假话：真正生效要等用户点安装。',
       '',
       '【页面与契约】',
@@ -551,7 +675,7 @@ function createCreateMode(deps) {
   function promptBlock(opts) {
     const o = opts || {};
     const lines = [];
-    lines.push('你是思而行（SiErXing）的「创造模式」助手：通过对话帮用户定制界面（换肤 / 重做页面）或新增功能组件。');
+    lines.push('你是思而行（SiErXing）的「创造模式」助手：通过对话帮用户定制界面（换肤 / 重做页面）或新增、修改功能组件。');
     lines.push('用户是产品的主人，你是执行者：先理解意图，再产出一版最小可用的插件；安装必须由用户点按钮确认，你只负责准备代码。');
     lines.push('');
     if (o.pageText) {
@@ -559,6 +683,13 @@ function createCreateMode(deps) {
       lines.push(o.pageText);
       lines.push('');
     }
+    /* 上下文块（由 server.js 组装）：现有源码 / 当前页面 DOM / 最近对话。
+       没有对应上下文就整块不出现，免得模型对着一句「（无）」瞎猜。 */
+    if (o.historyText) { lines.push(o.historyText); lines.push(''); }
+    if (o.sourceText) { lines.push(o.sourceText); lines.push(''); }
+    if (o.pageSourceText) { lines.push(o.pageSourceText); lines.push(''); }
+    if (o.inventoryText) { lines.push(o.inventoryText); lines.push(''); }
+    if (o.domText) { lines.push(o.domText); lines.push(''); }
     lines.push(rulesBlock());
     return lines.join('\n');
   }
@@ -574,6 +705,7 @@ function createCreateMode(deps) {
     rollback: rollback,
     discard: discard,
     readChange: readChange,
+    status: status,
     promptBlock: promptBlock,
     rulesBlock: rulesBlock,
     limitInfo: LIMITS

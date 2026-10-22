@@ -57,7 +57,7 @@
           <div class="rsNav"><button class="btn tiny" type="button" :disabled="busy" @click="send(false, true)">💡 卡住了</button><button class="btn tiny primary" type="button" :disabled="busy" @click="send(true, false)">{{ pending ? '换一个问法 →' : '下一问 →' }}</button><button class="btn tiny" type="button" @click="openConvs(Number(cur.round.point_idx || 0))">🗨 历史</button></div>
           <div class="rsNavFoot"><button class="rsLink" type="button" @click="cur = null; view = 'pick'">← 换个知识点</button></div>
         </aside>
-        <div class="rsSplit" @pointerdown="startSplit" @dblclick="resetSplit" title="拖动可调宽度，双击复位"></div>
+        <div class="rsSplit" role="separator" aria-orientation="vertical" @pointerdown="startSplit" @dblclick="resetSplit" title="拖动可调宽度，双击复位"><span class="rsGrip" aria-hidden="true"></span></div>
         <section class="rsPane rsPaneC">
           <div class="rsPaneT">💬 对话 <span class="rsPaneN">{{ cur.turns.length ? cur.turns.length + ' 轮' : '还没开口' }}</span></div>
           <div ref="threadEl" class="rsThread">
@@ -79,9 +79,9 @@
 
     <div v-else-if="view === 'done' && cur">
       <div v-if="String(cur.round.draft || '').trim()" class="rsSec rsOwnSec"><div class="rsSecT">✍️ 你自己写的原版</div><div class="rsOwnRaw">{{ cur.round.draft }}</div></div>
-      <div class="rsSec"><div class="rsSecT">{{ cur.round.point_title || '' }}</div><div class="rsMine"><div class="rsMineT">🗣 我的话 <button class="btn tiny" type="button" @click="copyMine">复制</button></div><div class="rsMineB mdBody" v-html="md(cur.round.mine)"></div></div><p v-if="cur.round.line" class="rsLine">{{ cur.round.line }}</p></div>
-      <div v-if="doneKept.length" class="rsSec"><div class="rsSecT">AI 认定你真讲对了的地方（{{ doneKept.length }}）</div><div class="rsKept"><div v-for="(k, i) in doneKept" :key="i" class="rsKeptI">✓ {{ k }}</div></div></div>
-      <div class="rsSec"><div class="rsSecT">{{ doneGaps.length ? '和关键要点的差距（' + doneGaps.length + '）' : '要点都覆盖了 ✓' }}</div><div v-if="doneGaps.length" class="rsGaps"><div v-for="(g, i) in doneGaps" :key="i" class="rsGap"><b>{{ g.key }}</b><span>{{ g.why || '' }}</span></div></div><p v-else class="muted">这一轮你已经用自己的话讲全了。</p></div>
+      <div class="rsSec"><div class="rsSecT">{{ cur.round.point_title || '' }}</div><div class="rsMine"><div class="rsMineT">🗣 我的话 <button class="btn tiny" type="button" @click="copyMine">复制</button></div><div class="rsMineB mdBody" v-html="md(cur.round.mine)"></div></div><p v-if="cur.round.line" class="rsLine" v-html="fmtInline(cur.round.line)"></p></div>
+      <div v-if="doneKept.length" class="rsSec"><div class="rsSecT">AI 认定你真讲对了的地方（{{ doneKept.length }}）</div><div class="rsKept"><div v-for="(k, i) in doneKept" :key="i" class="rsKeptI">✓ <span v-html="fmtInline(k)"></span></div></div></div>
+      <div class="rsSec"><div class="rsSecT">{{ doneGaps.length ? '和关键要点的差距（' + doneGaps.length + '）' : '要点都覆盖了 ✓' }}</div><div v-if="doneGaps.length" class="rsGaps"><div v-for="(g, i) in doneGaps" :key="i" class="rsGap"><b v-html="fmtInline(g.key)"></b><span v-html="fmtInline(g.why || '')"></span></div></div><p v-else class="muted">这一轮你已经用自己的话讲全了。</p></div>
       <div class="toolbarRow"><button class="btn" type="button" @click="openConvs(Number(cur.round.point_idx || 0))">🗨 看这段对话（{{ cur.turns.length }} 条）</button><button class="btn primary" type="button" @click="nextPoint">下一个知识点 →</button><button class="btn" type="button" @click="loadNotes">看我沉淀的话</button><a class="btn" :href="'#/t/' + tid">← 返回教程</a></div>
     </div>
 
@@ -122,11 +122,19 @@ const loadedTurns = reactive({});
 const notes = ref([]);
 const threadEl = ref(null);
 const panesEl = ref(null);
-const colQ = ref(320);
+const colQ = ref(380);
 let splitCleanup = null;
 
 const listOf = v => { if (Array.isArray(v)) return v; try { const a = JSON.parse(String(v || '[]')); return Array.isArray(a) ? a : []; } catch (e) { return []; } };
 const objOf = v => { if (v && typeof v === 'object') return v; try { const o = JSON.parse(String(v || '{}')); return (o && typeof o === 'object') ? o : {}; } catch (e) { return {}; } };
+const escText = v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+/* 收尾对照的短文本：剥围栏 → 压一行 → esc → 成对反引号变 <code>（服务端已清洗一遍，这里兜旧数据） */
+function fmtInline(v) {
+  let t = String(v == null ? '' : v).replace(/[\u200b-\u200d\ufeff]/g, '')
+    .replace(/(?:`{3,}|~{3,})[ \t]*[A-Za-z0-9_+#.\-]*[ \t]*\r?\n?([\s\S]*?)(?:`{3,}|~{3,})/g, (m, body) => String(body || ''))
+    .replace(/(?:`{3,}|~{3,})[ \t]*[A-Za-z0-9_+#.\-]*/g, '').replace(/[\r\n\t]+/g, ' ').replace(/ {2,}/g, ' ').trim();
+  return escText(t).replace(/`([^`\n]{1,120})`/g, '<code>$1</code>').replace(/`/g, '');
+}
 const fmtTime = (iso, withDate) => { const d = new Date(String(iso || '')); if (isNaN(d.getTime())) return ''; const p2 = n => String(n).padStart(2, '0'); const hm = p2(d.getHours()) + ':' + p2(d.getMinutes()); if (!withDate) return hm; const t = new Date(); const same = d.getFullYear() === t.getFullYear() && d.getMonth() === t.getMonth() && d.getDate() === t.getDate(); return (same ? '今天 ' : (d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ') + hm; };
 const convName = r => String((r && r.title) || '').trim() || (fmtTime(r && r.created_at, true) || '未命名对话');
 const hasMine = r => !!(r && String(r.mine || '').trim());
@@ -266,18 +274,18 @@ async function makeWeave() {
 async function loadNotes() { try { notes.value = (await api('/api/tutorials/' + tid.value + '/restate/notes')).notes || []; view.value = 'notes'; } catch (e) { toast(e.message); } }
 /* ---------- 三栏宽度可拖（本机显示偏好） ---------- */
 const COL_KEY = 'sierxing-restate-cols-v1';
-function clampCol(v) { const n = Number(v); return Number.isFinite(n) ? Math.min(Math.max(Math.round(n), 210), 560) : 320; }
-function loadCols() { try { const o = JSON.parse(localStorage.getItem(COL_KEY) || '{}') || {}; colQ.value = clampCol(o.q); } catch (e) { colQ.value = 320; } }
-function resetSplit() { try { localStorage.removeItem(COL_KEY); } catch (e) {} colQ.value = 320; }
+function clampCol(v) { const n = Number(v); return Number.isFinite(n) ? Math.min(Math.max(Math.round(n), 230), 680) : 380; }
+function loadCols() { try { const o = JSON.parse(localStorage.getItem(COL_KEY) || '{}') || {}; let q = clampCol(o.q); if (q === 320) q = 380; /* 老默认值当没调过 */ colQ.value = q; } catch (e) { colQ.value = 380; } }
+function resetSplit() { try { localStorage.removeItem(COL_KEY); } catch (e) {} colQ.value = 380; }
 function startSplit(e) {
   if (e.button !== 0) return;
   e.preventDefault();
   const box = panesEl.value && panesEl.value.getBoundingClientRect();
   if (!box) return;
   const startX = e.clientX, startW = colQ.value;
-  const maxW = Math.max(210, box.width - 20 - 420);
+  const maxW = Math.max(230, box.width - 26 - 420);
   document.body.classList.add('rsResizing');
-  const move = ev => { colQ.value = Math.min(Math.max(startW + (ev.clientX - startX), 210), maxW); };
+  const move = ev => { colQ.value = Math.min(Math.max(startW + (ev.clientX - startX), 230), maxW); };
   const up = () => {
     window.removeEventListener('pointermove', move);
     window.removeEventListener('pointerup', up);

@@ -19,6 +19,8 @@
  */
 'use strict';
 
+const { cleanInline } = require('./lib/inline-text');
+
 let db, nowISO, safeParse, sendJSON, readBody, log;
 let getGoal, aiText, currentModel, tasks;
 function bind(ctx) {
@@ -127,12 +129,19 @@ function saveArc(tid, arc) {
 /* 把 AI 可能给出的各种形态归一成 {thesis, spine[], branches[{id,name,gist}]} */
 /* 轮次里的 JSON 列统一解析成数组（gaps/kept）—— 前端不该拿到"[{...}]"这种字符串去 .length */
 function parseJSONList(v) {
+  if (Array.isArray(v)) return v;   /* roundOut 可能被调两次，别把已经解析过的数组再 String() 成 "[object Object]" */
   try { const a = JSON.parse(String(v || '[]')); return Array.isArray(a) ? a : []; } catch (e) { return []; }
 }
 function roundOut(r) {
   if (!r) return r;
-  r.gaps = parseJSONList(r.gaps);
-  r.kept = parseJSONList(r.kept);
+  /* 收尾对照是「短文本」：AI 经常把标识符写成 ```js\\nxxx\\n```，以前原样进 <b>/<span>，
+     页面上反引号和换行都露出来（用户真实反馈「`\\ninterview.js\\n` 后端插件作为执行入口」）。
+     在出口统一清洗 → 库里已有的旧记录也不用重跑 AI，刷新就干净。 */
+  r.gaps = parseJSONList(r.gaps).map(function (g) {
+    return { key: cleanInline(g && g.key, 80), why: cleanInline(g && g.why, 160) };
+  }).filter(function (g) { return g.key; });
+  r.kept = parseJSONList(r.kept).map(function (x) { return cleanInline(x, 120); }).filter(Boolean);
+  r.line = cleanInline(r.line, 160);
   return r;
 }
 function normArc(v, pts) {
@@ -178,7 +187,7 @@ function savePoints(tid, pts) {
     .run(Number(tid), JSON.stringify(pts), now, now);
 }
 function roundsOf(tid) {
-  return db.prepare('SELECT * FROM restate_rounds WHERE tutorial_id = ? ORDER BY id').all(Number(tid));
+  return db.prepare('SELECT * FROM restate_rounds WHERE tutorial_id = ? ORDER BY id').all(Number(tid)).map(roundOut);
 }
 function turnsOf(rid) {
   return db.prepare('SELECT * FROM restate_turns WHERE round_id = ? ORDER BY seq, id').all(Number(rid));
@@ -1133,12 +1142,12 @@ module.exports = {
            那也是"他确实讲到了"的依据，比让页面空着强，且不是编出来的。 */
         const stF = coachOf(r.id);
         const hitNames = dimsOf(point).filter(d => stF.hit.indexOf(d.key) >= 0).map(d => d.name);
-        let kept = (Array.isArray(d.kept) ? d.kept : []).map(x => String(x || '').trim()).filter(Boolean).slice(0, 5);
+        let kept = (Array.isArray(d.kept) ? d.kept : []).map(x => cleanInline(x, 120)).filter(Boolean).slice(0, 5);
         if (!kept.length) kept = hitNames.slice(0, 4);
         const gaps = (Array.isArray(d.gaps) ? d.gaps : []).map(g => ({
-          key: String((g && g.key) || '').slice(0, 80), why: String((g && g.why) || '').slice(0, 160)
+          key: cleanInline(g && g.key, 80), why: cleanInline(g && g.why, 160)
         })).filter(g => g.key).slice(0, 5);
-        const line = String(d.line || '').slice(0, 160);
+        const line = cleanInline(d.line, 160);
         const now = nowISO();
         db.prepare("UPDATE restate_rounds SET status = 'done', mine = ?, gaps = ?, line = ?, draft = ?, kept = ?, updated_at = ? WHERE id = ?")
           .run(mine, JSON.stringify(gaps), line, draft, JSON.stringify(kept), now, r.id);
@@ -1272,10 +1281,7 @@ module.exports = {
         const m = u.pathname.match(/^\/api\/tutorials\/(\d+)\/restate\/notes$/);
         if (!m || req.method !== 'GET') return false;
         const rows = db.prepare("SELECT * FROM restate_rounds WHERE tutorial_id = ? AND status = 'done' AND mine <> '' ORDER BY id DESC").all(Number(m[1]));
-        for (const r of rows) {
-          try { r.gaps = JSON.parse(r.gaps || '[]'); } catch (e) { r.gaps = []; }
-          try { r.kept = JSON.parse(r.kept || '[]'); } catch (e) { r.kept = []; }
-        }
+        for (const r of rows) roundOut(r);
         return sendJSON(res, 200, { notes: rows });
       }
     }

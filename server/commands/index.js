@@ -62,6 +62,12 @@ module.exports = function createCommands(ctx) {
     rag_enabled: { type: 'bool', desc: '检索增强开关' },
     ai_provider: { type: 'enum', values: ['openai', 'opencode'], desc: 'AI 接入方式' },
     model: { type: 'string', max: 200, desc: '对话模型名' },
+    /* 信息源检索的搜索 API：provider 空/builtin=内置搜索；deepseek/custom=外部搜索 API。
+       密钥（search_api_key）是敏感信息，故意不进白名单。 */
+    search_provider: { type: 'enum', values: ['', 'builtin', 'deepseek', 'custom'], desc: '信息源检索方式（空/内置=百度+必应）' },
+    search_api_base: { type: 'string', max: 300, desc: '搜索 API 地址' },
+    search_api_count: { type: 'int', min: 1, max: 50, desc: '每次搜索条数' },
+    search_api_content: { type: 'bool', desc: '搜索 API 同时返回网页正文' },
     vision_model: { type: 'string', max: 200, desc: '视觉模型名' },
     explain_style_sample: { type: 'string', max: 6000, desc: '讲解风格示例' }
   };
@@ -606,6 +612,12 @@ module.exports = function createCommands(ctx) {
         sources: db.prepare('SELECT COUNT(*) AS c FROM sources WHERE goal_id = ?').get(id).c,
         digests: db.prepare('SELECT COUNT(*) AS c FROM source_digests WHERE goal_id = ?').get(id).c
       };
+      const byKind = db.prepare('SELECT kind, COUNT(*) AS n FROM sources WHERE goal_id = ? GROUP BY kind ORDER BY n DESC').all(id);
+      // JD 类资料单独点出来：这是「找工作」目标里最常被问到的内容，不能只给个总数让 Agent 去猜/联网。
+      const jdLike = db.prepare(
+        "SELECT id, title, kind, quality, length(content) AS chars FROM sources WHERE goal_id = ? AND (" +
+        "kind LIKE '%JD%' OR kind LIKE '%岗位%' OR kind LIKE '%招聘%' OR title LIKE '%JD%') " +
+        "ORDER BY CASE WHEN kind = 'JD' THEN 0 WHEN kind LIKE 'JD%' THEN 1 ELSE 2 END, quality DESC, id DESC LIMIT 12").all(id);
       let ins = null;
       try { ins = insights.forGoal(db, g, nowISO()); } catch (e) {}
       return {
@@ -619,6 +631,7 @@ module.exports = function createCommands(ctx) {
         momentum: ins ? ins.momentum : null,
         insights: ins ? ins.insights : [],
         nextAction: ins ? ins.nextAction : null,
+        sources: { total: counts.sources, by_kind: byKind, jd_like: jdLike },
         recent_tutorials: (g.tutorials || []).slice(0, 5),
         uiUrl: ui('#/g/' + id)
       };
@@ -675,10 +688,40 @@ module.exports = function createCommands(ctx) {
       const limit = Math.min(100, Math.max(1, Number(input.limit) || 30));
       const rows = db.prepare('SELECT * FROM sources WHERE goal_id = ? ORDER BY quality DESC, id DESC LIMIT ?').all(id, limit);
       const sources = rows.map(function (s) {
+        const content = String(s.content || '');
         return { id: s.id, title: s.title, url: s.url, site: s.site, kind: s.kind, quality: s.quality,
-          quality_score: s.quality_score == null ? null : s.quality_score, topic: s.topic || '', ai_summary: s.ai_summary || '' };
+          quality_score: s.quality_score == null ? null : s.quality_score, topic: s.topic || '', ai_summary: s.ai_summary || '',
+          chars: content.length, has_content: content.trim().length > 0 };
       });
       return { goalId: id, sources: sources };
+    }
+  });
+
+  bus.define({
+    name: 'source.get',
+    title: '读取资料正文',
+    description: '读取一条资料的正文（分页）。回答 JD/岗位要求、资料内容类问题应先 source.list 找 id 再 source.get 读正文；思而行里已有的资料不要再去联网搜索。',
+    category: 'source', layer: 'content', risk: 'read',
+    inputSchema: {
+      type: 'object', required: ['id'],
+      properties: { id: { type: 'integer' }, offset: { type: 'integer' }, limit: { type: 'integer' } }
+    },
+    output: 'json',
+    handler: function (input) {
+      const id = num(input.id || input.sourceId, 'id');
+      const row = db.prepare('SELECT * FROM sources WHERE id = ?').get(id);
+      if (!row) fail('not_found', '资料不存在：' + id);
+      const content = String(row.content || '');
+      const offset = Math.max(0, Number(input.offset) || 0);
+      const limit = Math.min(20000, Math.max(500, Number(input.limit) || 6000));
+      const slice = content.slice(offset, offset + limit);
+      const next = offset + slice.length < content.length ? offset + slice.length : null;
+      return {
+        id: row.id, goalId: row.goal_id, title: row.title, url: row.url, site: row.site, kind: row.kind,
+        quality: row.quality, quality_score: row.quality_score == null ? null : row.quality_score,
+        topic: row.topic || '', ai_summary: row.ai_summary || '',
+        chars: content.length, offset: offset, content: slice, next_offset: next
+      };
     }
   });
 

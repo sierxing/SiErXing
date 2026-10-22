@@ -44,7 +44,10 @@ function createBus(options) {
       category: def.category || 'misc',
       layer: def.layer || 'feature',
       risk: def.risk || 'read',
-      async: !!def.async
+      async: !!def.async,
+      // 清单必须带参数契约：MCP 的 tools/list 直接拿 manifest 生成 inputSchema。
+      // 少了这一项，宿主 Agent 看到的所有工具都只剩 approvalId，传 goalId/id 会被判非法。
+      inputSchema: def.inputSchema || { type: 'object', properties: {} }
     };
   }
 

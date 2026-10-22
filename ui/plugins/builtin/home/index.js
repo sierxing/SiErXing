@@ -269,14 +269,13 @@ function bindPluginPicker() {
 
 async function startCollect(id) {
   if (!H.goalCompOn(goalCtx(), 'sources')) { H.toast('「信息源检索」组件在本目标已关闭：目标页 🧩 可单独开启'); return; }
-  if (H.state.collecting) return;
+  if (collectingAt(id)) return;
   if (!(await ensureCollectSetup(id))) return;   // 搜集前确认搜什么+要不要电子书（取消则不搜集）
-  H.state.collecting = true;
-  H.state.collectStatus = '正在检索…';
-  H.renderGoal();
+  const job = { status: '正在检索…', abort: new AbortController() };
+  H.state.collectJobs[id] = job;
+  if (isGoalCurrent(id)) H.renderGoal();
   try {
-    H.state.collectAbort = new AbortController();
-      const resp = await fetch('/api/goals/' + id + '/collect', { method: 'POST', signal: H.state.collectAbort.signal });
+    const resp = await fetch('/api/goals/' + id + '/collect', { method: 'POST', signal: job.abort.signal });
     if (!resp.ok || !resp.body) throw new Error('无法连接采集服务');
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
@@ -293,35 +292,42 @@ async function startCollect(id) {
         if (!line) continue;
         let d;
         try { d = JSON.parse(line.slice(6)); } catch (e) { continue; }
-        if (d.status) {
-          H.state.collectStatus = d.status;
-          const el = document.getElementById('spStatus');
-          if (el) el.textContent = d.status;
+        if (d.status_code) {
+          const t = searchFallbackStatusText(d.status_detail);
+          job.status = t;
+          /* 只有用户正在看这个目标时才改 DOM：否则会把另一个目标的进度条内容改掉 */
+          if (isGoalCurrent(id)) { const el = document.getElementById('spStatus'); if (el) el.textContent = t; }
+        } else if (d.status) {
+          job.status = d.status;
+          if (isGoalCurrent(id)) { const el = document.getElementById('spStatus'); if (el) el.textContent = d.status; }
         }
         if (d.done) {
-          done = true; H.state.sources = d.sources || [];
+          done = true;
+          if (isGoalCurrent(id)) H.state.sources = d.sources || [];
           const st = d.stats || null;
           const fun = st
             ? '（搜到 ' + st.searched + ' 条 → 进审 ' + st.toReview + ' 条 → 入库 ' + st.saved + ' 条'
               + (st.aiDrop ? '，AI 判为不合格 ' + st.aiDrop + ' 条' : '')
               + (st.fullGot ? '，补抓全文 ' + st.fullGot + ' 条' : '') + '）'
             : '';
-          H.toast('信息源收集完成：' + d.count + ' 条' + fun + (d.ebooks ? '；' + d.ebooks : '') + (d.blocked ? '（百度限流，本次用备用搜索，可稍后重新收集以获取更多）' : ''));
+          const fbNote = st && st.searchFallback ? tr('（搜索 API 不可用，本次用内置搜索）') : '';
+          H.toast('信息源收集完成：' + d.count + ' 条' + fun + fbNote + (d.ebooks ? '；' + d.ebooks : '') + (d.blocked ? '（百度限流，本次用备用搜索，可稍后重新收集以获取更多）' : ''));
         }
         if (d.error) { done = true; H.toast(d.error); }
       }
     }
     if (!done) H.toast('信息源收集中断，可重试');
   } catch (e) {
-    H.toast(e.message);
+    if (e && e.name !== 'AbortError') H.toast(e.message);
   } finally {
-    H.state.collecting = false;
-    H.state.collectStatus = '';
-    try { await H.loadGoal(id); } catch (e) {}
-    H.renderGoal();
-    // 收集完成后若还没有路径，自动开始规划
-    if (H.state.goal && !H.state.goal.nodes.length && !H.state.planning) {
-      startPlanning(id);
+    if (H.state.collectJobs && H.state.collectJobs[id] === job) delete H.state.collectJobs[id];
+    if (isGoalCurrent(id) && onGoalPage(id)) {
+      try { await H.loadGoal(id); } catch (e) {}
+      if (onGoalPage(id)) H.renderGoal();
+      // 收集完成后若这个目标还没有路径，自动开始规划（只在这个目标页上做，别在别的页面突然开始规划）
+      if (onGoalPage(id) && H.state.goal && Number(H.state.goal.id) === Number(id) && !H.state.goal.nodes.length && !H.state.planning) {
+        startPlanning(id);
+      }
     }
   }
 }
@@ -834,6 +840,8 @@ function goalCtx() {
   return H.state.goal;
 }
 
+function collectingAt(gid) { return !!collectJobOf(gid); }
+
 async function ensureCollectSetup(id, editOnly) {
   let plan = null, pref = null;
   let csGate = { review: true, min: 3, cap: 220, perSite: 12, full: true, fullMax: 60000 };
@@ -855,29 +863,41 @@ async function ensureCollectSetup(id, editOnly) {
   } catch (e) { return true; }
   if (!editOnly && plan && plan.asked && pref && pref.asked) return true;
   H.toast('AI 正在按目标制定搜集方案…');
-  let queries = (plan && plan.queries) || [];
-  let books = [];
-  try {
-    const rs = await Promise.all([
-      (plan && plan.asked) ? {} : H.api('/api/goals/' + id + '/collect-plan/recommend', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(e => ({})),
-      (pref && pref.asked) ? {} : H.api('/api/goals/' + id + '/ebooks/recommend', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(e => ({}))
-    ]);
-    if (!(plan && plan.asked)) {
-      queries = rs[0].queries || [];
-      if (rs[0].error && !queries.length) H.toast('搜集方案推荐失败：' + rs[0].error + '（可用默认模板或手动填写）');
-      if (!queries.length) queries = [];
-    }
-    if (!(pref && pref.asked)) {
-      books = rs[1].books || [];
-      if (rs[1].error && !books.length) H.toast('书单推荐失败：' + rs[1].error + '（可手动填写）');
-    }
-  } catch (e) { H.toast('推荐失败，可手动填写：' + e.message); }
-  return showCollectSetupDialog(id, { queries, books, pref, editOnly: !!editOnly });
+  /* 弹窗先出来，AI 推荐在后台补进去：以前是"等两个 AI 请求（10~30 秒）都回来才弹窗"，
+     中间只有一个 3 秒就消失的 toast，用户看到的就是"点了没反应"。 */
+  return showCollectSetupDialog(id, {
+    queries: (plan && plan.queries) || [],
+    books: (pref && pref.books) || [],
+    pref,
+    editOnly: !!editOnly,
+    csGate,
+    auto: { plan: !(plan && plan.asked), books: !(pref && pref.asked) }
+  });
+}
+
+/* 当前 state.goal 是不是这个目标（决定能不能改 state / DOM，防止后台任务把别的目标页改花） */
+function isGoalCurrent(gid) { return !!(H.state.goal && Number(H.state.goal.id) === Number(gid)); }
+
+/* 搜集进度里「搜索 API 失败回落」的进度文案（服务端只回 code） */
+function searchFallbackStatusText(code) {
+  if (code === 'no_endpoint') return tr('搜索 API 地址为空，本次回落到内置搜索…');
+  if (code === 'timeout') return tr('搜索 API 超时，本次回落到内置搜索…');
+  if (code === 'network') return tr('连不上搜索 API，本次回落到内置搜索…');
+  if (code === 'builtin_error') return tr('内置搜索失败，本次没有关键字结果…');
+  return tr('搜索 API 调用失败（{0}），本次回落到内置搜索…', code || 'error');
+}
+
+/* 路由是不是正停在这个目标的目标页（长任务收尾只重画它自己那一页） */
+function onGoalPage(gid) {
+  try { const rr = H.parseRoute(); return rr.view === 'goal' && Number(rr.id) === Number(gid); } catch (e) { return false; }
 }
 
 async function startPlanning(id, answers) {
-  if (H.state.planning || H.state.collecting || H.state.expanding) return;
+  /* 只看「这个目标」自己的长任务；别的目标在跑不该拦住这里的规划（用户反馈：搜集/AI 任务串目标） */
+  if (planBusyFor(id) || collectingAt(id) || digestingAt(id) || expandBusyFor(id)) return;
+  if (H.state.planning) { H.taskBusyElsewhereToast(); return; }
   H.state.planning = true;
+  H.state.planGoalId = id;
   H.state.planAbort = new AbortController();
   H.state.planProgress = null;
   H.state.planStage = 'skeleton';
@@ -896,8 +916,9 @@ async function startPlanning(id, answers) {
   }, H.state.planAbort.signal).catch(e => ({ done: true, error: e.message }));
   clearInterval(planTimer);
   H.state.planning = false;
+  H.state.planGoalId = 0;
   if (asked) {
-    H.state.pendingAsk = asked;
+    H.state.pendingAsk = Object.assign({ goalId: id }, asked);
     H.toast('AI 想先确认几个问题，回答后继续规划');
     try { await H.loadGoal(id); } catch (e) {}
   } else if (r.error || !r.done) {
@@ -1122,8 +1143,16 @@ function homeLauncherDragDrop(d, ev) {
   }
 }
 
+function collectJobOf(gid) { const id = Number(gid) || 0; return (H.state.collectJobs && H.state.collectJobs[id]) || null; }
+
 function showCollectSetupDialog(gid, opts) {
-  const { queries, books, pref, editOnly } = opts;
+  opts = opts || {};
+  let queries = opts.queries || [];
+  let books = opts.books || [];
+  const pref = opts.pref || null;
+  const editOnly = !!opts.editOnly;
+  const csGate = opts.csGate || { review: true, min: 3, cap: 220, perSite: 12, full: true, fullMax: 60000 };
+  const auto = opts.auto || { plan: false, books: false };
   const prefAsked = !!(pref && pref.asked);
   const savedWant = (pref && pref.want) || 'auto';
   return new Promise(resolve => {
@@ -1199,14 +1228,34 @@ function showCollectSetupDialog(gid, opts) {
     let liveQueries = queries && queries.length ? queries : [{ kind: '资料', q: '', days: 365, on: false }, { kind: '资料', q: '', days: 365, on: false }];
     paintQueries(liveQueries);
     const ebBox = m.querySelector('#ebBooks');
-    ebBox.innerHTML = books.length ? books.map((b, i) => `<label class="ebBook"><input type="checkbox" data-ebbook="${i}" checked>
+    const paintBooks = () => {
+      ebBox.innerHTML = books.length ? books.map((b, i) => `<label class="ebBook"><input type="checkbox" data-ebbook="${i}" checked>
         <span class="ebCover">📖</span>
         <span class="ebInfo"><b>《${H.esc(b.title)}》${b.author ? `<span class="muted">　${H.esc(b.author)}</span>` : ''}</b>
         ${b.pitch ? `<span class="ebPitch">${H.esc(b.pitch)}</span>` : ''}
         <span class="ebWhere">${b.public_domain ? '<span class="chip ok">公版可直下</span>' : ''}${b.where ? `<span class="muted">去哪找：${H.esc(b.where)}</span>` : ''}</span></span></label>`).join('')
       : '<div class="muted">这次没推荐出来，直接在下面写书名也行。</div>';
+    };
+    paintBooks();
     document.body.appendChild(m);
     const close = v => { m.remove(); resolve(v); };
+    /* 方案/书单还没定过：弹窗立刻显示，AI 推荐在后台补进来（以前是等两个 AI 请求都回来才弹窗，用户以为点了没反应） */
+    if (auto.plan) {
+      qList.innerHTML = '<div class="spProgress"><span class="spinner"></span></div>';
+      H.api('/api/goals/' + gid + '/collect-plan/recommend', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+        .then(rr => {
+          if (rr && rr.queries && rr.queries.length) { queries = rr.queries; liveQueries = queries; }
+          else if (rr && rr.error) H.toast(rr.error);
+          paintQueries(liveQueries);
+        })
+        .catch(e => { H.toast(e.message); paintQueries(liveQueries); });
+    }
+    if (auto.books) {
+      ebBox.innerHTML = '<div class="spProgress"><span class="spinner"></span></div>';
+      H.api('/api/goals/' + gid + '/ebooks/recommend', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+        .then(rr => { books = (rr && rr.books) || []; paintBooks(); })
+        .catch(() => paintBooks());
+    }
     m.querySelector('#csX').addEventListener('click', () => close(editOnly ? true : false));
     m.querySelector('#csCancel').addEventListener('click', () => close(editOnly ? true : false));
     const all = m.querySelector('#csAll'), none = m.querySelector('#csNone');
@@ -1258,6 +1307,12 @@ function showCollectSetupDialog(gid, opts) {
     });
   });
 }
+
+function planBusyFor(gid) { return !!H.state.planning && Number(H.state.planGoalId) === Number(gid); }
+
+function digestingAt(gid) { return !!digestJobOf(gid); }
+
+function expandBusyFor(gid) { return !!H.state.expanding && Number(H.state.expandGoalId) === Number(gid); }
 
 function bindPlanningPanel() {
   const stopBtn = document.getElementById('planStop');
@@ -1430,6 +1485,8 @@ function sxi(name, size) {
   const cls = size === 14 ? 'sxi s14' : size === 18 ? 'sxi s18' : size === 22 ? 'sxi s22' : 'sxi';
   return `<svg class="${cls}" viewBox="0 0 16 16" aria-hidden="true">${d}</svg>`;
 }
+
+function digestJobOf(gid) { const id = Number(gid) || 0; return (H.state.digestJobs && H.state.digestJobs[id]) || null; }
 
 function homeLauncherPaintDrop(d) {
   const grid = d.grid;

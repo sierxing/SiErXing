@@ -109,6 +109,60 @@ function readFileSafe(f) { try { return fs.readFileSync(f, 'utf8'); } catch (e) 
     assert.throws(function () { createMode.validateArtifact({ kind: 'skin', id: 'bad-skin', files: { 'skin.css': '@import url("https://x/y.css");' } }); }, /@import/);
   });
 
+  /* ---- create 块 JSON 容错（用户真实碰到：Unterminated string in JSON） ---- */
+  await ok('parseCreateOutput：JSON 字符串里的裸换行也能解析（Unterminated string 修复）', function () {
+    const fence = String.fromCharCode(96, 96, 96);
+    const text = '给你换一版皮肤。\n\n' + fence + 'create\n'
+      + '{"kind":"skin","id":"warm-2","name":"暖色","files":{"skin.css":":root{\n  --x: 1;\n}\n"}}\n' + fence;
+    const r = createMode.parseCreateOutput(text);
+    assert.strictEqual(r.found, true, r.error);
+    assert.ok(r.artifact, r.error);
+    assert.strictEqual(r.artifact.kind, 'skin');
+    assert.ok(r.artifact.files['skin.css'].indexOf('--x: 1') >= 0);
+    assert.ok(r.reply.indexOf('kind') < 0, '正文里不该再留着 JSON');
+  });
+  await ok('parseCreateOutput：结尾多逗号也能解析', function () {
+    const fence = String.fromCharCode(96, 96, 96);
+    const text = fence + 'create\n{"kind":"skin","id":"warm-3","name":"暖","files":{"skin.css":".a{}",},}\n' + fence;
+    const r = createMode.parseCreateOutput(text);
+    assert.ok(r.artifact, r.error);
+    assert.strictEqual(r.artifact.id, 'warm-3');
+  });
+  await ok('parseCreateOutput：代码字符串里再出现三反引号不会截断 JSON（试下一个结束围栏）', function () {
+    const fence = String.fromCharCode(96, 96, 96);
+    const js = 'var x = ' + fence + 'js\nfoo\n' + fence + ';';
+    const artifact = { kind: 'component', id: 'fence-test', name: '围栏测试', files: {
+      'server.js': 'module.exports = { id: "fence-test", name: "围栏测试" };',
+      'client.js': 'SiErXing.registerPlugin({ id: "fence-test" });' + js
+    } };
+    const text = fence + 'create\n' + JSON.stringify(artifact) + '\n' + fence;
+    const r = createMode.parseCreateOutput(text);
+    assert.ok(r.artifact, r.error);
+    assert.ok(r.artifact.files['client.js'].indexOf(fence + 'js') >= 0);
+    assert.ok(r.reply.indexOf('kind') < 0);
+  });
+  await ok('parseCreateOutput：围栏带空格/大写 Create 也认', function () {
+    const fence = String.fromCharCode(96, 96, 96);
+    const r = createMode.parseCreateOutput('说明\n\n' + fence + ' Create\n{"kind":"skin","id":"warm-4","name":"暖","files":{"skin.css":".b{}"}}\n' + fence);
+    assert.ok(r.artifact, r.error);
+    assert.strictEqual(r.artifact.id, 'warm-4');
+  });
+  await ok('parseCreateOutput：真的坏掉时报错但正文里不留整坨 JSON', function () {
+    const fence = String.fromCharCode(96, 96, 96);
+    const text = '先说明一下。\n\n' + fence + 'create\n{"kind":"skin","id":"broken","files":{"skin.css":"' + Array(400).join('x') + '\n' + fence;
+    const r = createMode.parseCreateOutput(text);
+    assert.strictEqual(r.found, true);
+    assert.strictEqual(r.artifact, null);
+    assert.ok(/JSON/.test(r.error));
+    assert.ok(r.reply.length < 100, '围栏没闭合时后面那坨内容不能当正文：' + r.reply.slice(0, 80));
+  });
+  await ok('validateArtifact：component 只给一个文件也通过（另一个后面继承）', function () {
+    const v = createMode.validateArtifact({ kind: 'component', id: 'only-client', name: '只改前端', files: { 'client.js': 'SiErXing.registerPlugin({ id: "only-client" });' } });
+    assert.ok(typeof v.bundle.client === 'string' && v.bundle.client.length > 0);
+    assert.strictEqual(v.bundle.server, '');
+    assert.throws(function () { createMode.validateArtifact({ kind: 'component', id: 'only-style', files: { 'style.css': '.x{}' } }); }, /至少要提供/);
+  });
+
   console.log('\n== 创造模式：HTTP e2e（沙箱实例） ==');
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sx-create-test-'));
   const port = await freePort();
@@ -175,6 +229,7 @@ function readFileSafe(f) { try { return fs.readFileSync(f, 'utf8'); } catch (e) 
         files: { 'skin.css': ':root { --test-card-radius: 21px; }\n.page { letter-spacing: .3px; }' }
       } });
       assert.strictEqual(st.status, 200, st.text);
+      assert.strictEqual(st.json.create.route, '');
       skinChange = st.json.create.changeId;
       let css = await req(port, 'GET', '/api/ui/skin.css');
       assert.ok(css.text.indexOf('--test-card-radius') < 0);
@@ -208,6 +263,7 @@ function readFileSafe(f) { try { return fs.readFileSync(f, 'utf8'); } catch (e) 
       };
       const st = await req(port, 'POST', '/api/create/stage', { artifact: mkArt('测试组件') });
       assert.strictEqual(st.status, 200, st.text);
+      assert.strictEqual(st.json.create.route, '');
       compChange = st.json.create.changeId;
       const ins = await req(port, 'POST', '/api/create/changes/' + compChange + '/install', { confirm: true });
       assert.strictEqual(ins.status, 200, ins.text);
@@ -250,7 +306,81 @@ function readFileSafe(f) { try { return fs.readFileSync(f, 'utf8'); } catch (e) 
         }
       } });
       assert.strictEqual(r.status, 400);
-      assert.ok(/同名|内置/.test(r.text));
+      assert.ok(/内置|核心|基础组件/.test(r.text), r.text);
+    });
+    await ok('status：安装→installed，撤销→rolled_back，清理后→missing（刷新后卡片靠它对账）', async function () {
+      const id = 'test-status-' + Date.now().toString(36);
+      const st = await req(port, 'POST', '/api/create/stage', { artifact: { kind: 'component', id: id, name: '状态测试', category: '其它', files: {
+        'server.js': 'module.exports = { id: "' + id + '", name: "状态测试", desc: "e2e", category: "其它", defaultEnabled: false };',
+        'client.js': 'SiErXing.registerPlugin({ id: "' + id + '" });'
+      } } });
+      assert.strictEqual(st.status, 200, st.text);
+      const cid = st.json.create.changeId;
+      let s1 = await req(port, 'GET', '/api/create/changes/' + cid + '/status');
+      assert.strictEqual(s1.status, 200, s1.text);
+      assert.strictEqual(s1.json.status, 'staged');
+      assert.strictEqual(s1.json.kind, 'component');
+      const ins = await req(port, 'POST', '/api/create/changes/' + cid + '/install', { confirm: true });
+      assert.strictEqual(ins.status, 200, ins.text);
+      s1 = await req(port, 'GET', '/api/create/changes/' + cid + '/status');
+      assert.strictEqual(s1.json.status, 'installed');
+      /* 已安装的创造不能再「放弃」：文件还在线上，直接丢记录会让它变成撤不掉的孤儿 */
+      const badDiscard = await req(port, 'POST', '/api/create/changes/' + cid + '/discard');
+      assert.strictEqual(badDiscard.status, 409, badDiscard.text);
+      const rb = await req(port, 'POST', '/api/create/changes/' + cid + '/rollback');
+      assert.strictEqual(rb.status, 200, rb.text);
+      s1 = await req(port, 'GET', '/api/create/changes/' + cid + '/status');
+      assert.strictEqual(s1.json.status, 'rolled_back');
+      const missing = await req(port, 'GET', '/api/create/changes/chg_does_not_exist/status');
+      assert.strictEqual(missing.status, 200);
+      assert.strictEqual(missing.json.status, 'missing');
+    });
+    await ok('非核心内置组件（如 restate）允许同 id 覆盖：装到数据目录、撤销后内置版本回来、程序文件不动', async function () {
+      const builtinServer = path.join(BASE, 'server', 'plugins', 'restate.js');
+      const builtinClient = path.join(BASE, 'public', 'plugins', 'restate.js');
+      const before = fs.readFileSync(builtinServer, 'utf8') + '\n' + fs.readFileSync(builtinClient, 'utf8');
+      const st = await req(port, 'POST', '/api/create/stage', { artifact: { kind: 'component', id: 'restate', name: '覆盖版用自己的话', category: '学习', files: {
+        'server.js': 'module.exports = { id: "restate", name: "覆盖版用自己的话", desc: "e2e override", category: "学习", defaultEnabled: false };',
+        'client.js': 'SiErXing.registerPlugin({ id: "restate" });'
+      } } });
+      assert.strictEqual(st.status, 200, st.text);
+      const cid = st.json.create.changeId;
+      const ins = await req(port, 'POST', '/api/create/changes/' + cid + '/install', { confirm: true });
+      assert.strictEqual(ins.status, 200, ins.text);
+      assert.ok(fs.existsSync(path.join(dataDir, 'plugins', 'restate.js')), '覆盖版本应写到数据目录');
+      const rb = await req(port, 'POST', '/api/create/changes/' + cid + '/rollback');
+      assert.strictEqual(rb.status, 200, rb.text);
+      assert.ok(!fs.existsSync(path.join(dataDir, 'plugins', 'restate.js')), '撤销后数据目录里的覆盖版本应删除');
+      const after = fs.readFileSync(builtinServer, 'utf8') + '\n' + fs.readFileSync(builtinClient, 'utf8');
+      assert.strictEqual(after, before, '程序目录里的内置组件文件绝不能被覆盖/删除');
+      const comps = await req(port, 'GET', '/api/components');
+      const mine = (comps.json.components || []).find(function (c) { return c.id === 'restate'; });
+      assert.ok(mine && mine.builtin === true, '撤销后应回到内置版本');
+    });
+    await ok('component：改内置组件只交 client.js → 服务端文件自动沿用线上版本', async function () {
+      const st = await req(port, 'POST', '/api/create/stage', { artifact: { kind: 'component', id: 'restate', files: {
+        'client.js': '/* partial-override */ SiErXing.registerPlugin({ id: "restate" });'
+      } } });
+      assert.strictEqual(st.status, 200, st.text);
+      const names = (st.json.create.files || []).map(function (f) { return f.name; });
+      assert.strictEqual(st.json.create.name, '用自己的话', '只改前端时应继承现版本的名字：' + st.json.create.name);
+      assert.ok(names.indexOf('server.js') >= 0, '应自动补上 server.js：' + JSON.stringify(names));
+      assert.ok(names.indexOf('client.js') >= 0);
+      const get = await req(port, 'GET', '/api/create/changes/' + st.json.create.changeId);
+      const serverFile = (get.json.change.files || []).find(function (f) { return f.name === 'server.js'; });
+      assert.ok(serverFile && /module\.exports/.test(serverFile.code), '继承来的 server.js 应该是真的组件源码');
+      const bundle = get.json.change.bundle || {};
+      assert.strictEqual(bundle.icon, '🧠', '继承来的元数据里图标不应被冲成默认值：' + JSON.stringify(bundle.icon));
+      assert.strictEqual(bundle.goalToggle, false, '继承来的 goalToggle 也不该被冲掉：' + JSON.stringify(bundle.goalToggle));
+      const d = await req(port, 'POST', '/api/create/changes/' + st.json.create.changeId + '/discard');
+      assert.strictEqual(d.status, 200, d.text);
+    });
+    await ok('component：全新组件只交一个文件 → 400（要求 server.js + client.js）', async function () {
+      const r = await req(port, 'POST', '/api/create/stage', { artifact: { kind: 'component', id: 'new-partial-' + Date.now().toString(36), name: '新组件', files: {
+        'client.js': 'SiErXing.registerPlugin({ id: "new-partial" });'
+      } } });
+      assert.strictEqual(r.status, 400, r.text);
+      assert.ok(/server\.js/.test(r.text), r.text);
     });
     await ok('discard：放弃后暂存记录读不到', async function () {
       const st = await req(port, 'POST', '/api/create/stage', { artifact: { kind: 'skin', id: 'test-discard-' + Date.now().toString(36), name: '放弃', files: { 'skin.css': '.x{}' } } });

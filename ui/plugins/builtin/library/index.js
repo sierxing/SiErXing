@@ -29,19 +29,16 @@ function kwScore(text, hay) {
   return n;
 }
 
-/* 信息提炼：让 AI 通读全部资料（含图片资料）→ 提炼成多篇主题 MD 汇总 → 规划优先依据 */
 async function startDigest(id) {
-  if (H.state.digesting) return;
+  if (digestingAt(id)) return;
   if (!(await ensureAIConfigured())) return;
   if (!(H.state.sources || []).length) { H.toast('还没有资料：先「收集信息源」或上传图片资料'); return; }
   if (!confirm('让 AI 通读全部 ' + (H.state.sources || []).length + ' 条资料并提炼成多篇主题汇总？\n\n你的资料越多耗时越长（100 条以上大约 10-20 分钟，期间可随时点「⏹ 停止」，已提炼的部分会保留），提炼结果会用于后续规划。')) return;
-  H.state.digesting = true;
-  H.state.digestStatus = '正在通读资料…';
-  H.state.digestProgress = null;
-  H.state.digestAbort = new AbortController();
-  H.renderGoal();
+  const job = { status: '正在通读资料…', progress: null, abort: new AbortController() };
+  H.state.digestJobs[id] = job;
+  if (isGoalCurrent(id)) H.renderGoal();
   try {
-    const resp = await fetch('/api/goals/' + id + '/sources/digest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: H.state.digestAbort.signal });
+    const resp = await fetch('/api/goals/' + id + '/sources/digest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: job.abort.signal });
     if (!resp.ok || !resp.body) throw new Error('无法连接提炼服务');
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
@@ -57,9 +54,12 @@ async function startDigest(id) {
         if (!line) continue;
         let d;
         try { d = JSON.parse(line.slice(6)); } catch (e) { continue; }
-        if (d.status) { H.state.digestStatus = d.status; const el = document.getElementById('spStatus'); if (el) el.textContent = d.status; }
-        if (d.progress) { H.state.digestProgress = d.progress; }
-        if (d.done) { done = true; H.state.digests = d.digests || []; H.toast('提炼完成：' + d.count + ' 篇主题汇总（规划会优先依据）'); }
+        if (d.status) {
+          job.status = d.status;
+          if (isGoalCurrent(id)) { const el = document.getElementById('spStatus'); if (el) el.textContent = d.status; }
+        }
+        if (d.progress) { job.progress = d.progress; }
+        if (d.done) { done = true; if (isGoalCurrent(id)) H.state.digests = d.digests || []; H.toast('提炼完成：' + d.count + ' 篇主题汇总（规划会优先依据）'); }
         if (d.cancelled) { done = true; H.toast(d.status || '已停止提炼'); }
         if (d.error) { done = true; H.toast(d.error); }
       }
@@ -68,14 +68,15 @@ async function startDigest(id) {
   } catch (e) {
     if (e && e.name !== 'AbortError') H.toast(e.message);
   } finally {
-    H.state.digesting = false;
-    H.state.digestStatus = '';
-    H.state.digestProgress = null;
-    H.state.digestAbort = null;
-    try { await H.loadGoal(id); } catch (e) {}
-    H.renderGoal();
+    if (H.state.digestJobs && H.state.digestJobs[id] === job) delete H.state.digestJobs[id];
+    if (isGoalCurrent(id) && onGoalPage(id)) {
+      try { await H.loadGoal(id); } catch (e) {}
+      if (onGoalPage(id)) H.renderGoal();
+    }
   }
 }
+
+function digestingAt(gid) { return !!digestJobOf(gid); }
 
 async function ensureAIConfigured() {
   try { H.state.aiStatus = await H.api('/api/ai/status'); } catch (e) { return true; }
@@ -84,6 +85,16 @@ async function ensureAIConfigured() {
   H.go('#/settings');
   return false;
 }
+
+/* 当前 state.goal 是不是这个目标（决定能不能改 state / DOM，防止后台任务把别的目标页改花） */
+function isGoalCurrent(gid) { return !!(H.state.goal && Number(H.state.goal.id) === Number(gid)); }
+
+/* 路由是不是正停在这个目标的目标页（长任务收尾只重画它自己那一页） */
+function onGoalPage(gid) {
+  try { const rr = H.parseRoute(); return rr.view === 'goal' && Number(rr.id) === Number(gid); } catch (e) { return false; }
+}
+
+function digestJobOf(gid) { const id = Number(gid) || 0; return (H.state.digestJobs && H.state.digestJobs[id]) || null; }
 
 async function renderLibraryPage() {
   if (H.libraryVueEnabled()) {

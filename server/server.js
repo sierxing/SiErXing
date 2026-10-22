@@ -29,6 +29,8 @@ const { readCodeFiles, buildCodeBlock, listCodeFiles } = require('./code-read');
 const nodeFolders = require('./node-folders');
 const codeStore = require('./code-store');
 const rag = require('./rag');
+/* 信息源检索的搜索 API 抽象（内置搜索 / DeepSeek / 自定义兼容接口，失败回落内置） */
+const searchApi = require('./search-api');
 /* 拉起 GUI 程序（VSCode / 浏览器）前补一份显示环境：开机自启起的实例不在桌面会话里 */
 const { guiEnv } = require('./gui-env');
 /* 教程分节生成（规划 / 逐节 / 自检）。提示词块在下面才定义，
@@ -51,6 +53,9 @@ const { goalHeader, richMdSpecLines, vizSpecLines, qaRender } = promptContext;
 /* 「当前页面」上下文（纯函数）：AI 助手常驻每个页面后，用户说的"这个/这里"要能对上
    屏幕上那段内容。前端抓当前页文字随消息上来，这里清洗 + 限量 + 拼成提示词块。 */
 const pageContext = require('./prompts/page-context');
+/* 提示词模板（正文在 language/prompts/zh-CN/packs.json）：创造模式的上下文块也从这里取，
+   不在 server.js 里写中文提示词正文（i18n 硬编码预算棘轮 + 提示词可被用户覆盖）。 */
+const { template: promptTemplate } = require('../language/prompts');
 /* 提示词包注册表：内置模板来自 server/prompts/packs.js，用户覆盖存本机 DB。
    启动时创建一次；server.js 只负责按 ctx 渲染，不在这里塞提示词正文。 */
 const createPromptRegistry = require('./prompts/registry');
@@ -381,6 +386,25 @@ const tasks = createTasks({ log: (...a) => console.log(...a), metrics });
    scene 缺省记 'unknown'；各调用点传 opts.scene 就能按功能分场景统计。 */
 ai.setStats((r) => metrics.insCall(r));
 rag.init({ db, tasks, nowISO, getSetting, log: (...a) => console.log(...a) });
+/* 搜索 API：把内置搜索（百度 + 必应抓取）注入给抽象层。
+   用户在设置里指定了搜索 API 时优先用它；没指定或调用失败时回落到这里。 */
+searchApi.init({
+  getSetting: (k, d) => getSetting(k, d),
+  log: (...a) => console.log(...a),
+  builtin: async (q, count, days) => {
+    let items = await baiduSearch(q, count, days);
+    let blocked = false;
+    if (items === null) {
+      blocked = true;
+      items = await bingSearch(q, Math.min(20, count || 20), days);
+    }
+    if (!items || !items.length) {
+      const b = await bingSearch(q, Math.min(20, count || 20), days);
+      if (b && b.length) items = b;
+    }
+    return { items: items || [], blocked };
+  }
+});
 let sync = null;   // 多端同步（在 backup 定义后初始化）
 
 sync = createSync({
@@ -611,9 +635,11 @@ function exportComponentBundle(cid) {
   if (comp.builtin) throw pipelineError('forbidden', '内置组件不可导出（核心/内置不可改）');
   let server = '', client = '', style = '';
   const readFirst = function (file) { try { return fs.readFileSync(file, 'utf8'); } catch (e) { return ''; } };
-  server = readFirst(path.join(PLUGIN_DIR, cid + '.js')) || readFirst(path.join(USER_PLUGIN_DIR, cid + '.js'));
-  client = readFirst(path.join(PUBLIC_DIR, 'plugins', cid + '.js')) || readFirst(path.join(USER_PUBLIC_PLUGIN_DIR, cid + '.js'));
-  style = readFirst(path.join(PUBLIC_DIR, 'plugins', cid + '.css')) || readFirst(path.join(USER_PUBLIC_PLUGIN_DIR, cid + '.css'));
+  /* 用户版本优先：覆盖内置组件时线上跑的是数据目录那份，备份/导出必须拿到它
+     （以前先读程序目录 → 覆盖版导出出来是内置原版，再回滚就把内置代码复制进数据目录）。 */
+  server = readFirst(path.join(USER_PLUGIN_DIR, cid + '.js')) || readFirst(path.join(PLUGIN_DIR, cid + '.js'));
+  client = readFirst(path.join(USER_PUBLIC_PLUGIN_DIR, cid + '.js')) || readFirst(path.join(PUBLIC_DIR, 'plugins', cid + '.js'));
+  style = readFirst(path.join(USER_PUBLIC_PLUGIN_DIR, cid + '.css')) || readFirst(path.join(PUBLIC_DIR, 'plugins', cid + '.css'));
   return {
     format: 'sierxing-component', formatVersion: 1,
     id: comp.id, name: comp.name, icon: comp.icon, desc: comp.desc,
@@ -665,18 +691,26 @@ function installComponentBundle(bundle) {
   }
 }
 function uninstallComponentBundle(cid) {
-  if (BUILTIN_COMPONENTS.some(function (b) { return b.id === cid; })) throw pipelineError('forbidden', '内置组件不可卸载');
+  const MSG_LOCKED = '内置组件不可卸载';
+  /* 数据目录里没有用户版本 = 这是程序自带的内置组件：不能卸载（删程序文件会毁掉功能/升级后也回不来）。
+     用户覆盖内置组件时，删掉数据目录里的覆盖层即可恢复内置版本 —— 那条路只删用户文件，安全。 */
+  const hasUser = fs.existsSync(path.join(USER_PLUGIN_DIR, cid + '.js'))
+    || fs.existsSync(path.join(USER_PUBLIC_PLUGIN_DIR, cid + '.js'))
+    || fs.existsSync(path.join(USER_PUBLIC_PLUGIN_DIR, cid + '.css'));
+  if (BUILTIN_COMPONENTS.some(function (b) { return b.id === cid; }) || !hasUser) throw pipelineError('forbidden', MSG_LOCKED);
   if (!FILE_PLUGINS.some(function (x) { return x.id === cid; })) throw pipelineError('not_found', '组件不存在：' + cid);
   backup();
-  /* 数据目录 + 老版本的“程序目录安装”一起清：否则删掉用户版本后，旧的程序目录文件会重新冒出来 */
+  /* 只删数据目录里的用户版本。
+     ⚠️ 绝不删程序目录（server/plugins、public/plugins）：那是程序自带文件；
+     用户"覆盖内置组件"时只是把同名文件写到数据目录盖上去，删掉覆盖层就该恢复内置版本。
+     老版本确实可能把用户组件装进程序目录 —— 那是历史遗留，宁可留着也不能误删内置文件
+     （真删过一次：撤销「用自己的话」的覆盖安装会把 server/plugins/restate.js 删掉）。 */
   try { fs.unlinkSync(path.join(USER_PLUGIN_DIR, cid + '.js')); } catch (e) {}
   try { fs.unlinkSync(path.join(USER_PUBLIC_PLUGIN_DIR, cid + '.js')); } catch (e) {}
   try { fs.unlinkSync(path.join(USER_PUBLIC_PLUGIN_DIR, cid + '.css')); } catch (e) {}
-  try { fs.unlinkSync(path.join(PLUGIN_DIR, cid + '.js')); } catch (e) {}
-  try { fs.unlinkSync(path.join(PUBLIC_DIR, 'plugins', cid + '.js')); } catch (e) {}
-  try { fs.unlinkSync(path.join(PUBLIC_DIR, 'plugins', cid + '.css')); } catch (e) {}
   reloadPlugins();
-  return { id: cid, removed: true };
+  const stillThere = FILE_PLUGINS.some(function (x) { return x.id === cid; });
+  return { id: cid, removed: !stillThere, restored: stillThere };
 }
 function goalPlugins(goal) {
   const raw = (goal && goal.plugins) || '{}';
@@ -847,6 +881,9 @@ function reloadPlugins() {
     } catch (e) {}
   }
   const builtinList = loadPlugins(PLUGIN_DIR, pluginCtx());
+  /* 内核 loader 原样返回模块对象，模块自己不会写 builtin —— 这里补上，
+     否则 /api/components 会把内置功能组件（restate 等）也报成「用户安装」（removable 错成 true）。 */
+  for (const p of builtinList) { try { p.builtin = true; } catch (e) {} }
   let userList = [];
   try {
     if (fs.existsSync(USER_PLUGIN_DIR)) userList = loadPlugins(USER_PLUGIN_DIR, pluginCtx()) || [];
@@ -895,10 +932,47 @@ const createMode = createCreateMode({
   installComponent: installComponentBundle,
   uninstallComponent: uninstallComponentBundle,
   exportComponent: exportComponentBundle,
+  /* 数据目录里有没有这个组件的用户版本（创造模式据此决定装前要不要快照）：
+     覆盖内置组件前没有旧文件，撤销时应当「删掉覆盖层 = 恢复内置」，而不是把内置源码复制进数据目录。 */
+  hasUserComponent: function (id) {
+    return fs.existsSync(path.join(USER_PLUGIN_DIR, id + '.js'))
+      || fs.existsSync(path.join(USER_PUBLIC_PLUGIN_DIR, id + '.js'))
+      || fs.existsSync(path.join(USER_PUBLIC_PLUGIN_DIR, id + '.css'));
+  },
+  /* 创造模式改现有组件时可以只交改动的文件：缺的那份从「线上正在跑的版本」继承（用户版优先，
+     其次程序目录里的内置源码）。必须整份读，不能用 createComponentSource 的 60KB 展示截断。 */
+  /* 改现有组件只交部分文件时，元数据（名字/图标/分类/开关默认值）也从现版本继承 --
+     否则 AI 只给一份 client.js 就会把「用自己的话」的名字/图标冲成 id 和默认值。 */
+  componentMeta: function (id) {
+    const c = allComponents().find(function (x) { return x.id === id; });
+    if (!c) return null;
+    return {
+      id: c.id, name: c.name, icon: c.icon, desc: c.desc, category: c.category,
+      order: c.order, version: c.version, defaultEnabled: c.defaultEnabled, goalToggle: c.goalToggle
+    };
+  },
+  readComponentSource: function (id) {
+    const readFirst = function (list) {
+      for (let i = 0; i < list.length; i++) { try { return fs.readFileSync(list[i], 'utf8'); } catch (e) {} }
+      return '';
+    };
+    return {
+      server: readFirst([path.join(USER_PLUGIN_DIR, id + '.js'), path.join(PLUGIN_DIR, id + '.js')]),
+      client: readFirst([path.join(USER_PUBLIC_PLUGIN_DIR, id + '.js'), path.join(PUBLIC_DIR, 'plugins', id + '.js')]),
+      style: readFirst([path.join(USER_PUBLIC_PLUGIN_DIR, id + '.css'), path.join(PUBLIC_DIR, 'plugins', id + '.css')])
+    };
+  },
   validateComponent: function (bundle) {
-    const dupe = (PLUGINS || []).find(function (p) { return p.id === bundle.id; });
-    if (dupe && dupe.builtin !== false) {
-      throw pipelineError('forbidden', '已经有同名内置组件「' + bundle.id + '」，换一个 id');
+    /* 内置组件也能改（用户要求「一个组件的所有代码创造模式都能拿到、都能改」）：
+       同 id 安装会写成数据目录里的用户版本，盖住内置版本；「撤销安装」删掉用户版本即恢复。
+       只有核心/基础组件保护起来（BUILTIN_COMPONENTS + 插件自己声明的 scope=core/base，
+       如 conditions）—— 它们跟数据表/全局能力深度耦合，覆盖会直接让应用起不来，
+       要加功能请起新 id。 */
+    const protectedIds = allComponents().filter(function (c) {
+      return c.scope === 'core' || c.scope === 'base';
+    }).map(function (c) { return c.id; });
+    if (protectedIds.indexOf(bundle.id) >= 0) {
+      throw pipelineError('forbidden', createTpl('create.err_protected', { id: bundle.id }));
     }
     return validateComponentBundle(bundle);
   },
@@ -1821,17 +1895,29 @@ async function collectSources(goal, queries, onProgress, signal) {
   const seen = new Set();
   const all = [];
   let doneQ = 0, blocked = false;
+  let searchFallbackNoted = false;
+  let searchFallback = null;      // 指定的搜索 API 失败时的 { code, detail }（前端负责出文案）
+  let searchApiUsed = false;      // 本轮是否真的用上了外部搜索 API
   const checkStop = () => { if (signal && signal.aborted) { const e = new Error('已停止'); e.cancelled = true; throw e; } };
-  /* ① 广撒网 */
+  /* ① 广撒网。搜索入口统一走 searchApi：用户在设置里指定了搜索 API 就用它，
+     没指定（或调用失败）时自动回落到内置搜索（百度 + 必应）。 */
   for (const item of queries) {
     checkStop();
     await new Promise(r => setTimeout(r, 1100 + Math.random() * 1200));
     checkStop();
-    let rs = await baiduSearch(item.q, 30, item.days);
-    if (rs === null) {
-      if (!blocked) { blocked = true; onProgress({ status: '百度触发限流，切换备用搜索（必应）…' }); }
-      rs = await bingSearch(item.q, 20, item.days);
+    const sr = await searchApi.search(item.q, { count: 30, days: item.days });
+    if (sr.fallback) {
+      /* 失败原因只回结构化 code/detail，进度文案由前端 tr() 组装（AGENTS.md §0.1） */
+      if (!searchFallback) searchFallback = { code: sr.fallbackCode || 'api_error', detail: String(sr.fallbackDetail || '').slice(0, 200) };
+      if (!searchFallbackNoted) {
+        searchFallbackNoted = true;
+        onProgress({ status_code: 'search_fallback', status_detail: searchFallback.code });
+      }
+    } else if (sr.provider !== 'builtin' && sr.items.length) {
+      searchApiUsed = true;
     }
+    if (sr.blocked && !blocked) { blocked = true; onProgress({ status: '百度触发限流，切换备用搜索（必应）…' }); }
+    const rs = sr.items || [];
     for (const r of rs) {
       if (!r.url || seen.has(r.url)) continue;
       try { new URL(r.url); } catch (e) { continue; }
@@ -1839,7 +1925,7 @@ async function collectSources(goal, queries, onProgress, signal) {
       if (!host) continue;
       if (/(^|\.)(baidu|google|bing)\.com$/.test(host)) continue;
       seen.add(r.url);
-      all.push({ ...r, host, site: siteLabel(host), kind: item.kind, q: item.q, days: item.days });
+      all.push({ ...r, apiContent: r.content || '', host, site: siteLabel(host), kind: item.kind, q: item.q, days: item.days });
     }
     doneQ++;
     onProgress({ status: `搜索 ${doneQ}/${queries.length}：${item.q.slice(0, 26)}（候选池 ${all.length} 条）`, prog: { phase: 0, frac: doneQ / Math.max(1, queries.length) } });
@@ -1924,10 +2010,18 @@ async function collectSources(goal, queries, onProgress, signal) {
     const pub = page.date || s2.date || 0;
     const limitDays = s2.kind === 'JD' ? 60 : 365;
     if (pub && now - pub > limitDays * 86400e3) return;
+    /* 搜索 API 直接带回了网页正文（如 DeepSeek 的 need_content=true）：
+       抓取失败时用它兜底 —— 知乎 / BOSS 这类要登录态的站，抓不到正文但搜索接口能拿到，
+       不兜底就等于白丢一条（抓取成功时仍用我们自己清洗过的正文）。 */
+    const apiText = String(s2.apiContent || '');
+    let probeText = page.text || '';
+    let probeTrunc = !!page.truncated;
+    if (!probeText && apiText) { probeText = apiText.slice(0, 3500); probeTrunc = apiText.length > 3500; }
     const cand = {
       i: cands.length + 1, query: s2.q || '', kind: s2.kind, url: finalUrl, host, site: siteLabel(host),
       title: String(s2.title || '').slice(0, 200), snippet: String(s2.snippet || '').slice(0, 600),
-      text: page.text || '', truncated: !!page.truncated, date: pub
+      text: probeText, truncated: probeTrunc, date: pub,
+      apiContent: apiText.slice(0, FULL_MAX)
     };
     const hard = collectScreen.hardGate(cand, { offTopicRe });
     if (hard && !hard.keep) {
@@ -1958,7 +2052,11 @@ async function collectSources(goal, queries, onProgress, signal) {
     }
     let content = c.text, isFull = 0;
     if (review && wantFull && collectScreen.needFullText(v, c, { minFullScore: 4 })) {
-      if (fullChars >= FULL_BUDGET) { /* 预算用完：保留探测正文，不再抓 */ }
+      const apiFull = String(c.apiContent || '');
+      if (apiFull.length > String(content || '').length + 200) {
+        /* 搜索 API 已带回完整正文：直接用，省一次抓取（也避开反爬登录墙） */
+        content = apiFull.slice(0, FULL_MAX); isFull = 1; fullGot++; fullChars += content.length;
+      } else if (fullChars >= FULL_BUDGET) { /* 预算用完：保留探测正文，不再抓 */ }
       else {
         try {
           onProgress({ status: `📄 这条质量高（${v ? v.score : '?'}/5），正在把全文抓回来：《${c.title.slice(0, 24)}》` });
@@ -1979,7 +2077,7 @@ async function collectSources(goal, queries, onProgress, signal) {
         v ? v.score : 0, v ? v.summary : '', v ? v.topic : '', v ? JSON.stringify(v) : '', isFull, 1);
     saved++;
   }
-  const stats = { searched: all.length, candidates: picked.length, toReview: cands.length, saved, aiDrop, hardDrop, ads, skipped, deadSkip, fullGot, fullFail, pdf: pdfSaved, review, minScore };
+  const stats = { searched: all.length, candidates: picked.length, toReview: cands.length, saved, aiDrop, hardDrop, ads, skipped, deadSkip, fullGot, fullFail, pdf: pdfSaved, review, minScore, searchApi: searchApiUsed ? 'api' : 'builtin', searchFallback: searchFallback };
   onProgress({ status: `把关完成：入库 ${saved} 条（AI 判为不合格 ${aiDrop} 条${fullGot ? ' · 补抓全文 ' + fullGot + ' 条' : ''}）` });
   /* 清理超期的旧来源 */
   let cleaned = 0;
@@ -2096,10 +2194,14 @@ function sourcesIndexBlock(goal, maxTitles, scopeNote, charBudget) { return prom
    摘要正文就在条目里），不能按 id 截前 N 条把代码库挤没；网络资料只列标题，
    结论交给上面的提炼汇总。若非如此，资料一多，「导入的代码库」永远进不了提示词，
    助手就会答「资料库是空的 / 看不到源码」。 */
+/* 「自己提供」的资料来源：用户上传/导入的一手材料，批量删资料时永远不碰
+   （要删只能按 id 或 site 显式点名）。2026-10-20 用户反馈"删掉不是我上传的资料"，
+   这里同时被 chatSourcesBlock 与 applyChatOps 的 delete_source 批量分支复用。 */
+const OWN_SOURCE_SITES = ['用户提供的图片', '用户提供的电子书', '导入的资料', '导入的代码库', '待找书单'];
 function chatSourcesBlock(goal) {
   const all = sourcesOf(goal.id);
   if (!all.length) return '';
-  const isOwn = s => s.site === '用户提供的图片' || s.site === '用户提供的电子书' || s.site === '导入的资料' || s.site === '导入的代码库' || s.site === '待找书单';
+  const isOwn = s => OWN_SOURCE_SITES.indexOf(String(s.site || '')) >= 0;
   const own = all.filter(isOwn);
   const net = all.filter(s => !isOwn(s));
   /* 每条带上 AI 判读（相关度 / 主题 / 一句话摘要）——模型据此判断"这条要不要展开读"，
@@ -2117,6 +2219,8 @@ function chatSourcesBlock(goal) {
     lines.push('【网络检索资料（仅列前 ' + Math.min(net.length, 20) + ' 条标题；完整结论见上面的提炼汇总）】');
     for (const s of net.slice(0, 20)) lines.push(line(s));
     if (net.length > 20) lines.push('- …（其余 ' + (net.length - 20) + ' 条略）');
+    const siteSummary = promptContext.chatNetSiteSummaryFrom(net);
+    if (siteSummary) lines.push(siteSummary);
   }
   return lines.join('\n');
 }
@@ -3787,7 +3891,7 @@ async function buildChatPrompt(goal, message, sessionId, opts) {
   const o = opts || {};
   /* 创造模式：不是"改路线图"，而是生成可安装的 UI 插件/皮肤/功能组件。
      走单独的提示词（扩展点说明书），产出 create JSON，由用户在卡片上确认安装。 */
-  if (o.mode === 'create') return await buildCreateChatPrompt(goal, message, o);
+  if (o.mode === 'create') return await buildCreateChatPrompt(goal, message, sessionId, o);
   /* ASK 模式：只回答、不许改。这里是**服务端**的硬边界 —— 前端也会拦一道，
      但真正决定"能不能改"的是这里，因为 ops 是在这个函数里被允许或禁止的。 */
   const askOnly = o.mode === 'ask';
@@ -4058,11 +4162,16 @@ function chatConditionOf(goalId, op) {
       })();
   } catch (e) { return null; }
 }
+/* 单轮 ops 的安全上限：**只防异常巨大的数组**（模型抽风/恶意输入），不承担工作流限制。
+   用户 2026-10-20 反馈：删除几十条资料被"单次最多 20 个操作"硬拆成多轮、还要回「继续」，
+   完全没必要 —— 删除类 op 很小，一次删完最省事。具体分轮规则写在提示词里：
+   只有 add / add_source 这类"重"操作才需要分批（见 chat.agent_rules）。 */
+const CHAT_OPS_SAFETY_MAX = 500;
 function applyChatOps(goalId, ops, opts) {
   const chatOpts = opts || {};
   const applied = [], errors = [];
   const nodeOf = id => db.prepare('SELECT * FROM nodes WHERE id = ? AND goal_id = ?').get(Number(id), goalId);
-  for (const op of (Array.isArray(ops) ? ops : []).slice(0, 25)) {
+  for (const op of (Array.isArray(ops) ? ops : []).slice(0, CHAT_OPS_SAFETY_MAX)) {
     try {
       const kind = String(op.op || op.type || '').toLowerCase();
       /* 第二道闸：即使调用方没先过滤（补操作 / 旧路径），这里也不让越界 op 落库。 */
@@ -4154,13 +4263,53 @@ function applyChatOps(goalId, ops, opts) {
           applied.push({ op: 'add_source', id: Number(sr.lastInsertRowid), title: (title || '资料').slice(0, 60) });
           rag.autoIndex(goalId);
       } else if (kind === 'delete_source') {
-          const key = String(op.title || op.title_match || op.id || '').trim();
-          if (!key) { errors.push('请给出要删除的资料标题'); continue; }
-          const row = db.prepare("SELECT id,title FROM sources WHERE goal_id = ? AND title LIKE ? LIMIT 1").get(goalId, '%' + key.slice(0, 40) + '%');
-          if (!row) { errors.push('没找到资料：' + key.slice(0, 30)); continue; }
-          db.prepare('DELETE FROM sources WHERE id = ?').run(row.id);
-          db.prepare('DELETE FROM code_repo_files WHERE source_id = ?').run(row.id);
-          applied.push({ op: 'delete_source', id: row.id, title: String(row.title).slice(0, 60) });
+          /* 删除资料：默认按标题只删 1 条（历史行为）；2026-10-20 起支持批量 ——
+             "删掉所有不是我上传的资料"这类请求有几百条，逐条写 op 既写不完，提示词也只列
+             前 20 条标题（模型根本看不到其余条目），上一轮就是这样只删了 7 条、还让用户补标题。
+             批量形式（都限定 goal_id）：
+               {"ids":[…]}                     按 id 删（最多 500 条）
+               {"site":"CSDN"} / {"sites":[…]} 删这些站点的全部资料
+               {"except_sites":[…]}            删这些站点之外的全部（"除了XX全删"）
+             安全：批量形式永远不碰「自己提供」的资料（OWN_SOURCE_SITES），要删只能 ids/site 显式点名。 */
+          const nameList = v => (Array.isArray(v) ? v : (v == null ? [] : [v]))
+            .map(x => String(x == null ? '' : x).trim()).filter(Boolean).slice(0, 60);
+          const wantIds = Array.isArray(op.ids) ? op.ids.map(Number).filter(x => x > 0).slice(0, 500) : [];
+          const wantSites = nameList(op.sites != null ? op.sites : op.site);
+          const keepSites = nameList(op.except_sites != null ? op.except_sites : (op.keep_sites != null ? op.keep_sites : op.except_site));
+          const keepKinds = nameList(op.except_kinds != null ? op.except_kinds : op.keep_kinds);
+          let rows = [];
+          let miss = '';
+          if (wantIds.length) {
+            miss = 'ids';
+            const ph = wantIds.map(() => '?').join(',');
+            rows = db.prepare('SELECT id,title FROM sources WHERE goal_id = ? AND id IN (' + ph + ')').all(goalId, ...wantIds);
+          } else if (wantSites.length) {
+            miss = wantSites.join('/');
+            const ph = wantSites.map(() => '?').join(',');
+            rows = db.prepare('SELECT id,title FROM sources WHERE goal_id = ? AND site IN (' + ph + ')').all(goalId, ...wantSites);
+          } else if (keepSites.length || keepKinds.length) {
+            miss = keepSites.join('/') || keepKinds.join('/');
+            const notSites = keepSites.length ? (' AND site NOT IN (' + keepSites.map(() => '?').join(',') + ')') : '';
+            const notKinds = keepKinds.length ? (' AND kind NOT IN (' + keepKinds.map(() => '?').join(',') + ')') : '';
+            const ownPh = OWN_SOURCE_SITES.map(() => '?').join(',');
+            rows = db.prepare('SELECT id,title FROM sources WHERE goal_id = ? AND site NOT IN (' + ownPh + ')' + notSites + notKinds)
+              .all(goalId, ...OWN_SOURCE_SITES, ...keepSites, ...keepKinds);
+          } else {
+            const key = String(op.title || op.title_match || op.id || '').trim();
+            if (!key) { errors.push('请给出要删除的资料标题'); continue; }
+            miss = key.slice(0, 30);
+            const row = db.prepare("SELECT id,title FROM sources WHERE goal_id = ? AND title LIKE ? LIMIT 1").get(goalId, '%' + key.slice(0, 40) + '%');
+            rows = row ? [row] : [];
+          }
+          if (!rows.length) { errors.push('没找到资料：' + miss); continue; }
+          const delSource = db.prepare('DELETE FROM sources WHERE id = ?');
+          const delSourceFiles = db.prepare('DELETE FROM code_repo_files WHERE source_id = ?');
+          for (const row of rows) {
+            delSource.run(row.id);
+            delSourceFiles.run(row.id);
+            try { rag.dropSource(row.id); } catch (e) {}
+            applied.push({ op: 'delete_source', id: row.id, title: String(row.title).slice(0, 60) });
+          }
       } else if (kind === 'update_goal' || kind === 'goal') {
           const f = op.fields || op;
           const cur = db.prepare('SELECT * FROM goals WHERE id = ?').get(goalId);
@@ -4339,7 +4488,7 @@ function parseChatOutput(text) {
     'condition_add', 'add_condition', 'condition_update', 'update_condition', 'condition_delete', 'delete_condition',
     'condition_assign', 'assign_condition', 'condition_unassign', 'unassign_condition', 'condition_replace', 'replace_conditions',
     'plan_create', 'plan_switch', 'plan_save', 'plan_list'].includes(String(o.op || o.type || '').toLowerCase());
-  const takeOps = arr => (Array.isArray(arr) ? arr.filter(valid).slice(0, 25) : []);
+  const takeOps = arr => (Array.isArray(arr) ? arr.filter(valid).slice(0, CHAT_OPS_SAFETY_MAX) : []);
   // 1) ```ops 代码块（推荐格式）
   const m = s.match(/```ops[ \t]*\r?\n?([\s\S]*?)```/i);
   if (m) {
@@ -4477,17 +4626,300 @@ async function recoverChatOps(goal, message, reply, o, model, sig) {
   }
   return [];
 }
+/* ---- 创造模式上下文采集：源码 / 当前页面 DOM / 最近对话 ----------------------
+   为什么要在服务端读源码：创造模式要「一个组件的所有代码都拿得到、都改得动」。
+   以前只给扩展点说明书，模型看不到线上实现，只能凭印象重写 —— 于是改错页面
+   （在对话页去修「用自己的话」）、把 6px 分栏热区当交互、新组件全站扫描文字。
+   现在按「用户这句话 + 当前路由 + 上一次创造产物」命中组件，把完整文件塞进提示词，
+   再加组件清单与 DOM 骨架，模型才有真实依据。预算：中文 1 字≈1 token，
+   源码全给会顶掉对话历史，所以按 perFile / total 截断。
+   ⚠️ 提示词正文一律走 language/prompts/zh-CN/packs.json（下面的 create.* 模板），
+      本文件不写中文句子 —— 否则 i18n 硬编码预算（棘轮）会涨。 */
+const CREATE_CTX = { perFile: 60000, total: 140000, history: 8000, historyRows: 24, bigPage: 70000, maxSources: 4 };
+function createTpl(id, map) {
+  const raw = promptTemplate(id);
+  return String(raw || '').replace(/\{\{(\w+)\}\}/g, function (m, k) {
+    return map && map[k] != null ? String(map[k]) : m;
+  });
+}
+function createReadText(file, max) {
+  try {
+    const buf = fs.readFileSync(file, 'utf8');
+    const cap = max || CREATE_CTX.perFile;
+    return buf.length > cap ? buf.slice(0, cap) + '\n...(truncated)' : buf;
+  } catch (e) { return ''; }
+}
+function createIsFile(file) { try { return fs.statSync(file).isFile(); } catch (e) { return false; } }
+function createRelLabel(file) {
+  try {
+    if (file.indexOf(DATA_DIR) === 0) return 'DATA/' + path.relative(DATA_DIR, file).split(path.sep).join('/');
+    return path.relative(APP_DIR, file).split(path.sep).join('/');
+  } catch (e) { return path.basename(file); }
+}
+/* 一个组件的三份文件：用户版本优先（同 id 时它就盖在内置版本上）。 */
+function createComponentSource(id) {
+  const out = { id: id, files: [], fromUser: false };
+  const pairs = [
+    ['server.js', [path.join(USER_PLUGIN_DIR, id + '.js'), path.join(PLUGIN_DIR, id + '.js')]],
+    ['client.js', [path.join(USER_PUBLIC_PLUGIN_DIR, id + '.js'), path.join(PUBLIC_DIR, 'plugins', id + '.js')]],
+    ['style.css', [path.join(USER_PUBLIC_PLUGIN_DIR, id + '.css'), path.join(PUBLIC_DIR, 'plugins', id + '.css')]]
+  ];
+  for (const pair of pairs) {
+    for (const file of pair[1]) {
+      if (!createIsFile(file)) continue;
+      out.files.push({ name: pair[0], file: createRelLabel(file), code: createReadText(file) });
+      if (file.indexOf(DATA_DIR) === 0) out.fromUser = true;
+      break;
+    }
+  }
+  return out;
+}
+/* 某个可覆盖页面的现有实现：用户覆盖版本优先，否则内置页面插件。 */
+function createPageSource(pageId) {
+  const out = { id: pageId, files: [], builtin: false, found: false, tooBig: false };
+  if (!/^[a-z][a-z0-9-]{1,30}$/.test(String(pageId || ''))) return out;
+  const userDir = path.join(DATA_DIR, 'ui-plugins', pageId);
+  const builtinDir = path.join(UI_PLUGIN_DIR_BUILTIN, pageId);
+  let dir = '';
+  if (fs.existsSync(userDir)) dir = userDir;
+  else if (fs.existsSync(builtinDir)) { dir = builtinDir; out.builtin = true; }
+  if (!dir) return out;
+  for (const name of ['manifest.json', 'index.js', 'style.css']) {
+    const file = path.join(dir, name);
+    if (!createIsFile(file)) continue;
+    out.files.push({ name: name, file: createRelLabel(file), code: createReadText(file) });
+  }
+  out.found = out.files.length > 0;
+  out.tooBig = out.files.reduce(function (n, f) { return n + String(f.code || '').length; }, 0) > CREATE_CTX.bigPage;
+  return out;
+}
+/* 路由 → 页面 id / 插件 id（页面插件用 page id，组件页用组件 id）。 */
+function createRouteTarget(hash) {
+  const h = String(hash || '');
+  if (!h || h === '#' || h === '#/') return { page: 'home', pluginId: '' };
+  const m = h.match(/^#\/(?:g|t)\/\d+\/([a-z0-9_-]+)/i);
+  if (m) {
+    const seg = m[1].toLowerCase();
+    if (seg === 'map') return { page: 'roadmap', pluginId: '' };
+    if (seg === 'versions' || seg === 'diff' || seg === 'chat') return { page: seg === 'chat' ? 'chat' : seg, pluginId: '' };
+    return { page: '', pluginId: seg };
+  }
+  if (/^#\/settings/.test(h)) return { page: 'settings', pluginId: '' };
+  if (/^#\/components/.test(h)) return { page: 'components', pluginId: '' };
+  if (/^#\/library/.test(h)) return { page: 'library', pluginId: '' };
+  if (/^#\/aitasks/.test(h)) return { page: 'aitasks', pluginId: '' };
+  if (/^#\/guide/.test(h)) return { page: 'guide', pluginId: '' };
+  if (/^#\/g\/\d+/.test(h)) return { page: 'goal', pluginId: '' };
+  if (/^#\/t\/\d+/.test(h)) return { page: 'tutorial', pluginId: '' };
+  return { page: '', pluginId: '' };
+}
+/* 从文字里认组件：id 作为完整词出现，或完整组件名出现（中文名 ≥2 字才认）。 */
+function createMatchComponentIds(text) {
+  const hay = String(text || '').toLowerCase();
+  if (!hay) return [];
+  const ids = [];
+  for (const comp of allComponents()) {
+    const id = String(comp.id || '').toLowerCase();
+    if (!id) continue;
+    const re = new RegExp('(^|[^a-z0-9_-])' + id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '([^a-z0-9_-]|$)');
+    if (re.test(hay)) { ids.push(id); continue; }
+    const name = String(comp.name || '').toLowerCase();
+    if (name.length >= 2 && hay.indexOf(name) >= 0) ids.push(id);
+  }
+  return ids;
+}
+/* 这段会话最近一次创造产物（用户说「改刚才那个」时就是它）。 */
+function createLastCreate(sessionId) {
+  if (!sessionId) return null;
+  try {
+    const rows = db.prepare('SELECT trace FROM chats WHERE session_id = ? ORDER BY id DESC LIMIT 40').all(sessionId);
+    for (const row of rows) {
+      let arr = null;
+      try { arr = JSON.parse(row.trace || '[]'); } catch (e) { continue; }
+      if (!Array.isArray(arr)) continue;
+      for (let i = arr.length - 1; i >= 0; i--) {
+        const st = arr[i];
+        if (st && st.kind === 'create' && st.create && st.create.changeId) return st.create;
+      }
+    }
+  } catch (e) {}
+  return null;
+}
 /* 创造模式提示词：把「能改什么、怎么改、红线、输出协议」一次性交给模型。
-   页面上下文复用 AI 助手那套（用户正在看的页面就是他最可能想改的那一页）。 */
-async function buildCreateChatPrompt(goal, message, o) {
+   页面上下文复用 AI 助手那套（用户正在看的页面就是他最可能想改的那一页），
+   再补上：最近对话 / 现有组件与页面源码 / 组件清单 / 当前页面 DOM 骨架。 */
+async function buildCreateChatPrompt(goal, message, sessionId, o) {
   const rawPage = pageContext.sanitizePageContext(o.page || null);
-  const pageText = rawPage && pageContext.pageContextBlockFrom ? pageContext.pageContextBlockFrom(rawPage) : '';
-  const prompt = createMode.promptBlock({ pageText: pageText })
-    + '\n\n【用户这句话】\n' + String(message || '').trim();
+  const pageBlock = rawPage && pageContext.pageContextBlockFrom ? pageContext.pageContextBlockFrom(rawPage) : null;
+  const pageText = pageBlock ? pageBlock.text : '';
   const ctx = [{ kind: 'ctx', label: '创造模式扩展点说明书', detail: '可覆盖页面 / 插件契约 / CSS 变量 / 安全红线 / 输出协议' }];
-  if (pageText) ctx.push({ kind: 'ctx', label: '你当前页面上的内容', detail: '' });
+  if (pageText) {
+    ctx.push({ kind: 'ctx', label: '你当前页面上的内容', detail: createTpl('create.detail_page_text', { label: pageBlock.label, n: pageBlock.chars }) });
+  }
+
+  /* 1) 最近对话：改口/补充要求都靠它（以前创造模式完全不带历史，用户说「刚才那个」模型一脸懵） */
+  const historyRows = [];
+  if (sessionId) {
+    try {
+      historyRows.push.apply(historyRows, db.prepare('SELECT role, content FROM chats WHERE session_id = ? ORDER BY id DESC LIMIT ?')
+        .all(sessionId, CREATE_CTX.historyRows).reverse());
+    } catch (e) {}
+  }
+  const curMsg = String(message || '').replace(/\s+/g, ' ').trim();
+  const histLines = [];
+  let histBudget = CREATE_CTX.history;
+  for (let i = historyRows.length - 1; i >= 0; i--) {
+    const row = historyRows[i];
+    let txt = String(row.content || '').replace(/\s+/g, ' ').trim();
+    if (!txt) continue;
+    if (row.role === 'user' && txt === curMsg) continue;
+    const cap = row.role === 'user' ? 600 : 1500;
+    if (txt.length > cap) txt = txt.slice(0, cap) + '...';
+    if (histBudget - txt.length < 0) break;
+    histBudget -= txt.length;
+    histLines.unshift(createTpl('create.hist_line', {
+      role: promptTemplate(row.role === 'user' ? 'create.hist_user' : 'create.hist_ai'),
+      text: txt
+    }));
+  }
+  const historyText = histLines.length ? createTpl('create.ctx_history', { history: histLines.join('\n') }) : '';
+  if (historyText) {
+    ctx.push({ kind: 'ctx', label: promptTemplate('create.label_history'), detail: createTpl('create.detail_history', { n: histLines.length }) });
+  }
+
+  /* 2) 命中要改的组件 / 页面（路由插件页最重要：用户在「用自己的话」页抱怨，就别去修对话页） */
+  const routeInfo = createRouteTarget(rawPage && rawPage.route);
+  const matched = [];
+  const addId = function (id) {
+    const s = String(id || '').toLowerCase();
+    if (s && matched.indexOf(s) < 0) matched.push(s);
+  };
+  if (routeInfo.pluginId) addId(routeInfo.pluginId);
+  const lastCreate = createLastCreate(sessionId);
+  if (lastCreate) {
+    if (lastCreate.kind === 'component' && lastCreate.id) addId(lastCreate.id);
+    if (lastCreate.kind === 'ui-page' && lastCreate.page) {
+      ctx.push({
+        kind: 'ctx', label: promptTemplate('create.label_last_create'),
+        detail: createTpl('create.detail_last_create', { page: lastCreate.page, name: lastCreate.name || '' })
+      });
+    }
+  }
+  const matchText = [message, histLines.join('\n'), rawPage && rawPage.title, rawPage && rawPage.text].join('\n');
+  for (const id of createMatchComponentIds(matchText)) addId(id);
+  /* 用户自己装的组件体积小、最可能被「改一下」，默认带上（最多 3 个，避免挤掉命中的那个） */
+  let userFilled = 0;
+  for (const comp of allComponents()) {
+    if (comp.builtin || userFilled >= 3) continue;
+    if (matched.indexOf(String(comp.id).toLowerCase()) >= 0) continue;
+    addId(comp.id); userFilled++;
+  }
+  const sourceIds = matched.slice(0, CREATE_CTX.maxSources);
+  const sourceTexts = [];
+  let sourceBudget = CREATE_CTX.total;
+  const sourceMeta = [];
+  for (const id of sourceIds) {
+    const src = createComponentSource(id);
+    if (!src.files.length) continue;
+    const comp = allComponents().find(function (c) { return c.id === id; }) || {};
+    const head = createTpl('create.src_head', {
+      id: id, name: comp.name || id,
+      origin: promptTemplate(comp.builtin ? 'create.kind_builtin' : 'create.kind_user'),
+      extra: (src.fromUser ? promptTemplate('create.src_extra_user') : '')
+        + (comp.kind === 'theme' ? promptTemplate('create.src_extra_theme') : '')
+    });
+    const chunks = [head];
+    for (const f of src.files) {
+      const used = chunks.reduce(function (n, x) { return n + x.length; }, 0);
+      const cap = Math.min(CREATE_CTX.perFile, sourceBudget - used);
+      if (cap <= 0) break;
+      chunks.push('--- ' + f.name + ' (' + f.file + ') ---\n'
+        + (f.code.length > cap ? f.code.slice(0, cap) + '\n...(truncated)' : f.code));
+    }
+    const blockText = chunks.join('\n');
+    if (blockText.length + 200 > sourceBudget) break;
+    sourceBudget -= blockText.length;
+    sourceTexts.push(blockText);
+    sourceMeta.push(id);
+  }
+  const sourceText = sourceTexts.length ? createTpl('create.ctx_sources', { sources: sourceTexts.join('\n\n') }) : '';
+  if (sourceMeta.length) {
+    ctx.push({
+      kind: 'ctx', label: createTpl('create.label_sources', { ids: sourceMeta.join(' / ') }),
+      detail: createTpl('create.detail_sources', { n: sourceTexts.length })
+    });
+  }
+
+  /* 3) 被改页面的现有实现：改「教程页 / 首页」这种内置页面时必须看到真实 DOM 与接口 */
+  let pageSourceText = '';
+  let targetPage = '';
+  for (const pid of Object.keys(createMode.PAGES)) {
+    const label = String((createMode.PAGES[pid] && createMode.PAGES[pid].label) || '');
+    if (label && String(message || '').indexOf(label) >= 0) { targetPage = pid; break; }
+  }
+  if (!targetPage && !routeInfo.pluginId) targetPage = routeInfo.page;
+  if (targetPage) {
+    const ps = createPageSource(targetPage);
+    if (ps.found && !ps.tooBig) {
+      pageSourceText = createTpl('create.ctx_page_source', {
+        pageId: targetPage,
+        files: ps.files.map(function (f) { return f.name; }).join(' + '),
+        kind: promptTemplate(ps.builtin ? 'create.kind_builtin' : 'create.kind_user'),
+        code: ps.files.map(function (f) { return '--- ' + f.name + ' (' + f.file + ') ---\n' + f.code; }).join('\n\n')
+      });
+      ctx.push({
+        kind: 'ctx', label: createTpl('create.label_page_source', { page: targetPage }),
+        detail: ps.files.map(function (f) { return f.name; }).join(' + ')
+      });
+    } else if (ps.found && ps.tooBig) {
+      pageSourceText = createTpl('create.ctx_page_too_big', {
+        pageId: targetPage,
+        sizes: ps.files.map(function (f) { return f.name + ' ' + Math.round(String(f.code || '').length / 1024) + 'KB'; }).join(' / ')
+      });
+      ctx.push({
+        kind: 'ctx', label: createTpl('create.label_page_too_big', { page: targetPage }),
+        detail: promptTemplate('create.detail_page_too_big')
+      });
+    }
+  }
+
+  /* 4) 当前页面 DOM 骨架（标签 + id/class，不含文字）：模型拿不到选择器就会自创、然后改不动 */
+  const domRaw = (rawPage && rawPage.dom) ? String(rawPage.dom).slice(0, 12000) : '';
+  const domText = domRaw ? createTpl('create.ctx_dom', { dom: domRaw }) : '';
+  if (domText) {
+    ctx.push({ kind: 'ctx', label: promptTemplate('create.label_dom'), detail: createTpl('create.detail_dom', { n: domRaw.length }) });
+  }
+
+  /* 5) 组件清单：知道有哪些组件、哪个能覆盖、装在哪，才不会起重复 id / 找错对象 */
+  let inventoryText = '';
+  try {
+    const comps = allComponents();
+    const invLines = [];
+    for (const comp of comps) {
+      if (comp.kind === 'theme') continue;
+      invLines.push(createTpl('create.inv_line', {
+        id: comp.id, name: comp.name || comp.id,
+        kind: promptTemplate(comp.builtin ? 'create.kind_builtin' : 'create.kind_user'),
+        category: comp.category || '',
+        state: promptTemplate(componentEnabled(comp.id) ? 'create.state_on' : 'create.state_off'),
+        mode: comp.mode ? ' - ' + comp.mode : ''
+      }));
+    }
+    inventoryText = createTpl('create.ctx_inventory', { count: comps.length, list: invLines.join('\n') });
+  } catch (e) {}
+
+  const prompt = createMode.promptBlock({
+    pageText: pageText, historyText: historyText, sourceText: sourceText,
+    pageSourceText: pageSourceText, inventoryText: inventoryText, domText: domText
+  })
+    + '\n\n' + createTpl('create.ctx_tail', {
+      title: String((goal && goal.title) || '-').slice(0, 120),
+      status: String((goal && goal.status) || '-'),
+      message: String(message || '').trim()
+    });
   return { prompt: prompt, ctx: ctx };
 }
+
 /* ===== 对话图片（粘贴 / 拖入）：原图只随这次请求发给支持多模态的模型，
    数据库只留缩略图（刷新后还能看到自己发过什么；缩略图很小，不拖垮多端同步）。 */
 const CHAT_IMG_MAX = 4;
@@ -6390,7 +6822,7 @@ async function handleAPI(req, res, u) {
       return sendJSON(res, 400, { error: (e && e.message) || String(e), code: (e && e.code) || '' });
     }
   }
-  const createMatch = p.match(/^\/api\/create\/changes\/([A-Za-z0-9_-]+)(?:\/(install|discard|rollback))?$/);
+  const createMatch = p.match(/^\/api\/create\/changes\/([A-Za-z0-9_-]+)(?:\/(install|discard|rollback|status))?$/);
   if (createMatch) {
     const cid = createMatch[1];
     const action = createMatch[2] || '';
@@ -6403,6 +6835,17 @@ async function handleAPI(req, res, u) {
     };
     try {
       if (!action && method === 'GET') return sendJSON(res, 200, { change: createMode.readChange(cid) });
+      /* 卡片状态查询：刷新对话后前端靠它把卡片恢复成「已安装 / 已撤销 / 已放弃」。
+         不读暂存目录（放弃时目录已删），只回数据库里的状态。 */
+      if (action === 'status' && method === 'GET') {
+        /* 记录/暂存被清理时也回 200 + status:'missing'：对话框刷新后要能
+           把卡片标成已失效，而不是让用户再点一次安装吃个 404。 */
+        try { return sendJSON(res, 200, createMode.status(cid)); }
+        catch (e) {
+          if (e && e.code === 'not_found') return sendJSON(res, 200, { ok: true, changeId: cid, status: 'missing' });
+          throw e;
+        }
+      }
       if (action === 'install' && method === 'POST') {
         const body = await readBody(req).catch(function () { return {}; });
         if (!body || body.confirm !== true) {
@@ -9341,6 +9784,8 @@ function extractEbookPrefFromAnswers(answers) {
       collect_per_site: getSetting('collect_per_site', '12'),
       collect_full: (getSetting('collect_full', '1') || '1') !== '0',
       collect_full_max: getSetting('collect_full_max', '60000'),
+      /* 信息源检索：指定外部搜索 API（provider=builtin 表示用内置搜索；密钥只回有没有） */
+      search: searchApi.status(),
       emb_base_url: getSetting('emb_base_url', ''),
       emb_has_key: !!getSetting('emb_api_key', ''),
       emb_model: getSetting('emb_model', ''),
@@ -9383,7 +9828,39 @@ function extractEbookPrefFromAnswers(answers) {
     if (body.emb_model != null) set('emb_model', body.emb_model);
     if (body.emb_api_key != null && String(body.emb_api_key).trim() && !/^•+$/.test(String(body.emb_api_key).trim())) set('emb_api_key', body.emb_api_key);
     if (body.emb_api_key === '') setSetting('emb_api_key', '');
-    return sendJSON(res, 200, { ok: true, settings: { model: currentModel(), ai_provider: getSetting('ai_provider', 'openai'), ai_base_url: getSetting('ai_base_url', ''), ai_vision_model: getSetting('ai_vision_model', ''), ai_timeout_ms: getSetting('ai_timeout_ms', '300000') } });
+    /* 信息源检索：搜索 API（provider = builtin / deepseek / custom；密钥留空 = 不修改，'' = 清空） */
+    if (body.search_provider != null) {
+      const sp = String(body.search_provider).trim();
+      setSetting('search_provider', (sp === 'deepseek' || sp === 'custom') ? sp : 'builtin');
+    }
+    if (body.search_api_base != null) set('search_api_base', body.search_api_base);
+    if (body.search_api_count != null) set('search_api_count', String(Math.max(1, Math.min(50, Number(body.search_api_count) || 20))));
+    if (body.search_api_content != null) {
+      const on = body.search_api_content === true || body.search_api_content === '1' || body.search_api_content === 'true';
+      setSetting('search_api_content', on ? '1' : '0');
+    }
+    if (body.search_api_key != null && String(body.search_api_key).trim() && !/^•+$/.test(String(body.search_api_key).trim())) set('search_api_key', body.search_api_key);
+    if (body.search_api_key === '') setSetting('search_api_key', '');
+    return sendJSON(res, 200, { ok: true, search: searchApi.status(), settings: { model: currentModel(), ai_provider: getSetting('ai_provider', 'openai'), ai_base_url: getSetting('ai_base_url', ''), ai_vision_model: getSetting('ai_vision_model', ''), ai_timeout_ms: getSetting('ai_timeout_ms', '300000') } });
+  }
+  /* 设置页「测试搜索」：带表单里的值真实打一次外部搜索 API（不回落到内置，失败要如实报错） */
+  if (p === '/api/search/test' && method === 'POST') {
+    const body = await readBody(req);
+    const rawKey = body.apiKey == null ? '' : String(body.apiKey).trim();
+    const opts = {
+      provider: body.provider != null ? String(body.provider) : undefined,
+      base: body.base != null ? String(body.base) : undefined,
+      apiKey: (rawKey && !/^•+$/.test(rawKey)) ? rawKey : undefined,
+      count: body.count,
+      content: body.content,
+      query: body.query,
+      timeoutMs: 25000
+    };
+    try {
+      return sendJSON(res, 200, await searchApi.test(opts));
+    } catch (e) {
+      return sendJSON(res, 200, { ok: false, provider: opts.provider || '', count: 0, items: [], code: 'internal', detail: String((e && e.message) || e) });
+    }
   }
 
   /* ===== 插件路由 ===== */

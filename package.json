@@ -33,6 +33,9 @@
     "test:goal-picker": "node --no-warnings scripts/test-goal-picker.js",
     "test:ai-tasks": "node --no-warnings scripts/test-ai-tasks-cleanup.js",
     "test:host-agent": "node --no-warnings scripts/test-host-agent.js",
+    "test:search": "node --no-warnings scripts/test-search-api.js",
+    "test:chat-ops": "node --no-warnings scripts/test-chat-ops-batch.js",
+    "test:collect-ui": "node --no-warnings scripts/test-collect-ui.js",
     "test:dsh-bridge": "node integrations/dsh-bridge/test/run.js",
     "build:lang": "node scripts/build-language-source.js",
     "check:i18n": "node scripts/check-i18n.js",
@@ -40,7 +43,8 @@
     "test:i18n-ui": "node --no-warnings scripts/test-language-ui.js",
     "test:i18n-all": "npm run test:i18n && npm run test:i18n-ui",
     "hooks:install": "node scripts/install-git-hooks.js",
-    "check": "node --check public/app.js && node --check server/server.js && node scripts/check-i18n.js"
+    "check": "node --check public/app.js && node --check server/server.js && node scripts/check-i18n.js",
+    "test:restate": "node --no-warnings --experimental-sqlite scripts/test-restate-clean.js"
   },
   "keywords": [
     "goal-planning",

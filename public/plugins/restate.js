@@ -679,7 +679,7 @@
             <button class="rsLink" id="rsBack">← 换个知识点</button>
           </div>
         </aside>
-        <div class="rsSplit" data-k="q"></div>
+        <div class="rsSplit" data-k="q" role="separator" aria-orientation="vertical" title="${tr('拖动调宽 · 双击复位')}"><span class="rsGrip" aria-hidden="true" title="${tr('拖动调宽 · 双击复位')}"></span></div>
 
         <section class="rsPane rsPaneC">
           <div class="rsPaneT">💬 对话
@@ -728,18 +728,25 @@
   }
   /* ---------- 三栏宽度可拖动 ----------
      宽度写在 CSS 变量 --rs-col-q 上，存在 localStorage。
-     两侧都夹住，中栏永远留够宽度 —— 否则拖过头会把对话挤成一条缝。 */
+     两侧都夹住，中栏永远留够宽度 —— 否则拖过头会把对话挤成一条缝。
+     ⚠️ 用户反馈过两个问题，别再改回去：
+       ① 初始太窄（原来的 320px 只够放标题）→ 默认放大到 380；
+       ② 把手只有 6px 透明热区，用户"看不出来能拖动"→ 现在把手常驻成
+          一根带握把纹的竖条（见 .rsGrip），hover 变主题色。 */
   const COL_KEY = 'sierxing-restate-cols-v1';
-  const COL_DEF = { q: 320 };
-  const COL_MIN = { q: 210 };
+  const COL_DEF = { q: 380 };
+  const COL_MIN = { q: 230 };
   function colCfg() {
     let o = {};
     try { o = JSON.parse(localStorage.getItem(COL_KEY) || '{}') || {}; } catch (e) { o = {}; }
-    return { q: clampCol('q', o.q) };
+    let q = clampCol('q', o.q);
+    /* 老默认值 320 当成"没调过"：用户没主动拖过就不该被旧默认值卡在窄栏上 */
+    if (q === 320) q = COL_DEF.q;
+    return { q: q };
   }
   function clampCol(k, v) {
     const n = Number(v);
-    return Number.isFinite(n) ? Math.min(Math.max(Math.round(n), COL_MIN[k]), 560) : COL_DEF[k];
+    return Number.isFinite(n) ? Math.min(Math.max(Math.round(n), COL_MIN[k]), 680) : COL_DEF[k];
   }
   function applyCols(cfg) {
     const c = cfg || colCfg(), el = document.getElementById('rsPanes');
@@ -757,8 +764,8 @@
         const k = h.getAttribute('data-k');
         const cfg = colCfg();
         const box = el.getBoundingClientRect();
-        // 只有一个把手(6px) + 中栏两侧的外边距(7px×2)
-        const chrome = 20;
+        // 一根 12px 把手 + 中栏两侧的外边距(7px×2)
+        const chrome = 26;
         const startX = e.clientX, startW = cfg[k];
         const MID_MIN = 420;
         const maxW = Math.max(COL_MIN[k], box.width - chrome - MID_MIN);
@@ -971,6 +978,19 @@
   }
 
   /* ---------- 收尾对照 ---------- */
+  /* AI 写要点时爱把标识符包成 ```js\\ninterview.js\\n``` 或 `interview.js`。
+     服务端出口已经会剥围栏（server/plugins/lib/inline-text.js），这里再兜一道：
+     先 esc 再只把成对的 `xxx` 换成 <code> —— 顺序不能反，否则等于给自己开 XSS 口子。
+     库里早期存下的旧记录（服务端清洗前）也靠这道兜底。 */
+  function inlineCode(v, max) {
+    let t = String(v == null ? '' : v)
+      .replace(/[\u200b-\u200d\ufeff]/g, '')
+      .replace(/(?:`{3,}|~{3,})[ \t]*[A-Za-z0-9_+#.\-]*[ \t]*\r?\n?([\s\S]*?)(?:`{3,}|~{3,})/g, function (m, body) { return String(body || ''); })
+      .replace(/(?:`{3,}|~{3,})[ \t]*[A-Za-z0-9_+#.\-]*/g, '')
+      .replace(/[\r\n\t]+/g, ' ').replace(/ {2,}/g, ' ').trim();
+    if (max) t = t.slice(0, max);
+    return esc(t).replace(/`([^`\n]{1,120})`/g, '<code>$1</code>').replace(/`/g, '');
+  }
   function drawDone() {
     const r = cur.round || {};
     let gaps = [], kept = [];
@@ -988,16 +1008,16 @@
           <div class="rsMineT">🗣 我的话<button class="btn tiny" id="rsCopy">复制</button></div>
           <div class="rsMineB mdBody">${mdToHTML(r.mine || '')}</div>
         </div>
-        ${r.line ? `<p class="rsLine">${esc(r.line)}</p>` : ''}
+        ${r.line ? `<p class="rsLine">${inlineCode(r.line, 160)}</p>` : ''}
       </div>
       ${kept.length ? `<div class="rsSec">
         <div class="rsSecT">AI 认定你真讲对了的地方（${kept.length}）</div>
-        <div class="rsKept">${kept.map(k => '<div class="rsKeptI">✓ ' + esc(k) + '</div>').join('')}</div>
+        <div class="rsKept">${kept.map(k => '<div class="rsKeptI">✓ ' + inlineCode(k, 120) + '</div>').join('')}</div>
       </div>` : ''}
       <div class="rsSec">
         <div class="rsSecT">${gaps.length ? '和关键要点的差距（' + gaps.length + '）' : '要点都覆盖了 ✓'}</div>
         ${gaps.length ? `<div class="rsGaps">${gaps.map(g => `
-          <div class="rsGap"><b>${esc(g.key)}</b><span>${esc(g.why || '')}</span></div>`).join('')}</div>`
+          <div class="rsGap"><b>${inlineCode(g.key, 80)}</b><span>${inlineCode(g.why || '', 160)}</span></div>`).join('')}</div>`
           : '<p class="muted">这一轮你已经用自己的话讲全了。</p>'}
         ${gaps.length ? '<p class="hint">不用现在补。过两天回来看这条，你会认出哪些点是「以为自己懂了」。</p>' : ''}
       </div>

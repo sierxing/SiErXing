@@ -56,7 +56,7 @@ const PACKS = {
     description: '对话助手的工具边界、ops 契约与教程修改规则；{{tutorialEditOp}} 是唯一动态块。',
     editable: true,
     placeholders: ['tutorialEditOp'],
-    mustInclude: ['不要使用任何工具', '"op":"add"', '单次最多 20 个操作'],
+    mustInclude: ['不要使用任何工具', '"op":"add"', '删除类操作', '不设上限'],
     template: template('chat.agent_rules'),
     sampleCtx: { tutorialEditOp: chatPacks.TUTORIAL_EDIT_OP },
     builtinRender: function (ctx) { return chatPacks.agentRules({ tutorialEditOp: ctx && ctx.tutorialEditOp }); }

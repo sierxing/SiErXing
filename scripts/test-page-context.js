@@ -95,4 +95,14 @@ T('tidyPageText 去掉纯分隔符行与行尾空白', () => {
   assert.ok(s.includes('正文'));
 });
 
+T('DOM 骨架：正文为空也能用（创造模式靠它拿真实选择器），服务端限量', () => {
+  const dom = Array.from({ length: 500 }, function (_, i) { return '<div class="row"><span id="n' + i + '">'; }).join('');
+  const s = pc.sanitizePageContext({ label: '目标页', dom: dom });
+  assert.ok(s && s.dom, '有 DOM 就不该返回 null');
+  assert.ok(s.dom.length <= pc.PAGE_DOM_INPUT_MAX, 'DOM 必须限量：' + s.dom.length);
+  assert.ok(s.dom.indexOf('<div') >= 0);
+  const blk = pc.pageContextBlockFrom({ label: '目标页', dom: '<main id="app"><button data-act="go">x</button></main>' });
+  assert.ok(blk && blk.dom, '只有 DOM 也应产生上下文块');
+  assert.ok(blk.text.indexOf('目标页') >= 0);
+});
 console.log('\n' + n + ' 项全部通过');

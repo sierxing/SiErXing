@@ -36,6 +36,7 @@ function usage() {
     '  node list --goal <goalId> [--json]',
     '  tutorial get --id <tutorialId> [--offset N] [--limit N] [--json]',
     '  source list --goal <goalId> [--limit N] [--json]',
+    '  source get --id <sourceId> [--offset N] [--limit N] [--json]',
     '  brief user [--json]',
     '  brief goal --id <goalId> [--json]',
     '  insight list [--goal <goalId>] [--json]',
@@ -275,6 +276,19 @@ async function main() {
       if (f.limit) input.limit = Number(f.limit);
       const r = await run('source.list', input);
       return out(r, !f.json);
+    }
+    if (a[1] === 'get') {
+      if (!f.id) throw new Error('缺少 --id');
+      const input = { id: Number(f.id) };
+      if (f.offset) input.offset = Number(f.offset);
+      if (f.limit) input.limit = Number(f.limit);
+      const r = await run('source.get', input);
+      if (f.json) return out(r, false);
+      const s = r.result || {};
+      console.log('#' + s.id + ' ' + (s.title || '') + ' [' + (s.kind || '') + ' · ' + (s.chars || 0) + ' 字]');
+      console.log(s.content || '');
+      if (s.next_offset != null) console.log('\n…（还有内容，继续读：--offset ' + s.next_offset + '）');
+      return;
     }
     throw new Error('未知 source 子命令：' + a[1]);
   }

@@ -36,9 +36,11 @@
 4. AI 先回一段说明，并生成一张 **🎨 已生成** 卡片（列出产物类型、id、文件）。**此时还没有安装。**
 5. 卡片上可以：
    - **安装并查看**：落盘 + 自动启用，然后点「刷新查看」在真实界面里看效果（用装好的插件本身当预览）。
+     ⚠️ **刷新查看不会把你弹去别的页面**：页面插件（ui-page）才会跳到它覆盖的那一页；组件/皮肤是给**当前页**加能力，原地刷新即可（以前组件卡片的 route 写死 `#/components`，改完当前组件一刷新就被丢到组件管理页，得点好几步才回得来）。
    - **查看代码**：先读生成的文件再决定。
    - **放弃**：删掉暂存，什么都没发生。
 6. 不满意就再聊一句让它改（同一 id 会覆盖上一版）；也可以点 **撤销安装** 回到安装前（有旧版本就恢复旧版本，没有就删掉）。
+7. 刷新/重开对话后卡片**不会退回「已生成」**：前端会向 `GET /api/create/changes/:id/status` 对账，已安装的仍显示「已安装 / 撤销安装」，已撤销/已放弃/已清理各有对应状态（以前刷新后一律显示「已生成」，用户点安装只收到「已经安装过」，想撤销又找不到入口）。
 
 > 页面/皮肤装好后，以后想临时关掉：进 **#/ui-plugins（界面管理）** 停用即可，不用删文件。
 
@@ -48,12 +50,12 @@
 
 | 约束 | 实现 |
 | --- | --- |
-| 只能改扩展点，不能改内核 | 页面 id 白名单（`server/create-mode.js` 的 `PAGES`）；不能占用内置组件 id；产物只进 `DATA_DIR` |
+| 只能改扩展点，不能改内核 | 页面 id 白名单（`server/create-mode.js` 的 `PAGES`）；**核心/基础组件**（`plan/clarify/constraints/sources/versions/chat/tutorial` 及 `scope=core/base` 的插件，如 `conditions`）不能覆盖 id；其它内置功能组件（如 `restate`）支持**同 id 覆盖**；产物只进 `DATA_DIR` |
 | 零依赖 / 不联网 / 不碰宿主 | 静态扫描：禁止 `require` 第三方包、`import` 外部模块、`fetch('http…')`、`WebSocket`、`XMLHttpRequest`、`child_process`、`eval` / `new Function`；CSS 禁止外部 `@import`/`url()` |
 | 语法先过一遍 | 服务端把生成代码写临时文件跑 `node --check`（ESM 用 `.mjs`），不通过直接拒收 |
 | 体积限制 | 单文件 ≤200KB（组件前端 300KB）、总 ≤800KB、文件数 ≤8 |
 | 安装要用户批准 | 生成只做「校验 + 暂存」；`POST /api/create/changes/:id/install` 必须带 `confirm:true`；UI 上就是卡片按钮 |
-| 失败可回滚 | 安装前把旧版本快照到 `DATA_DIR/agent-changes/<changeId>/backup/`；装失败自动恢复；成功后也能「撤销安装」 |
+| 失败可回滚 | 安装前把旧版本快照到 `DATA_DIR/agent-changes/<changeId>/backup/`；装失败自动恢复；成功后也能「撤销安装」。**撤销只删数据目录里的用户文件**，绝不删 `server/plugins`、`public/plugins` 里的程序文件（删过一次内置 `restate.js`）；覆盖内置组件时撤销 = 删掉覆盖层、内置版本自动回来 |
 | 不静默破坏 | 校验错误/越界都会写回对话（用户看得到「为什么没装成」） |
 
 > 功能组件的服务端 JS 仍然是在本进程里运行的 Node 代码（和普通组件一致）。所以它必须由用户点安装；不要给不可信来源的包点安装。
@@ -64,12 +66,12 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| `server/create-mode.js` | 解析 create 块 → 校验 → 暂存 → 安装/回滚/放弃；生成「扩展点说明书」提示词（页面表 / 三种契约 / CSS 变量 / 已装用户插件 / 红线 / 输出协议） |
-| `server/server.js` | 对话模式 `mode:'create'`（`buildChatPrompt` → `buildCreateChatPrompt`；`streamChat` 解析 + 暂存 + SSE 下发 `create`）；`/api/create/*` 路由；用户组件目录加载 + `serveStatic` 兜底 |
-| `public/app.js` | `AI_MODES` 里的「创造」；输入框提示；SSE 收尾把 create 存进消息（并随 trace 落库，刷新后卡片还在）；卡片渲染 + 安装/代码/放弃/刷新/撤销动作 |
+| `server/create-mode.js` | 解析 create 块 → 校验 → 暂存 → 安装/回滚/放弃/状态查询；生成「扩展点说明书」提示词（页面表 / 三种契约 / CSS 变量 / 已装用户插件 / 红线 / 输出协议），并把 server.js 采到的上下文块（历史 / 源码 / DOM / 清单）按顺序拼进去 |
+| `server/server.js` | 对话模式 `mode:'create'`（`buildChatPrompt` → `buildCreateChatPrompt`；`streamChat` 解析 + 暂存 + SSE 下发 `create`）；`/api/create/*` 路由（含 `/status`）；用户组件目录加载 + `serveStatic` 兜底。**创造模式上下文采集**也在这里：最近对话 / 命中的组件完整源码（用户版本优先）/ 被改页面的现有实现 / 组件清单 / 当前页面 DOM 骨架 —— 模型不再只拿到「扩展点说明书」，否则改东西只能凭印象重写 |
+| `public/app.js` | `AI_MODES` 里的「创造」；输入框提示；SSE 收尾把 create 存进消息（并随 trace 落库，刷新后卡片还在）；卡片渲染 + 安装/代码/放弃/刷新/撤销动作；`chatCreateSync()` 在每次渲染后按 `/status` 校正卡片状态；`collectPageContext()` 在创造模式下额外抓 DOM 骨架 |
 | `public/style.css` | `.chCreate*` 卡片样式 |
-| `scripts/test-create-mode.js` | 17 项：纯函数（围栏/校验/红线/语法）+ HTTP e2e（三种产物 暂存→安装→回滚/放弃、确认安装、内置 id 保护） |
-| `scripts/test-create-ui.js` | 20 项：假 AI 驱动的前端闭环（切模式 → 提示词 → 生成卡片 → 不会自动安装 → 看代码 → 安装 → 撤销 → 无 JS 异常） |
+| `scripts/test-create-mode.js` | 27 项：纯函数（围栏/JSON 容错/校验/红线/语法/只交单个文件）+ HTTP e2e（三种产物 暂存→安装→回滚/放弃、确认安装、内置 id 保护、`/status` 状态机、discard 已安装 409、非核心内置组件同 id 覆盖/撤销后内置版本回来/程序文件不动、改现有组件只交 client.js 时服务端文件自动继承） |
+| `scripts/test-create-ui.js` | 24 项：假 AI 驱动的前端闭环（切模式 → 提示词带页面源码/DOM/组件清单 → 生成卡片 → 不会自动安装 → 看代码 → 安装 → **刷新后卡片自动恢复「已安装」** → 撤销 → 无 JS 异常） |
 
 ### 4.1 输出协议（模型侧）
 
@@ -82,6 +84,10 @@ AI 在正文之后输出**恰好一个** create 围栏块（三个反引号 + `c
 ```
 
 服务端会补/覆盖 `manifest.json` 里必须正确的字段（id / name / page / apiVersion），并生成 `manifest.json`。
+
+**JSON 容错**（用户真实碰到 `create 块不是合法 JSON：Unterminated string`）：解析器先按原样 `JSON.parse`；失败则把 JSON 字符串内部的**裸换行/制表符转义**、去掉**结尾多余逗号**再试；围栏里的代码字符串出现 ``` 时，会依次尝试后面的结束围栏（取第一个能解析成功的），不会按第一个 ``` 截断。都失败才报错，并且**正文里不会留下整坨 JSON**（围栏没闭合时 JSON 之后的内容一并丢掉）。提示词也要求：字符串里的换行必须写 `\n`、正文别贴整段代码。
+
+**改现有组件可以只交改动的文件**：例如只动前端就只给 `client.js`，缺的 `server.js` / `style.css` 由 `stage()` 从当前线上版本继承（用户版本优先，其次程序目录里的内置源码）。这样改一个 60KB 的组件不必整份重发，输出小得多、也更不容易被截断或写出坏 JSON。**新组件**仍然必须同时提供 `server.js` + `client.js`。
 
 ### 4.2 页面插件契约（ui-page）
 
@@ -118,7 +124,8 @@ CSS 建议写在入口里注入 `<style id="sxc-<id>">`（unmount 时一起删�
 | GET | `/api/create/meta` | 页面表 + 限额 + 暂存目录 |
 | GET | `/api/create/changes/:id` | 读回暂存内容（含文件代码） |
 | POST | `/api/create/changes/:id/install` | 安装，body 必须 `{confirm:true}` |
-| POST | `/api/create/changes/:id/discard` | 放弃 |
+| GET | `/api/create/changes/:id/status` | 只读状态（`staged/installed/rolled_back/discarded/missing`）：卡片刷新后对账用；记录已清理时也回 200 + `missing`，不让前端吃 404 |
+| POST | `/api/create/changes/:id/discard` | 放弃（已安装的会 409，避免丢掉「撤销安装」入口） |
 | POST | `/api/create/changes/:id/rollback` | 撤销安装/恢复旧版本 |
 | POST | `/api/create/stage` | **仅测试/调试**：`SIERXING_CREATE_DEBUG=1` 时开放，直接把一份 create JSON 走同一套校验 + 暂存（自动化测试用） |
 
@@ -126,12 +133,18 @@ CSS 建议写在入口里注入 `<style id="sxc-<id>">`（unmount 时一起删�
 
 导出 `createCreateMode(deps)`、`parseCreateOutput(text)`、`validateArtifact(artifact)`、`PAGES`、`CREATE_API`、`LIMITS`。
 
-`createCreateMode` 的 `deps`：`db / dataDir / uiDir / uiPlugins / styleCssPath / installComponent / uninstallComponent / exportComponent / validateComponent / reloadPlugins / log`。
+`createCreateMode` 的 `deps`：`db / dataDir / uiDir / uiPlugins / styleCssPath / installComponent / uninstallComponent / exportComponent / hasUserComponent / readComponentSource / componentMeta / validateComponent / reloadPlugins / log`。
+
+`hasUserComponent(id)` 决定装前要不要快照：覆盖内置组件前数据目录里没有旧文件，撤销时应当删掉覆盖层（恢复内置），而不是把内置源码复制进数据目录当「旧版本」。
+
+`readComponentSource(id)` 读「当前线上版本」的完整源码（用户版本优先，其次内置；不截断）：改现有组件只交部分文件时，用它补齐没交的文件。
+
+`componentMeta(id)` 取现版本的元数据（名字 / 图标 / 说明 / 分类 / 排序 / 开关默认值）：只交部分文件时，AI 没显式给的字段从现版本继承，避免改个前端把「用自己的话」的名字图标冲成 id 和默认值。
 
 ### 5.3 回归
 
 ```bash
-npm run test:create          # 17 项纯函数+HTTP e2e（不花钱）+ 20 项前端闭环（假 AI）
+npm run test:create          # 27 项纯函数+HTTP e2e（不花钱）+ 24 项前端闭环（假 AI）
 # 或分开：
 node --no-warnings scripts/test-create-mode.js
 node --no-warnings scripts/test-create-ui.js
@@ -145,8 +158,8 @@ node --no-warnings scripts/test-create-ui.js
 
 - **第一版就要能装**：提示词要求 AI 给最小可用的一版，别一次生成一整套；安装后用它本身当预览（不预装 mock）。
 - **卡片随会话落库**：create 信息放在 `chats.trace` 的步骤里（`kind:'create'`），刷新/重开对话后卡片还在；暂存目录在服务重启后仍可安装。
-- **同 id 覆盖**：用户自己的页面插件/组件允许用同 id 迭代；内置（core/base 及程序目录自带组件）不允许覆盖。
+- **同 id 覆盖**：用户自己的页面插件/组件允许用同 id 迭代；**非核心内置功能组件**（`server/plugins/*.js` 里非 core/base 的，如 `restate`）也可以同 id 覆盖 —— 安装只写 `DATA_DIR`，撤销时删掉覆盖层，内置版本自动回来，程序文件永远不动。核心/基础组件（core/base）不能覆盖，要加功能请起新 id。
 - **卡片动作不经过审批命令总线**：这是普通用户的显式点击，不是 Agent 自动执行的写操作；命令总线的 `component.*` 仍服务 Agent/MCP 场景。
-- **功能组件前端需要刷新**：组件脚本按需加载，装好后点「刷新查看」才会加载新前端；页面/皮肤同理。
+- **功能组件前端需要刷新**：组件脚本按需加载，装好后点「刷新查看」才会加载新前端；页面/皮肤同理。**刷新查看保持当前页**：只有 ui-page 会跳到它覆盖的路由，组件/皮肤原地刷新（组件卡片的 route 是空串）。
 - **升级安全**：用户页面插件、皮肤、功能组件全部在 `DATA_DIR`；升级只替换程序目录，不会动它们。旧版本装在程序目录的组件会在用户目录版本存在时被同名覆盖（核心/基础组件除外）。
 - **暂存清理**：`DATA_DIR/agent-changes/` 里的失败/放弃记录不会自动 GC（文件都很小）；需要时可手动删。
