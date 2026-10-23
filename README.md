@@ -28,6 +28,20 @@
 
 ---
 
+## 📌 项目速览（给面试官 / 招聘方）
+
+| | |
+| --- | --- |
+| **角色** | 独立产品负责人 + 独立开发（需求定义 → 方案设计 → 开发 → 测试 → 发布 全链路） |
+| **时间** | 2026.09 – 至今，20+ 次版本迭代（169 commits），MIT 开源 |
+| **形态** | 本地单进程应用：Node 内置 `http` + SQLite（46 张表），零第三方依赖 |
+| **解决的问题** | AI 一次生成的计划看着漂亮、执行两周就崩（任务太泛 / 不会拆 / 不敢改） |
+| **关键结果** | 规划推进率 PAR **63.6%**（7/11 使用日）· 首版规划留存率 FRR **0–100%** · 规划收敛迭代 **21 版** · AI 失败分类：显式 **143** 处 / 静默 **244** 处 · RAG 两臂评测要点命中率 **35.8% → 85.0%（+49.2pt）** |
+| **评测证据** | [RAG 检索增强评测报告](docs/eval/rag-benchmark-2026-10.md)：同题同模型 · 只改一个变量 · 盲评 · 8 题 × 38 要点 |
+| **技术理解** | RAG（切块 + 余弦/关键词混合召回）· Agent 工具调用（结构化 ops + 四级风险审批 + 回滚）· 评测与失败归因 |
+
+---
+
 **你有一个真正想实现的目标：转行、学一门技能、考研考证、做出一个作品、养成一个习惯。**
 
 大多数工具只会把目标拆成一串待办，然后你对着 50 条任务发呆。思而行不这么干：它先用问卷（含客观自测）把你的**真实起点**问清楚，不清楚的地方还能逐题深挖追问；问透之后才生成「阶段 → 小目标 → 任务」三级路径，并且**随时可以继续改**。
@@ -104,7 +118,7 @@
 
 ### 方式一：下载单文件 exe（推荐给不想折腾的人）
 
-去 <https://atomgit.com/sierxing/SiErXing/releases> 下载 **`SiErXing.exe`**，双击即可。
+去 [Releases](../../releases) 下载 **`SiErXing.exe`**，双击即可。（国内镜像：[AtomGit Releases](https://atomgit.com/sierxing/SiErXing/releases)）
 
 - **不用装 Node、不用敲命令、不需要管理员权限**，整个程序就这一个文件
 - 首次运行会把程序文件解到 `%LOCALAPPDATA%\SiErXing\app`（约 2MB），你的数据存在其中的 `data\` 目录
@@ -114,22 +128,25 @@
 
 ### 方式二：git clone（适合开发者）
 
+> 国内网络拉不动 GitHub 时，把命令里的 `https://github.com/sierxing/SiErXing.git` 换成
+> `https://atomgit.com/sierxing/SiErXing.git`（内容同步的镜像）。
+
 **Linux / macOS**
 
 ```bash
-git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git ~/SiErXing && bash ~/SiErXing/scripts/install.sh
+git clone --depth 1 https://github.com/sierxing/SiErXing.git ~/SiErXing && bash ~/SiErXing/scripts/install.sh
 ```
 
 **Windows**（PowerShell，整行复制）
 
 ```powershell
-git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git "$env:USERPROFILE\SiErXing"; & "$env:USERPROFILE\SiErXing\scripts\install.bat"
+git clone --depth 1 https://github.com/sierxing/SiErXing.git "$env:USERPROFILE\SiErXing"; & "$env:USERPROFILE\SiErXing\scripts\install.bat"
 ```
 
 想装到其它目录，把 `D:\SiErXing` 换成你的路径：
 
 ```powershell
-$d="D:\SiErXing"; git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git $d; & "$d\scripts\install.bat"
+$d="D:\SiErXing"; git clone --depth 1 https://github.com/sierxing/SiErXing.git $d; & "$d\scripts\install.bat"
 ```
 
 **手动启动**
@@ -148,7 +165,7 @@ node server/server.js          # 然后打开 http://localhost:3213
 请帮我在本机部署并启动「思而行 SiErXing」——本地运行的目标规划助手（零第三方依赖，只需 Node.js）。
 
 1. 检查 Node.js ≥ 22.5；不足则告诉我怎么装（推荐 Node 24 LTS）。
-2. git clone --depth 1 https://atomgit.com/sierxing/SiErXing.git ~/SiErXing
+2. git clone --depth 1 https://github.com/sierxing/SiErXing.git ~/SiErXing
    bash ~/SiErXing/scripts/install.sh        # Windows 用 scripts\install.bat
 3. 验证：curl http://localhost:3213/api/health 应返回 {"ok":true}；端口被占用就换 PORT。
 4. 按我的意愿开关开机自启：
@@ -264,7 +281,8 @@ PORT=3214 node server/server.js    # 换端口
 
 ```
 基于「思而行 SiErXing」开源项目构建 —— 原作者：sierxing
-https://atomgit.com/sierxing/SiErXing
+https://github.com/sierxing/SiErXing
+（国内镜像：https://atomgit.com/sierxing/SiErXing）
 ```
 
 如需**显式专利授权**，可换用 Apache-2.0（同样允许商用闭源，但需保留 NOTICE 与版权声明）。
