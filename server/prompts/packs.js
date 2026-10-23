@@ -151,11 +151,11 @@ const PACKS = {
   },
   'resume.finalize': {
     id: 'resume.finalize',
-    title: '简历 · 生成终版（改写 + 排版）',
-    description: '按 JD 改写并排版成可直接投递的终版 Markdown 简历；不新增事实、指标必须有口径。',
+    title: '简历 · 生成终版（结构化改写 + 排版）',
+    description: '按 JD 改写并输出结构化简历（name/title/contacts/summary/sections），由渲染层排成 Word/网页；不新增事实、指标必须有口径。',
     editable: true,
     placeholders: ['targetRole', 'jd', 'resume', 'evidence', 'extra'],
-    mustInclude: ['JSON', '"markdown"', '不得新增事实'],
+    mustInclude: ['JSON', '"sections"', '不得新增事实', '一条 bullet 只讲一个主张'],
     template: template('resume.finalize'),
     sampleCtx: { targetRole: 'AI 产品经理实习', jd: '岗位职责：…', resume: '## 简历\n…', evidence: '【证据 1】…', extra: 'review summary' },
     builtinRender: function (ctx) { return fill(template('resume.finalize'), ctx); }

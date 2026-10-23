@@ -1288,12 +1288,27 @@ module.exports = function createCommands(ctx) {
       const g = d.getDoc(docId);
       const out = { ok: true, pipeline: p };
       if (input && input.withBody !== false) {
+        out.final_data = (g.doc && g.doc.final_data) || {};
         out.doc = g.doc;
         out.evidence = g.evidence;
         out.versions = g.versions;
         out.reports = g.reports;
       }
       return out;
+    }
+  });
+
+  bus.define({
+    name: 'resume.export_html',
+    title: '简历工坊 · 导出 HTML',
+    description: '把终版简历导出成自包含、可直接编辑与打印成 PDF 的 HTML（read）。',
+    category: 'resume', layer: 'content', risk: 'read',
+    inputSchema: { type: 'object', required: ['docId'], properties: { docId: { type: 'integer' } } }, output: 'json',
+    handler: function (input) {
+      const d = getResumeDomain && getResumeDomain();
+      if (!d) fail('not_found', '简历工坊未启用');
+      const r = d.exportHtml(num(input.docId, 'docId'));
+      return { ok: true, filename: r.filename, chars: r.html.length, html: r.html };
     }
   });
 

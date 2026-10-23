@@ -70,7 +70,7 @@
     docs: [], doc: null, pipeline: null, evidence: [], versions: [], reports: [],
     step: 'upload', busy: '', err: '', notice: '',
     review: null, questions: null, jdText: '', jdSources: [], jdSourceId: 0,
-    match: null, finalMd: '', answers: {}, cards: null, exportName: ''
+    match: null, finalMd: '', finalData: null, answers: {}, cards: null, exportName: ''
   };
   var gid = 0;                         /* 当前页的目标 id：只用于「返回目标」+ 目标级开关 */
   var goal = null;
@@ -226,6 +226,7 @@
     UI.jdSourceId = r.doc.jd_source_id || 0;
     UI.match = (r.doc.match && Object.keys(r.doc.match).length) ? r.doc.match : null;
     UI.finalMd = r.doc.final_md || '';
+    UI.finalData = r.doc.final_data || null;
     UI.jdSources = r.jd_sources || [];
     UI.answers = {};
     var g = await api('/api/resume/docs/' + id);
@@ -358,7 +359,7 @@
       if (kind === 'review') UI.review = r.data;
       else if (kind === 'questions') UI.questions = r.data.questions || [];
       else if (kind === 'match') UI.match = r.data;
-      else if (kind === 'finalize') UI.finalMd = (r.data && r.data.markdown) || '';
+      else if (kind === 'finalize') { UI.finalMd = (r.data && r.data.markdown) || ''; UI.finalData = (r.data && r.data.data) || null; }
       if (nextStep) UI.step = nextStep;
       UI.notice = tr('这一步完成了');
     } catch (e) { UI.err = errText(e); }
@@ -647,10 +648,12 @@
     }
     h += '<div class="rsBtns">'
       + '<button class="btn small primary" id="rsExport">' + tr('下载 .docx') + '</button>'
+      + '<button class="btn small primary" id="rsExportHtml">' + tr('打开可编辑网页版') + '</button>'
       + '<button class="btn small" id="rsCopyFinal">' + tr('复制正文') + '</button>'
       + '<button class="btn small" id="rsSaveVer">' + tr('存一版') + '</button>'
-      + '<button class="btn small" id="rsReFinal">' + tr('重新生成') + '</button></div>';
-    h += '<div class="rsMd">' + (mdToHTML ? mdToHTML(esc(UI.finalMd)) : '<pre>' + esc(UI.finalMd) + '</pre>') + '</div>';
+      + '<button class="btn small" id="rsReFinal">' + tr('重新生成') + '</button></div>'
+      + '<div class="rsHint">' + tr('网页版可直接改字、按「打印 / 存 PDF」导出 A4；docx 用 Word 打开后也能改。') + '</div>';
+    h += '<div class="rsMd rsPreview">' + (mdToHTML ? mdToHTML(esc(UI.finalMd)) : '<pre>' + esc(UI.finalMd) + '</pre>') + '</div>';
     if (UI.versions && UI.versions.length) {
       h += '<div class="rsDivider"></div><div class="rsSub">' + tr('版本历史') + '</div><div class="rsList">'
         + UI.versions.slice(0, 8).map(function (v) {
@@ -709,6 +712,7 @@
     var doFinal = $('rsDoFinal'); if (doFinal) doFinal.addEventListener('click', function () { runStep('finalize', null, tr('AI 正在改写并排版…'), 'finalize'); });
     var reFinal = $('rsReFinal'); if (reFinal) reFinal.addEventListener('click', function () { runStep('finalize', null, tr('AI 正在重新生成…'), 'finalize'); });
     var exp = $('rsExport'); if (exp) exp.addEventListener('click', exportDocx);
+    var expH = $('rsExportHtml'); if (expH) expH.addEventListener('click', function () { window.open('/api/resume/docs/' + UI.doc.id + '/export-html', '_blank'); });
     var cp = $('rsCopyFinal'); if (cp) cp.addEventListener('click', function () { copyText(UI.finalMd); });
     var sv = $('rsSaveVer'); if (sv) sv.addEventListener('click', async function () {
       try {

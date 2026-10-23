@@ -5328,5 +5328,7 @@
  "简历与经历证据工作流：先盘点经历攒证据，再按 JD 做「要求 → 证据」匹配与定向改写，最后过一遍证据审计；每一步只做一件事。": "Resume and experience-evidence workflow: first mine experience into evidence, then match requirements to evidence against a JD and rewrite, finally run an evidence audit; each step does one thing.",
  "先打开一个目标，再用「简历工坊」": "Open a goal first, then use Resume Workshop",
  "这个目标已关闭「简历工坊」": "Resume Workshop is disabled for this goal",
- "组件开关按目标隔离：到目标页顶栏「🧩 组件」里勾上就能打开。关掉只是隐藏入口，简历数据不受影响（全目标共享一份）。": "Component toggles are per-goal: tick it under 🧩 Components in the goal top bar to open it. Turning it off only hides the entry; resume data is unaffected (one shared library)."
+ "组件开关按目标隔离：到目标页顶栏「🧩 组件」里勾上就能打开。关掉只是隐藏入口，简历数据不受影响（全目标共享一份）。": "Component toggles are per-goal: tick it under 🧩 Components in the goal top bar to open it. Turning it off only hides the entry; resume data is unaffected (one shared library).",
+ "打开可编辑网页版": "Open editable web version",
+ "网页版可直接改字、按「打印 / 存 PDF」导出 A4；docx 用 Word 打开后也能改。": "The web version is directly editable; use Print / Save as PDF for A4. The .docx can also be edited in Word."
 }

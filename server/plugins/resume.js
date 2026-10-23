@@ -418,6 +418,20 @@ async function handler(req, res, u) {
     } catch (e) { return sendErr(res, e); }
   }
 
+  /* 第六步：导出 .html（自包含可编辑网页，可直接打印成 PDF） */
+  m = p.match(/^\/api\/resume\/docs\/(\d+)\/export-html$/);
+  if (m && (method === 'GET' || method === 'POST')) {
+    try {
+      const r = D.exportHtml(Number(m[1]));
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Disposition': 'inline; filename="resume.html"; filename*=UTF-8\'\'' + encodeURIComponent(r.filename),
+        'Cache-Control': 'no-cache'
+      });
+      return res.end(r.html);
+    } catch (e) { return sendErr(res, e); }
+  }
+
   /* 第六步：导出 .docx（二进制） */
   m = p.match(/^\/api\/resume\/docs\/(\d+)\/export$/);
   if (m && (method === 'GET' || method === 'POST')) {

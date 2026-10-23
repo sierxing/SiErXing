@@ -23,6 +23,7 @@
  */
 const L = require('../language/resume-labels');
 const fileUtil = require('./plugins/lib/resume-file');
+const render = require('./plugins/lib/resume-render');
 
 const STAGES = ['upload', 'review', 'supplement', 'jd', 'match', 'finalize'];
 const STAGE_NEXT = { upload: 'review', review: 'supplement', supplement: 'jd', jd: 'match', match: 'finalize', finalize: 'finalize' };
@@ -177,7 +178,21 @@ function fakeAI(kind, ctx) {
     ], warnings: ['no numbers without evidence'] };
   }
   if (kind === 'finalize') {
-    return { markdown: '# ' + (ctx.targetRole || 'Resume') + '\n\n## Summary\n- rewritten summary\n\n## Experience\n- bullet one\n- bullet two\n', notes: ['kept facts only'] };
+    return {
+      name: 'Fake Name',
+      title: (ctx.targetRole || 'Target role') + ' | strongest evidence',
+      contacts: ['Phone 10000000000', 'Email a@b.c'],
+      summary: 'Positioning sentence with **one hard metric**.',
+      sections: [
+        { title: 'Experience', items: [
+          { left: 'Project A | owner', right: '2026.09-2026.10', bullets: ['**Metric**: designed 5 verifiable metrics, PAR 63.6%', 'Split one bullet = one claim'] },
+          { left: 'Project B | contributor', right: '2025', bullets: ['Shipped a thing with a testable outcome'] }
+        ] },
+        { title: 'Skills', items: [{ left: '', right: '', bullets: ['AI / Agent: prompt design and evaluation'] }] }
+      ],
+      notes: ['kept facts only'],
+      removed: []
+    };
   }
   if (kind === 'audit') {
     return { summary: '2 claims: 1 partially corroborated, 1 unsupported.', claims: [
@@ -239,8 +254,13 @@ function normalize(kind, data) {
     };
   }
   if (kind === 'finalize') {
+    /* 新格式：结构化 resume_data（能排出真简历）；老格式只有 markdown 时转成结构化 */
+    const norm = render.normData(d);
+    const hasStruct = !!(norm.sections && norm.sections.length);
+    const dataOut = hasStruct ? norm : render.markdownToData(String(d.markdown != null ? d.markdown : (d.resume_md != null ? d.resume_md : '')));
     return {
-      markdown: String(d.markdown != null ? d.markdown : (d.resume_md != null ? d.resume_md : '')).slice(0, 60000),
+      data: dataOut,
+      markdown: render.dataToMarkdown(dataOut).slice(0, 60000),
       notes: arr(d.notes).slice(0, 20).map(function (x) { return S(x, 300); }),
       removed: arr(d.removed).slice(0, 20).map(function (x) { return S(x, 300); })
     };
@@ -250,6 +270,28 @@ function normalize(kind, data) {
   }), patterns: arr(d.patterns).slice(0, 20).map(function (x) { return S(x, 200); }), to_fill: arr(d.to_fill).slice(0, 20).map(function (x) { return S(x, 300); }) };
 }
 
+
+/* 把 document.xml 包成最小可用的 .docx（复用 resume-file 的 zip 写入） */
+function buildDocxZip(documentXml, title) {
+  const esc = function (s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };
+  const contentTypes = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+    + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+    + '<Default Extension="xml" ContentType="application/xml"/>'
+    + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+    + '</Types>';
+  const rels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    + '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+    + '</Relationships>';
+  const core = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>' + esc(title) + '</dc:title></cp:coreProperties>';
+  return fileUtil.buildZip([
+    { name: '[Content_Types].xml', data: contentTypes },
+    { name: '_rels/.rels', data: rels },
+    { name: 'word/document.xml', data: documentXml },
+    { name: 'docProps/core.xml', data: core }
+  ]);
+}
 
 function createResumeDomain(deps) {
   const db = deps.db;
@@ -291,6 +333,7 @@ function createResumeDomain(deps) {
       d.jd_text = String(r.jd_text || '');
       d.match = safeParse(r.match_json, {}) || {};
       d.final_md = String(r.final_md || '');
+      d.final_data = safeParse(r.final_data, {}) || {};
     }
     return d;
   }
@@ -345,6 +388,22 @@ function createResumeDomain(deps) {
     };
     db.prepare('UPDATE resume_docs SET title=?, target_role=?, content_md=?, stage=?, updated_at=? WHERE id=?')
       .run(next.title, next.target_role, next.content_md, next.stage, t, r.id);
+    /* 终版：结构化数据（final_data）+ 由它渲染的 markdown（final_md）；
+       用户/Agent 精修后可以直接 PUT 结构化数据，Word/网页渲染跟着变。 */
+    if (p.final_data != null || p.final_md != null) {
+      try {
+        const cols = db.prepare('PRAGMA table_info(resume_docs)').all().map(function (c) { return c.name; });
+        if (cols.indexOf('final_data') < 0) db.exec("ALTER TABLE resume_docs ADD COLUMN final_data TEXT NOT NULL DEFAULT '{}'");
+      } catch (e) {}
+      let data = p.final_data;
+      if (data != null && typeof data === 'string') { try { data = JSON.parse(data); } catch (e) { data = null; } }
+      if (data && typeof data === 'object' && Array.isArray(data.sections)) {
+        db.prepare('UPDATE resume_docs SET final_data = ?, final_md = ? WHERE id = ?')
+          .run(JSON.stringify(data), String(p.final_md != null ? p.final_md : render.dataToMarkdown(data)), r.id);
+      } else if (p.final_md != null) {
+        db.prepare('UPDATE resume_docs SET final_md = ? WHERE id = ?').run(String(p.final_md), r.id);
+      }
+    }
     backup();
     return docOut(docRow(r.id), true);
   }
@@ -510,7 +569,14 @@ function createResumeDomain(deps) {
     else if (kind === 'questions') db.prepare('UPDATE resume_docs SET stage=?, updated_at=? WHERE id=?').run('supplement', at, r.id);
     else if (kind === 'answers') db.prepare('UPDATE resume_docs SET answers=?, stage=?, updated_at=? WHERE id=?').run(JSON.stringify(normalized.cards || []), 'jd', at, r.id);
     else if (kind === 'match') db.prepare('UPDATE resume_docs SET match_json=?, stage=?, updated_at=? WHERE id=?').run(JSON.stringify(normalized), 'finalize', at, r.id);
-    else if (kind === 'finalize') db.prepare('UPDATE resume_docs SET final_md=?, stage=?, updated_at=? WHERE id=?').run(String(normalized.markdown || ''), 'finalize', at, r.id);
+    else if (kind === 'finalize') {
+      try {
+        const cols = db.prepare('PRAGMA table_info(resume_docs)').all().map(function (c) { return c.name; });
+        if (cols.indexOf('final_data') < 0) db.exec("ALTER TABLE resume_docs ADD COLUMN final_data TEXT NOT NULL DEFAULT '{}'");
+      } catch (e) {}
+      db.prepare('UPDATE resume_docs SET final_md=?, final_data=?, stage=?, updated_at=? WHERE id=?')
+        .run(String(normalized.markdown || ''), JSON.stringify(normalized.data || {}), 'finalize', at, r.id);
+    }
     backup();
     return { ok: true, kind: kind, data: normalized, raw: !!normalized.raw, reportId: numOf(info.lastInsertRowid), created_at: at, doc: docOut(docRow(r.id), false) };
   }
@@ -605,13 +671,29 @@ function createResumeDomain(deps) {
   }
 
   /* ---------- 第六步：导出 docx ---------- */
+  /** 终版的结构化数据：优先 final_data，没有就从 final_md 反推 */
+  function finalData(r) {
+    const d = safeParse(r && r.final_data, {}) || {};
+    if (d && Array.isArray(d.sections) && d.sections.length) return d;
+    return render.markdownToData(String((r && r.final_md) || ''));
+  }
   function exportDocx(id, opts) {
     const r = docRow(id);
     if (!r) throw fail('not_found');
-    const md = String((opts && opts.markdown) || r.final_md || '');
-    if (!md.trim()) throw fail('need_final');
+    const data = (opts && opts.data) || finalData(r);
+    const hasAny = data && ((data.sections && data.sections.length) || String(data.name || '').trim());
+    if (!hasAny) throw fail('need_final');
     const title = String(r.title || 'resume');
-    return { filename: title.replace(/[\\/:*?"<>|\r\n]/g, '').slice(0, 40) + '.docx', buffer: fileUtil.markdownToDocx(md, title) };
+    const xml = render.renderDocx(data, title);
+    return { filename: title.replace(/[\\/:*?"<>|\r\n]/g, '').slice(0, 40) + '.docx', buffer: buildDocxZip(xml, title) };
+  }
+  function exportHtml(id) {
+    const r = docRow(id);
+    if (!r) throw fail('not_found');
+    const data = finalData(r);
+    const hasAny = data && ((data.sections && data.sections.length) || String(data.name || '').trim());
+    if (!hasAny) throw fail('need_final');
+    return { filename: String(r.title || 'resume').replace(/[\\/:*?"<>|\r\n]/g, '').slice(0, 40) + '.html', html: render.renderHtml(data, { title: r.title }) };
   }
 
   /* 目标删除时清掉挂在该目标上的简历 */
@@ -666,6 +748,8 @@ function createResumeDomain(deps) {
     getReport: getReport,
     deleteReport: deleteReport,
     exportDocx: exportDocx,
+    exportHtml: exportHtml,
+    finalData: finalData,
     pipeline: pipeline,
     onGoalDelete: onGoalDelete,
     /* 纯函数（测试用） */

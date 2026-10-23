@@ -341,6 +341,58 @@ const domainMod = require('../server/resume-domain.js');
       if (buf.length < 500) throw new Error('docx 太小');
       if (!f.parseResumeBuffer(buf, 'x.docx').text.trim()) throw new Error('导出内容为空');
     });
+
+    await ok('结构化 finalize：返回 data(sections) + markdown，final_data 落库', async function () {
+      const c = await req(port, 'POST', '/api/resume/docs', { title: '结构化渲染测试', target_role: 'AI PM' });
+      const id = c.json.doc.id;
+      await req(port, 'POST', '/api/resume/docs/' + id + '/upload', { text: '# A\n\n## Exp\n- x', filename: '' });
+      await req(port, 'POST', '/api/resume/docs/' + id + '/jd', { jd: 'need user research' });
+      const r = await req(port, 'POST', '/api/resume/docs/' + id + '/ai', { kind: 'finalize' });
+      if (r.status !== 200) throw new Error(r.status + ' ' + r.text);
+      const d = r.json.data;
+      if (!d.data || !Array.isArray(d.data.sections) || !d.data.sections.length) throw new Error('没有结构化 sections');
+      if (!d.markdown || d.markdown.indexOf('## ') < 0) throw new Error('markdown 不对');
+      const g = await req(port, 'GET', '/api/resume/docs/' + id + '/pipeline');
+      if (!g.json.doc.has_final) throw new Error('has_final 应为 true');
+      const full = await req(port, 'POST', '/api/commands/run', { name: 'resume.get', input: { docId: id, withBody: true } });
+      const fd = full.json.result.final_data;
+      if (!fd || !Array.isArray(fd.sections)) throw new Error('final_data 没落库');
+    });
+    await ok('GET /export-html：自包含 HTML（含打印按钮与右对齐日期）', async function () {
+      const c = await req(port, 'POST', '/api/resume/docs', { title: 'HTML 导出测试' });
+      const id = c.json.doc.id;
+      await req(port, 'POST', '/api/resume/docs/' + id + '/upload', { text: '# A\n\n## Exp\n- x', filename: '' });
+      await req(port, 'POST', '/api/resume/docs/' + id + '/jd', { jd: 'need x' });
+      await req(port, 'POST', '/api/resume/docs/' + id + '/ai', { kind: 'finalize' });
+      const res = await fetch('http://127.0.0.1:' + port + '/api/resume/docs/' + id + '/export-html');
+      if (res.status !== 200) throw new Error('status ' + res.status);
+      const html = await res.text();
+      if (html.indexOf('window.print') < 0) throw new Error('缺打印按钮');
+      if (html.indexOf('itDate') < 0) throw new Error('缺右对齐日期样式');
+      if (html.indexOf('contenteditable') < 0) throw new Error('缺可编辑');
+      if (html.indexOf('@page') < 0) throw new Error('缺 A4 打印样式');
+    });
+    await ok('export docx：结构化版含加粗/右对齐 tab/项目符号/章节分隔线', async function () {
+      const D = require('../server/resume-domain.js');
+      const lib = require('../server/plugins/lib/resume-render.js');
+      const xml = lib.renderDocx({ name: 'N', title: 'T', contacts: ['c1'], summary: 's', sections: [{ title: '项目经历', items: [{ left: 'L', right: '2026.01', bullets: ['**b**1', 'b2'] }] }] }, 'x');
+      if (xml.indexOf('<w:b/>') < 0) throw new Error('缺加粗');
+      if (xml.indexOf('w:val="right"') < 0) throw new Error('缺右对齐 tab');
+      if (xml.indexOf('• ') < 0) throw new Error('缺项目符号');
+      if (xml.indexOf('w:pBdr') < 0) throw new Error('缺章节分隔线');
+      /* 真实导出：能被 resume-file 解析回来 */
+      const c = await req(port, 'POST', '/api/resume/docs', { title: 'docx 版式测试' });
+      const id = c.json.doc.id;
+      await req(port, 'POST', '/api/resume/docs/' + id + '/upload', { text: '# A\n\n## Exp\n- x', filename: '' });
+      await req(port, 'POST', '/api/resume/docs/' + id + '/jd', { jd: 'need x' });
+      await req(port, 'POST', '/api/resume/docs/' + id + '/ai', { kind: 'finalize' });
+      const f = require('../server/plugins/lib/resume-file');
+      const res = await fetch('http://127.0.0.1:' + port + '/api/resume/docs/' + id + '/export');
+      const buf = Buffer.from(await res.arrayBuffer());
+      const parsed = f.parseResumeBuffer(buf, 'x.docx');
+      if (!parsed.text.trim()) throw new Error('导出 docx 解析为空');
+      if (parsed.text.indexOf('Fake Name') < 0) throw new Error('导出内容缺姓名：' + parsed.text.slice(0, 120));
+    });
     await ok('组件开关：可以全局关闭 resume（不是 core）', async function () {
       const off = await req(port, 'POST', '/api/components/resume/toggle', { enabled: false });
       if (off.status !== 200 || off.json.enabled.resume !== false) throw new Error(off.text);
