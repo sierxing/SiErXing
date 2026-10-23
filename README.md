@@ -25,6 +25,11 @@
   <img src="assets/hero.png" alt="思而行 · 我的目标" width="860" />
 </p>
 
+<p align="center">
+  <a href="assets/intro.mp4"><img src="assets/intro-cover.png" alt="点击播放：思而行 50 秒演示视频" width="760" /></a>
+  <br />
+  <sub>▶ 50 秒看完：目标桌面 → 路线图 → 组件 → AI 助手（点封面播放）</sub>
+</p>
 
 <p align="center">
   <a href="https://github.com/sierxing/SiErXing"><b>GitHub（主仓库）</b></a> ·
