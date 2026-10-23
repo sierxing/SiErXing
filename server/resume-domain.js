@@ -24,6 +24,9 @@
 const L = require('../language/resume-labels');
 const fileUtil = require('./plugins/lib/resume-file');
 const render = require('./plugins/lib/resume-render');
+const schoolTitles = require('../language/school-titles');
+const enhance = require('../language/resume-enhance');
+const contentFilter = require('./plugins/lib/resume-filter');
 
 const STAGES = ['upload', 'review', 'supplement', 'jd', 'match', 'finalize'];
 const STAGE_NEXT = { upload: 'review', review: 'supplement', supplement: 'jd', jd: 'match', match: 'finalize', finalize: 'finalize' };
@@ -43,6 +46,8 @@ const SCHEMA_DOCS = [
   '  jd_source_id INTEGER NOT NULL DEFAULT 0,',
   '  match_json TEXT NOT NULL DEFAULT \'{}\',',
   '  final_md TEXT NOT NULL DEFAULT \'\',',
+  "  excluded TEXT NOT NULL DEFAULT '[]',",
+  "  final_data TEXT NOT NULL DEFAULT '{}',",
   '  created_at TEXT NOT NULL,',
   '  updated_at TEXT NOT NULL',
   ');'
@@ -95,7 +100,8 @@ const ALTERS = [
   'ALTER TABLE resume_docs ADD COLUMN final_md TEXT NOT NULL DEFAULT \'\'',
   /* 旧库（v1）的 resume_versions 没有 stage 列：直接 INSERT 会报 no column named stage。
      这里也补上，保证老数据平滑升级。 */
-  'ALTER TABLE resume_versions ADD COLUMN stage TEXT NOT NULL DEFAULT \'\''
+  'ALTER TABLE resume_versions ADD COLUMN stage TEXT NOT NULL DEFAULT \'\'',
+  'ALTER TABLE resume_docs ADD COLUMN excluded TEXT NOT NULL DEFAULT \'[]\'',
 ];
 
 function fail(code, message) {
@@ -334,6 +340,7 @@ function createResumeDomain(deps) {
       d.match = safeParse(r.match_json, {}) || {};
       d.final_md = String(r.final_md || '');
       d.final_data = safeParse(r.final_data, {}) || {};
+      d.excluded = safeParse(r.excluded, []) || [];
     }
     return d;
   }
@@ -390,6 +397,12 @@ function createResumeDomain(deps) {
       .run(next.title, next.target_role, next.content_md, next.stage, t, r.id);
     /* 终版：结构化数据（final_data）+ 由它渲染的 markdown（final_md）；
        用户/Agent 精修后可以直接 PUT 结构化数据，Word/网页渲染跟着变。 */
+    if (p.excluded != null) {
+      try {
+        const arr = Array.isArray(p.excluded) ? p.excluded : (typeof p.excluded === 'string' ? JSON.parse(p.excluded) : []);
+        db.prepare('UPDATE resume_docs SET excluded = ? WHERE id = ?').run(JSON.stringify(contentFilter.norm(arr)), r.id);
+      } catch (e) {}
+    }
     if (p.final_data != null || p.final_md != null) {
       try {
         const cols = db.prepare('PRAGMA table_info(resume_docs)').all().map(function (c) { return c.name; });
@@ -517,8 +530,25 @@ function createResumeDomain(deps) {
       jd: clean(p.jd || r.jd_text, 20000),
       answers: clean(p.answers || JSON.stringify(safeParse(r.answers, []) || []), 12000),
       finalMd: clean(r.final_md, 14000),
-      extra: clean(p.extra, 4000)
+      extra: clean(p.extra, 4000),
+      /* 增强上下文：可核验机构 Title（ASu 的学校 Title 增强）+ Owner 化拆分 + 技术链 */
+      enhance: clean(p.enhance || buildEnhance(r), 4000)
     };
+  }
+
+  /** 组装「可核验增强」上下文：从简历与目标资料里找学校，再拼 Owner 化/技术链规则 */
+  function buildEnhance(r) {
+    const p2 = (arguments.length > 1 && arguments[1]) || {};
+    let schoolText = '';
+    try {
+      const hit = schoolTitles.detectFromResume(String((r && r.content_md) || ''));
+      if (hit) schoolText = schoolTitles.titleBlock(hit);
+    } catch (e) {}
+    try {
+      /* 目标里显式写的学校信息优先级更高（用户可能补充过） */
+      if (!schoolText && p2.school) schoolText = schoolTitles.titleBlock(schoolTitles.findSchool(p2.school));
+    } catch (e) {}
+    return enhance.enhancementBlock({ school: schoolText });
   }
 
   /* ---------- 假 AI（仅测试；SIERXING_RESUME_FAKE=1） ---------- */
@@ -574,8 +604,22 @@ function createResumeDomain(deps) {
         const cols = db.prepare('PRAGMA table_info(resume_docs)').all().map(function (c) { return c.name; });
         if (cols.indexOf('final_data') < 0) db.exec("ALTER TABLE resume_docs ADD COLUMN final_data TEXT NOT NULL DEFAULT '{}'");
       } catch (e) {}
+      /* 用户要求「不写进简历」的内容：代码级硬过滤（提示词不可靠，实测会反复写回） */
+      let finalData = normalized.data || {};
+      let filtered = [];
+      try {
+        const excluded = safeParse(r.excluded, []) || [];
+        const f = contentFilter.filterData(finalData, excluded);
+        finalData = f.data; filtered = f.removed;
+      } catch (e) {}
+      const finalMd = render.dataToMarkdown(finalData);
+      normalized.data = finalData;
+      normalized.markdown = finalMd;
+      if (filtered.length) {
+        normalized.removed = (normalized.removed || []).concat(filtered.map(function (x) { return 'excluded: ' + x; }));
+      }
       db.prepare('UPDATE resume_docs SET final_md=?, final_data=?, stage=?, updated_at=? WHERE id=?')
-        .run(String(normalized.markdown || ''), JSON.stringify(normalized.data || {}), 'finalize', at, r.id);
+        .run(String(finalMd || ''), JSON.stringify(finalData), 'finalize', at, r.id);
     }
     backup();
     return { ok: true, kind: kind, data: normalized, raw: !!normalized.raw, reportId: numOf(info.lastInsertRowid), created_at: at, doc: docOut(docRow(r.id), false) };
@@ -750,6 +794,14 @@ function createResumeDomain(deps) {
     exportDocx: exportDocx,
     exportHtml: exportHtml,
     finalData: finalData,
+    /** 设置「不写进简历」的排除词（代码级过滤，finalize 时生效） */
+    setExcluded: function (id, words) {
+      const r = docRow(id);
+      if (!r) throw fail('not_found');
+      const arr = contentFilter.norm(Array.isArray(words) ? words : [words]);
+      db.prepare('UPDATE resume_docs SET excluded = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(arr), nowISO(), r.id);
+      return { ok: true, excluded: arr, doc: docOut(docRow(r.id), false) };
+    },
     pipeline: pipeline,
     onGoalDelete: onGoalDelete,
     /* 纯函数（测试用） */

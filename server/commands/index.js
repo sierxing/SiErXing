@@ -1313,6 +1313,21 @@ module.exports = function createCommands(ctx) {
   });
 
   bus.define({
+    name: 'resume.exclude',
+    title: '简历工坊 · 设置不写进简历的内容',
+    description: '把某些内容（如某个项目名）永久排除在终版简历之外；finalize 时按关键词做代码级过滤（write）。',
+    category: 'resume', layer: 'content', risk: 'write',
+    inputSchema: { type: 'object', required: ['docId'], properties: { docId: { type: 'integer' }, words: { type: 'array' }, word: { type: 'string' } } }, output: 'json',
+    handler: function (input) {
+      const d = getResumeDomain && getResumeDomain();
+      if (!d) fail('not_found', '简历工坊未启用');
+      const words = Array.isArray(input.words) ? input.words : (input.word ? [input.word] : []);
+      if (!words.length) fail('bad_input', '请给出要排除的关键词');
+      return d.setExcluded(num(input.docId, 'docId'), words);
+    }
+  });
+
+  bus.define({
     name: 'resume.export',
     title: '简历工坊 · 导出 docx',
     description: '把终版简历导出成 .docx（base64 返回给 Agent，由 Agent 交给用户；write 但只读正文不写库）。',

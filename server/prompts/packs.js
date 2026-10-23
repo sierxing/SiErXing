@@ -154,10 +154,10 @@ const PACKS = {
     title: '简历 · 生成终版（结构化改写 + 排版）',
     description: '按 JD 改写并输出结构化简历（name/title/contacts/summary/sections），由渲染层排成 Word/网页；不新增事实、指标必须有口径。',
     editable: true,
-    placeholders: ['targetRole', 'jd', 'resume', 'evidence', 'extra'],
-    mustInclude: ['JSON', '"sections"', '不得新增事实', '一条 bullet 只讲一个主张'],
+    placeholders: ['targetRole', 'jd', 'resume', 'evidence', 'extra', 'enhance'],
+    mustInclude: ['JSON', '"sections"', '不得新增事实', '一条 bullet 只讲一个主张', 'Owner 化拆分', '技术链'],
+    sampleCtx: { targetRole: 'AI 产品经理实习', jd: '岗位职责：…', resume: '## 简历\n…', evidence: '【证据 1】…', extra: 'review summary', enhance: '【可核验的机构 Title】中国石油大学：211工程\n【Owner 化拆分】先找最小闭环…' },
     template: template('resume.finalize'),
-    sampleCtx: { targetRole: 'AI 产品经理实习', jd: '岗位职责：…', resume: '## 简历\n…', evidence: '【证据 1】…', extra: 'review summary' },
     builtinRender: function (ctx) { return fill(template('resume.finalize'), ctx); }
   }
 };

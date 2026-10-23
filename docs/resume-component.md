@@ -119,3 +119,23 @@ npm run test:resume-page   # 无头浏览器：顶栏入口 → 整页 → 目�
 - 只做纯文本解析，不保留原简历排版（排版由 finalize 重新生成）；扫描版 PDF 需要先截图识别。
 - 审计只在「简历 + 证据卡」范围内核验，不联网核验学历/奖项/开源链接。
 - 终版是 Markdown → docx 的简单排版（无图片/表格样式）；需要更精细排版时可再导出 Word 手动调整。
+
+## 9. 三项「可核验增强」（汲取 ASu 与 lofisu，2026-10-23 追加）
+
+| 能力 | 实现 | 为什么值钱 |
+|---|---|---|
+| **机构 Title**（ASu 的学校 Title 增强） | `language/school-titles.js`：211 / 985 / 双一流 / 部委直属标签库 + `detectFromResume()` 从简历识别学校。只写确定事实，未知学校返回 `null` 不猜 | 「中国石油大学（北京）」→「211工程｜双一流（一流学科建设高校）｜教育部直属」，纯可核验加分项 |
+| **Owner 化拆分**（ASu 的角色强度） | `language/resume-enhance.js` 的 `roleLadder()`：把「独立完成 / 主要负责 / 参与 / 计划」映射成允许的角色词 + **边界要求**。提示词要求「先找最小闭环，只对这个闭环用 Owner」 | 解决「独立完成」写得太大、面试被追问的问题 |
+| **技术链**（ASu 的技术链拆解） | `techChainHints()` + 「输入 → 表征 → 规划 → 工具 → 状态 → 评测」六段说明进提示词 | 把功能清单改写成链路，一眼看出产品理解 |
+| **定位先行**（lofisu） | `finalize` 的 `title` = 岗位意向 + 最强卖点；`summary` 三句（定位/方法论/匹配） | 开头一句话抓住人 |
+
+以上通过 `buildCtx().enhance` 注入 finalize / review 提示词（占位符 `{{enhance}}`）。
+
+### 9.1 内容硬过滤（代码级，不信提示词）
+
+用户要求「某段经历不写进简历」时，只靠提示词会反复写回（实测同一个提示词两次，一次删了、一次又写回去）。所以：
+
+- `resume_docs.excluded` 存排除词（JSON 数组）；`resume.exclude` 命令 / `PUT /api/resume/docs/:id {excluded}` 设置；
+- `language/resume-filter.js` 的 `filterData()` 在 finalize **落库前**做硬过滤：sections / items / summary / title / name / contacts 全覆盖；
+- 被移除的条目会写进 `removed` 让用户知道原因；
+- 排除词为空时不误删。

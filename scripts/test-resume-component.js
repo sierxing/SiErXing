@@ -257,6 +257,64 @@ const domainMod = require('../server/resume-domain.js');
       const text = JSON.stringify(r.json);
       if (text.indexOf('JD') < 0) throw new Error('渲染结果里没有 JD：' + text.slice(0, 300));
     });
+    /* ===== 三项增强（学校 Title / Owner 化 / 技术链）+ 内容硬过滤 ===== */
+    await ok('school-titles：识别 211/双一流，未知学校返回 null（不猜）', function () {
+      const S = require('../language/school-titles');
+      const hit = S.findSchool('中国石油大学（北京） 计算机硕士');
+      if (!hit || hit.tags.indexOf('211工程') < 0) throw new Error(JSON.stringify(hit));
+      if (S.findSchool('某某职业技术学院') !== null) throw new Error('未知学校应返回 null');
+      const edu = ['教育背景', '中国石油大学（北京）｜计算机科学与技术 硕士'].join('\n');
+      const d = S.detectFromResume(edu);
+      if (!d || d.name !== '中国石油大学') throw new Error('detectFromResume 失败');
+    });
+    await ok('resume-enhance：角色强度阶梯 + 技术链命中', function () {
+      const E = require('../language/resume-enhance');
+      const a = E.roleLadder('独立完成产品设计');
+      if (a.allow.indexOf('0→1') < 0 || !a.boundary) throw new Error(JSON.stringify(a));
+      const b = E.roleLadder('参与推进');
+      if (b.allow.indexOf('系统级共建者') < 0) throw new Error(JSON.stringify(b));
+      const blocks = E.enhancementBlock({ school: '中国石油大学：211工程' });
+      if (blocks.indexOf('211工程') < 0 || blocks.indexOf('最小闭环') < 0) throw new Error('enhancementBlock 缺内容');
+      const chain = E.techChainHints('从本地 SQLite 设计指标并做版本回滚评测').map(function (x) { return x.stage; });
+      if (chain.indexOf('工具') < 0 || chain.indexOf('评测') < 0) throw new Error(JSON.stringify(chain));
+    });
+    await ok('resume-filter：排除词硬过滤（sections + summary 都清）', function () {
+      const F = require('../server/plugins/lib/resume-filter');
+      const d = { name: 'N', title: 'T', summary: 'A句。遗珠新韵项目经验。B句。', sections: [
+        { title: '项目经历', items: [{ left: '遗珠新韵｜非遗问答', bullets: ['x'] }, { left: '思而行｜AI 规划', bullets: ['y'] }] }
+      ] };
+      const out = F.filterData(d, ['遗珠', '非遗']);
+      if (out.data.sections[0].items.length !== 1) throw new Error('item 未过滤');
+      if (out.data.sections[0].items[0].left.indexOf('思而行') < 0) throw new Error('误删了不该删的');
+      if (/遗珠|非遗/.test(out.data.summary)) throw new Error('summary 未过滤：' + out.data.summary);
+      if (!out.removed.length) throw new Error('removed 应记录原因');
+      if (F.filterData(d, []).removed.length !== 0) throw new Error('无排除词时不应删');
+    });
+    await ok('resume.exclude 命令 + finalize 落库前硬过滤', async function () {
+      const c = await req(port, 'POST', '/api/resume/docs', { title: '过滤测试' });
+      const id = c.json.doc.id;
+      await req(port, 'POST', '/api/resume/docs/' + id + '/upload', { text: '# A\n\n## Exp\n- x', filename: '' });
+      const ex = await req(port, 'POST', '/api/commands/run', { name: 'resume.exclude', input: { docId: id, words: ['Fake Name'] } });
+      if (ex.status !== 200 || (ex.json.result.excluded || []).length !== 1) throw new Error(ex.text);
+      await req(port, 'POST', '/api/resume/docs/' + id + '/jd', { jd: 'need x' });
+      const r = await req(port, 'POST', '/api/resume/docs/' + id + '/ai', { kind: 'finalize' });
+      if (r.status !== 200) throw new Error(r.status + ' ' + r.text);
+      const d = r.json.data;
+      const blob = JSON.stringify(d.data) + String(d.markdown || '');
+      if (blob.indexOf('Fake Name') >= 0) throw new Error('排除词仍出现在终版里');
+      const g = await req(port, 'POST', '/api/commands/run', { name: 'resume.get', input: { docId: id, withBody: true } });
+      if ((g.json.result.doc.excluded || []).length !== 1) throw new Error('excluded 没落库');
+    });
+    await ok('finalize 提示词带 enhance 占位符，且渲染时注入机构 Title', function () {
+      const packs = require('../server/prompts/packs');
+      const f = packs['resume.finalize'];
+      if (f.placeholders.indexOf('enhance') < 0) throw new Error('缺 enhance 占位符');
+      if (f.mustInclude.indexOf('Owner 化拆分') < 0 || f.mustInclude.indexOf('技术链') < 0) throw new Error('mustInclude 缺新规则');
+      const out = f.builtinRender({ targetRole: 'AI PM', jd: 'x', resume: 'y', evidence: 'z', extra: '', enhance: '中国石油大学：211工程' });
+      if (out.indexOf('211工程') < 0) throw new Error('enhance 没注入');
+      if (out.indexOf('{{enhance}}') >= 0) throw new Error('占位符没替换');
+      if (out.indexOf('输入 → 表征') < 0) throw new Error('缺技术链说明');
+    });
     /* ===== 流水线（向导每一步）+ Agent 命令 ===== */
     let pipeDocId = 0;
     await ok('POST /upload：传 base64 docx → 解析成正文并进入 review 步骤', async function () {
