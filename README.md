@@ -26,6 +26,13 @@
 </p>
 
 
+<p align="center">
+  <a href="https://github.com/sierxing/SiErXing"><b>GitHub（主仓库）</b></a> ·
+  <a href="https://atomgit.com/sierxing/SiErXing">AtomGit（国内镜像）</a> ·
+  <a href="../../releases">下载 Releases</a> ·
+  <a href="../../issues">反馈 / 提问 Issues</a>
+</p>
+
 ---
 
 ## 📌 项目速览（给面试官 / 招聘方）
@@ -118,7 +125,7 @@
 
 ### 方式一：下载单文件 exe（推荐给不想折腾的人）
 
-去 [Releases](../../releases) 下载 **`SiErXing.exe`**，双击即可。（国内镜像：[AtomGit Releases](https://atomgit.com/sierxing/SiErXing/releases)）
+在 **[GitHub Releases](../../releases)** 下载 **`SiErXing.exe`**，双击即可。（国内访问慢时用 [AtomGit Releases](https://atomgit.com/sierxing/SiErXing/releases)）
 
 - **不用装 Node、不用敲命令、不需要管理员权限**，整个程序就这一个文件
 - 首次运行会把程序文件解到 `%LOCALAPPDATA%\SiErXing\app`（约 2MB），你的数据存在其中的 `data\` 目录
@@ -257,6 +264,14 @@ AI 会先回一张「🎨 已生成」卡片（**不会自动安装**）。你�
   升级程序不会覆盖。规则和操作手册见 [`language/README.md`](language/README.md)。
 - 当前约定：只翻译**界面**；AI 生成的内容（规划、教程、对话）仍保持模型原始输出语言。
 
+## 🐙 关于这个 GitHub 仓库
+
+- **GitHub 是主仓库**，[AtomGit](https://atomgit.com/sierxing/SiErXing) 是同步镜像，两边代码一致；任一平台的 [Releases](../../releases) 都能下到同一个 exe。
+- **提交历史就是产品迭代过程**：从 v1.0 到 v1.10，每一次需求、返工与取舍都留在 commit log 里——想快速判断开发节奏，直接翻提交记录。
+- **想先看「这个项目做成了什么」**：看页面顶部的「📌 项目速览」，以及 [RAG 检索增强评测报告](docs/eval/rag-benchmark-2026-10.md)（8 题 × 38 要点盲评，命中率 35.8% → 85.0%）。
+- **问题 / 建议 / 想加的组件**：欢迎开 [Issue](../../issues) 或直接提 PR（组件接口见 [AGENTS.md](AGENTS.md)）。
+- **想跟进后续更新**：点右上角 ⭐ Star 或 Watch，Release 发布时会收到通知。
+
 ## 给开发者 / AI 助手
 
 代码结构、组件接口、数据表、接口约定、以及**一堆踩过的坑**，都在 [`AGENTS.md`](AGENTS.md)。
@@ -281,8 +296,8 @@ PORT=3214 node server/server.js    # 换端口
 
 ```
 基于「思而行 SiErXing」开源项目构建 —— 原作者：sierxing
-https://github.com/sierxing/SiErXing
-（国内镜像：https://atomgit.com/sierxing/SiErXing）
+主仓库：https://github.com/sierxing/SiErXing
+镜像：https://atomgit.com/sierxing/SiErXing
 ```
 
 如需**显式专利授权**，可换用 Apache-2.0（同样允许商用闭源，但需保留 NOTICE 与版权声明）。
