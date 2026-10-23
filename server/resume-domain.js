@@ -91,7 +91,10 @@ const ALTERS = [
   'ALTER TABLE resume_docs ADD COLUMN jd_text TEXT NOT NULL DEFAULT \'\'',
   'ALTER TABLE resume_docs ADD COLUMN jd_source_id INTEGER NOT NULL DEFAULT 0',
   'ALTER TABLE resume_docs ADD COLUMN match_json TEXT NOT NULL DEFAULT \'{}\'',
-  'ALTER TABLE resume_docs ADD COLUMN final_md TEXT NOT NULL DEFAULT \'\''
+  'ALTER TABLE resume_docs ADD COLUMN final_md TEXT NOT NULL DEFAULT \'\'',
+  /* 旧库（v1）的 resume_versions 没有 stage 列：直接 INSERT 会报 no column named stage。
+     这里也补上，保证老数据平滑升级。 */
+  'ALTER TABLE resume_versions ADD COLUMN stage TEXT NOT NULL DEFAULT \'\''
 ];
 
 function fail(code, message) {

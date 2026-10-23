@@ -2,11 +2,18 @@
 /**
  * 思而行 · 前端扩展组件：简历工坊（resume）—— 一步一步的向导
  * ==================================================================
- * 用户每次只看到「当前这一步要做什么」，六步流水线：
+ * 和「🎯 达成条件」同一套形态：
+ *   · 入口在**目标页顶栏**（`goalEntry` → 收藏栏按钮「📄 简历工坊」）；
+ *   · 点开是**整页** `#/g/:id/resume`（不是右下角浮窗 / 右侧抽屉）；
+ *   · **每个目标可以单独打开 / 关闭**（`goalToggle:true`，写 goals.plugins.resume）。
+ *
+ * 关掉只是「这个目标不显示入口」，数据不动。简历库**全目标共享**：
+ * `GET /api/resume/docs` 不带 goalId 就返回所有简历，换目标看到的是同一份。
+ *
+ * 六步流水线（每步只让用户做一件事）：
  *   1 上传简历（支持拖文件进来）→ 2 AI 审查问题 → 3 AI 追问补充信息
  *   → 4 选岗位（直接用资料库里的 JD）→ 5 匹配与改写 → 6 生成终版（可导出 docx）
  *
- * 由目标页 / 路线图页顶栏的「📄 简历」按钮打开（SX.openResumeWorkshop）。
  * 参考的开源工作流（用户指定 4 个链接，含 1 个重复）：
  *   https://github.com/Elowwwen/resume-evidence-workflow
  *   https://github.com/zclllyybb/lofisu-identity-engine
@@ -65,90 +72,142 @@
     review: null, questions: null, jdText: '', jdSources: [], jdSourceId: 0,
     match: null, finalMd: '', answers: {}, cards: null, exportName: ''
   };
+  var gid = 0;                         /* 当前页的目标 id：只用于「返回目标」+ 目标级开关 */
+  var goal = null;
 
   function $(id) { return document.getElementById(id); }
+  function pageRoot() { return $('rsPage'); }
+  function bodyEl() { return $('rsBody'); }
   function has(v) { return v != null && String(v).length > 0; }
   function shortTime(s) { return s ? String(s).replace('T', ' ').slice(0, 16) : ''; }
-  function componentOn() {
-    try { var c = SX.state && SX.state.components; return !(c && c.resume === false); }
-    catch (e) { return true; }
-  }
-
-  /* ---------------- 面板 ---------------- */
-  var mask = null, panel = null, open = false;
-
-  function ensurePanel() {
-    if (panel) return;
-    mask = document.createElement('div');
-    mask.id = 'resumeMask';
-    mask.className = 'rsMask';
-    mask.addEventListener('click', close);
-    document.body.appendChild(mask);
-
-    panel = document.createElement('aside');
-    panel.id = 'resumePanel';
-    panel.className = 'resumePanel';
-    panel.innerHTML = [
-      '<div class="rsHead">',
-      '<span class="rsLogo">📄</span>',
-      '<span class="rsTitle">' + tr('简历工坊') + '</span>',
-      '<span class="rsSub" id="rsDocName"></span>',
-      '<span class="rsGrow"></span>',
-      '<button class="btn small" id="rsPickDoc" title="' + esc(tr('切换到别的简历')) + '">' + tr('🗂 简历') + '</button>',
-      '<button class="btn small" id="rsNewDoc" title="' + esc(tr('新建一份简历')) + '">' + tr('＋ 新建') + '</button>',
-      '<button class="btn small" id="rsClose">✕</button>',
-      '</div>',
-      '<div class="rsSteps" id="rsSteps"></div>',
-      '<div class="rsBody" id="rsBody"></div>',
-      '<div class="rsFoot">',
-      '<span>' + tr('本地存储 · 参考开源项目：') + '</span>',
-      '<a href="https://github.com/Elowwwen/resume-evidence-workflow" target="_blank" rel="noopener">resume-evidence-workflow</a>',
-      '<a href="https://github.com/zclllyybb/lofisu-identity-engine" target="_blank" rel="noopener">lofisu-identity-engine</a>',
-      '<a href="https://github.com/Claycui828/ASu-resume-skills" target="_blank" rel="noopener">ASu-resume-skills</a>',
-      '<a href="https://github.com/Elowwwen/resume-evidence-workflow" target="_blank" rel="noopener">' + tr('resume-evidence-workflow（重复引用）') + '</a>',
-      '</div>'
-    ].join('');
-    document.body.appendChild(panel);
-
-    $('rsClose').addEventListener('click', close);
-    $('rsNewDoc').addEventListener('click', newDoc);
-    $('rsPickDoc').addEventListener('click', pickDoc);
-    panel.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape') { e.stopPropagation(); close(); }
-    });
-  }
-
-  function openPanel() {
-    ensurePanel();
-    if (open) return;
-    mask.classList.add('open');
-    panel.classList.add('open');
-    document.body.classList.add('rsLock');
-    open = true;
-    loadAll();
-  }
-  function close() {
-    if (mask) mask.classList.remove('open');
-    if (panel) panel.classList.remove('open');
-    document.body.classList.remove('rsLock');
-    open = false;
-  }
-  function wantAutoOpen() {
+  /* 组件开关：按目标（写 goals.plugins.resume）。没有目标上下文时退回全局开关。 */
+  function componentOn(g) {
+    var gg = g || goal;
     try {
-      var q = new URLSearchParams(location.search || '').get('resume');
-      if (q === '1' || q === 'true') return true;
-      return (location.hash || '') === '#/resume';
-    } catch (e) { return false; }
+      if (gg && gg.id) return !!SX.pluginEnabled(gg, 'resume');
+      var c = SX.state && SX.state.components;
+      return !(c && c.resume === false);
+    } catch (e) { return true; }
+  }
+
+  /* ---------------- 整页骨架 ---------------- */
+  function pageHTML(enabled) {
+    var title = (goal && goal.title) || '';
+    var head =
+      '<div class="pageHead">' +
+        '<button class="back" data-back="#/g/' + gid + '">' + tr('← 返回目标') + '</button>' +
+        '<span class="mapTitle">📄 ' + tr('简历工坊') + '</span>' +
+        (title ? '<span class="chip gray">' + esc(title) + '</span>' : '') +
+        '<div class="spacer"></div>' +
+        '<button class="btn small" id="rsPickDoc" title="' + esc(tr('切换到别的简历')) + '">' + tr('🗂 简历库') + '</button>' +
+        '<button class="btn small primary" id="rsNewDoc" title="' + esc(tr('新建一份简历')) + '">' + tr('＋ 新建简历') + '</button>' +
+      '</div>';
+    if (!enabled) {
+      return '<div class="page rsPage" id="rsPage">' + head +
+        '<div class="emptyBox"><div class="ebIcon">📄</div>' +
+          '<div class="ebTitle">' + tr('这个目标已关闭「简历工坊」') + '</div>' +
+          '<div class="ebText">' + tr('组件开关按目标隔离：到目标页顶栏「🧩 组件」里勾上就能打开。关掉只是隐藏入口，简历数据不受影响（全目标共享一份）。') + '</div>' +
+          '<a class="btn primary" href="#/g/' + gid + '">' + tr('回目标页打开') + '</a>' +
+        '</div>' +
+      '</div>';
+    }
+    return '<div class="page rsPage" id="rsPage">' + head +
+      '<div class="rsIntro">' + tr('简历与经历证据工作流：先盘点经历攒证据，再按 JD 做「要求 → 证据」匹配与定向改写，最后过一遍证据审计；每一步只做一件事。') +
+        '<br><span class="rsIntroTip">' + tr('简历库是全目标共享的：换目标、换设备（多端同步）看到的都是同一份；这个目标的开关只决定要不要在顶栏露出入口。') + '</span></div>' +
+      '<div class="rsSteps" id="rsSteps"></div>' +
+      '<div class="rsBody" id="rsBody"></div>' +
+      '<div class="rsFoot">' +
+        '<span>' + tr('本地存储 · 参考开源项目：') + '</span>' +
+        '<a href="https://github.com/Elowwwen/resume-evidence-workflow" target="_blank" rel="noopener">resume-evidence-workflow</a>' +
+        '<a href="https://github.com/zclllyybb/lofisu-identity-engine" target="_blank" rel="noopener">lofisu-identity-engine</a>' +
+        '<a href="https://github.com/Claycui828/ASu-resume-skills" target="_blank" rel="noopener">ASu-resume-skills</a>' +
+        '<a href="https://github.com/Elowwwen/resume-evidence-workflow" target="_blank" rel="noopener">' + tr('resume-evidence-workflow（重复引用）') + '</a>' +
+      '</div>' +
+    '</div>';
+  }
+
+  /* 整页重画（进路由 / 开关变化时）：骨架 + 步骤条 + 正文 */
+  function draw() {
+    var app = SX.app;
+    if (!app) return;
+    var enabled = componentOn();
+    app.innerHTML = pageHTML(enabled);
+    if (!enabled) return;
+    bindPage();
+    render();
+  }
+
+  function bindPage() {
+    var add = $('rsNewDoc');
+    if (add) add.addEventListener('click', newDoc);
+    var pick = $('rsPickDoc');
+    if (pick) pick.addEventListener('click', pickDoc);
+    var steps = $('rsSteps');
+    if (steps) steps.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-rs-jump]');
+      if (!b) return;
+      captureEdits();
+      UI.err = ''; UI.notice = '';
+      UI.step = b.getAttribute('data-rs-jump');
+      render();
+    });
+    /* Ctrl/⌘+Enter 只挂一次：draw() 每次进页都会跑，重复挂会执行多遍 */
+    if (!bindPage._keys) {
+      bindPage._keys = true;
+      document.addEventListener('keydown', function (e) {
+        if (!pageRoot()) return;
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+          var go = $('rsPasteSave') || $('rsSaveJd');
+          if (go) { e.preventDefault(); go.click(); }
+        }
+      });
+    }
+  }
+
+  /* 只重画「步骤条 + 当前这一步」，不重画页头（页面按钮/滚动不丢） */
+  function render() {
+    /* 已经离开这一页（异步回调晚到）就什么都不做 —— 绝不能把简历页画回 #app */
+    if (!pageRoot()) return;
+    if (!componentOn()) { draw(); return; }
+    var nameEl = $('rsDocName');
+    if (nameEl) nameEl.textContent = UI.doc ? (UI.doc.title || '') : '';
+    var stepsEl = $('rsSteps');
+    if (stepsEl) stepsEl.innerHTML = stepsHTML();
+    var body = bodyEl();
+    if (!body) return;
+    if (UI.busy) { body.innerHTML = busyHTML(); return; }
+    var html = '';
+    if (!UI.doc) {
+      html = '<div class="rsEmpty">' + tr('简历库里还没有简历。点右上角「＋ 新建简历」，或直接把简历文件拖进来。') + '</div>'
+        + '<div class="rsDrop" id="rsDrop0"><div class="rsDropIcon">📄</div><div class="rsDropTitle">' + tr('把简历文件拖到这里') + '</div>'
+        + '<div class="rsDropHint">' + tr('支持 docx / pdf / txt / md') + '</div><input type="file" id="rsFile0" accept=".docx,.pdf,.txt,.md,.markdown" hidden></div>';
+      body.innerHTML = html;
+      bindDrop($('rsDrop0'), $('rsFile0'));
+      return;
+    }
+    if (UI.step === 'review') html = stepReviewHTML();
+    else if (UI.step === 'supplement') html = stepSupplementHTML();
+    else if (UI.step === 'jd') html = stepJdHTML();
+    else if (UI.step === 'match') html = stepMatchHTML();
+    else if (UI.step === 'finalize') html = stepFinalHTML();
+    else html = stepUploadHTML();
+    body.innerHTML = stepNavHTML() + html;
+    bindAll();
+    if (UI.step === 'jd' && !UI.jdSources.length) loadJdSources();
   }
 
   /* ---------------- 数据 ---------------- */
+  /* 进页面：先拿目标（标题 + 目标级开关），再取简历库（全目标共享，不带 goalId） */
   async function loadAll() {
-    UI.busy = tr('加载中…'); render();
+    await SX.loadGoal(gid).catch(function () { return null; });
+    goal = (SX.state && SX.state.goal) || null;
+    if (!componentOn()) { draw(); return; }
+    UI.busy = tr('加载中…'); draw();
     try {
       var r = await api('/api/resume/docs');
       UI.docs = r.docs || [];
       if (!UI.docs.length) UI.doc = null;
-      else if (!UI.doc || !UI.docs.some(function (d) { return d.id === UI.doc.id; })) UI.doc = UI.docs[0];
+      else if (!UI.doc || !UI.docs.some(function (d) { return Number(d.id) === Number(UI.doc.id); })) UI.doc = UI.docs[0];
       if (UI.doc) await loadDoc(UI.doc.id);
       else { UI.busy = ''; render(); return; }
     } catch (e) { UI.err = errText(e); }
@@ -197,7 +256,7 @@
     try {
       var r = await api('/api/resume/docs', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: title, target_role: (UI.doc && UI.doc.target_role) || '', goalId: goalIdOf() })
+        body: JSON.stringify({ title: title, target_role: (UI.doc && UI.doc.target_role) || '' })
       });
       UI.doc = r.doc;
       await loadDoc(r.doc.id);
@@ -208,6 +267,7 @@
     UI.busy = ''; render();
   }
 
+  /* 简历库切换：一个简单弹层（标题 + 当前第几步），点哪份切哪份 */
   function pickDoc() {
     if (!UI.docs.length) { toast(tr('还没有简历')); return; }
     var lines = UI.docs.map(function (d, i) { return (i + 1) + '. ' + d.title + '（' + tr('第 {0} 步', stepIndex(d.stage) + 1) + '）'; }).join('\n');
@@ -226,6 +286,7 @@
   }
   function goalIdOf() {
     try {
+      if (gid) return gid;
       if (SX.state && SX.state.goal && SX.state.goal.id) return SX.state.goal.id;
       var m = String(location.hash || '').match(/^#\/g\/(\d+)/);
       if (m) return Number(m[1]);
@@ -308,8 +369,9 @@
   async function makeCards() {
     var qs = UI.questions || [];
     var answers = [];
+    var root = bodyEl() || document;
     for (var i = 0; i < qs.length; i++) {
-      var ta = panel.querySelector('[data-rs-a="' + qs[i].id + '"]');
+      var ta = root.querySelector('[data-rs-a="' + qs[i].id + '"]');
       var a = ta ? String(ta.value || '').trim() : '';
       if (a) answers.push({ id: qs[i].id, q: qs[i].q, a: a });
     }
@@ -373,8 +435,8 @@
   }
   async function loadJdSources() {
     try {
-      var gid = (UI.doc && UI.doc.goal_id) || goalIdOf();
-      var r = await api('/api/resume/jd-sources?goalId=' + gid);
+      var gid2 = (UI.doc && UI.doc.goal_id) || goalIdOf();
+      var r = await api('/api/resume/jd-sources?goalId=' + gid2);
       UI.jdSources = r.sources || [];
     } catch (e) { UI.jdSources = []; }
     render();
@@ -600,34 +662,6 @@
     return h;
   }
 
-  function render() {
-    if (!panel) return;
-    var nameEl = $('rsDocName');
-    if (nameEl) nameEl.textContent = UI.doc ? (UI.doc.title || '') : '';
-    var stepsEl = $('rsSteps');
-    if (stepsEl) stepsEl.innerHTML = stepsHTML();
-    var body = $('rsBody');
-    if (UI.busy) { body.innerHTML = busyHTML(); return; }
-    var html = '';
-    if (!UI.doc) {
-      html = '<div class="rsEmpty">' + tr('还没有简历。点右上角「＋ 新建」开始，或直接把简历文件拖进来。') + '</div>'
-        + '<div class="rsDrop" id="rsDrop0"><div class="rsDropIcon">📄</div><div class="rsDropTitle">' + tr('把简历文件拖到这里') + '</div>'
-        + '<div class="rsDropHint">' + tr('支持 docx / pdf / txt / md') + '</div><input type="file" id="rsFile0" accept=".docx,.pdf,.txt,.md,.markdown" hidden></div>';
-      body.innerHTML = html;
-      bindDrop($('rsDrop0'), $('rsFile0'));
-      return;
-    }
-    if (UI.step === 'review') html = stepReviewHTML();
-    else if (UI.step === 'supplement') html = stepSupplementHTML();
-    else if (UI.step === 'jd') html = stepJdHTML();
-    else if (UI.step === 'match') html = stepMatchHTML();
-    else if (UI.step === 'finalize') html = stepFinalHTML();
-    else html = stepUploadHTML();
-    body.innerHTML = stepNavHTML() + html;
-    bindAll();
-    if (UI.step === 'jd' && !UI.jdSources.length) { loadJdSources(); }
-  }
-
   /* 上一步 / 下一步（只给导航，避免用户被"一定要按顺序"卡住） */
   function stepNavHTML() {
     var cur = stepIndex(UI.step);
@@ -689,18 +723,11 @@
       } catch (e) { UI.err = errText(e); }
       render();
     });
-    panel.querySelectorAll('[data-rs-jump]').forEach(function (b) {
-      b.addEventListener('click', function () {
-        captureEdits();
-        UI.err = ''; UI.notice = '';
-        UI.step = b.getAttribute('data-rs-jump');
-        render();
-      });
-    });
-    panel.querySelectorAll('[data-rs-jd]').forEach(function (b) {
+    var root = bodyEl() || document;
+    root.querySelectorAll('[data-rs-jd]').forEach(function (b) {
       b.addEventListener('click', function () { pickJdSource(Number(b.getAttribute('data-rs-jd'))); });
     });
-    panel.querySelectorAll('[data-rs-del-ev]').forEach(function (b) {
+    root.querySelectorAll('[data-rs-del-ev]').forEach(function (b) {
       b.addEventListener('click', async function () {
         try {
           await api('/api/resume/evidence/' + b.getAttribute('data-rs-del-ev'), { method: 'DELETE' });
@@ -708,7 +735,7 @@
         } catch (e) { UI.err = errText(e); render(); }
       });
     });
-    panel.querySelectorAll('[data-rs-restore]').forEach(function (b) {
+    root.querySelectorAll('[data-rs-restore]').forEach(function (b) {
       b.addEventListener('click', async function () {
         if (!window.confirm(tr('恢复到这一版？'))) return;
         try {
@@ -719,20 +746,80 @@
     });
   }
 
-  /* ---------------- 启动：只暴露入口，不再有右下角浮窗 ---------------- */
-  function expose() {
-    try { SX.openResumeWorkshop = openPanel; SX.closeResumeWorkshop = close; } catch (e) {}
-    try { window.ResumeWorkshop = { open: openPanel, close: close }; } catch (e) {}
+  /* ---------------- 路由 / 入口（和达成条件同一套） ---------------- */
+  SX.registerPlugin({
+    id: 'resume',
+    goalEntry: {
+      label: tr('简历工坊'), icon: '📄', order: 20, header: true,
+      hash: function (g) { return '#/g/' + g + '/resume'; },
+      show: function (g) { return SX.pluginEnabled(g, 'resume'); }
+    },
+    routes: [
+      {
+        match: function (h) { return h.match(/^#\/g\/(\d+)\/resume$/); },
+        render: async function (m) {
+          gid = Number(m[1]);
+          UI.err = ''; UI.notice = ''; UI.busy = '';
+          await loadAll();
+        }
+      },
+      /* 老深链接：`#/resume`（以前是抽屉，没有目标上下文）→ 转成最近目标的整页 */
+      {
+        match: function (h) { return h === '#/resume' || h === '#/resume/'; },
+        render: async function () { await redirectLegacyLink(); }
+      }
+    ]
+  });
+
+  /* 老链接没有目标上下文：跳到「最近打开过的目标」的简历页；没有目标就回首页。 */
+  async function redirectLegacyLink() {
+    var target = 0;
+    try {
+      var gm = (location.hash || '').match(/^#\/g\/(\d+)(?:\/|$)/);
+      if (gm) target = Number(gm[1]);
+    } catch (e) {}
+    if (!target) {
+      try {
+        var lr = JSON.parse(localStorage.getItem('sierxing-home-recent-v1') || '[]');
+        var first0 = Array.isArray(lr) ? lr[0] : null;
+        var id0 = Number((first0 && first0.id) || first0 || 0);
+        if (id0 > 0) target = id0;
+      } catch (e) {}
+    }
+    if (!target) {
+      try {
+        var r = await api('/api/goals');
+        var g0 = (r.goals || [])[0];
+        if (g0) target = Number(g0.id);
+      } catch (e) {}
+    }
+    location.hash = target ? ('#/g/' + target + '/resume') : '#/';
   }
-  function boot() {
-    if (!componentOn()) return;
-    expose();
-    if (wantAutoOpen()) setTimeout(openPanel, 60);
-  }
-  var tries = 0;
-  (function waitReady() {
-    if (SX.state && SX.state.components != null) { boot(); return; }
-    if (tries++ > 40) { boot(); return; }
-    setTimeout(waitReady, 250);
-  })();
+
+  /* 老代码兼容：以前目标页/路线图页按钮调 SiErXing.openResumeWorkshop() 打开抽屉。
+     现在改成「跳到当前目标的简历整页」，旧调用点不用改也不会破。 */
+  try {
+    SX.openResumeWorkshop = function () {
+      var g = 0;
+      try {
+        var m = String(location.hash || '').match(/^#\/g\/(\d+)/);
+        if (m) g = Number(m[1]);
+        else if (SX.state && SX.state.goal && SX.state.goal.id) g = Number(SX.state.goal.id);
+      } catch (e) {}
+      if (!g) { toast(tr('先打开一个目标，再用「简历工坊」')); return false; }
+      location.hash = '#/g/' + g + '/resume';
+      return true;
+    };
+    window.ResumeWorkshop = { open: SX.openResumeWorkshop, close: function () {} };
+  } catch (e) {}
+
+  /* 老浮窗的深链接 `?resume=1`：以前直接弹抽屉，现在转成整页（带上当前目标）。 */
+  try {
+    var legacyQ = new URLSearchParams(location.search || '').get('resume');
+    if ((legacyQ === '1' || legacyQ === 'true') && !/^#\/g\/\d+\/resume$/.test(location.hash || '')) {
+      var gm1 = (location.hash || '').match(/^#\/g\/(\d+)(?:\/|$)/);
+      if (gm1) location.hash = '#/g/' + Number(gm1[1]) + '/resume';
+      else redirectLegacyLink();
+    }
+  } catch (e) {}
 })();

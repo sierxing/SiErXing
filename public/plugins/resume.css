@@ -4,24 +4,7 @@
 .rsPage .pageHead{flex-wrap:wrap; row-gap:8px;}
 .rsIntro{position:relative; background:var(--soft); border:1px solid var(--border); border-left:3px solid var(--accent-border); border-radius:10px; padding:10px 14px; font-size:13px; color:var(--muted); line-height:1.7; margin-bottom:14px;}
 .rsIntroTip{color:var(--accent);}
-/* 简历库切换条：一份简历一个 chip，当前那份高亮 */
-.rsDocBar{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:0 0 12px;}
-.rsDocBarLbl{font-size:12px; color:var(--muted); font-weight:700; flex:none;}
-.rsDocChip{
-  border:1px solid var(--border); background:var(--card); color:var(--muted);
-  border-radius:999px; padding:4px 12px; font-size:12.5px; font-family:inherit; cursor:pointer;
-  max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; transition:.15s;
-}
-.rsDocChip:hover{border-color:var(--accent-border); color:var(--accent);}
-.rsDocChip.on{background:var(--accent-soft); border-color:var(--accent-border); color:var(--accent); font-weight:700;}
-/* 页签 */
-.rsTabs{display:flex; gap:4px; padding:0; border-bottom:1px solid var(--border); flex:none; flex-wrap:wrap; margin-bottom:14px;}
-.rsTab{
-  border:1px solid transparent; border-bottom:none; background:transparent; color:var(--muted);
-  font-size:12.8px; padding:8px 13px; border-radius:9px 9px 0 0; cursor:pointer; font-family:inherit;
-}
-.rsTab:hover{color:var(--text); background:var(--soft);}
-.rsTab.active{color:var(--accent); background:var(--accent-soft); border-color:var(--accent-border); font-weight:700;}
+/* 步骤条（向导版放 CSS 末尾，见 .rsSteps） */
 .rsBody{min-height:320px;}
 .rsFoot{
   margin-top:18px; border-top:1px solid var(--border); padding:8px 2px 0; font-size:11px; color:var(--muted);

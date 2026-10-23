@@ -202,11 +202,6 @@ function bindMapTools() {
   if (mv) mv.addEventListener('click', () => H.showVersionsPanel(H.state.goal.id));
   const mpb = document.getElementById('mapPlansBtn');
   if (mpb) mpb.addEventListener('click', () => planPopShow(mpb));
-  const mrb = document.getElementById('mapResumeBtn');
-  if (mrb) mrb.addEventListener('click', () => {
-    if (window.SiErXing && typeof SiErXing.openResumeWorkshop === 'function') return SiErXing.openResumeWorkshop();
-    H.toast(tr('简历工坊组件未加载或已关闭：到「组件管理」确认「简历工坊」是开着的'));
-  });
   const mc = document.getElementById('mapChatBtn');
   if (mc) mc.addEventListener('click', () => H.aiToggle(true));
   const mp = document.getElementById('mapPlanBtn');
@@ -391,7 +386,6 @@ function renderMapPage() {
       <button class="btn small" id="expandAll">全部展开</button>
       ${H.goalCompOn(H.state.goal, 'chat') ? '<button class="btn small" id="mapChatBtn">💬 AI 助手</button>' : ''}
       ${H.goalCompOn(H.state.goal, 'versions') ? '<button class="btn small" id="mapVerBtn">📜 版本对比</button>' : ''}
-      ${H.goalCompOn(H.state.goal, 'resume') ? '<button class="btn small" id="mapResumeBtn" title="' + H.esc(tr('简历工坊：上传简历 → AI 审查 → 补信息 → 选 JD → 改写 → 生成终版')) + '">' + H.esc(tr('📄 简历')) + '</button>' : ''}
       <button class="btn small" id="mapPlansBtn" data-plans-btn title="${H.esc(tr('切换或保存多份规划方案'))}">🗂 ${H.esc(tr('方案'))}</button>
       <button class="btn small" id="mapPlanBtn" title="重新规划（会清空现有路径，请三思；微调骨架用下面的调整面板）">🧭 重新规划</button>
     </div>

@@ -442,10 +442,14 @@ module.exports = {
   icon: META.icon || '📄',
   category: META.category || 'extra',
   desc: META.desc || '',
-  version: '2.0.0',
+  version: '2.1.0',
   author: 'SiErXing',
   order: 60,
-  goalToggle: false,
+  /* 和「🎯 达成条件」一样按目标开关：入口在目标页顶栏（收藏栏），页 = `#/g/:id/resume`。
+     开关只决定「这个目标显不显示入口」；数据是**全目标共享的一份简历库**
+     （前端列表接口不带 goalId 就返回全部文档）——所以 onGoalDelete 不能再按 goal_id
+     级联删，否则删掉一个目标会把大家共用的简历一起删掉。 */
+  goalToggle: true,
   defaultEnabled: true,
   client: '/plugins/resume.js',
 
@@ -456,9 +460,8 @@ module.exports = {
     try { const d = getResumeDomain && getResumeDomain(); if (d && d.ensureSchema) d.ensureSchema(); } catch (e) {}
   },
 
-  onGoalDelete(goalId, ctx) {
-    try { const d = getResumeDomain && getResumeDomain(); if (d && d.onGoalDelete) d.onGoalDelete(goalId); } catch (e) {}
-  },
+  /* 简历库全目标共享：删除目标不动简历数据（组件拉不起来时也不要级联删）。 */
+  onGoalDelete() {},
 
   api: [
     { method: 'GET', pattern: /^\/api\/resume\//, handler: handler },

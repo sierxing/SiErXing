@@ -237,10 +237,11 @@ function run(text, opts) {
 function para(text, opts) {
   const o = opts || {};
   const pPr = [];
+  if (o.line == null) o.line = 1.0;   /* 简历默认紧凑行距：一页 A4 装得下 */
   if (o.align) pPr.push('<w:jc w:val="' + o.align + '"/>');
   const spacing = [];
-  if (o.before != null) spacing.push('w:before="' + Math.round(o.before * 20) + '"');
-  if (o.after != null) spacing.push('w:after="' + Math.round(o.after * 20) + '"');
+  if (o.before != null) spacing.push('w:before="' + Math.round(o.before * 12) + '"');
+  if (o.after != null) spacing.push('w:after="' + Math.round(o.after * 12) + '"');
   if (o.line != null) spacing.push('w:line="' + Math.round(o.line * 240) + '" w:lineRule="auto"');
   if (spacing.length) pPr.push('<w:spacing ' + spacing.join(' ') + '/>');
   if (o.indent != null) pPr.push('<w:ind w:left="' + Math.round(o.indent * 20) + '"/>');
@@ -260,34 +261,34 @@ function markdownToDocx(md, title) {
   let firstBlock = true;
   for (const raw of lines) {
     const line = raw.replace(/\s+$/, '');
-    if (!line.trim()) { body.push(para('', { after: 2 })); continue; }
+    if (!line.trim()) { body.push(para('', { after: 1 })); continue; }
     if (/^---+$/.test(line.trim())) { body.push(para('', { after: 0 })); continue; }
     let m;
     if ((m = line.match(/^(#{1,4})\s+(.*)$/))) {
       const lv = m[1].length;
-      const sizes = { 1: 17, 2: 13, 3: 11.5, 4: 10.5 };
-      body.push(para(cleanInline(m[2]), { bold: true, size: sizes[lv] || 10.5, before: firstBlock ? 0 : 6, after: 3 }));
+      const sizes = { 1: 15, 2: 11.5, 3: 10.2, 4: 9.6 };
+      body.push(para(cleanInline(m[2]), { bold: true, size: sizes[lv] || 9.6, before: firstBlock ? 0 : 4, after: 1.5 }));
       if (lv <= 2) body.push(para('', { after: 0 }));
       firstBlock = false;
       continue;
     }
     if ((m = line.match(/^\s*[-*+]\s+(.*)$/))) {
-      body.push(para(cleanInline(m[1]), { indent: 0.4, after: 1.5, size: 10.5 }));
+      body.push(para(cleanInline(m[1]), { indent: 0.32, after: 0.5, size: 9.4 }));
       firstBlock = false;
       continue;
     }
     if ((m = line.match(/^\s*(\d+)[.)]\s+(.*)$/))) {
-      body.push(para(cleanInline(m[1] + '. ' + m[2]), { indent: 0.4, after: 1.5, size: 10.5 }));
+      body.push(para(cleanInline(m[1] + '. ' + m[2]), { indent: 0.32, after: 0.5, size: 9.4 }));
       firstBlock = false;
       continue;
     }
-    body.push(para(cleanInline(line), { after: 2, size: 10.5 }));
+    body.push(para(cleanInline(line), { after: 1, size: 9.4 }));
     firstBlock = false;
   }
   const docXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
     + '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
     + '<w:body>' + body.join('') + '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
-    + '<w:pgMar w:top="850" w:right="900" w:bottom="800" w:left="900" w:header="0" w:footer="0" w:gutter="0"/>'
+    + '<w:pgMar w:top="520" w:right="620" w:bottom="480" w:left="620" w:header="0" w:footer="0" w:gutter="0"/>'
     + '</w:sectPr></w:body></w:document>';
   const contentTypes = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
     + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'

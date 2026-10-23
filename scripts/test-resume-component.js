@@ -85,9 +85,14 @@ const domainMod = require('../server/resume-domain.js');
   await ok('组件描述标注参考了 4 个开源项目链接（含重复给出的那个）', function () {
     for (const u of REFS) if (plugin.desc.indexOf(u) < 0) throw new Error('desc 缺少链接 ' + u);
   });
-  await ok('默认开启 + 组件可管理（不是 core 不可关）', function () {
+  await ok('默认开启 + 可**按目标**开关（goalToggle:true，和达成条件一致）', function () {
     if (plugin.defaultEnabled !== true) throw new Error('defaultEnabled=' + plugin.defaultEnabled);
-    if (plugin.goalToggle !== false) throw new Error('goalToggle=' + plugin.goalToggle);
+    if (plugin.goalToggle !== true) throw new Error('goalToggle=' + plugin.goalToggle);
+  });
+  await ok('删目标不清简历库（数据全目标共享，onGoalDelete 是空实现）', function () {
+    if (typeof plugin.onGoalDelete !== 'function') throw new Error('缺 onGoalDelete');
+    const src = String(plugin.onGoalDelete);
+    if (/onGoalDelete\s*\)|getResumeDomain/.test(src)) throw new Error('onGoalDelete 仍在级联删共享简历：' + src);
   });
   await ok('prompt packs registered (resume.*) — 至少 8 个，含 review/answers/finalize', function () {
     const packs = require('../server/prompts/packs');
@@ -341,6 +346,35 @@ const domainMod = require('../server/resume-domain.js');
       if (off.status !== 200 || off.json.enabled.resume !== false) throw new Error(off.text);
       const on = await req(port, 'POST', '/api/components/resume/toggle', { enabled: true });
       if (on.json.enabled.resume !== true) throw new Error(on.text);
+    });
+    await ok('按目标开关：resume 出现在「可按目标管理」清单里，且只写本目标', async function () {
+      const mk = await req(port, 'POST', '/api/goals', { title: '简历工坊开关测试' });
+      if (mk.status !== 201 || !mk.json.goal || !mk.json.goal.id) throw new Error('建目标失败：' + mk.text);
+      const gid = mk.json.goal.id;
+      const before = await req(port, 'GET', '/api/goals/' + gid + '/plugins');
+      if (before.status !== 200) throw new Error(before.text);
+      /* 新目标建档时会快照当前全局有效值：resume 必须在这里有一项（说明它是"可按目标开关"的组件） */
+      if (!('resume' in (before.json.enabled || {}))) throw new Error('目标级清单里没有 resume：' + before.text);
+      const off = await req(port, 'POST', '/api/goals/' + gid + '/plugins', { plugin_id: 'resume', enabled: false });
+      if (off.status !== 200 || off.json.enabled.resume !== false) throw new Error('按目标关闭失败：' + off.text);
+      /* 只改本目标：全局值仍是开 */
+      const comps = await req(port, 'GET', '/api/components');
+      if (comps.json.enabled.resume !== true) throw new Error('按目标关闭串到全局了');
+      const other = await req(port, 'POST', '/api/goals', { title: '另一个目标' });
+      const og = await req(port, 'GET', '/api/goals/' + other.json.goal.id + '/plugins');
+      if (og.json.enabled.resume === false) throw new Error('按目标关闭串到别的目标了');
+      const on = await req(port, 'POST', '/api/goals/' + gid + '/plugins', { plugin_id: 'resume', enabled: true });
+      if (on.json.enabled.resume !== true) throw new Error(on.text);
+    });
+    await ok('删目标不级联删共享简历库', async function () {
+      const mk = await req(port, 'POST', '/api/goals', { title: '要被删的目标' });
+      const gid = mk.json.goal.id;
+      const c = await req(port, 'POST', '/api/resume/docs', { title: '共享简历', goalId: gid });
+      const rid = c.json.doc.id;
+      const del = await req(port, 'DELETE', '/api/goals/' + gid);
+      if (del.status !== 200) throw new Error('删目标失败：' + del.text);
+      const g = await req(port, 'GET', '/api/resume/docs/' + rid);
+      if (g.status !== 200) throw new Error('删目标把共享简历一起删了（应保留）：' + g.status);
     });
     await ok('DELETE evidence：证据卡删除后列表变短', async function () {
       const r = await req(port, 'DELETE', '/api/resume/evidence/' + evIds[1]);

@@ -1999,11 +1999,6 @@ function bindMapTools() {
   if (mv) mv.addEventListener('click', () => showVersionsPanel(state.goal.id));
   const mpb = document.getElementById('mapPlansBtn');
   if (mpb) mpb.addEventListener('click', () => planPopShow(mpb));
-  const mrb = document.getElementById('mapResumeBtn');
-  if (mrb) mrb.addEventListener('click', () => {
-    if (window.SiErXing && typeof SiErXing.openResumeWorkshop === 'function') return SiErXing.openResumeWorkshop();
-    toast(tr('简历工坊组件未加载或已关闭：到「组件管理」确认「简历工坊」是开着的'));
-  });
   const mc = document.getElementById('mapChatBtn');
   if (mc) mc.addEventListener('click', () => aiToggle(true));
   const mp = document.getElementById('mapPlanBtn');
@@ -2187,7 +2182,6 @@ function renderMapPage() {
       <button class="btn small" id="expandAll">全部展开</button>
       ${goalCompOn(state.goal, 'chat') ? '<button class="btn small" id="mapChatBtn">💬 AI 助手</button>' : ''}
       ${goalCompOn(state.goal, 'versions') ? '<button class="btn small" id="mapVerBtn">📜 版本对比</button>' : ''}
-      ${goalCompOn(state.goal, 'resume') ? '<button class="btn small" id="mapResumeBtn" title="' + esc(tr('简历工坊：上传简历 → AI 审查 → 补信息 → 选 JD → 改写 → 生成终版')) + '">' + tr('📄 简历') + '</button>' : ''}
       <button class="btn small" id="mapPlansBtn" data-plans-btn title="${esc(tr('切换或保存多份规划方案'))}">🗂 ${esc(tr('方案'))}</button>
       <button class="btn small" id="mapPlanBtn" title="重新规划（会清空现有路径，请三思；微调骨架用下面的调整面板）">🧭 重新规划</button>
     </div>
@@ -10281,7 +10275,6 @@ function renderGoal() {
       ${pluginButtonsHTML(g)}
       ${goalPluginsHTML(g)}
       ${g.nodes.length && goalCompOn(g, 'versions') ? '<button class="btn small" data-tbtn id="verBtn">📜 版本对比</button>' : ''}
-      ${goalCompOn(g, 'resume') ? '<button class="btn small" data-tbtn id="resumeBtn" title="' + esc(tr('简历工坊：上传简历 → AI 审查 → 补信息 → 选 JD → 改写 → 生成终版')) + '">' + tr('📄 简历') + '</button>' : ''}
       <button class="btn small primary" data-tbtn id="planBtn" title="重新规划（会清空现有路径，请三思；微调骨架用下面的调整面板）">${g.nodes.length ? '重新规划（AI 先澄清）' : '开始 AI 规划（AI 先澄清）'}</button>
       <button class="btn small danger" data-tbtn id="delGoalBtn">删除</button>
       <button class="btn small" id="goalMoreBtn" data-morebtn-of="goal" hidden>⋯</button>
@@ -10338,11 +10331,6 @@ function renderGoal() {
   if (chatBtn) chatBtn.addEventListener('click', () => aiToggle(true));
   const verBtn = document.getElementById('verBtn');
   if (verBtn) verBtn.addEventListener('click', () => showVersionsPanel(g.id));
-  const resumeBtnEl = document.getElementById('resumeBtn');
-  if (resumeBtnEl) resumeBtnEl.addEventListener('click', () => {
-    if (window.SiErXing && typeof SiErXing.openResumeWorkshop === 'function') return SiErXing.openResumeWorkshop();
-    toast(tr('简历工坊组件未加载或已关闭：到「组件管理」确认「简历工坊」是开着的'));
-  });
   if (window.Workspace && goalCompOn(g, 'workspace')) { try { window.Workspace.bindGoal(g); } catch (e) {} }
   const planBtnEl = document.getElementById('planBtn');
   planBtnEl.addEventListener('click', () => {

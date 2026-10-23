@@ -1,6 +1,8 @@
 # 简历工坊（resume）—— 一步一步的简历工作流
 
-> 思而行里的「写简历 / 改简历 / 投递版本」组件。**在目标页 / 路线图页顶栏的「📄 简历」按钮打开**。
+> 思而行里的「写简历 / 改简历 / 投递版本」组件。
+> **入口在目标页顶栏（收藏栏）的「📄 简历工坊」按钮，点开是整页 `#/g/:id/resume`** —— 和「🎯 达成条件」同一套形态，不是右下角浮窗/右侧抽屉。
+> **开关按目标隔离**（`goalToggle:true`）：每个目标可以单独开关；关掉只隐藏入口，**数据是全目标共享的一份简历库**（换目标看到同一份）。
 > 设计目标：用户每一步只做一件事；同样的步骤 Agent 也能通过命令 / MCP 逐步调用。
 
 ## 0. 参考的开源项目（用户给出的四个链接）
@@ -40,7 +42,7 @@
 - `resume_versions`：版本快照（note / stage / content）
 - `resume_reports`：每次 AI 动作的报告（kind / jd_text / output_json）
 
-删除简历级联清理；目标删除时 `onGoalDelete` 清掉挂在该目标上的简历。
+删除简历级联清理证据/版本/报告。**删除目标不级联删简历**：简历库全目标共享（前端列表接口不带 `goalId` 就返回全部文档），`onGoalDelete` 是空实现 —— 否则删一个目标会把大家共用的简历一起删掉。
 
 ## 4. 领域与接口
 
@@ -104,7 +106,13 @@ MCP 工具名：`resume_docs` / `resume_create` / `resume_upload` / `resume_revi
 npm run test:resume     # node --no-warnings --experimental-sqlite scripts/test-resume-component.js
 ```
 
-38 项：组件元数据（含四个参考链接）、docx 往返解析、领域纯函数、HTTP e2e（上传/pipeline/JD/finalize/export/证据/版本/报告/删除级联/组件开关）、**Agent 命令全链路**。AI 走 `SIERXING_RESUME_FAKE=1` 假实现，不花钱不联网。
+41 项：组件元数据（含四个参考链接）、docx 往返解析、领域纯函数、HTTP e2e（上传/pipeline/JD/finalize/export/证据/版本/报告/删除级联）、**按目标开关**（出现在目标级清单里 / 只写本目标 / 不串全局与别的目标）、**删目标不删共享简历**、**Agent 命令全链路**。AI 走 `SIERXING_RESUME_FAKE=1` 假实现，不花钱不联网。
+
+```bash
+npm run test:resume-page   # 无头浏览器：顶栏入口 → 整页 → 目标级开关（关A不影响B）
+```
+
+16 项：顶栏有 `goalComp_resume` 入口、点开是 `#/g/:id/resume` 整页且**没有抽屉/蒙层**、六步步骤条 6 个、返回目标、关掉目标 A 后 A 无入口且直开页面显示「已关闭」空状态、目标 B 不受影响、全局值不被目标级开关串掉、目标级清单包含 resume、重新打开仍整页无残留、全程无 JS 异常。
 
 ## 8. 已知边界
 
