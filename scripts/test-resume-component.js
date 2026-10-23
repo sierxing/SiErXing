@@ -436,7 +436,10 @@ const domainMod = require('../server/resume-domain.js');
       const xml = lib.renderDocx({ name: 'N', title: 'T', contacts: ['c1'], summary: 's', sections: [{ title: '项目经历', items: [{ left: 'L', right: '2026.01', bullets: ['**b**1', 'b2'] }] }] }, 'x');
       if (xml.indexOf('<w:b/>') < 0) throw new Error('缺加粗');
       if (xml.indexOf('w:val="right"') < 0) throw new Error('缺右对齐 tab');
-      if (xml.indexOf('• ') < 0) throw new Error('缺项目符号');
+      /* 新版用 ▪(U+25AA) 作为要点符号（更接近技术履历排版），旧版是 • */
+      if (xml.indexOf('\u25AA') < 0 && xml.indexOf('\u2022') < 0) throw new Error('缺项目符号');
+      if (xml.indexOf('<w:shd') < 0) throw new Error('缺章节底纹');
+      if (xml.indexOf('<w:keepNext/>') < 0) throw new Error('缺标题与内容同页控制');
       if (xml.indexOf('w:pBdr') < 0) throw new Error('缺章节分隔线');
       /* 真实导出：能被 resume-file 解析回来 */
       const c = await req(port, 'POST', '/api/resume/docs', { title: 'docx 版式测试' });
